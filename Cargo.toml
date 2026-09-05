@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "A GNOME download manager frontend for wget (GTK 4 / libadwaita)"
-license = "GPL-3.0-or-later"
+license = "MIT"
 
 [[bin]]
 name = "grab"
