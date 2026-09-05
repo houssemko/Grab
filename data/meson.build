@@ -31,6 +31,15 @@ install_data('org.gnome.WgetFrontend.gschema.xml',
   install_dir: get_option('datadir') / 'glib-2.0/schemas',
 )
 
+# D-Bus activation: required because the desktop file sets DBusActivatable=true.
+# Without this, launching from Shell/the app grid silently does nothing.
+configure_file(
+  input: 'org.gnome.WgetFrontend.service.in',
+  output: 'org.gnome.WgetFrontend.service',
+  configuration: {'bindir': get_option('prefix') / get_option('bindir')},
+  install_dir: get_option('datadir') / 'dbus-1' / 'services',
+)
+
 compile_schemas = find_program('glib-compile-schemas', required: false)
 if compile_schemas.found()
   test('Validate schema file', compile_schemas,
