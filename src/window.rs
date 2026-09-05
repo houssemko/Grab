@@ -55,35 +55,39 @@ pub fn open_folder(path: &std::path::Path, toasts: &adw::ToastOverlay) {
     });
 }
 
-fn refresh_row(
-    item: &crate::download::DownloadItem,
-    detail: &gtk4::Label,
-    progress: &gtk4::ProgressBar,
-    spinner: &adw::Spinner,
-    toggle_btn: &gtk4::Button,
-    stop_btn: &gtk4::Button,
-    reveal_btn: &gtk4::Button,
-) {
+struct RowWidgets {
+    detail: gtk4::Label,
+    progress: gtk4::ProgressBar,
+    spinner: adw::Spinner,
+    toggle_btn: gtk4::Button,
+    stop_btn: gtk4::Button,
+    reveal_btn: gtk4::Button,
+    delete_btn: gtk4::Button,
+}
+
+fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets) {
     let frac = item.progress().clamp(0.0, 1.0);
-    progress.set_fraction(frac);
+    w.progress.set_fraction(frac);
     let active = item.status() == DownloadStatus::Downloading;
-    spinner.set_visible(active);
-    detail.set_text(&item.detail());
+    w.spinner.set_visible(active);
+    w.detail.set_text(&item.detail());
 
     let running = matches!(
         item.status(),
         DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
     );
-    toggle_btn.set_visible(running);
-    stop_btn.set_visible(running);
-    reveal_btn.set_visible(item.status() == DownloadStatus::Done);
+    w.toggle_btn.set_visible(running);
+    w.stop_btn.set_visible(running);
+    let done = item.status() == DownloadStatus::Done;
+    w.reveal_btn.set_visible(done);
+    w.delete_btn.set_visible(done);
 
     if item.status() == DownloadStatus::Paused {
-        toggle_btn.set_icon_name("media-playback-start-symbolic");
-        toggle_btn.set_tooltip_text(Some("Resume"));
+        w.toggle_btn.set_icon_name("media-playback-start-symbolic");
+        w.toggle_btn.set_tooltip_text(Some("Resume"));
     } else {
-        toggle_btn.set_icon_name("media-playback-pause-symbolic");
-        toggle_btn.set_tooltip_text(Some("Pause"));
+        w.toggle_btn.set_icon_name("media-playback-pause-symbolic");
+        w.toggle_btn.set_tooltip_text(Some("Pause"));
     }
 }
 
@@ -118,7 +122,8 @@ fn build_row(
     let toggle_btn = icon_button("media-playback-pause-symbolic", "Pause");
     let stop_btn = icon_button("process-stop-symbolic", "Cancel");
     let reveal_btn = icon_button("folder-open-symbolic", "Show in Folder");
-    let remove_btn = icon_button("user-trash-symbolic", "Remove");
+    let delete_btn = icon_button("user-trash-symbolic", "Delete file");
+    let remove_btn = icon_button("list-remove-symbolic", "Remove from list");
 
     top.append(&name);
     top.append(&status);
@@ -126,6 +131,7 @@ fn build_row(
     top.append(&toggle_btn);
     top.append(&stop_btn);
     top.append(&reveal_btn);
+    top.append(&delete_btn);
     top.append(&remove_btn);
 
     let detail = gtk4::Label::builder()
@@ -146,38 +152,46 @@ fn build_row(
 
     // Live updates: weak refs only, so rows never leak after removal.
     let w = |w: &gtk4::Widget| w.downgrade();
-    let (w_detail, w_prog, w_spin, w_tog, w_stop, w_reveal, w_status, w_name) = (
+    let weaks = (
         w(detail.upcast_ref()),
         w(progress.upcast_ref()),
         w(spinner.upcast_ref()),
         w(toggle_btn.upcast_ref()),
         w(stop_btn.upcast_ref()),
         w(reveal_btn.upcast_ref()),
+        w(delete_btn.upcast_ref()),
         w(status.upcast_ref()),
         w(name.upcast_ref()),
     );
     let updater = move |it: &crate::download::DownloadItem| {
-        if let (Some(d), Some(p), Some(s), Some(t), Some(x), Some(o), Some(st), Some(n)) = (
+        let (w_detail, w_prog, w_spin, w_tog, w_stop, w_reveal, w_del, w_status, w_name) = &weaks;
+        if let (Some(d), Some(p), Some(s), Some(t), Some(x), Some(o), Some(y), Some(st), Some(n)) = (
             w_detail.upgrade(),
             w_prog.upgrade(),
             w_spin.upgrade(),
             w_tog.upgrade(),
             w_stop.upgrade(),
             w_reveal.upgrade(),
+            w_del.upgrade(),
             w_status.upgrade(),
             w_name.upgrade(),
         ) {
-            let d: gtk4::Label = d.downcast().unwrap();
-            let p: gtk4::ProgressBar = p.downcast().unwrap();
-            let s: adw::Spinner = s.downcast().unwrap();
-            let t: gtk4::Button = t.downcast().unwrap();
-            let x: gtk4::Button = x.downcast().unwrap();
-            let o: gtk4::Button = o.downcast().unwrap();
             let st: gtk4::Label = st.downcast().unwrap();
             let n: gtk4::Label = n.downcast().unwrap();
             n.set_text(&it.filename());
             st.set_text(it.status().label());
-            refresh_row(it, &d, &p, &s, &t, &x, &o);
+            refresh_row(
+                it,
+                &RowWidgets {
+                    detail: d.downcast().unwrap(),
+                    progress: p.downcast().unwrap(),
+                    spinner: s.downcast().unwrap(),
+                    toggle_btn: t.downcast().unwrap(),
+                    stop_btn: x.downcast().unwrap(),
+                    reveal_btn: o.downcast().unwrap(),
+                    delete_btn: y.downcast().unwrap(),
+                },
+            );
         }
     };
     let u1 = updater.clone();
@@ -190,12 +204,15 @@ fn build_row(
     item.connect_filename_notify(move |it| u4(it));
     refresh_row(
         item,
-        &detail,
-        &progress,
-        &spinner,
-        &toggle_btn,
-        &stop_btn,
-        &reveal_btn,
+        &RowWidgets {
+            detail: detail.clone(),
+            progress: progress.clone(),
+            spinner: spinner.clone(),
+            toggle_btn: toggle_btn.clone(),
+            stop_btn: stop_btn.clone(),
+            reveal_btn: reveal_btn.clone(),
+            delete_btn: delete_btn.clone(),
+        },
     );
 
     let id = item.id();
@@ -221,6 +238,15 @@ fn build_row(
         reveal_btn.connect_clicked(move |_| {
             if let Some(it) = m.find(id) {
                 reveal_file(&it.file_path(), &t);
+            }
+        });
+    }
+    {
+        let m = Rc::clone(manager);
+        let t = Rc::clone(toasts);
+        delete_btn.connect_clicked(move |_| {
+            if let Err(e) = m.delete_download(id) {
+                t.add_toast(adw::Toast::new(&e));
             }
         });
     }
@@ -294,77 +320,115 @@ pub fn build_window(
         .build();
     stack.add_named(&empty, Some("empty"));
 
-    let list = gtk4::ListBox::builder()
-        .selection_mode(gtk4::SelectionMode::None)
-        .css_classes(["boxed-list"])
-        .margin_top(12)
-        .margin_bottom(12)
-        .margin_start(12)
-        .margin_end(12)
-        .build();
+    fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
+        let label = gtk4::Label::builder()
+            .label(title)
+            .halign(gtk4::Align::Start)
+            .css_classes(["heading"])
+            .build();
+        let list = gtk4::ListBox::builder()
+            .selection_mode(gtk4::SelectionMode::None)
+            .css_classes(["boxed-list"])
+            .build();
+        let section = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        section.append(&label);
+        section.append(&list);
+        (section, list)
+    }
+    let (downloading_section, downloading_list) = section_list("Downloading");
+    let (downloaded_section, downloaded_list) = section_list("Downloaded");
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 18);
+    content.set_margin_top(12);
+    content.set_margin_bottom(12);
+    content.set_margin_start(12);
+    content.set_margin_end(12);
+    content.append(&downloading_section);
+    content.append(&downloaded_section);
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
-        .child(&list)
+        .child(&content)
         .build();
     stack.add_named(&scroll, Some("list"));
 
+    fn is_done(it: &crate::download::DownloadItem) -> bool {
+        it.status() == crate::download::DownloadStatus::Done
+    }
+
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
-    {
+    // Put every row in its section. Runs on store changes AND on status
+    // changes (a finishing download moves sections without store churn).
+    let sync: Rc<dyn Fn()> = {
         let m = Rc::clone(&manager);
-        let l = list.clone();
+        let t = Rc::clone(&toasts);
         let r = Rc::clone(&rows);
         let s = stack.clone();
-        let t = Rc::clone(&toasts);
+        let l_downloading = downloading_list.clone();
+        let l_downloaded = downloaded_list.clone();
+        let sec_downloading = downloading_section.clone();
+        let sec_downloaded = downloaded_section.clone();
+        Rc::new(move || {
+            let store = m.store();
+            let mut present = std::collections::HashSet::new();
+            let mut n_downloading = 0;
+            let mut n_downloaded = 0;
+            for i in 0..store.n_items() {
+                if let Some(it) = store
+                    .item(i)
+                    .and_downcast::<crate::download::DownloadItem>()
+                {
+                    present.insert(it.id());
+                    if is_done(&it) {
+                        n_downloaded += 1;
+                    } else {
+                        n_downloading += 1;
+                    }
+                    let existing = r.borrow().get(&it.id()).cloned();
+                    let row = if let Some(row) = existing {
+                        row
+                    } else {
+                        let row = build_row(&it, &m, &t);
+                        r.borrow_mut().insert(it.id(), row.clone());
+                        row
+                    };
+                    let target = if is_done(&it) {
+                        &l_downloaded
+                    } else {
+                        &l_downloading
+                    };
+                    if !row.is_ancestor(target) {
+                        if let Some(old) = row.parent().and_downcast::<gtk4::ListBox>() {
+                            old.remove(&row);
+                        }
+                        target.append(&row);
+                    }
+                }
+            }
+            let stale: Vec<u64> = r
+                .borrow()
+                .keys()
+                .filter(|id| !present.contains(id))
+                .cloned()
+                .collect();
+            for id in stale {
+                if let Some(row) = r.borrow_mut().remove(&id) {
+                    if let Some(old) = row.parent().and_downcast::<gtk4::ListBox>() {
+                        old.remove(&row);
+                    }
+                }
+            }
+            sec_downloading.set_visible(n_downloading > 0);
+            sec_downloaded.set_visible(n_downloaded > 0);
+            s.set_visible_child_name(if store.n_items() > 0 { "list" } else { "empty" });
+        })
+    };
+    {
+        let sync = Rc::clone(&sync);
         manager
             .store()
-            .connect_items_changed(move |store, _, _, _| {
-                // Membership sync (lists are small; full scan is cheapest correct).
-                let mut present = std::collections::HashSet::new();
-                for i in 0..store.n_items() {
-                    if let Some(it) = store
-                        .item(i)
-                        .and_downcast::<crate::download::DownloadItem>()
-                    {
-                        present.insert(it.id());
-                        if !r.borrow().contains_key(&it.id()) {
-                            let row = build_row(&it, &m, &t);
-                            r.borrow_mut().insert(it.id(), row.clone());
-                            l.append(&row);
-                        }
-                    }
-                }
-                let stale: Vec<u64> = r
-                    .borrow()
-                    .keys()
-                    .filter(|id| !present.contains(id))
-                    .cloned()
-                    .collect();
-                for id in stale {
-                    if let Some(row) = r.borrow_mut().remove(&id) {
-                        l.remove(&row);
-                    }
-                }
-                s.set_visible_child_name(if store.n_items() > 0 { "list" } else { "empty" });
-            });
+            .connect_items_changed(move |_, _, _, _| sync());
     }
-    // Initial population.
-    for i in 0..manager.store().n_items() {
-        if let Some(it) = manager
-            .store()
-            .item(i)
-            .and_downcast::<crate::download::DownloadItem>()
-        {
-            let row = build_row(&it, &manager, &toasts);
-            rows.borrow_mut().insert(it.id(), row.clone());
-            list.append(&row);
-        }
-    }
-    stack.set_visible_child_name(if manager.store().n_items() > 0 {
-        "list"
-    } else {
-        "empty"
-    });
+    sync();
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
@@ -372,11 +436,13 @@ pub fn build_window(
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
 
-    // Keep action sensitivity fresh.
+    // Keep action sensitivity fresh and rows in their section.
     {
         let app_weak = app.downgrade();
         let m = Rc::clone(&manager);
+        let sync = Rc::clone(&sync);
         manager.set_on_change(move || {
+            sync();
             if let Some(app) = app_weak.upgrade() {
                 if let Some(a) = app
                     .lookup_action("cancel-all")

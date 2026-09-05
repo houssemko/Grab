@@ -566,6 +566,21 @@ impl DownloadManager {
         self.changed();
     }
 
+    /// Delete the downloaded file AND drop the row. Fails (keeping the row)
+    /// if the file cannot be removed; a missing file still drops the row.
+    pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
+        let item = self
+            .find(id)
+            .ok_or_else(|| "Download not found".to_string())?;
+        match std::fs::remove_file(item.file_path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Could not delete {}: {e}", item.filename())),
+        }
+        self.remove(id);
+        Ok(())
+    }
+
     pub fn cancel_all(self: &Rc<Self>) {
         let ids: Vec<u64> = (0..self.store.n_items())
             .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
@@ -775,6 +790,44 @@ mod tests {
             Some("Connecting to x... failed: Connection refused.")
         );
         assert_eq!(failure_hint(&[]), None);
+    }
+
+    #[test]
+    fn delete_download_removes_file_and_row() {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let dir = std::env::temp_dir().join(format!("grab-del-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gone.bin");
+        std::fs::write(&file, b"bye").unwrap();
+
+        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store.clone(), settings);
+        let item = DownloadItem::new(
+            7,
+            "https://example.com/gone.bin",
+            "gone.bin",
+            &dir.to_string_lossy(),
+        );
+        item.set_status(DownloadStatus::Done);
+        store.append(&item);
+
+        assert!(manager.delete_download(7).is_ok());
+        assert!(!file.exists());
+        assert_eq!(store.n_items(), 0);
+        // Missing file still drops the row.
+        let item2 = DownloadItem::new(
+            8,
+            "https://example.com/missing.bin",
+            "missing.bin",
+            &dir.to_string_lossy(),
+        );
+        item2.set_status(DownloadStatus::Done);
+        store.append(&item2);
+        assert!(manager.delete_download(8).is_ok());
+        assert_eq!(store.n_items(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
