@@ -21,5 +21,5 @@ fn main() {
             }
         }
     }
-    println!("cargo:rustc-env=WGET_SCHEMA_DIR={}", schema_dir.display());
+    println!("cargo:rustc-env=GRAB_SCHEMA_DIR={}", schema_dir.display());
 }

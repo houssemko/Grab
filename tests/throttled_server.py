@@ -1,4 +1,4 @@
-"""Throttled single-file HTTP server for wget-manager's lifecycle test.
+"""Throttled single-file HTTP server for Grab's lifecycle test.
 
 Serves one file slowly (~160KB/s) so pause() always lands mid-transfer.
 Usage: throttled_server.py PORT FILE

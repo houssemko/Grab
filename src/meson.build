@@ -6,7 +6,7 @@ cargo_options = ['--offline', '--release', '--path', meson.project_source_root()
 cargo_build = custom_target('cargo-build',
   build_by_default: true,
   build_always_stale: true,
-  output: 'wget-manager',
+  output: 'grab',
   console: true,
   install: true,
   install_dir: get_option('bindir'),

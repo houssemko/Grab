@@ -3,7 +3,7 @@
   "runtime": "org.gnome.Platform",
   "runtime-version": "48",
   "sdk": "org.gnome.Sdk",
-  "command": "wget-manager",
+  "command": "grab",
   "finish-args": [
     "--share=network",
     "--share=ipc",
@@ -27,7 +27,7 @@
       ]
     },
     {
-      "name": "wget-manager",
+      "name": "grab",
       "buildsystem": "meson",
       "builddir": true,
       "sources": [

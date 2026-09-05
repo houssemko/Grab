@@ -16,7 +16,7 @@ fn ensure_schema_dir() {
     if std::env::var_os("GSETTINGS_SCHEMA_DIR").is_some() {
         return;
     }
-    let dir = env!("WGET_SCHEMA_DIR");
+    let dir = env!("GRAB_SCHEMA_DIR");
     if std::path::Path::new(&format!("{dir}/gschemas.compiled")).exists() {
         // SAFETY: single-threaded startup, before any GSettings use.
         unsafe { std::env::set_var("GSETTINGS_SCHEMA_DIR", dir) };

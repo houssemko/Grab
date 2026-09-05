@@ -562,7 +562,7 @@ impl DownloadManager {
     // dropped — add a real history store when someone asks for it).
     fn queue_file() -> std::path::PathBuf {
         let mut dir = glib::user_data_dir();
-        dir.push("wget-manager");
+        dir.push("grab");
         let _ = std::fs::create_dir_all(&dir);
         dir.join("queue.txt")
     }
@@ -693,7 +693,7 @@ mod tests {
     /// just the ListStore + MainLoop.
     #[test]
     fn manager_pause_resume_cancel() {
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("WGET_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
         // Memory backend: the test never touches the user's real dconf db,
         // even if it times out or panics mid-run.
         std::env::set_var("GSETTINGS_BACKEND", "memory");

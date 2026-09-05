@@ -4,7 +4,7 @@
 # desktop entry points at target/debug; for an optimized build, set BIN=...
 set -eu
 root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-bin="${BIN:-$root/target/debug/wget-manager}"
+bin="${BIN:-$root/target/debug/grab}"
 prefix="${XDG_DATA_HOME:-$HOME/.local/share}"
 mkdir -p "$prefix/applications" "$prefix/icons/hicolor/scalable/apps" "$prefix/glib-2.0/schemas" "$prefix/dbus-1/services"
 sed "s|^Exec=.*|Exec=$bin %U|" "$root/data/org.gnome.WgetFrontend.desktop.in" \

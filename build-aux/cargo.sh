@@ -8,8 +8,8 @@ export PATH="$CARGO_HOME/bin:$PATH"
 # shellcheck disable=SC2086
 cargo build --offline --profile "$profile" --manifest-path "$src/Cargo.toml" \
   ${CARGO_TARGET_DIR:+--target-dir "$CARGO_TARGET_DIR"}
-bin="$CARGO_TARGET_DIR/$profile/wget-manager"
+bin="$CARGO_TARGET_DIR/$profile/grab"
 if [ ! -f "$bin" ]; then
-  bin="$src/target/$profile/wget-manager"
+  bin="$src/target/$profile/grab"
 fi
 cp "$bin" "$out"

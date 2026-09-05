@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Grab
 Comment=Download files with GNU wget
-Exec=wget-manager %U
+Exec=grab %U
 Icon=org.gnome.WgetFrontend
 Terminal=false
 Type=Application
