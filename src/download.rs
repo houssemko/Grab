@@ -148,6 +148,28 @@ pub fn failure_hint(lines: &[String]) -> Option<String> {
         .cloned()
 }
 
+/// Nautilus-style dedupe: "f.iso" -> "f (1).iso" while `taken` holds.
+pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(filename) {
+        return filename.to_string();
+    }
+    let (stem, ext) = match filename.rfind('.') {
+        Some(i) if i > 0 => (&filename[..i], Some(&filename[i + 1..])),
+        _ => (filename, None),
+    };
+    let mut n = 1;
+    loop {
+        let cand = match ext {
+            Some(e) => format!("{stem} ({n}).{e}"),
+            None => format!("{filename} ({n})"),
+        };
+        if !taken(&cand) {
+            return cand;
+        }
+        n += 1;
+    }
+}
+
 /// Guess a filename from a URL's last path segment.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
@@ -317,6 +339,14 @@ impl DownloadManager {
             .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\0'))
             .map(|s| s.to_string())
             .unwrap_or_else(|| filename_from_url(&url));
+        // Never let two downloads (or an existing file) share one path:
+        // concurrent `wget -O` writers would corrupt each other.
+        let name = dedupe_filename(&name, |n| {
+            std::path::Path::new(&dir).join(n).exists()
+                || (0..self.store.n_items())
+                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                    .any(|it| it.dest_dir() == dir && it.filename() == n)
+        });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         self.store.append(&item);
         self.persist_queue();
@@ -852,6 +882,19 @@ mod tests {
             &opts,
         );
         assert!(!argv.iter().any(|a| a.starts_with("--user-agent")));
+    }
+
+    #[test]
+    fn dedupes() {
+        let taken = |n: &str| matches!(n, "f.iso" | "f (1).iso");
+        assert_eq!(dedupe_filename("g.iso", taken), "g.iso");
+        assert_eq!(dedupe_filename("f.iso", taken), "f (2).iso");
+        assert_eq!(dedupe_filename("README", taken), "README");
+        let taken = |n: &str| n == "README";
+        assert_eq!(dedupe_filename("README", taken), "README (1)");
+        let taken = |_: &str| false;
+        assert_eq!(dedupe_filename(".profile", taken), ".profile");
+        assert_eq!(dedupe_filename("a.tar.gz", taken), "a.tar.gz");
     }
 
     #[test]
