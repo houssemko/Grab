@@ -39,7 +39,7 @@ meson setup build && ninja -C build && sudo ninja -C build install
 ## Flatpak
 
 ```bash
-flatpak install --user flathub org.flatpak.Builder org.gnome.Sdk//48 org.gnome.Platform//48
+flatpak install --user flathub org.flatpak.Builder org.gnome.Sdk//50 org.gnome.Platform//50
 flatpak-builder --user --install build build-aux/org.gnome.WgetFrontend.json
 ```
 
