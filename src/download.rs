@@ -415,6 +415,12 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         validate_url(&url)?;
+        // Same invariant as new downloads: a hand-edited queue file must not
+        // plant absolute/traversing names (they end up in --output-document
+        // and behind the Delete button).
+        if !sane_filename(filename) {
+            return Err(format!("Invalid filename in queue: {filename}"));
+        }
         let name = self.resolve_name(dest_dir, filename, false);
         let item = DownloadItem::new(self.alloc_id(), &url, &name, dest_dir);
         Ok(self.insert(item))
@@ -829,14 +835,31 @@ impl DownloadManager {
             version: QUEUE_VERSION,
             items,
         };
-        match serde_json::to_string_pretty(&data) {
-            Ok(text) => {
-                if let Err(e) = std::fs::write(Self::queue_file(), text) {
+        // Atomic replace (tmp + fsync + rename): a crash mid-write must never
+        // leave a truncated queue.json, which restore would drop entirely.
+        let text = match serde_json::to_string_pretty(&data) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("Grab: could not serialize download queue: {e}");
+                return;
+            }
+        };
+        let tmp = Self::queue_file().with_extension("json.tmp");
+        let write_tmp = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+            Ok(())
+        };
+        match write_tmp() {
+            Ok(()) => {
+                if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
                     // Journal-visible; a lost queue means lost resume state.
-                    eprintln!("Grab: could not persist download queue: {e}");
+                    eprintln!("Grab: could not replace download queue: {e}");
                 }
             }
-            Err(e) => eprintln!("Grab: could not serialize download queue: {e}"),
+            Err(e) => eprintln!("Grab: could not persist download queue: {e}"),
         }
     }
 
@@ -876,7 +899,11 @@ impl DownloadManager {
                         self.insert_history(item.url, item.dest_dir, item.filename, item.progress);
                     }
                     _ => {
-                        let _ = self.restore_existing(&item.url, &item.dest_dir, &item.filename);
+                        if let Err(e) =
+                            self.restore_existing(&item.url, &item.dest_dir, &item.filename)
+                        {
+                            eprintln!("Grab: skipping queue entry: {e}");
+                        }
                     }
                 }
             }
@@ -1227,7 +1254,37 @@ mod tests {
         assert_eq!(it.filename(), "old.iso");
         assert_eq!(it.status(), DownloadStatus::Done);
         assert!((it.progress() - 1.0).abs() < f64::EPSILON);
+        // Atomic persist leaves no tmp debris behind.
+        assert!(!qf.with_extension("json.tmp").exists());
         let _ = std::fs::remove_file(&qf);
+    }
+
+    #[test]
+    fn sane_filenames() {
+        assert!(sane_filename("a.iso"));
+        assert!(sane_filename("my file (1).tar.gz"));
+        assert!(!sane_filename(""));
+        assert!(!sane_filename("."));
+        assert!(!sane_filename(".."));
+        assert!(!sane_filename("/etc/passwd"));
+        assert!(!sane_filename("a/b"));
+        assert!(!sane_filename("a\0b"));
+    }
+
+    #[test]
+    fn restore_rejects_bad_filenames() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("restore-bad");
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        for bad in ["/etc/passwd", "..", ".", "a/b", ""] {
+            assert!(manager
+                .restore_existing("https://example.com/f.iso", "/tmp/dl", bad)
+                .is_err());
+        }
+        assert_eq!(manager.store().n_items(), 0);
     }
 
     #[test]
