@@ -225,8 +225,6 @@ pub struct WgetOptions {
     pub tries: i32,
     pub timeout: i32,
     pub limit_rate: String,
-    pub user: String,
-    pub password: String,
     pub user_agent: String,
 }
 
@@ -236,8 +234,6 @@ impl WgetOptions {
             tries: s.int("retries"),
             timeout: s.int("timeout"),
             limit_rate: s.string("speed-limit").to_string(),
-            user: String::new(),
-            password: String::new(),
             user_agent: s.string("user-agent").to_string(),
         }
     }
@@ -254,12 +250,6 @@ pub fn build_wget_argv(url: &str, dest_file: &std::path::Path, opts: &WgetOption
     ];
     if !opts.limit_rate.trim().is_empty() && opts.limit_rate.trim() != "0" {
         argv.push(format!("--limit-rate={}", opts.limit_rate.trim()));
-    }
-    if !opts.user.is_empty() {
-        argv.push(format!("--user={}", opts.user));
-    }
-    if !opts.password.is_empty() {
-        argv.push(format!("--password={}", opts.password));
     }
     if !opts.user_agent.trim().is_empty() {
         argv.push(format!("--user-agent={}", opts.user_agent.trim()));
@@ -720,7 +710,10 @@ impl DownloadManager {
                 }
             }
         }
-        let _ = std::fs::write(Self::queue_file(), lines.join("\n"));
+        if let Err(e) = std::fs::write(Self::queue_file(), lines.join("\n")) {
+            // Journal-visible; a lost queue means lost resume state.
+            eprintln!("Grab: could not persist download queue: {e}");
+        }
     }
 
     pub fn restore_queue(self: &Rc<Self>) {

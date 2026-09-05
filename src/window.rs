@@ -335,14 +335,14 @@ pub fn build_window(
         section.append(&list);
         (section, list)
     }
-    let (downloading_section, downloading_list) = section_list("Downloading");
+    let (active_section, active_list) = section_list("Active");
     let (downloaded_section, downloaded_list) = section_list("Downloaded");
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 18);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
     content.set_margin_start(12);
     content.set_margin_end(12);
-    content.append(&downloading_section);
+    content.append(&active_section);
     content.append(&downloaded_section);
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
@@ -363,14 +363,14 @@ pub fn build_window(
         let t = Rc::clone(&toasts);
         let r = Rc::clone(&rows);
         let s = stack.clone();
-        let l_downloading = downloading_list.clone();
+        let l_active = active_list.clone();
         let l_downloaded = downloaded_list.clone();
-        let sec_downloading = downloading_section.clone();
+        let sec_active = active_section.clone();
         let sec_downloaded = downloaded_section.clone();
         Rc::new(move || {
             let store = m.store();
             let mut present = std::collections::HashSet::new();
-            let mut n_downloading = 0;
+            let mut n_active = 0;
             let mut n_downloaded = 0;
             for i in 0..store.n_items() {
                 if let Some(it) = store
@@ -381,7 +381,7 @@ pub fn build_window(
                     if is_done(&it) {
                         n_downloaded += 1;
                     } else {
-                        n_downloading += 1;
+                        n_active += 1;
                     }
                     let existing = r.borrow().get(&it.id()).cloned();
                     let row = if let Some(row) = existing {
@@ -394,7 +394,7 @@ pub fn build_window(
                     let target = if is_done(&it) {
                         &l_downloaded
                     } else {
-                        &l_downloading
+                        &l_active
                     };
                     if !row.is_ancestor(target) {
                         if let Some(old) = row.parent().and_downcast::<gtk4::ListBox>() {
@@ -417,7 +417,7 @@ pub fn build_window(
                     }
                 }
             }
-            sec_downloading.set_visible(n_downloading > 0);
+            sec_active.set_visible(n_active > 0);
             sec_downloaded.set_visible(n_downloaded > 0);
             s.set_visible_child_name(if store.n_items() > 0 { "list" } else { "empty" });
         })
