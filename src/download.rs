@@ -137,6 +137,17 @@ pub fn parse_progress_line(line: &str) -> Option<(f64, String, String)> {
     Some((pct / 100.0, speed, eta))
 }
 
+/// Pick the most useful failure cause from recent wget stderr lines.
+/// Prefers an explicit ERROR line, else the last line seen.
+pub fn failure_hint(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find(|l| l.contains("ERROR"))
+        .or_else(|| lines.last())
+        .cloned()
+}
+
 /// Guess a filename from a URL's last path segment.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
@@ -343,6 +354,9 @@ impl DownloadManager {
             // which wget prints after "Saving to:") from EOF — both come back
             // empty. Treating that as EOF closes the pipe early and wget dies
             // writing progress to a broken pipe (EPIPE → exit 1).
+            // Recent non-progress lines: on failure the last one usually
+            // names the cause ("ERROR 404: Not Found", "Connection refused").
+            let mut last_lines: Vec<String> = Vec::new();
             if let Some(stderr) = proc.stderr_pipe() {
                 let reader = gio::DataInputStream::new(&stderr);
                 loop {
@@ -360,6 +374,14 @@ impl DownloadManager {
                                         speed,
                                         eta
                                     ));
+                                }
+                            } else {
+                                let trimmed = line.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    if last_lines.len() >= 8 {
+                                        last_lines.remove(0);
+                                    }
+                                    last_lines.push(trimmed);
                                 }
                             }
                         }
@@ -387,13 +409,18 @@ impl DownloadManager {
                 item.set_progress(1.0);
                 item.set_status(DownloadStatus::Done);
                 item.set_detail("Finished".to_string());
-                this.notify_finished(&item, true);
+                this.notify_finished(&item, true, None);
             } else {
                 item.set_status(DownloadStatus::Failed);
-                if item.detail().is_empty() || item.detail() == "Starting…" {
-                    item.set_detail("wget exited with an error".to_string());
+                let hint = failure_hint(&last_lines);
+                match &hint {
+                    Some(h) => item.set_detail(h.clone()),
+                    None if item.detail().is_empty() || item.detail() == "Starting…" => {
+                        item.set_detail("wget exited with an error".to_string())
+                    }
+                    None => {}
                 }
-                this.notify_finished(&item, false);
+                this.notify_finished(&item, false, hint);
             }
             this.persist_queue();
             this.changed();
@@ -401,7 +428,7 @@ impl DownloadManager {
         });
     }
 
-    fn notify_finished(&self, item: &DownloadItem, ok: bool) {
+    fn notify_finished(&self, item: &DownloadItem, ok: bool, hint: Option<String>) {
         if !self.settings.boolean("show-notifications") {
             return;
         }
@@ -411,11 +438,17 @@ impl DownloadManager {
             } else {
                 "Download failed"
             });
-            n.set_body(Some(&format!(
+            let mut body = format!(
                 "{} → {}",
                 item.filename(),
                 item.file_path().to_string_lossy()
-            )));
+            );
+            if !ok {
+                if let Some(h) = hint {
+                    body.push_str(&format!("\n{h}"));
+                }
+            }
+            n.set_body(Some(&body));
             n.set_default_action_and_target_value("app.present", None);
             app.send_notification(Some(&format!("dl-{}", item.id())), &n);
         }
@@ -666,6 +699,26 @@ mod tests {
         assert!(validate_url("ftp://example.com/f").is_ok());
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("--post-file=x").is_err());
+    }
+
+    #[test]
+    fn failure_hints() {
+        let lines = vec![
+            "--2026-09-05--  http://x/f.iso".to_string(),
+            "Connecting to x... connected.".to_string(),
+            "HTTP request sent, awaiting response... 404 File not found".to_string(),
+            "2026-09-05 ERROR 404: File not found.".to_string(),
+        ];
+        assert_eq!(
+            failure_hint(&lines).as_deref(),
+            Some("2026-09-05 ERROR 404: File not found.")
+        );
+        let lines = vec!["Connecting to x... failed: Connection refused.".to_string()];
+        assert_eq!(
+            failure_hint(&lines).as_deref(),
+            Some("Connecting to x... failed: Connection refused.")
+        );
+        assert_eq!(failure_hint(&[]), None);
     }
 
     #[test]
