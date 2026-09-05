@@ -43,6 +43,9 @@ flatpak install --user flathub org.flatpak.Builder org.gnome.Sdk//50 org.gnome.P
 flatpak-builder --user --install build build-aux/io.github.houssemko.Grab.json
 ```
 
+After any dependency change, regenerate the vendored cargo sources first:
+`python3 build-aux/gen-cargo-sources.py` (the Flatpak builds offline).
+
 Notes: file picking uses `GtkFileDialog` (portal-safe); downloads default to
 `xdg-download` (`--filesystem=xdg-download` in the manifest).
 
