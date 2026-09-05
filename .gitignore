@@ -1,5 +1,8 @@
 # Rust build output (1GB+, regenerable; OUT_DIR embeds absolute paths)
 target/
+# Flatpak builder working state and output
+build/
+.flatpak-builder/
 # Editor / tooling droppings
 *.rs.bk
 *.swp

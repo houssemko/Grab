@@ -4,6 +4,12 @@
   "runtime-version": "50",
   "sdk": "org.gnome.Sdk",
   "command": "grab",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin"
+  },
   "finish-args": [
     "--share=network",
     "--share=ipc",
