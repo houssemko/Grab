@@ -160,10 +160,38 @@ pub fn filename_from_url(url_str: &str) -> String {
         .unwrap_or_else(|| "index.html".to_string())
 }
 
+/// Normalize user input into an absolute URL string, adding a default
+/// `https://` scheme for bare `host/path` input like browsers do.
+pub fn normalize_url(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if let Ok(u) = url::Url::parse(trimmed) {
+        if matches!(u.scheme(), "http" | "https" | "ftp") {
+            return Ok(u.to_string());
+        }
+        // "localhost:8080/x" parses with scheme "localhost" — a bare host in
+        // disguise. Only retry those when the user gave no "://" at all, so
+        // real "file:///..." URLs still get validate_url's scheme error.
+        if trimmed.contains("://") {
+            return Ok(u.to_string());
+        }
+    }
+    if looks_like_bare_host(trimmed) {
+        let with_scheme = format!("https://{trimmed}");
+        if let Ok(u) = url::Url::parse(&with_scheme) {
+            return Ok(u.to_string());
+        }
+    }
+    Err(format!("Invalid URL: {trimmed}"))
+}
+
+fn looks_like_bare_host(s: &str) -> bool {
+    !s.contains("://") && !s.contains(' ') && (s.contains('.') || s.starts_with("localhost"))
+}
+
 /// Only http/https/ftp go to wget (blocks `--post-file`-style flag injection
 /// at the UI layer; argv still uses `--` separator defensively).
 pub fn validate_url(url_str: &str) -> Result<(), String> {
-    let u = url::Url::parse(url_str).map_err(|e| format!("Invalid URL: {e}"))?;
+    let u = url::Url::parse(url_str).map_err(|_| format!("Invalid URL: {url_str}"))?;
     match u.scheme() {
         "http" | "https" | "ftp" => Ok(()),
         s => Err(format!("Unsupported scheme: {s} (use http/https/ftp)")),
@@ -279,7 +307,8 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
     ) -> Result<DownloadItem, String> {
-        validate_url(url)?;
+        let url = normalize_url(url)?;
+        validate_url(&url)?;
         let dir = dest_dir
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -287,8 +316,8 @@ impl DownloadManager {
         let name = filename
             .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\0'))
             .map(|s| s.to_string())
-            .unwrap_or_else(|| filename_from_url(url));
-        let item = DownloadItem::new(self.alloc_id(), url, &name, &dir);
+            .unwrap_or_else(|| filename_from_url(&url));
+        let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         self.store.append(&item);
         self.persist_queue();
         self.changed();
@@ -699,6 +728,33 @@ mod tests {
         assert!(validate_url("ftp://example.com/f").is_ok());
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("--post-file=x").is_err());
+    }
+
+    #[test]
+    fn normalizes_bare_hosts() {
+        assert_eq!(
+            normalize_url("example.com/f.iso").as_deref(),
+            Ok("https://example.com/f.iso")
+        );
+        assert_eq!(
+            normalize_url("  example.com  ").as_deref(),
+            Ok("https://example.com/")
+        );
+        assert_eq!(
+            normalize_url("http://example.com/f.iso").as_deref(),
+            Ok("http://example.com/f.iso")
+        );
+        assert_eq!(
+            normalize_url("localhost:8080/f.iso").as_deref(),
+            Ok("https://localhost:8080/f.iso")
+        );
+        assert!(normalize_url("not a url").is_err());
+        assert!(normalize_url("").is_err());
+        // No more url-crate jargon in user-facing errors.
+        assert_eq!(
+            normalize_url("example .com").unwrap_err(),
+            "Invalid URL: example .com"
+        );
     }
 
     #[test]
