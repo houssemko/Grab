@@ -341,18 +341,44 @@ impl DownloadManager {
             .unwrap_or_else(|| filename_from_url(&url));
         // Never let two downloads (or an existing file) share one path:
         // concurrent `wget -O` writers would corrupt each other.
-        let name = dedupe_filename(&name, |n| {
-            std::path::Path::new(&dir).join(n).exists()
+        let name = self.resolve_name(&dir, &name, true);
+        Ok(self.insert(url, dir, name))
+    }
+
+    /// Re-add a queue entry from a previous session. Unlike [`Self::enqueue`],
+    /// the stored filename is kept verbatim: the file on disk (if any) is the
+    /// partial download `wget --continue` must resume, not a clash.
+    pub fn restore_existing(
+        self: &Rc<Self>,
+        url: &str,
+        dest_dir: &str,
+        filename: &str,
+    ) -> Result<DownloadItem, String> {
+        let url = normalize_url(url)?;
+        validate_url(&url)?;
+        let name = self.resolve_name(dest_dir, filename, false);
+        Ok(self.insert(url, dest_dir.to_string(), name))
+    }
+
+    fn resolve_name(&self, dir: &str, filename: &str, dedupe: bool) -> String {
+        if !dedupe {
+            return filename.to_string();
+        }
+        dedupe_filename(filename, |n| {
+            std::path::Path::new(dir).join(n).exists()
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| it.dest_dir() == dir && it.filename() == n)
-        });
+        })
+    }
+
+    fn insert(self: &Rc<Self>, url: String, dir: String, name: String) -> DownloadItem {
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         self.store.append(&item);
         self.persist_queue();
         self.changed();
         self.start_next();
-        Ok(item)
+        item
     }
 
     pub fn effective_download_dir(&self) -> String {
@@ -705,7 +731,11 @@ impl DownloadManager {
             let parts: Vec<&str> = line.split('\t').collect();
             if parts.len() >= 2 && !parts[0].is_empty() {
                 let filename = parts.get(2).copied().filter(|s| !s.is_empty());
-                let _ = self.enqueue(parts[0], Some(parts[1]), filename);
+                // Exact names only: the on-disk file is the partial download
+                // to resume, never a naming clash (see restore_existing).
+                if let Some(filename) = filename {
+                    let _ = self.restore_existing(parts[0], parts[1], filename);
+                }
             }
         }
     }
@@ -895,6 +925,35 @@ mod tests {
         let taken = |_: &str| false;
         assert_eq!(dedupe_filename(".profile", taken), ".profile");
         assert_eq!(dedupe_filename("a.tar.gz", taken), "a.tar.gz");
+    }
+
+    #[test]
+    fn restore_keeps_exact_filename() {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let dir = std::env::temp_dir().join(format!("grab-restore-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir_s = dir.to_string_lossy().into_owned();
+        // A partial download left on disk must NOT trigger dedupe on restore…
+        std::fs::write(dir.join("ubuntu.iso"), b"partial").unwrap();
+        // …but must for brand-new downloads.
+        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        assert_eq!(
+            manager.resolve_name(&dir_s, "ubuntu.iso", false),
+            "ubuntu.iso"
+        );
+        assert_eq!(
+            manager.resolve_name(&dir_s, "ubuntu.iso", true),
+            "ubuntu (1).iso"
+        );
+        assert_eq!(manager.resolve_name(&dir_s, "fresh.iso", true), "fresh.iso");
+        // …nor for in-flight names with nothing on disk.
+        let item = DownloadItem::new(1, "https://example.com/a.iso", "a.iso", &dir_s);
+        manager.store().append(&item);
+        assert_eq!(manager.resolve_name(&dir_s, "a.iso", true), "a (1).iso");
+        assert_eq!(manager.resolve_name(&dir_s, "a.iso", false), "a.iso");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
