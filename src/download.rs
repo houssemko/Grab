@@ -732,7 +732,7 @@ mod tests {
         }
         assert!(ready, "test HTTP server did not listen on port {port}");
 
-        let settings = gio::Settings::new("org.gnome.WgetFrontend");
+        let settings = gio::Settings::new("org.gnome.Grab");
         settings.set_boolean("show-notifications", false).unwrap();
 
         let store = gio::ListStore::new::<DownloadItem>();

@@ -1,4 +1,4 @@
-# Grab (`org.gnome.WgetFrontend`)
+# Grab (`org.gnome.Grab`)
 
 A GNOME download manager frontend for GNU wget — GTK 4 + libadwaita, written in Rust.
 
@@ -40,7 +40,7 @@ meson setup build && ninja -C build && sudo ninja -C build install
 
 ```bash
 flatpak install --user flathub org.flatpak.Builder org.gnome.Sdk//50 org.gnome.Platform//50
-flatpak-builder --user --install build build-aux/org.gnome.WgetFrontend.json
+flatpak-builder --user --install build build-aux/org.gnome.Grab.json
 ```
 
 Notes: file picking uses `GtkFileDialog` (portal-safe); downloads default to

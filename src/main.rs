@@ -7,7 +7,7 @@ use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
 
-pub const APP_ID: &str = "org.gnome.WgetFrontend";
+pub const APP_ID: &str = "org.gnome.Grab";
 
 /// Point GSettings at the build-time compiled schema dir so `cargo run`
 /// works without installing. A pre-set GSETTINGS_SCHEMA_DIR or a

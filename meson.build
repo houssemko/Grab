@@ -7,7 +7,7 @@ project('grab', 'rust',
 gnome = import('gnome')
 i18n = import('i18n')
 
-application_id = 'org.gnome.WgetFrontend'
+application_id = 'org.gnome.Grab'
 
 subdir('data')
 subdir('src')
