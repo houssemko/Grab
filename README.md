@@ -1,4 +1,4 @@
-# Grab (`io.github.houssemko.Grab`)
+# Grab
 
 A GNOME download manager frontend for GNU wget — GTK 4 + libadwaita, written in Rust.
 
@@ -23,7 +23,7 @@ G_DEBUG=fatal-criticals cargo run     # abort on criticals
 cargo test                             # parser/argv unit tests
 ```
 
-## Install for the current user (dash icon, no sudo)
+## Install for the current user
 
 ```bash
 cargo build && sh build-aux/install-user.sh  # then restart the app
@@ -46,10 +46,3 @@ flatpak-builder --user --install build build-aux/io.github.houssemko.Grab.json
 Notes: file picking uses `GtkFileDialog` (portal-safe); downloads default to
 `xdg-download` (`--filesystem=xdg-download` in the manifest).
 
-## Design rules (from `developing-gtk-apps`)
-
-- Single-threaded UI: wget runs as `gio::Subprocess`, stderr is drained in a
-  `glib::spawn_future_local` future. Never touch widgets off the main thread.
-- Pause = `SIGSTOP`, resume = `SIGCONT`, resume-after-restart = `wget -c`.
-- Actions live on `app.*`; accelerators: `Ctrl+N` new, `Ctrl+,` prefs, `Ctrl+Q` quit.
-- No deprecated widgets: `AdwDialog`/`AdwAboutDialog`, `AdwSpinner`, `.dimmed` class.
