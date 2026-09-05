@@ -831,6 +831,30 @@ mod tests {
     }
 
     #[test]
+    fn argv_user_agent() {
+        let opts = WgetOptions {
+            tries: 3,
+            timeout: 30,
+            user_agent: "Mozilla/5.0 Test".to_string(),
+            ..Default::default()
+        };
+        let argv = build_wget_argv(
+            "https://example.com/f.iso",
+            std::path::Path::new("/tmp/dl/f.iso"),
+            &opts,
+        );
+        assert!(argv.contains(&"--user-agent=Mozilla/5.0 Test".to_string()));
+        // Empty UA means no flag (wget default).
+        let opts = WgetOptions::default();
+        let argv = build_wget_argv(
+            "https://example.com/f.iso",
+            std::path::Path::new("/tmp/dl/f.iso"),
+            &opts,
+        );
+        assert!(!argv.iter().any(|a| a.starts_with("--user-agent")));
+    }
+
+    #[test]
     fn argv_shape() {
         let opts = WgetOptions {
             tries: 3,

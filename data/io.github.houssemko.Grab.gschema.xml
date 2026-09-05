@@ -30,7 +30,7 @@
       <description>Passed to wget --timeout.</description>
     </key>
     <key name="user-agent" type="s">
-      <default>''</default>
+      <default>'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'</default>
       <summary>User agent</summary>
       <description>Passed to wget --user-agent. Empty means wget default.</description>
     </key>
