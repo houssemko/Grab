@@ -165,7 +165,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             .version(env!("CARGO_PKG_VERSION"))
                             .developer_name("Grab Contributors")
                             .license_type(gtk4::License::Gpl30)
-                            .website("https://www.gnu.org/software/wget/")
+                            .website("https://github.com/houssemko/grab")
                             .issue_url("https://github.com/houssemko/grab/issues")
                             .comments("A GNOME download manager frontend for GNU wget")
                             .build();

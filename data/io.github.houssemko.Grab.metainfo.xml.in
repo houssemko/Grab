@@ -15,7 +15,7 @@
   <developer>
     <name>Grab Contributors</name>
   </developer>
-  <url type="homepage">https://www.gnu.org/software/wget/</url>
+  <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
     <release version="0.1.0" date="2026-09-05">
