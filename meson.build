@@ -9,6 +9,8 @@ i18n = import('i18n')
 
 application_id = 'io.github.houssemko.Grab'
 
+cargo_sh = files('build-aux/cargo.sh')
+
 subdir('data')
 subdir('src')
 subdir('po')

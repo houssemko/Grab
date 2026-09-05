@@ -22,7 +22,7 @@
         {
           "type": "archive",
           "url": "https://ftp.gnu.org/gnu/wget/wget-1.25.0.tar.gz",
-          "sha256": "5a7cfa7d84a5fd05656776a0574c4f4a2770d00fd3e5f55a33d1da15bbd04f"
+          "sha256": "766e48423e79359ea31e41db9e5c289675947a7fcf2efdcedb726ac9d0da3784"
         }
       ]
     },
@@ -30,10 +30,23 @@
       "name": "grab",
       "buildsystem": "meson",
       "builddir": true,
+      "build-options": {
+        "env": {
+          "CARGO_NET_OFFLINE": "true"
+        }
+      },
       "sources": [
         {
           "type": "dir",
           "path": ".."
+        },
+        "cargo-sources.json",
+        {
+          "type": "shell",
+          "commands": [
+            "mkdir -p .cargo",
+            "cp -vf cargo/config .cargo/config.toml"
+          ]
         }
       ]
     }
