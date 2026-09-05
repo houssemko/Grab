@@ -1,0 +1,20 @@
+[package]
+name = "wget-manager"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A GNOME download manager frontend for wget (GTK 4 / libadwaita)"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "wget-manager"
+path = "src/main.rs"
+
+[dependencies]
+# Version features must match the system libs (GTK 4.18+ / Adw 1.7+ API used).
+gtk4 = { version = "0.9", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18"] }
+libadwaita = { version = "0.7", package = "libadwaita", features = ["v1_4", "v1_5", "v1_6", "v1_7"] }
+regex = "1"
+url = "2"
+humansize = "2"
+async-channel = "2"

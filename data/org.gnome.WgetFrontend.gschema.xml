@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.WgetFrontend" path="/org/gnome/WgetFrontend/">
+    <key name="download-dir" type="s">
+      <default>''</default>
+      <summary>Download folder</summary>
+      <description>Empty means the system Downloads folder.</description>
+    </key>
+    <key name="max-concurrent" type="i">
+      <default>3</default>
+      <range min="1" max="10"/>
+      <summary>Simultaneous downloads</summary>
+      <description>How many wget processes may run at once.</description>
+    </key>
+    <key name="speed-limit" type="s">
+      <default>''</default>
+      <summary>Speed limit</summary>
+      <description>Passed to wget --limit-rate (e.g. 500K, 2M). Empty means unlimited.</description>
+    </key>
+    <key name="retries" type="i">
+      <default>3</default>
+      <range min="1" max="99"/>
+      <summary>Retries</summary>
+      <description>Passed to wget --tries.</description>
+    </key>
+    <key name="timeout" type="i">
+      <default>30</default>
+      <range min="5" max="300"/>
+      <summary>Timeout in seconds</summary>
+      <description>Passed to wget --timeout.</description>
+    </key>
+    <key name="user-agent" type="s">
+      <default>''</default>
+      <summary>User agent</summary>
+      <description>Passed to wget --user-agent. Empty means wget default.</description>
+    </key>
+    <key name="show-notifications" type="b">
+      <default>true</default>
+      <summary>Notify on completion</summary>
+      <description>Send a desktop notification when a download finishes or fails.</description>
+    </key>
+    <key name="window-width" type="i">
+      <default>900</default>
+      <summary>Window width</summary>
+      <description>Last used window width.</description>
+    </key>
+    <key name="window-height" type="i">
+      <default>600</default>
+      <summary>Window height</summary>
+      <description>Last used window height.</description>
+    </key>
+  </schema>
+</schemalist>

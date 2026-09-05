@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Grab
+Comment=Download files with GNU wget
+Exec=wget-manager %U
+Icon=org.gnome.WgetFrontend
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;GTK;
+Keywords=download;wget;manager;
+StartupNotify=true
+DBusActivatable=true
+MimeType=text/uri-list;x-scheme-handler/http;x-scheme-handler/https;
+SingleMainWindow=true
