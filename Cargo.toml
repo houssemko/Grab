@@ -6,14 +6,10 @@ rust-version = "1.75"
 description = "A GNOME download manager frontend for wget (GTK 4 / libadwaita)"
 license = "MIT"
 
-[[bin]]
-name = "grab"
-path = "src/main.rs"
-
 [dependencies]
 # Version features must match the system libs (GTK 4.18+ / Adw 1.7+ API used).
 gtk4 = { version = "0.9", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18"] }
-libadwaita = { version = "0.7", package = "libadwaita", features = ["v1_4", "v1_5", "v1_6", "v1_7"] }
+libadwaita = { version = "0.7", features = ["v1_4", "v1_5", "v1_6", "v1_7"] }
 url = "2"
 async-channel = "2"
 serde = { version = "1", features = ["derive"] }

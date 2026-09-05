@@ -119,11 +119,10 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
         {
             let st = Rc::clone(st);
             gio::ActionEntry::builder("add-download")
-                .activate(move |app: &adw::Application, _, _| {
+                .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        show_add_dialog(s.manager.clone(), s.toasts.clone());
+                        show_add_dialog(s.manager.clone());
                     }
-                    let _ = app;
                 })
                 .build()
         },

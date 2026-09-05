@@ -7,8 +7,6 @@ project('grab', 'rust',
 gnome = import('gnome')
 i18n = import('i18n')
 
-application_id = 'io.github.houssemko.Grab'
-
 cargo_sh = files('build-aux/cargo.sh')
 
 subdir('data')

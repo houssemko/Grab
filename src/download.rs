@@ -7,7 +7,7 @@
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
@@ -201,13 +201,9 @@ fn parse_legacy_line(line: &str) -> Option<(String, String, String)> {
 
 /// Pick the most useful failure cause from recent wget stderr lines.
 /// Prefers an explicit ERROR line, else the last line seen.
-pub fn failure_hint(lines: &[String]) -> Option<String> {
-    lines
-        .iter()
-        .rev()
-        .find(|l| l.contains("ERROR"))
-        .or_else(|| lines.last())
-        .cloned()
+pub fn failure_hint<'a>(mut lines: impl DoubleEndedIterator<Item = &'a String>) -> Option<String> {
+    let last = lines.next_back().cloned();
+    lines.rfind(|l| l.contains("ERROR")).cloned().or(last)
 }
 
 /// Nautilus-style dedupe: "f.iso" -> "f (1).iso" while `taken` holds.
@@ -542,7 +538,7 @@ impl DownloadManager {
             // means EOF.
             // Recent non-progress lines: on failure the last one usually
             // names the cause ("ERROR 404: Not Found", "Connection refused").
-            let mut last_lines: Vec<String> = Vec::new();
+            let mut last_lines: VecDeque<String> = VecDeque::new();
             let mut handle_line = |text: &str| {
                 if let Some((frac, speed, eta)) = parse_progress_line(text) {
                     // Skip updates for paused items (SIGSTOP freezes output anyway).
@@ -561,9 +557,9 @@ impl DownloadManager {
                     let trimmed = text.trim().to_string();
                     if !trimmed.is_empty() {
                         if last_lines.len() >= 8 {
-                            last_lines.remove(0);
+                            last_lines.pop_front();
                         }
-                        last_lines.push(trimmed);
+                        last_lines.push_back(trimmed);
                     }
                 }
             };
@@ -618,7 +614,7 @@ impl DownloadManager {
                 this.notify_finished(&item, true, None);
             } else {
                 item.set_status(DownloadStatus::Failed);
-                let hint = failure_hint(&last_lines);
+                let hint = failure_hint(last_lines.iter());
                 match &hint {
                     Some(h) => item.set_detail(h.clone()),
                     None if item.detail().is_empty() || item.detail() == "Starting…" => {
@@ -760,57 +756,56 @@ impl DownloadManager {
     }
 
     pub fn cancel_all(self: &Rc<Self>) {
-        let ids: Vec<u64> = (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-            .filter(|it| {
+        self.for_matching(
+            |s| {
                 matches!(
-                    it.status(),
+                    s,
                     DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
                 )
-            })
-            .map(|it| it.id())
-            .collect();
-        for id in ids {
-            self.cancel(id);
-        }
+            },
+            |m, id| m.cancel(id),
+        );
     }
 
     pub fn retry_failed(self: &Rc<Self>) {
+        self.for_matching(
+            |s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled),
+            |m, id| m.retry(id),
+        );
+    }
+
+    fn for_matching(
+        self: &Rc<Self>,
+        matches: impl Fn(DownloadStatus) -> bool,
+        mut op: impl FnMut(&Rc<Self>, u64),
+    ) {
         let ids: Vec<u64> = (0..self.store.n_items())
             .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-            .filter(|it| {
-                matches!(
-                    it.status(),
-                    DownloadStatus::Failed | DownloadStatus::Cancelled
-                )
-            })
+            .filter(|it| matches(it.status()))
             .map(|it| it.id())
             .collect();
         for id in ids {
-            self.retry(id);
+            op(self, id);
         }
     }
 
     pub fn has_active(&self) -> bool {
-        (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-            .any(|it| {
-                matches!(
-                    it.status(),
-                    DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
-                )
-            })
+        self.any_status(|s| {
+            matches!(
+                s,
+                DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
+            )
+        })
     }
 
     pub fn has_failed(&self) -> bool {
+        self.any_status(|s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled))
+    }
+
+    fn any_status(&self, pred: impl Fn(DownloadStatus) -> bool) -> bool {
         (0..self.store.n_items())
             .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-            .any(|it| {
-                matches!(
-                    it.status(),
-                    DownloadStatus::Failed | DownloadStatus::Cancelled
-                )
-            })
+            .any(|it| pred(it.status()))
     }
 
     // -- persistence: pending items resume, finished items survive as
@@ -1071,22 +1066,23 @@ mod tests {
 
     #[test]
     fn failure_hints() {
-        let lines = vec![
+        let lines = [
             "--2026-09-05--  http://x/f.iso".to_string(),
             "Connecting to x... connected.".to_string(),
             "HTTP request sent, awaiting response... 404 File not found".to_string(),
             "2026-09-05 ERROR 404: File not found.".to_string(),
         ];
         assert_eq!(
-            failure_hint(&lines).as_deref(),
+            failure_hint(lines.iter()).as_deref(),
             Some("2026-09-05 ERROR 404: File not found.")
         );
-        let lines = vec!["Connecting to x... failed: Connection refused.".to_string()];
+        let lines = ["Connecting to x... failed: Connection refused.".to_string()];
         assert_eq!(
-            failure_hint(&lines).as_deref(),
+            failure_hint(lines.iter()).as_deref(),
             Some("Connecting to x... failed: Connection refused.")
         );
-        assert_eq!(failure_hint(&[]), None);
+        let empty: Vec<String> = Vec::new();
+        assert_eq!(failure_hint(empty.iter()), None);
     }
 
     #[test]

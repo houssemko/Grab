@@ -23,34 +23,36 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
         .build()
 }
 
-/// Reveal a downloaded file in the file manager (Nautilus opens with the
-/// file selected). Uses GtkFileLauncher: portal-aware, so it also works
+/// Open a path in the file manager: the file itself revealed with selection,
+/// or a bare folder. Uses GtkFileLauncher: portal-aware, so it also works
 /// sandboxed in Flatpak. Failures always surface as a toast — launching
 /// must never fail silently.
 pub fn reveal_file(path: &std::path::Path, toasts: &adw::ToastOverlay) {
-    let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
-    let t = toasts.clone();
-    let what = path.to_string_lossy().into_owned();
-    glib::spawn_future_local(async move {
-        if let Err(e) = launcher
-            .open_containing_folder_future(None::<&gtk4::Window>)
-            .await
-        {
-            t.add_toast(adw::Toast::new(&format!(
-                "Could not show {what} in the file manager: {e}"
-            )));
-        }
-    });
+    launch_path(path, toasts, true);
 }
 
 /// Open a folder itself in the file manager.
 pub fn open_folder(path: &std::path::Path, toasts: &adw::ToastOverlay) {
+    launch_path(path, toasts, false);
+}
+
+fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: bool) {
     let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
     let t = toasts.clone();
     let what = path.to_string_lossy().into_owned();
     glib::spawn_future_local(async move {
-        if let Err(e) = launcher.launch_future(None::<&gtk4::Window>).await {
-            t.add_toast(adw::Toast::new(&format!("Could not open {what}: {e}")));
+        let res = if reveal {
+            launcher
+                .open_containing_folder_future(None::<&gtk4::Window>)
+                .await
+        } else {
+            launcher.launch_future(None::<&gtk4::Window>).await
+        };
+        if let Err(e) = res {
+            let verb = if reveal { "show" } else { "open" };
+            t.add_toast(adw::Toast::new(&format!(
+                "Could not {verb} {what} in the file manager: {e}"
+            )));
         }
     });
 }
@@ -306,8 +308,7 @@ pub fn build_window(
         .build();
     {
         let m = Rc::clone(&manager);
-        let t = Rc::clone(&toasts);
-        add_btn.connect_clicked(move |_| show_add_dialog(m.clone(), t.clone()));
+        add_btn.connect_clicked(move |_| show_add_dialog(m.clone()));
     }
     header.pack_end(&add_btn);
 
@@ -464,7 +465,7 @@ pub fn build_window(
 }
 
 /// "New Download" dialog.
-pub fn show_add_dialog(manager: Rc<DownloadManager>, _toasts: Rc<adw::ToastOverlay>) {
+pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder().title("New Download").build();
     dialog.set_content_width(420);
 
