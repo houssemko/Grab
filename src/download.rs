@@ -343,6 +343,9 @@ pub struct DownloadManager {
     running: RefCell<HashMap<u64, gio::Subprocess>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
+    /// While true, `persist_queue` is a no-op: restoring N items must not do
+    /// N durable (fsync) writes. The restorer persists once at the end.
+    batch: Cell<bool>,
 }
 
 impl DownloadManager {
@@ -353,6 +356,7 @@ impl DownloadManager {
             running: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
+            batch: Cell::new(false),
         })
     }
 
@@ -699,9 +703,10 @@ impl DownloadManager {
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
         }
-        // running entry is removed by the spawn future's epilogue; drop it
-        // here too in case the future already finished.
-        self.running.borrow_mut().remove(&id);
+        // The running entry stays until the spawn future reaps the child and
+        // removes it: freeing the slot early would let start_next() exceed
+        // max-concurrent while the old wget is still terminating.
+        // start_next() below only helps never-started (Queued) items.
         self.persist_queue();
         self.changed();
         self.start_next();
@@ -829,6 +834,9 @@ impl DownloadManager {
     }
 
     fn persist_queue(&self) {
+        if self.batch.get() {
+            return;
+        }
         let mut items = Vec::new();
         for i in 0..self.store.n_items() {
             if let Some(it) = self.store.item(i).and_downcast::<DownloadItem>() {
@@ -913,6 +921,7 @@ impl DownloadManager {
                     queue.items.len()
                 );
             }
+            self.batch.set(true);
             for item in queue.items.into_iter().take(MAX_QUEUE_ITEMS) {
                 match item.status {
                     StoredStatus::Done => {
@@ -927,6 +936,8 @@ impl DownloadManager {
                     }
                 }
             }
+            self.batch.set(false);
+            self.persist_queue();
             return;
         }
         self.restore_legacy_tsv();
@@ -938,6 +949,7 @@ impl DownloadManager {
         let Ok(text) = std::fs::read_to_string(&legacy) else {
             return;
         };
+        self.batch.set(true);
         for line in text.lines() {
             // Exact names only: the on-disk file is the partial download
             // to resume, never a naming clash (see restore_existing).
@@ -945,6 +957,8 @@ impl DownloadManager {
                 let _ = self.restore_existing(&url, &dir, &filename);
             }
         }
+        self.batch.set(false);
+        self.persist_queue();
         let _ = std::fs::remove_file(legacy);
     }
 
@@ -1311,6 +1325,67 @@ mod tests {
             .restore_existing("https://example.com/f.iso", "relative/dir", "f.iso")
             .is_err());
         assert_eq!(manager.store().n_items(), 0);
+    }
+
+    #[test]
+    fn batch_restore_hundred_done() {
+        // Correctness at scale; single persist is by construction (one call
+        // site at the end of restore_queue).
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("batch");
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let items: Vec<StoredItem> = (0..100)
+            .map(|i| StoredItem {
+                url: format!("https://example.com/f{i}.iso"),
+                dest_dir: "/tmp/dl".to_string(),
+                filename: format!("f{i}.iso"),
+                status: StoredStatus::Done,
+                progress: 1.0,
+            })
+            .collect();
+        let queue = StoredQueue {
+            version: QUEUE_VERSION,
+            items,
+        };
+        std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        m.restore_queue();
+        assert_eq!(m.store().n_items(), 100);
+        let it = m.store().item(99).and_downcast::<DownloadItem>().unwrap();
+        assert_eq!(it.filename(), "f99.iso");
+        assert_eq!(it.status(), DownloadStatus::Done);
+        let _ = std::fs::remove_file(&qf);
+    }
+
+    #[test]
+    fn cancel_holds_slot_until_reaped() {
+        // Crafted by hand, no MainLoop: A downloading with a live child, B
+        // queued. No async epilogue can run here, so nothing reaps except
+        // what cancel() itself does — and no dangling future is left on the
+        // process-global MainContext for other tests to trip over.
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("cancel-slot");
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let a = DownloadItem::new(41, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+        a.set_status(DownloadStatus::Downloading);
+        manager.store().append(&a);
+        let argv = [std::ffi::OsStr::new("sleep"), std::ffi::OsStr::new("60")];
+        let proc = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).unwrap();
+        manager.running.borrow_mut().insert(41, proc);
+        let b = DownloadItem::new(42, "https://example.com/b.bin", "b.bin", "/tmp/dl");
+        manager.store().append(&b); // Queued by default
+        manager.cancel(41);
+        // Slot stays occupied until the epilogue reaps: no eager start.
+        assert_eq!(a.status(), DownloadStatus::Cancelled);
+        assert!(manager.running.borrow().contains_key(&41));
+        assert_eq!(b.status(), DownloadStatus::Queued);
+        assert_eq!(manager.running.borrow().len(), 1);
     }
 
     #[test]

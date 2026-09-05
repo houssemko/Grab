@@ -88,10 +88,11 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
                 if let Ok(f) = res {
                     if let Some(p) = f.path() {
                         let dir = p.to_string_lossy().into_owned();
-                        // Same convention as bind_spin: a failed write means
-                        // dconf itself is broken; never panic out of a dialog.
-                        let _ = s2.set_string("download-dir", &dir);
-                        l2.set_text(&dir);
+                        // Only show what stuck: a failed write must not
+                        // desync the label from the actual setting.
+                        if s2.set_string("download-dir", &dir).is_ok() {
+                            l2.set_text(&dir);
+                        }
                     }
                 }
             });
@@ -101,8 +102,9 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         let s = settings.clone();
         let l = dest_label.clone();
         reset_btn.connect_clicked(move |_| {
-            let _ = s.set_string("download-dir", "");
-            l.set_text("(System Downloads folder)");
+            if s.set_string("download-dir", "").is_ok() {
+                l.set_text("(System Downloads folder)");
+            }
         });
     }
 
