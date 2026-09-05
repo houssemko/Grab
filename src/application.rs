@@ -75,9 +75,23 @@ pub fn setup(app: &adw::Application) {
                     }
                 }
                 // Otherwise treat as a text file with one URL per line.
+                // Capped: URL lists are small text, never slurp arbitrary dumps.
                 if let Some(path) = f.path() {
+                    const MAX_LIST_BYTES: u64 = 1_000_000;
+                    const MAX_LIST_LINES: usize = 1000;
+                    if std::fs::metadata(&path)
+                        .map(|m| m.len() > MAX_LIST_BYTES)
+                        .unwrap_or(true)
+                    {
+                        continue;
+                    }
                     if let Ok(text) = std::fs::read_to_string(&path) {
-                        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                        for line in text
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty())
+                            .take(MAX_LIST_LINES)
+                        {
                             if let Err(e) = s.manager.enqueue(line, None, None) {
                                 s.toasts.add_toast(adw::Toast::new(&e));
                             }

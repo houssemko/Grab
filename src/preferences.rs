@@ -16,13 +16,17 @@ fn bind_spin(settings: &gio::Settings, key: &str, row: &adw::SpinRow) {
         });
     }
     {
-        let r = row.clone();
+        // Weak: this closure lives on the app-lifetime Settings object, so a
+        // strong row ref would leak the whole dialog on every open.
+        let r = row.downgrade();
         let k = key.to_string();
         let kd = k.clone();
         settings.connect_changed(Some(kd.as_str()), move |s, _| {
-            let v = s.int(&k) as f64;
-            if (r.value() - v).abs() > f64::EPSILON {
-                r.set_value(v);
+            if let Some(r) = r.upgrade() {
+                let v = s.int(&k) as f64;
+                if (r.value() - v).abs() > f64::EPSILON {
+                    r.set_value(v);
+                }
             }
         });
     }

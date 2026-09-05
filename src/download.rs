@@ -232,6 +232,12 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     }
 }
 
+/// File names we accept from users and queue files: no separators, no NUL,
+/// and never bare `.`/`..` (path escape via `dest_dir/..`).
+fn sane_filename(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains('\0') && s != "." && s != ".."
+}
+
 /// Guess a filename from a URL's last path segment.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
@@ -388,7 +394,7 @@ impl DownloadManager {
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.effective_download_dir());
         let name = filename
-            .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('\0'))
+            .filter(|s| sane_filename(s))
             .map(|s| s.to_string())
             .unwrap_or_else(|| filename_from_url(&url));
         // Never let two downloads (or an existing file) share one path:
@@ -436,18 +442,22 @@ impl DownloadManager {
 
     /// Re-create a finished download from a previous session for display.
     /// Never spawns: the item lands Done, so `start_next` ignores it.
-    fn insert_history(
-        self: &Rc<Self>,
-        url: String,
-        dir: String,
-        name: String,
-        progress: f64,
-    ) -> DownloadItem {
+    /// Validated like any other entry: a hand-edited queue file must not
+    /// plant `file://` rows or path escapes behind the Delete button.
+    fn insert_history(self: &Rc<Self>, url: String, dir: String, name: String, progress: f64) {
+        let Ok(url) = normalize_url(&url) else {
+            eprintln!("Grab: skipping history entry with bad URL");
+            return;
+        };
+        if validate_url(&url).is_err() || !sane_filename(&name) {
+            eprintln!("Grab: skipping invalid history entry for {name}");
+            return;
+        }
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
         item.set_detail("Finished".to_string());
-        self.insert(item)
+        self.insert(item);
     }
 
     pub fn effective_download_dir(&self) -> String {
@@ -502,46 +512,66 @@ impl DownloadManager {
         let this = Rc::clone(self);
         let id = item.id();
         glib::spawn_future_local(async move {
-            // Drain stderr line by line (main thread — safe to touch the item).
-            // NOTE: read_line_utf8_future yields None ONLY at real EOF. The
-            // byte-based read_line* can NOT tell a blank line ("\n" alone,
-            // which wget prints after "Saving to:") from EOF — both come back
-            // empty. Treating that as EOF closes the pipe early and wget dies
-            // writing progress to a broken pipe (EPIPE → exit 1).
+            // Drain stderr in raw chunks and split lines by hand. Two traps
+            // this avoids:
+            // - the byte line API conflates a blank "\n" line with EOF, and
+            //   closing the pipe early kills wget with EPIPE (exit 1);
+            // - the UTF-8 line API errors out on non-UTF-8 bytes (locale
+            //   messages, hostile filenames) with the same fatal result.
+            // from_utf8_lossy never fails, and only a truly empty read
+            // means EOF.
             // Recent non-progress lines: on failure the last one usually
             // names the cause ("ERROR 404: Not Found", "Connection refused").
             let mut last_lines: Vec<String> = Vec::new();
+            let mut handle_line = |text: &str| {
+                if let Some((frac, speed, eta)) = parse_progress_line(text) {
+                    // Skip updates for paused items (SIGSTOP freezes output anyway).
+                    if item.status() == DownloadStatus::Downloading {
+                        item.set_progress(frac);
+                        item.set_speed(speed.clone());
+                        item.set_eta(eta.clone());
+                        item.set_detail(format!(
+                            "{}% • {} • ETA {}",
+                            (frac * 100.0) as u64,
+                            speed,
+                            eta
+                        ));
+                    }
+                } else {
+                    let trimmed = text.trim().to_string();
+                    if !trimmed.is_empty() {
+                        if last_lines.len() >= 8 {
+                            last_lines.remove(0);
+                        }
+                        last_lines.push(trimmed);
+                    }
+                }
+            };
             if let Some(stderr) = proc.stderr_pipe() {
-                let reader = gio::DataInputStream::new(&stderr);
+                let mut buf: Vec<u8> = Vec::new();
                 loop {
-                    match reader.read_line_utf8_future(glib::Priority::DEFAULT).await {
-                        Ok(Some(line)) => {
-                            if let Some((frac, speed, eta)) = parse_progress_line(&line) {
-                                // Skip updates for paused items (SIGSTOP freezes output anyway).
-                                if item.status() == DownloadStatus::Downloading {
-                                    item.set_progress(frac);
-                                    item.set_speed(speed.clone());
-                                    item.set_eta(eta.clone());
-                                    item.set_detail(format!(
-                                        "{}% • {} • ETA {}",
-                                        (frac * 100.0) as u64,
-                                        speed,
-                                        eta
-                                    ));
-                                }
-                            } else {
-                                let trimmed = line.trim().to_string();
-                                if !trimmed.is_empty() {
-                                    if last_lines.len() >= 8 {
-                                        last_lines.remove(0);
-                                    }
-                                    last_lines.push(trimmed);
-                                }
+                    let (tx, rx) = async_channel::bounded(1);
+                    stderr.read_bytes_async(
+                        65536,
+                        glib::Priority::DEFAULT,
+                        gio::Cancellable::NONE,
+                        move |res| {
+                            let _ = tx.send_blocking(res);
+                        },
+                    );
+                    match rx.recv().await {
+                        Ok(Ok(bytes)) if !bytes.is_empty() => {
+                            buf.extend_from_slice(&bytes);
+                            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                                let raw: Vec<u8> = buf.drain(..=pos).collect();
+                                handle_line(&String::from_utf8_lossy(&raw));
                             }
                         }
-                        Ok(None) => break, // real EOF: wget closed stderr
-                        Err(_) => break,
+                        _ => break, // EOF (empty) or error
                     }
+                }
+                if !buf.is_empty() {
+                    handle_line(&String::from_utf8_lossy(&buf));
                 }
             }
             // Wait for exit without blocking: bridge the callback API.
@@ -812,6 +842,17 @@ impl DownloadManager {
 
     pub fn restore_queue(self: &Rc<Self>) {
         if Self::queue_file().exists() {
+            // Cap: a corrupt/hand-made giant file must not freeze the UI
+            // with a million rows (processes stay capped regardless).
+            const MAX_QUEUE_BYTES: u64 = 10_000_000;
+            const MAX_QUEUE_ITEMS: usize = 1000;
+            if std::fs::metadata(Self::queue_file())
+                .map(|m| m.len() > MAX_QUEUE_BYTES)
+                .unwrap_or(true)
+            {
+                eprintln!("Grab: ignoring oversized download queue");
+                return;
+            }
             let Ok(text) = std::fs::read_to_string(Self::queue_file()) else {
                 return;
             };
@@ -823,7 +864,13 @@ impl DownloadManager {
                 eprintln!("Grab: ignoring download queue version {}", queue.version);
                 return;
             }
-            for item in queue.items {
+            if queue.items.len() > MAX_QUEUE_ITEMS {
+                eprintln!(
+                    "Grab: truncating download queue ({} items)",
+                    queue.items.len()
+                );
+            }
+            for item in queue.items.into_iter().take(MAX_QUEUE_ITEMS) {
                 match item.status {
                     StoredStatus::Done => {
                         self.insert_history(item.url, item.dest_dir, item.filename, item.progress);

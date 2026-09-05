@@ -551,9 +551,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, _toasts: Rc<adw::ToastOverl
     dialog.set_child(Some(&toolbar));
 
     {
-        let d = dialog.clone();
+        // Weak: the button owns this closure, so a strong dialog ref here
+        // would cycle (dialog -> button -> closure -> dialog) and leak the
+        // whole dialog on every open.
+        let d = dialog.downgrade();
         cancel_btn.connect_clicked(move |_| {
-            d.close();
+            if let Some(d) = d.upgrade() {
+                d.close();
+            }
         });
     }
     {
@@ -562,7 +567,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, _toasts: Rc<adw::ToastOverl
         let url_row = url_row.clone();
         let file_row = file_row.clone();
         let error_label = error_label.clone();
-        let dialog = dialog.clone();
+        let dialog = dialog.downgrade();
         add_btn.connect_clicked(move |_| {
             let url = url_row.text().trim().to_string();
             let fname = file_row.text().trim().to_string();
@@ -576,7 +581,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, _toasts: Rc<adw::ToastOverl
                 },
             ) {
                 Ok(_) => {
-                    dialog.close();
+                    if let Some(dialog) = dialog.upgrade() {
+                        dialog.close();
+                    }
                 }
                 Err(e) => {
                     error_label.set_text(&e);
@@ -588,13 +595,20 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, _toasts: Rc<adw::ToastOverl
     {
         let m = manager.clone();
         let dd = dest_dir.clone();
+        let dialog = dialog.downgrade();
         url_row.connect_apply(move |row| {
             let url = row.text().trim().to_string();
             if url.is_empty() {
                 return;
             }
             match m.enqueue(&url, Some(&dd.borrow()), None) {
-                Ok(_) => {}
+                // Close like the Add button does; staying open invites
+                // accidental double-enqueue on a second Enter.
+                Ok(_) => {
+                    if let Some(dialog) = dialog.upgrade() {
+                        dialog.close();
+                    }
+                }
                 Err(e) => {
                     error_label.set_text(&e);
                     error_label.set_visible(true);
