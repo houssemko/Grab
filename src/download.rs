@@ -238,7 +238,9 @@ fn sane_filename(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\0') && s != "." && s != ".."
 }
 
-/// Guess a filename from a URL's last path segment.
+/// Guess a filename from a URL's last path segment. Routed through the same
+/// invariant as every other name source rather than relying on `url`'s
+/// dot-segment normalization to have stripped `.`/`..`.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
         .ok()
@@ -246,7 +248,7 @@ pub fn filename_from_url(url_str: &str) -> String {
             u.path_segments()
                 .and_then(|mut segs| segs.rfind(|s| !s.is_empty()).map(|s| s.to_string()))
         })
-        .filter(|s| !s.contains('/') && !s.contains('\0'))
+        .filter(|s| sane_filename(s))
         .unwrap_or_else(|| "index.html".to_string())
 }
 
@@ -417,9 +419,13 @@ impl DownloadManager {
         validate_url(&url)?;
         // Same invariant as new downloads: a hand-edited queue file must not
         // plant absolute/traversing names (they end up in --output-document
-        // and behind the Delete button).
+        // and behind the Delete button). Destinations must be absolute too:
+        // relative ones would resolve against an unpredictable CWD.
         if !sane_filename(filename) {
             return Err(format!("Invalid filename in queue: {filename}"));
+        }
+        if !std::path::Path::new(dest_dir).is_absolute() {
+            return Err(format!("Invalid destination in queue: {dest_dir}"));
         }
         let name = self.resolve_name(dest_dir, filename, false);
         let item = DownloadItem::new(self.alloc_id(), &url, &name, dest_dir);
@@ -457,6 +463,10 @@ impl DownloadManager {
         };
         if validate_url(&url).is_err() || !sane_filename(&name) {
             eprintln!("Grab: skipping invalid history entry for {name}");
+            return;
+        }
+        if !std::path::Path::new(&dir).is_absolute() {
+            eprintln!("Grab: skipping history entry with relative destination");
             return;
         }
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
@@ -555,8 +565,10 @@ impl DownloadManager {
             };
             if let Some(stderr) = proc.stderr_pipe() {
                 let mut buf: Vec<u8> = Vec::new();
+                // One channel for the whole drain, not one per chunk.
+                let (tx, rx) = async_channel::bounded(1);
                 loop {
-                    let (tx, rx) = async_channel::bounded(1);
+                    let tx = tx.clone();
                     stderr.read_bytes_async(
                         65536,
                         glib::Priority::DEFAULT,
@@ -857,6 +869,14 @@ impl DownloadManager {
                 if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
                     // Journal-visible; a lost queue means lost resume state.
                     eprintln!("Grab: could not replace download queue: {e}");
+                    return;
+                }
+                // Best-effort durability for the rename itself; a failure
+                // here only widens the power-loss window, the file is fine.
+                if let Some(parent) = Self::queue_file().parent() {
+                    if let Ok(dir) = std::fs::File::open(parent) {
+                        let _ = dir.sync_all();
+                    }
                 }
             }
             Err(e) => eprintln!("Grab: could not persist download queue: {e}"),
@@ -1263,6 +1283,8 @@ mod tests {
     fn sane_filenames() {
         assert!(sane_filename("a.iso"));
         assert!(sane_filename("my file (1).tar.gz"));
+        // Backslash is an ordinary (legal, harmless) char on Linux.
+        assert!(sane_filename("a\\b"));
         assert!(!sane_filename(""));
         assert!(!sane_filename("."));
         assert!(!sane_filename(".."));
@@ -1284,6 +1306,10 @@ mod tests {
                 .restore_existing("https://example.com/f.iso", "/tmp/dl", bad)
                 .is_err());
         }
+        // Relative destinations resolve against an unpredictable CWD.
+        assert!(manager
+            .restore_existing("https://example.com/f.iso", "relative/dir", "f.iso")
+            .is_err());
         assert_eq!(manager.store().n_items(), 0);
     }
 
