@@ -7,13 +7,13 @@ root="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 bin="${BIN:-$root/target/debug/grab}"
 prefix="${XDG_DATA_HOME:-$HOME/.local/share}"
 mkdir -p "$prefix/applications" "$prefix/icons/hicolor/scalable/apps" "$prefix/glib-2.0/schemas" "$prefix/dbus-1/services"
-sed "s|^Exec=.*|Exec=$bin %U|" "$root/data/org.gnome.Grab.desktop.in" \
-    > "$prefix/applications/org.gnome.Grab.desktop"
-sed "s|^Exec=.*|Exec=$bin|" "$root/data/org.gnome.Grab.service.in" \
-    > "$prefix/dbus-1/services/org.gnome.Grab.service"
-cp "$root/data/icons/hicolor/scalable/apps/org.gnome.Grab.svg" \
+sed "s|^Exec=.*|Exec=$bin %U|" "$root/data/io.github.houssemko.Grab.desktop.in" \
+    > "$prefix/applications/io.github.houssemko.Grab.desktop"
+sed "s|^Exec=.*|Exec=$bin|" "$root/data/io.github.houssemko.Grab.service.in" \
+    > "$prefix/dbus-1/services/io.github.houssemko.Grab.service"
+cp "$root/data/icons/hicolor/scalable/apps/io.github.houssemko.Grab.svg" \
     "$prefix/icons/hicolor/scalable/apps/"
-cp "$root/data/org.gnome.Grab.gschema.xml" "$prefix/glib-2.0/schemas/"
+cp "$root/data/io.github.houssemko.Grab.gschema.xml" "$prefix/glib-2.0/schemas/"
 glib-compile-schemas "$prefix/glib-2.0/schemas/"
 command -v update-desktop-database >/dev/null \
     && update-desktop-database "$prefix/applications" || true

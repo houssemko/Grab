@@ -2,7 +2,7 @@
 Name=Grab
 Comment=Download files with GNU wget
 Exec=grab %U
-Icon=org.gnome.Grab
+Icon=io.github.houssemko.Grab
 Terminal=false
 Type=Application
 Categories=Network;FileTransfer;GTK;

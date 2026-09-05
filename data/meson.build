@@ -1,6 +1,6 @@
 desktop_file = i18n.merge_file(
-  input: 'org.gnome.Grab.desktop.in',
-  output: 'org.gnome.Grab.desktop',
+  input: 'io.github.houssemko.Grab.desktop.in',
+  output: 'io.github.houssemko.Grab.desktop',
   type: 'desktop',
   po_dir: '../po',
   install: true,
@@ -13,8 +13,8 @@ if desktop_utils.found()
 endif
 
 appstream_file = i18n.merge_file(
-  input: 'org.gnome.Grab.metainfo.xml.in',
-  output: 'org.gnome.Grab.metainfo.xml',
+  input: 'io.github.houssemko.Grab.metainfo.xml.in',
+  output: 'io.github.houssemko.Grab.metainfo.xml',
   po_dir: '../po',
   install: true,
   install_dir: get_option('datadir') / 'metainfo',
@@ -27,15 +27,15 @@ if appstreamcli.found()
   )
 endif
 
-install_data('org.gnome.Grab.gschema.xml',
+install_data('io.github.houssemko.Grab.gschema.xml',
   install_dir: get_option('datadir') / 'glib-2.0/schemas',
 )
 
 # D-Bus activation: required because the desktop file sets DBusActivatable=true.
 # Without this, launching from Shell/the app grid silently does nothing.
 configure_file(
-  input: 'org.gnome.Grab.service.in',
-  output: 'org.gnome.Grab.service',
+  input: 'io.github.houssemko.Grab.service.in',
+  output: 'io.github.houssemko.Grab.service',
   configuration: {'bindir': get_option('prefix') / get_option('bindir')},
   install_dir: get_option('datadir') / 'dbus-1' / 'services',
 )

@@ -7,7 +7,7 @@ project('grab', 'rust',
 gnome = import('gnome')
 i18n = import('i18n')
 
-application_id = 'org.gnome.Grab'
+application_id = 'io.github.houssemko.Grab'
 
 subdir('data')
 subdir('src')

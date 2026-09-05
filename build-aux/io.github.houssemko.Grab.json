@@ -1,5 +1,5 @@
 {
-  "app-id": "org.gnome.Grab",
+  "app-id": "io.github.houssemko.Grab",
   "runtime": "org.gnome.Platform",
   "runtime-version": "50",
   "sdk": "org.gnome.Sdk",

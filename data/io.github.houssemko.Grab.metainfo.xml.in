@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>org.gnome.Grab</id>
+  <id>io.github.houssemko.Grab</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
   <name>Grab</name>
@@ -11,7 +11,7 @@
       battle-tested GNU wget backend, in a native GNOME interface.
     </p>
   </description>
-  <launchable type="desktop-id">org.gnome.Grab.desktop</launchable>
+  <launchable type="desktop-id">io.github.houssemko.Grab.desktop</launchable>
   <developer>
     <name>Grab Contributors</name>
   </developer>
