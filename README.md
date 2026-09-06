@@ -2,6 +2,15 @@
 
 A GNOME download manager frontend for GNU wget — GTK 4 + libadwaita, written in Rust.
 
+## Install (alpha)
+
+Download `Grab.flatpak` from the [latest release](https://github.com/houssemko/Grab/releases), then:
+
+```bash
+flatpak install --user Grab.flatpak   # pulls the GNOME 50 runtime from Flathub
+flatpak run io.github.houssemko.Grab  # or open Grab from the app grid
+```
+
 ## Quick start (no install)
 
 ```bash
