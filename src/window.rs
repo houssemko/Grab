@@ -3,7 +3,7 @@ use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -415,6 +415,24 @@ pub fn build_window(
     }
     sync();
 
+    // ponytail: hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
+    let ever_shown = Rc::new(Cell::new(false));
+    {
+        let m = Rc::clone(&manager);
+        window.connect_close_request(move |win| {
+            if m.has_active() {
+                win.set_visible(false);
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+    }
+    {
+        let armed = Rc::clone(&ever_shown);
+        window.connect_map(move |_| armed.set(true));
+    }
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&stack));
@@ -425,6 +443,8 @@ pub fn build_window(
         let app_weak = app.downgrade();
         let m = Rc::clone(&manager);
         let sync = Rc::clone(&sync);
+        let w = window.downgrade();
+        let armed = Rc::clone(&ever_shown);
         manager.set_on_change(move || {
             sync();
             if let Some(app) = app_weak.upgrade() {
@@ -439,6 +459,13 @@ pub fn build_window(
                     .and_downcast::<gio::SimpleAction>()
                 {
                     a.set_enabled(m.has_failed());
+                }
+            }
+            let idle_hidden =
+                armed.get() && !m.has_active() && w.upgrade().is_some_and(|win| !win.is_visible());
+            if idle_hidden {
+                if let Some(app) = app_weak.upgrade() {
+                    app.quit();
                 }
             }
         });
