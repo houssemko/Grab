@@ -258,7 +258,7 @@ pub fn build_wget_argv(url: &str, dest_file: &std::path::Path, opts: &WgetOption
     let mut argv = vec![
         "wget".to_string(),
         "--continue".to_string(),
-        "--progress=dot:mega".to_string(),
+        "--progress=dot:default".to_string(),
         format!("--tries={}", opts.tries.max(1)),
         format!("--timeout={}", opts.timeout.max(1)),
     ];
@@ -444,7 +444,15 @@ impl DownloadManager {
         };
         self.running.borrow_mut().insert(item.id(), proc.clone());
         item.set_status(DownloadStatus::Downloading);
-        item.set_detail("Starting…".to_string());
+        let host = url::Url::parse(&item.url())
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_default();
+        item.set_detail(if host.is_empty() {
+            "Starting…".to_string()
+        } else {
+            format!("Connecting to {host}…")
+        });
         self.changed();
 
         let this = Rc::clone(self);
@@ -525,7 +533,10 @@ impl DownloadManager {
                 let hint = failure_hint(last_lines.iter());
                 match &hint {
                     Some(h) => item.set_detail(h.clone()),
-                    None if item.detail().is_empty() || item.detail() == "Starting…" => {
+                    None if item.detail().is_empty()
+                        || item.detail() == "Starting…"
+                        || item.detail().starts_with("Connecting to ") =>
+                    {
                         item.set_detail("wget exited with an error".to_string())
                     }
                     None => {}
@@ -862,7 +873,7 @@ mod tests {
 
     #[test]
     fn parses_real_wget125_output() {
-        // Captured from `wget --progress=dot:mega` (wget 1.25, localhost).
+        // Captured from `wget --progress=dot:default` (wget 1.25, localhost).
         let (frac, speed, eta) = parse_progress_line(
             "     0K ........ ........ ........ ........ ........ ........ 37%  279M 0s",
         )
@@ -1308,7 +1319,7 @@ mod tests {
         );
         assert_eq!(argv[0], "wget");
         assert!(argv.contains(&"--continue".to_string()));
-        assert!(argv.contains(&"--progress=dot:mega".to_string()));
+        assert!(argv.contains(&"--progress=dot:default".to_string()));
         // URL is last, after `--` separator.
         assert_eq!(argv[argv.len() - 1], "https://example.com/f.iso");
         assert_eq!(argv[argv.len() - 2], "--");
