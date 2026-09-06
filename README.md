@@ -1,6 +1,6 @@
 # Grab
 
-A download manager for GNOME. Built with GTK 4 and libadwaita, downloads with wget.
+A download manager for GNOME. Built with GTK 4 and libadwaita using Wget.
 
 ## Install
 
@@ -14,11 +14,33 @@ Then open Grab from the app grid. The GNOME 50 runtime comes from Flathub on its
 
 ## Try it without installing
 
-You need Rust, GTK 4, libadwaita and wget:
+Run Grab straight from source. Nothing is installed on your system.
+
+**1. Install the build tools** (one time):
+
+```bash
+# Fedora / RHEL
+sudo dnf install rustc cargo gtk4-devel libadwaita-devel wget
+# Arch / CachyOS
+sudo pacman -S rust gtk4 libadwaita wget
+# Debian / Ubuntu
+sudo apt install cargo libgtk-4-dev libadwaita-1-dev wget
+```
+
+**2. Get the code:**
+
+```bash
+git clone https://github.com/houssemko/Grab.git
+cd Grab
+```
+
+**3. Run it:**
 
 ```bash
 cargo run -- https://example.com/file.iso
 ```
+
+The first build takes a few minutes. The app window opens and the download starts. Settings are stored per-user, so your system is untouched — delete the folder to remove everything.
 
 ## Debug
 
