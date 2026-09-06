@@ -47,7 +47,8 @@ pub fn setup(app: &adw::Application) {
 
     {
         let st = Rc::clone(&state);
-        app.connect_activate(move |_| {
+        app.connect_activate(move |app| {
+            app.withdraw_notification(window::BACKGROUND_NOTIF_ID);
             if let Some(s) = st.borrow().as_ref() {
                 s.window.present();
             }

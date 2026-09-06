@@ -398,6 +398,10 @@ impl DownloadManager {
         self.insert(item);
     }
 
+    pub fn notifications_enabled(&self) -> bool {
+        self.settings.boolean("show-notifications")
+    }
+
     pub fn effective_download_dir(&self) -> String {
         let configured = self.settings.string("download-dir").to_string();
         if !configured.is_empty() {
@@ -550,7 +554,7 @@ impl DownloadManager {
     }
 
     fn notify_finished(&self, item: &DownloadItem, ok: bool, hint: Option<String>) {
-        if !self.settings.boolean("show-notifications") {
+        if !self.notifications_enabled() {
             return;
         }
         if let Some(app) = gio::Application::default() {

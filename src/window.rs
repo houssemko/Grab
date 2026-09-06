@@ -7,6 +7,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+pub const BACKGROUND_NOTIF_ID: &str = "grab-background";
+
 fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
     gtk4::Button::builder()
         .icon_name(icon)
@@ -422,6 +424,14 @@ pub fn build_window(
         window.connect_close_request(move |win| {
             if m.has_active() {
                 win.set_visible(false);
+                if m.notifications_enabled() {
+                    if let Some(app) = gio::Application::default() {
+                        let n = gio::Notification::new("Downloads continue in the background");
+                        n.set_body(Some("Grab stays open until they finish."));
+                        n.set_default_action_and_target_value("app.present", None);
+                        app.send_notification(Some(BACKGROUND_NOTIF_ID), &n);
+                    }
+                }
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
@@ -465,6 +475,7 @@ pub fn build_window(
                 armed.get() && !m.has_active() && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden {
                 if let Some(app) = app_weak.upgrade() {
+                    app.withdraw_notification(BACKGROUND_NOTIF_ID);
                     app.quit();
                 }
             }
