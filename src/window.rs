@@ -409,12 +409,6 @@ pub fn build_window(
             s.set_visible_child_name(if store.n_items() > 0 { "list" } else { "empty" });
         })
     };
-    {
-        let sync = Rc::clone(&sync);
-        manager
-            .store()
-            .connect_items_changed(move |_, _, _, _| sync());
-    }
     sync();
 
     // ponytail: hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
@@ -456,7 +450,9 @@ pub fn build_window(
         let w = window.downgrade();
         let armed = Rc::clone(&ever_shown);
         manager.set_on_change(move || {
-            sync();
+            if !m.is_batching() {
+                sync();
+            }
             if let Some(app) = app_weak.upgrade() {
                 if let Some(a) = app
                     .lookup_action("cancel-all")

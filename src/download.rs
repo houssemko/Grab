@@ -214,17 +214,16 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
             return Ok(u.to_string());
         }
     }
-    if looks_like_bare_host(trimmed) {
+    let bare = !trimmed.contains("://")
+        && !trimmed.contains(' ')
+        && (trimmed.contains('.') || trimmed.starts_with("localhost"));
+    if bare {
         let with_scheme = format!("https://{trimmed}");
         if let Ok(u) = url::Url::parse(&with_scheme) {
             return Ok(u.to_string());
         }
     }
     Err(format!("Invalid URL: {trimmed}"))
-}
-
-fn looks_like_bare_host(s: &str) -> bool {
-    !s.contains("://") && !s.contains(' ') && (s.contains('.') || s.starts_with("localhost"))
 }
 
 pub fn validate_url(url_str: &str) -> Result<(), String> {
@@ -300,6 +299,10 @@ impl DownloadManager {
 
     pub fn set_on_change(&self, cb: impl Fn() + 'static) {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
+    }
+
+    pub fn is_batching(&self) -> bool {
+        self.batch.get()
     }
 
     fn changed(&self) {
@@ -833,6 +836,7 @@ impl DownloadManager {
             }
             self.batch.set(false);
             self.persist_queue();
+            self.changed();
         }
     }
 
