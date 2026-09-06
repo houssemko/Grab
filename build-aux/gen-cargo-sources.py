@@ -12,7 +12,6 @@ import json
 import sys
 import tomllib
 
-LOCK = "Cargo.toml"
 OUT = "build-aux/cargo-sources.json"
 CRATES_IO = "https://static.crates.io/crates"
 

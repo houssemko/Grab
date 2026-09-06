@@ -496,7 +496,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let url_row = adw::EntryRow::builder()
         .title("URL")
         .text("")
-        .show_apply_button(false)
+        .show_apply_button(true)
         .build();
     url_row.set_input_purpose(gtk4::InputPurpose::Url);
     group.add(&url_row);
