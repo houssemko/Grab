@@ -10,29 +10,29 @@
       <default>3</default>
       <range min="1" max="10"/>
       <summary>Simultaneous downloads</summary>
-      <description>How many wget processes may run at once.</description>
+      <description>How many downloads may run at once.</description>
     </key>
     <key name="speed-limit" type="s">
       <default>''</default>
       <summary>Speed limit</summary>
-      <description>Passed to wget --limit-rate (e.g. 500K, 2M). Empty means unlimited.</description>
+      <description>Download speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
     </key>
     <key name="retries" type="i">
       <default>3</default>
       <range min="1" max="99"/>
       <summary>Retries</summary>
-      <description>Passed to wget --tries.</description>
+      <description>How many times a failed download retries.</description>
     </key>
     <key name="timeout" type="i">
       <default>30</default>
       <range min="5" max="300"/>
       <summary>Timeout in seconds</summary>
-      <description>Passed to wget --timeout.</description>
+      <description>Network timeout in seconds.</description>
     </key>
     <key name="user-agent" type="s">
       <default>'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'</default>
       <summary>User agent</summary>
-      <description>Passed to wget --user-agent. Empty means wget default.</description>
+      <description>Custom User-Agent header. Empty means the default.</description>
     </key>
     <key name="show-notifications" type="b">
       <default>true</default>

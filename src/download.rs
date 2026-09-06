@@ -1400,7 +1400,7 @@ mod tests {
         let _qf = test_queue_file("lifecycle");
         let settings = test_settings();
 
-        let dir = std::env::temp_dir().join(format!("wgetmgr-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("grab-test-{}", std::process::id()));
         let srv = dir.join("srv");
         let dl = dir.join("dl");
         std::fs::create_dir_all(&srv).unwrap();

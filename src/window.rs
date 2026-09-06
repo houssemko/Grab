@@ -305,7 +305,7 @@ pub fn build_window(
     let empty = adw::StatusPage::builder()
         .icon_name("folder-download-symbolic")
         .title("No Downloads Yet")
-        .description("Add a download to get started. Files are fetched with wget.")
+        .description("Add a download to get started.")
         .build();
     stack.add_named(&empty, Some("empty"));
 
