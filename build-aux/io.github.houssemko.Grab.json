@@ -36,6 +36,9 @@
       "name": "grab",
       "buildsystem": "meson",
       "builddir": true,
+      "config-opts": [
+        "-Dbuildtype=release"
+      ],
       "build-options": {
         "env": {
           "CARGO_NET_OFFLINE": "true"

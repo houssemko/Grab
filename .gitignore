@@ -3,6 +3,8 @@ target/
 # Flatpak builder working state and output
 build/
 .flatpak-builder/
+flatpak-repo/
+*.flatpak
 # Editor / tooling droppings
 *.rs.bk
 *.swp
