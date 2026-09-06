@@ -3,7 +3,7 @@ name = "grab"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "A GNOME download manager frontend for wget (GTK 4 / libadwaita)"
+description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "MIT"
 
 [dependencies]

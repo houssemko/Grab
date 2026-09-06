@@ -4,11 +4,11 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>Grab</name>
-  <summary>A GNOME download manager frontend for GNU wget</summary>
+  <summary>A GNOME download manager with pause, resume and history</summary>
   <description>
     <p>
-      Queue, pause, resume and monitor file downloads driven by the
-      battle-tested GNU wget backend, in a native GNOME interface.
+      Queue, pause, resume and monitor file downloads with smart
+      auto-resume, in a native GNOME interface.
     </p>
   </description>
   <launchable type="desktop-id">io.github.houssemko.Grab.desktop</launchable>

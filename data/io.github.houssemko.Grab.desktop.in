@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Grab
-Comment=Download files with GNU wget
+Comment=Download files from the web
 Exec=grab %U
 Icon=io.github.houssemko.Grab
 Terminal=false

@@ -1,6 +1,6 @@
 # Grab
 
-A download manager for GNOME. Built with GTK 4 and libadwaita using Wget.
+A download manager for GNOME. Built with GTK 4 and libadwaita, downloads over HTTP(S).
 
 ## Install
 
@@ -20,11 +20,11 @@ Run Grab straight from source. Nothing is installed on your system.
 
 ```bash
 # Fedora / RHEL
-sudo dnf install rustc cargo gtk4-devel libadwaita-devel wget
+sudo dnf install rustc cargo gtk4-devel libadwaita-devel
 # Arch / CachyOS
-sudo pacman -S rust gtk4 libadwaita wget
+sudo pacman -S rust gtk4 libadwaita
 # Debian / Ubuntu
-sudo apt install cargo libgtk-4-dev libadwaita-1-dev wget
+sudo apt install cargo libgtk-4-dev libadwaita-1-dev
 ```
 
 **2. Get the code:**

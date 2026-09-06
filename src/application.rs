@@ -1,5 +1,5 @@
 //! Application lifecycle: startup (actions once), activate (window),
-//! open (URLs/files), shutdown (kill wget children, persist queue).
+//! open (URLs/files), shutdown (stop downloads, persist queue).
 
 use crate::download::DownloadManager;
 use crate::window::{self, show_add_dialog};
@@ -174,7 +174,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             .license_type(gtk4::License::MitX11)
                             .website("https://github.com/houssemko/grab")
                             .issue_url("https://github.com/houssemko/grab/issues")
-                            .comments("A GNOME download manager frontend for GNU wget")
+                            .comments("A GNOME download manager")
                             .build();
                         about.present(Some(&s.window));
                     }

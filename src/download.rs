@@ -1,11 +1,14 @@
+use futures_util::StreamExt as _;
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
-#[enum_type(name = "WgetDownloadStatus")]
+#[enum_type(name = "GrabDownloadStatus")]
 pub enum DownloadStatus {
     #[default]
     Queued,
@@ -99,7 +102,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for DownloadItem {
-        const NAME: &'static str = "WgetDownloadItem";
+        const NAME: &'static str = "GrabDownloadItem";
         type Type = super::DownloadItem;
     }
 
@@ -124,39 +127,6 @@ impl DownloadItem {
     pub fn file_path(&self) -> std::path::PathBuf {
         std::path::Path::new(&self.dest_dir()).join(self.filename())
     }
-}
-
-pub fn parse_progress_line(line: &str) -> Option<(f64, String, String)> {
-    let pct_end = line.find('%')?;
-    let pct_start = line[..pct_end].rfind(|c: char| !c.is_ascii_digit())? + 1;
-    let pct: f64 = line[pct_start..pct_end].trim().parse().ok()?;
-    if !(0.0..=100.0).contains(&pct) {
-        return None;
-    }
-    let rest: Vec<&str> = line[pct_end + 1..].split_whitespace().collect();
-    if rest.is_empty() {
-        return None;
-    }
-    let (speed, eta) = match rest.as_slice() {
-        [single] => {
-            let mut parts = single.splitn(2, '=');
-            match (parts.next(), parts.next()) {
-                (Some(s), Some(e)) => (s.trim().to_string(), e.to_string()),
-                _ => return None,
-            }
-        }
-        [s, e, ..] => (s.trim_start_matches('=').to_string(), e.to_string()),
-        [] => return None,
-    };
-    if speed.is_empty() || eta.is_empty() {
-        return None;
-    }
-    Some((pct / 100.0, speed, eta))
-}
-
-pub fn failure_hint<'a>(mut lines: impl DoubleEndedIterator<Item = &'a String>) -> Option<String> {
-    let last = lines.next_back().cloned();
-    lines.rfind(|l| l.contains("ERROR")).cloned().or(last)
 }
 
 fn restored_status(stored: StoredStatus) -> DownloadStatus {
@@ -207,7 +177,7 @@ pub fn filename_from_url(url_str: &str) -> String {
 pub fn normalize_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if let Ok(u) = url::Url::parse(trimmed) {
-        if matches!(u.scheme(), "http" | "https" | "ftp") {
+        if matches!(u.scheme(), "http" | "https") {
             return Ok(u.to_string());
         }
         if trimmed.contains("://") {
@@ -229,20 +199,21 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
 pub fn validate_url(url_str: &str) -> Result<(), String> {
     let u = url::Url::parse(url_str).map_err(|_| format!("Invalid URL: {url_str}"))?;
     match u.scheme() {
-        "http" | "https" | "ftp" => Ok(()),
-        s => Err(format!("Unsupported scheme: {s} (use http/https/ftp)")),
+        "http" | "https" => Ok(()),
+        "ftp" => Err("FTP is not supported (use http/https)".to_string()),
+        s => Err(format!("Unsupported scheme: {s} (use http/https)")),
     }
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct WgetOptions {
+pub struct DownloadOptions {
     pub tries: i32,
     pub timeout: i32,
     pub limit_rate: String,
     pub user_agent: String,
 }
 
-impl WgetOptions {
+impl DownloadOptions {
     pub fn from_settings(s: &gio::Settings) -> Self {
         Self {
             tries: s.int("retries"),
@@ -253,33 +224,202 @@ impl WgetOptions {
     }
 }
 
-pub fn build_wget_argv(url: &str, dest_file: &std::path::Path, opts: &WgetOptions) -> Vec<String> {
-    let mut argv = vec![
-        "wget".to_string(),
-        "--continue".to_string(),
-        "--progress=dot:default".to_string(),
-        format!("--tries={}", opts.tries.max(1)),
-        format!("--timeout={}", opts.timeout.max(1)),
-    ];
-    if !opts.limit_rate.trim().is_empty() && opts.limit_rate.trim() != "0" {
-        argv.push(format!("--limit-rate={}", opts.limit_rate.trim()));
-    }
-    if !opts.user_agent.trim().is_empty() {
-        argv.push(format!("--user-agent={}", opts.user_agent.trim()));
-    }
-    argv.push(format!("--output-document={}", dest_file.to_string_lossy()));
-    argv.push("--".to_string());
-    argv.push(url.to_string());
-    argv
+fn tokio_rt() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("grab-download")
+            .enable_all()
+            .build()
+            .expect("tokio runtime")
+    })
 }
 
-const SIGSTOP: i32 = 19;
-const SIGCONT: i32 = 18;
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
+}
+
+enum EngineMsg {
+    Progress { downloaded: u64, total: Option<u64> },
+    Finished,
+    Failed(String),
+}
+
+async fn run_download(
+    client: &'static reqwest::Client,
+    url: String,
+    dest: std::path::PathBuf,
+    opts: DownloadOptions,
+    rate_limit: Option<u64>,
+    tx: async_channel::Sender<EngineMsg>,
+) {
+    let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
+    let mut tries = opts.tries.max(1);
+    loop {
+        match attempt_once(client, &url, &dest, &opts, rate_limit, timeout, &tx).await {
+            Ok(()) => {
+                tx.send(EngineMsg::Finished).await.ok();
+                return;
+            }
+            Err(e) => {
+                tries -= 1;
+                if tries <= 0 {
+                    tx.send(EngineMsg::Failed(e)).await.ok();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn attempt_once(
+    client: &reqwest::Client,
+    url: &str,
+    dest: &std::path::Path,
+    opts: &DownloadOptions,
+    rate_limit: Option<u64>,
+    timeout: Duration,
+    tx: &async_channel::Sender<EngineMsg>,
+) -> Result<(), String> {
+    let start = tokio::fs::metadata(dest)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    let mut req = client.get(url);
+    if start > 0 {
+        req = req.header("Range", format!("bytes={start}-"));
+    }
+    if !opts.user_agent.trim().is_empty() {
+        req = req.header("User-Agent", opts.user_agent.trim());
+    }
+    let resp = match tokio::time::timeout(
+        timeout,
+        client.execute(req.build().map_err(|e| e.to_string())?),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(e.to_string()),
+        Err(_) => return Err("Connection timed out".to_string()),
+    };
+    let status = resp.status();
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && start > 0 {
+        return Ok(());
+    }
+    if status.is_client_error() || status.is_server_error() {
+        return Err(format!(
+            "HTTP {}: {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("error")
+        ));
+    }
+    if !status.is_success() {
+        return Err(format!("HTTP {}", status.as_u16()));
+    }
+    let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+    let total = resp
+        .content_length()
+        .map(|t| if partial { t + start } else { t });
+    let mut file = if partial {
+        tokio::fs::OpenOptions::new().append(true).open(dest).await
+    } else {
+        tokio::fs::File::create(dest).await
+    }
+    .map_err(|e| format!("Cannot write file: {e}"))?;
+    let mut downloaded = if partial { start } else { 0 };
+    tx.send(EngineMsg::Progress { downloaded, total })
+        .await
+        .ok();
+    let mut stream = resp.bytes_stream();
+    let pace_start = Instant::now();
+    let mut paced: u64 = 0;
+    let mut last_sent = Instant::now() - Duration::from_secs(3600);
+    use tokio::io::AsyncWriteExt as _;
+    loop {
+        let chunk = match tokio::time::timeout(timeout, stream.next()).await {
+            Ok(Some(Ok(c))) => c,
+            Ok(Some(Err(e))) => return Err(format!("Download interrupted: {e}")),
+            Ok(None) => break,
+            Err(_) => return Err("Stalled connection timed out".to_string()),
+        };
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Cannot write file: {e}"))?;
+        downloaded += chunk.len() as u64;
+        if let Some(rate) = rate_limit {
+            paced += chunk.len() as u64;
+            let wait = paced as f64 / rate as f64 - pace_start.elapsed().as_secs_f64();
+            if wait > 0.0 {
+                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+            }
+        }
+        if last_sent.elapsed() >= Duration::from_millis(100) {
+            tx.send(EngineMsg::Progress { downloaded, total })
+                .await
+                .ok();
+            last_sent = Instant::now();
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("Cannot write file: {e}"))?;
+    match total {
+        Some(t) if downloaded != t => Err("Incomplete download".to_string()),
+        _ => Ok(()),
+    }
+}
+
+fn parse_rate(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() || s == "0" {
+        return None;
+    }
+    let (num, mult) = match s.chars().last()? {
+        'K' | 'k' => (s[..s.len() - 1].to_string(), 1024u64),
+        'M' | 'm' => (s[..s.len() - 1].to_string(), 1024 * 1024),
+        'G' | 'g' => (s[..s.len() - 1].to_string(), 1024 * 1024 * 1024),
+        c if c.is_ascii_digit() => (s.to_string(), 1),
+        _ => return None,
+    };
+    num.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| *v > 0.0)
+        .map(|v| (v * mult as f64) as u64)
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < 4 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+fn fmt_eta(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if h > 0 {
+        format!("{h}h{m}m")
+    } else if m > 0 {
+        format!("{m}m{s}s")
+    } else {
+        format!("{s}s")
+    }
+}
 
 pub struct DownloadManager {
     store: gio::ListStore,
     settings: gio::Settings,
-    running: RefCell<HashMap<u64, gio::Subprocess>>,
+    running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<bool>,
@@ -432,24 +572,29 @@ impl DownloadManager {
     }
 
     fn spawn(self: &Rc<Self>, item: DownloadItem) {
-        let opts = WgetOptions::from_settings(&self.settings);
+        let opts = DownloadOptions::from_settings(&self.settings);
         let dest = item.file_path();
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let argv = build_wget_argv(&item.url(), &dest, &opts);
-        let argv_refs: Vec<&std::ffi::OsStr> = argv.iter().map(std::ffi::OsStr::new).collect();
-        let flags = gio::SubprocessFlags::STDERR_PIPE | gio::SubprocessFlags::STDOUT_SILENCE;
-        let proc = match gio::Subprocess::newv(&argv_refs, flags) {
-            Ok(p) => p,
-            Err(e) => {
-                item.set_status(DownloadStatus::Failed);
-                item.set_detail(format!("Could not start wget: {e}"));
-                self.changed();
-                return;
+        let limit = opts.limit_rate.trim();
+        let rate = if limit.is_empty() || limit == "0" {
+            None
+        } else {
+            match parse_rate(limit) {
+                Some(r) => Some(r),
+                None => {
+                    item.set_status(DownloadStatus::Failed);
+                    item.set_detail(format!("Invalid speed limit: {limit}"));
+                    self.changed();
+                    return;
+                }
             }
         };
-        self.running.borrow_mut().insert(item.id(), proc.clone());
+        let url = item.url().to_string();
+        let (tx, rx) = async_channel::unbounded();
+        let handle = tokio_rt().spawn(run_download(http_client(), url, dest, opts, rate, tx));
+        self.running.borrow_mut().insert(item.id(), handle);
         item.set_status(DownloadStatus::Downloading);
         let host = url::Url::parse(&item.url())
             .ok()
@@ -464,95 +609,76 @@ impl DownloadManager {
 
         let this = Rc::clone(self);
         let id = item.id();
+        let t0 = Instant::now();
         glib::spawn_future_local(async move {
-            let mut last_lines: VecDeque<String> = VecDeque::new();
-            let mut handle_line = |text: &str| {
-                if let Some((frac, speed, eta)) = parse_progress_line(text) {
-                    if item.status() == DownloadStatus::Downloading {
-                        item.set_progress(frac);
-                        item.set_speed(speed.clone());
-                        item.set_eta(eta.clone());
-                        item.set_detail(format!(
-                            "{}% • {} • ETA {}",
-                            (frac * 100.0) as u64,
-                            speed,
-                            eta
-                        ));
-                    }
-                } else {
-                    let trimmed = text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        if last_lines.len() >= 8 {
-                            last_lines.pop_front();
+            while let Ok(msg) = rx.recv().await {
+                match msg {
+                    EngineMsg::Progress { downloaded, total } => {
+                        if item.status() != DownloadStatus::Downloading {
+                            continue;
                         }
-                        last_lines.push_back(trimmed);
-                    }
-                }
-            };
-            if let Some(stderr) = proc.stderr_pipe() {
-                let mut buf: Vec<u8> = Vec::new();
-                let (tx, rx) = async_channel::bounded(1);
-                loop {
-                    let tx = tx.clone();
-                    stderr.read_bytes_async(
-                        65536,
-                        glib::Priority::DEFAULT,
-                        gio::Cancellable::NONE,
-                        move |res| {
-                            let _ = tx.send_blocking(res);
-                        },
-                    );
-                    match rx.recv().await {
-                        Ok(Ok(bytes)) if !bytes.is_empty() => {
-                            buf.extend_from_slice(&bytes);
-                            while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-                                let raw: Vec<u8> = buf.drain(..=pos).collect();
-                                handle_line(&String::from_utf8_lossy(&raw));
+                        let bps = downloaded as f64 / t0.elapsed().as_secs_f64().max(0.001);
+                        let speed = format!("{}/s", fmt_bytes(bps as u64));
+                        match total {
+                            Some(t) if t > 0 => {
+                                let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
+                                item.set_progress(frac);
+                                item.set_speed(speed.clone());
+                                let eta = if bps > 0.0 {
+                                    fmt_eta((t.saturating_sub(downloaded) as f64 / bps) as u64)
+                                } else {
+                                    "—".to_string()
+                                };
+                                item.set_eta(eta.clone());
+                                item.set_detail(format!(
+                                    "{}% • {} • ETA {}",
+                                    (frac * 100.0) as u64,
+                                    speed,
+                                    eta
+                                ));
+                            }
+                            _ => {
+                                item.set_detail(format!("{} • {}", fmt_bytes(downloaded), speed));
                             }
                         }
-                        _ => break,
+                    }
+                    EngineMsg::Finished => {
+                        this.running.borrow_mut().remove(&id);
+                        if item.status() == DownloadStatus::Cancelled
+                            || item.status() == DownloadStatus::Paused
+                        {
+                            this.changed();
+                            this.start_next();
+                            break;
+                        }
+                        item.set_progress(1.0);
+                        item.set_status(DownloadStatus::Done);
+                        item.set_detail("Finished".to_string());
+                        this.notify_finished(&item, true, None);
+                        this.persist_queue();
+                        this.changed();
+                        this.start_next();
+                        break;
+                    }
+                    EngineMsg::Failed(e) => {
+                        this.running.borrow_mut().remove(&id);
+                        if item.status() == DownloadStatus::Cancelled
+                            || item.status() == DownloadStatus::Paused
+                        {
+                            this.changed();
+                            this.start_next();
+                            break;
+                        }
+                        item.set_status(DownloadStatus::Failed);
+                        item.set_detail(e.clone());
+                        this.notify_finished(&item, false, Some(e));
+                        this.persist_queue();
+                        this.changed();
+                        this.start_next();
+                        break;
                     }
                 }
-                if !buf.is_empty() {
-                    handle_line(&String::from_utf8_lossy(&buf));
-                }
             }
-            let (done_tx, done_rx) = async_channel::bounded::<bool>(1);
-            proc.wait_check_async(gio::Cancellable::NONE, move |res| {
-                let _ = done_tx.send_blocking(res.is_ok());
-            });
-            let exit_ok = done_rx.recv().await.unwrap_or(false);
-            this.running.borrow_mut().remove(&id);
-
-            if item.status() == DownloadStatus::Cancelled || item.status() == DownloadStatus::Paused
-            {
-                this.changed();
-                this.start_next();
-                return;
-            }
-            if exit_ok && dest.exists() {
-                item.set_progress(1.0);
-                item.set_status(DownloadStatus::Done);
-                item.set_detail("Finished".to_string());
-                this.notify_finished(&item, true, None);
-            } else {
-                item.set_status(DownloadStatus::Failed);
-                let hint = failure_hint(last_lines.iter());
-                match &hint {
-                    Some(h) => item.set_detail(h.clone()),
-                    None if item.detail().is_empty()
-                        || item.detail() == "Starting…"
-                        || item.detail().starts_with("Connecting to ") =>
-                    {
-                        item.set_detail("wget exited with an error".to_string())
-                    }
-                    None => {}
-                }
-                this.notify_finished(&item, false, hint);
-            }
-            this.persist_queue();
-            this.changed();
-            this.start_next();
         });
     }
 
@@ -583,9 +709,10 @@ impl DownloadManager {
     }
 
     pub fn pause(self: &Rc<Self>, id: u64) {
-        if let Some(proc) = self.running.borrow().get(&id) {
-            proc.send_signal(SIGSTOP);
+        if let Some(handle) = self.running.borrow().get(&id) {
+            handle.abort();
         }
+        self.running.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             if item.status() == DownloadStatus::Downloading {
                 item.set_status(DownloadStatus::Paused);
@@ -596,30 +723,20 @@ impl DownloadManager {
     }
 
     pub fn resume(self: &Rc<Self>, id: u64) {
-        let mut need_spawn = false;
-        if let Some(proc) = self.running.borrow().get(&id) {
-            proc.send_signal(SIGCONT);
-        } else if let Some(item) = self.find(id) {
+        if let Some(item) = self.find(id) {
             if item.status() == DownloadStatus::Paused {
                 item.set_status(DownloadStatus::Queued);
-                need_spawn = true;
+                self.changed();
+                self.start_next();
             }
-        }
-        if let Some(item) = self.find(id) {
-            if item.status() == DownloadStatus::Paused && !need_spawn {
-                item.set_status(DownloadStatus::Downloading);
-            }
-        }
-        self.changed();
-        if need_spawn {
-            self.start_next();
         }
     }
 
     pub fn cancel(self: &Rc<Self>, id: u64) {
-        if let Some(proc) = self.running.borrow().get(&id) {
-            proc.force_exit();
+        if let Some(handle) = self.running.borrow().get(&id) {
+            handle.abort();
         }
+        self.running.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
@@ -841,8 +958,8 @@ impl DownloadManager {
     }
 
     pub fn shutdown(&self) {
-        for proc in self.running.borrow().values() {
-            proc.force_exit();
+        for handle in self.running.borrow().values() {
+            handle.abort();
         }
         self.persist_queue();
     }
@@ -870,40 +987,34 @@ mod tests {
         gio::Settings::new("io.github.houssemko.Grab")
     }
     #[test]
-    fn parses_dot_mega_lines() {
-        let (frac, speed, eta) =
-            parse_progress_line("  1500K .......... .......... ..........  25% 1.23M 45s")
-                .expect("should parse");
-        assert!((frac - 0.25).abs() < 1e-9);
-        assert_eq!(speed, "1.23M");
-        assert_eq!(eta, "45s");
+    fn parses_rates() {
+        assert_eq!(parse_rate(""), None);
+        assert_eq!(parse_rate("0"), None);
+        assert_eq!(parse_rate("500K"), Some(500 * 1024));
+        assert_eq!(parse_rate("2M"), Some(2 * 1024 * 1024));
+        assert_eq!(parse_rate("1.5M"), Some(1572864));
+        assert_eq!(parse_rate("3G"), Some(3 * 1024 * 1024 * 1024));
+        assert_eq!(parse_rate("1024"), Some(1024));
+        assert_eq!(parse_rate("junk"), None);
+        assert_eq!(parse_rate("-5K"), None);
     }
 
     #[test]
-    fn parses_real_wget125_output() {
-        // Captured from `wget --progress=dot:default` (wget 1.25, localhost).
-        let (frac, speed, eta) = parse_progress_line(
-            "     0K ........ ........ ........ ........ ........ ........ 37%  279M 0s",
-        )
-        .expect("should parse");
-        assert!((frac - 0.37).abs() < 1e-9);
-        assert_eq!(speed, "279M");
-        assert_eq!(eta, "0s");
+    fn formats_bytes() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(999), "999 B");
+        assert_eq!(fmt_bytes(1024), "1.0 KB");
+        assert_eq!(fmt_bytes(1536), "1.5 KB");
+        assert_eq!(fmt_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
     #[test]
-    fn parses_complete_line() {
-        let (frac, _, _) =
-            parse_progress_line("  9425K .......... .......... ..........  100% 2.10M=12s")
-                .expect("should parse");
-        assert!((frac - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn rejects_noise() {
-        assert!(parse_progress_line("Saving to: ‘index.html’").is_none());
-        assert!(parse_progress_line("HTTP request sent, awaiting response... 200 OK").is_none());
-        assert!(parse_progress_line("").is_none());
+    fn formats_eta() {
+        assert_eq!(fmt_eta(0), "0s");
+        assert_eq!(fmt_eta(45), "45s");
+        assert_eq!(fmt_eta(125), "2m5s");
+        assert_eq!(fmt_eta(3723), "1h2m");
     }
 
     #[test]
@@ -916,7 +1027,7 @@ mod tests {
     #[test]
     fn urls() {
         assert!(validate_url("https://example.com/f.iso").is_ok());
-        assert!(validate_url("ftp://example.com/f").is_ok());
+        assert!(validate_url("ftp://example.com/f").is_err());
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("--post-file=x").is_err());
     }
@@ -945,27 +1056,6 @@ mod tests {
             normalize_url("example .com").unwrap_err(),
             "Invalid URL: example .com"
         );
-    }
-
-    #[test]
-    fn failure_hints() {
-        let lines = [
-            "--2026-09-05--  http://x/f.iso".to_string(),
-            "Connecting to x... connected.".to_string(),
-            "HTTP request sent, awaiting response... 404 File not found".to_string(),
-            "2026-09-05 ERROR 404: File not found.".to_string(),
-        ];
-        assert_eq!(
-            failure_hint(lines.iter()).as_deref(),
-            Some("2026-09-05 ERROR 404: File not found.")
-        );
-        let lines = ["Connecting to x... failed: Connection refused.".to_string()];
-        assert_eq!(
-            failure_hint(lines.iter()).as_deref(),
-            Some("Connecting to x... failed: Connection refused.")
-        );
-        let empty: Vec<String> = Vec::new();
-        assert_eq!(failure_hint(empty.iter()), None);
     }
 
     #[test]
@@ -1006,29 +1096,6 @@ mod tests {
     }
 
     #[test]
-    fn argv_user_agent() {
-        let opts = WgetOptions {
-            tries: 3,
-            timeout: 30,
-            user_agent: "Mozilla/5.0 Test".to_string(),
-            ..Default::default()
-        };
-        let argv = build_wget_argv(
-            "https://example.com/f.iso",
-            std::path::Path::new("/tmp/dl/f.iso"),
-            &opts,
-        );
-        assert!(argv.contains(&"--user-agent=Mozilla/5.0 Test".to_string()));
-        let opts = WgetOptions::default();
-        let argv = build_wget_argv(
-            "https://example.com/f.iso",
-            std::path::Path::new("/tmp/dl/f.iso"),
-            &opts,
-        );
-        assert!(!argv.iter().any(|a| a.starts_with("--user-agent")));
-    }
-
-    #[test]
     fn dedupes() {
         let taken = |n: &str| matches!(n, "f.iso" | "f (1).iso");
         assert_eq!(dedupe_filename("g.iso", taken), "g.iso");
@@ -1051,9 +1118,10 @@ mod tests {
         let settings = test_settings();
         settings.set_int("max-concurrent", 1).unwrap();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-        let argv = [std::ffi::OsStr::new("sleep"), std::ffi::OsStr::new("60")];
-        let proc = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).unwrap();
-        manager.running.borrow_mut().insert(99, proc);
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(99, holder);
         let item = manager
             .restore_existing(
                 "https://example.com/ubuntu.iso",
@@ -1207,7 +1275,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_holds_slot_until_reaped() {
+    fn cancel_frees_slot_immediately() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("cancel-slot");
         let settings = test_settings();
@@ -1216,17 +1284,29 @@ mod tests {
         let a = DownloadItem::new(41, "https://example.com/a.bin", "a.bin", "/tmp/dl");
         a.set_status(DownloadStatus::Downloading);
         manager.store().append(&a);
-        let argv = [std::ffi::OsStr::new("sleep"), std::ffi::OsStr::new("60")];
-        let proc = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).unwrap();
-        manager.running.borrow_mut().insert(41, proc);
-        let b = DownloadItem::new(42, "https://example.com/b.bin", "b.bin", "/tmp/dl");
-        manager.store().append(&b); // Queued by default
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(41, holder);
+        let b = DownloadItem::new(42, "http://127.0.0.1:9/b.bin", "b.bin", "/tmp/dl");
+        manager.store().append(&b);
         manager.cancel(41);
-        // Slot stays occupied until the epilogue reaps: no eager start.
         assert_eq!(a.status(), DownloadStatus::Cancelled);
-        assert!(manager.running.borrow().contains_key(&41));
-        assert_eq!(b.status(), DownloadStatus::Queued);
-        assert_eq!(manager.running.borrow().len(), 1);
+        assert!(!manager.running.borrow().contains_key(&41));
+        assert_eq!(b.status(), DownloadStatus::Downloading);
+        assert!(manager.running.borrow().contains_key(&42));
+        // Drain B's UI future on THIS thread: its Failed message is already
+        // queued (dead port fails fast). Leaving it pending would let another
+        // test's MainLoop poll it on the wrong thread and abort on glib's
+        // thread-affinity guard.
+        let ctx = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.running.borrow().contains_key(&42) && std::time::Instant::now() < deadline {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!manager.running.borrow().contains_key(&42));
+        assert_eq!(b.status(), DownloadStatus::Failed);
     }
 
     #[test]
@@ -1299,9 +1379,10 @@ mod tests {
         let item = DownloadItem::new(51, "https://example.com/r.bin", "r.bin", "/tmp/dl");
         item.set_status(DownloadStatus::Cancelled);
         manager.store().append(&item);
-        let argv = [std::ffi::OsStr::new("sleep"), std::ffi::OsStr::new("60")];
-        let proc = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).unwrap();
-        manager.running.borrow_mut().insert(52, proc);
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(52, holder);
         manager.retry(51);
         assert_eq!(item.status(), DownloadStatus::Queued);
         assert_eq!(manager.running.borrow().len(), 1);
@@ -1311,26 +1392,6 @@ mod tests {
         assert_eq!(queue.items[0].filename, "r.bin");
         assert_eq!(queue.items[0].status, StoredStatus::Queued);
         let _ = std::fs::remove_file(&qf);
-    }
-
-    #[test]
-    fn argv_shape() {
-        let opts = WgetOptions {
-            tries: 3,
-            timeout: 30,
-            ..Default::default()
-        };
-        let argv = build_wget_argv(
-            "https://example.com/f.iso",
-            std::path::Path::new("/tmp/dl/f.iso"),
-            &opts,
-        );
-        assert_eq!(argv[0], "wget");
-        assert!(argv.contains(&"--continue".to_string()));
-        assert!(argv.contains(&"--progress=dot:default".to_string()));
-        // URL is last, after `--` separator.
-        assert_eq!(argv[argv.len() - 1], "https://example.com/f.iso");
-        assert_eq!(argv[argv.len() - 2], "--");
     }
 
     #[test]
@@ -1436,6 +1497,67 @@ mod tests {
         let watchdog = main_loop.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(90));
+            if watchdog.is_running() {
+                eprintln!("TEST TIMEOUT");
+                std::process::exit(2);
+            }
+        });
+        main_loop.run();
+    }
+
+    #[test]
+    fn failed_download_reports_cause() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("http-error");
+        let settings = test_settings();
+        let port = 20000 + (std::process::id() % 5000) as u16 + 7;
+        let server = std::process::Command::new("python3")
+            .args(["-m", "http.server", &port.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 http.server");
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let server = Rc::new(RefCell::new(server));
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let fail = |msg: &str| -> ! {
+                eprintln!("TEST FAILURE: {msg}");
+                let _ = server.borrow_mut().kill();
+                std::process::exit(1);
+            };
+            let store = gio::ListStore::new::<DownloadItem>();
+            let manager = DownloadManager::new(store, settings);
+            let item = manager
+                .enqueue(
+                    &format!("http://127.0.0.1:{port}/nope.bin"),
+                    None,
+                    Some("nope.bin"),
+                )
+                .unwrap_or_else(|e| fail(&e));
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Failed && waited < 200 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Failed {
+                fail(&format!("expected Failed, got {:?}", item.status()));
+            }
+            if !item.detail().contains("404") {
+                fail(&format!("expected 404 hint, got {:?}", item.detail()));
+            }
+            let _ = server.borrow_mut().kill();
+            quit.quit();
+        });
+        let watchdog = main_loop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(60));
             if watchdog.is_running() {
                 eprintln!("TEST TIMEOUT");
                 std::process::exit(2);
