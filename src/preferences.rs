@@ -1,11 +1,8 @@
-//! Preferences dialog: every row bound straight to GSettings.
-
 use adw::prelude::*;
 use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-/// Sync an int GSettings key with an AdwSpinRow (whose value is f64).
 fn bind_spin(settings: &gio::Settings, key: &str, row: &adw::SpinRow) {
     row.set_value(settings.int(key) as f64);
     {
@@ -16,8 +13,6 @@ fn bind_spin(settings: &gio::Settings, key: &str, row: &adw::SpinRow) {
         });
     }
     {
-        // Weak: this closure lives on the app-lifetime Settings object, so a
-        // strong row ref would leak the whole dialog on every open.
         let r = row.downgrade();
         let k = key.to_string();
         let kd = k.clone();
@@ -42,7 +37,6 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .icon_name("folder-download-symbolic")
         .build();
 
-    // -- Destination -------------------------------------------------------
     let dest_group = adw::PreferencesGroup::builder()
         .title("Destination")
         .build();
@@ -88,8 +82,6 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
                 if let Ok(f) = res {
                     if let Some(p) = f.path() {
                         let dir = p.to_string_lossy().into_owned();
-                        // Only show what stuck: a failed write must not
-                        // desync the label from the actual setting.
                         if s2.set_string("download-dir", &dir).is_ok() {
                             l2.set_text(&dir);
                         }
@@ -108,7 +100,6 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         });
     }
 
-    // -- Limits -------------------------------------------------------------
     let net_group = adw::PreferencesGroup::builder()
         .title("Network and Queue")
         .build();
@@ -149,7 +140,6 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     settings.bind("user-agent", &ua, "text").build();
     net_group.add(&ua);
 
-    // -- Notifications ------------------------------------------------------
     let ui_group = adw::PreferencesGroup::builder().title("Interface").build();
     let notif = adw::SwitchRow::builder()
         .title("Notify when downloads finish")

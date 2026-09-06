@@ -1,10 +1,3 @@
-//! Main window: code-built libadwaita UI (no Blueprint compiler needed).
-//!
-//! `AdwApplicationWindow > AdwToastOverlay > AdwToolbarView > AdwViewStack`
-//! with an empty-state `AdwStatusPage` and a `ListBox` of download rows.
-//! Rows update via `notify::` handlers with weak widget refs — no threads,
-//! no factory recycling bugs.
-
 use crate::download::{DownloadManager, DownloadStatus};
 use adw::prelude::*;
 use gtk4::prelude::*;
@@ -23,10 +16,6 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
         .build()
 }
 
-/// Open a path in the file manager: the file itself revealed with selection,
-/// or a bare folder. Uses GtkFileLauncher: portal-aware, so it also works
-/// sandboxed in Flatpak. Failures always surface as a toast — launching
-/// must never fail silently.
 pub fn reveal_file(path: &std::path::Path, toasts: &adw::ToastOverlay) {
     launch_path(path, toasts, true);
 }
@@ -152,7 +141,6 @@ fn build_row(
     let row = gtk4::ListBoxRow::new();
     row.set_child(Some(&outer));
 
-    // Live updates: weak refs only, so rows never leak after removal.
     let w = |w: &gtk4::Widget| w.downgrade();
     let weaks = (
         w(detail.upcast_ref()),
@@ -282,7 +270,6 @@ pub fn build_window(
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&adw::WindowTitle::new("Grab", "Download Manager")));
 
-    // App menu.
     let menu = gio::Menu::new();
     menu.append(Some("New Download"), Some("app.add-download"));
     let section = gio::Menu::new();
@@ -312,7 +299,6 @@ pub fn build_window(
     }
     header.pack_end(&add_btn);
 
-    // Content: empty status vs download list.
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
         .icon_name("folder-download-symbolic")
@@ -357,8 +343,6 @@ pub fn build_window(
     }
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
-    // Put every row in its section. Runs on store changes AND on status
-    // changes (a finishing download moves sections without store churn).
     let sync: Rc<dyn Fn()> = {
         let m = Rc::clone(&manager);
         let t = Rc::clone(&toasts);
@@ -437,7 +421,6 @@ pub fn build_window(
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
 
-    // Keep action sensitivity fresh and rows in their section.
     {
         let app_weak = app.downgrade();
         let m = Rc::clone(&manager);
@@ -464,7 +447,6 @@ pub fn build_window(
     window
 }
 
-/// "New Download" dialog.
 pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder().title("New Download").build();
     dialog.set_content_width(420);
@@ -507,7 +489,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     {
         let dd = Rc::clone(&dest_dir);
         let dl = dest_label.clone();
-        // Parent the portal dialog on the AdwDialog's root once presented.
         dest_btn.connect_clicked(move |b| {
             let chooser = gtk4::FileDialog::builder()
                 .title("Choose download folder")
@@ -552,9 +533,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     dialog.set_child(Some(&toolbar));
 
     {
-        // Weak: the button owns this closure, so a strong dialog ref here
-        // would cycle (dialog -> button -> closure -> dialog) and leak the
-        // whole dialog on every open.
         let d = dialog.downgrade();
         cancel_btn.connect_clicked(move |_| {
             if let Some(d) = d.upgrade() {
@@ -603,8 +581,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 return;
             }
             match m.enqueue(&url, Some(&dd.borrow()), None) {
-                // Close like the Add button does; staying open invites
-                // accidental double-enqueue on a second Enter.
                 Ok(_) => {
                     if let Some(dialog) = dialog.upgrade() {
                         dialog.close();
@@ -618,7 +594,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         });
     }
 
-    // Present on the active window.
     if let Some(app) = gio::Application::default().and_downcast::<adw::Application>() {
         if let Some(win) = app.active_window() {
             dialog.present(Some(&win));

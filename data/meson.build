@@ -1,29 +1,25 @@
-desktop_file = i18n.merge_file(
-  input: 'io.github.houssemko.Grab.desktop.in',
-  output: 'io.github.houssemko.Grab.desktop',
-  type: 'desktop',
-  po_dir: '../po',
-  install: true,
+install_data('io.github.houssemko.Grab.desktop.in',
+  rename: 'io.github.houssemko.Grab.desktop',
   install_dir: get_option('datadir') / 'applications',
 )
 
 desktop_utils = find_program('desktop-file-validate', required: false)
 if desktop_utils.found()
-  test('Validate desktop file', desktop_utils, args: [desktop_file])
+  test('Validate desktop file', desktop_utils,
+    args: [meson.current_source_dir() / 'io.github.houssemko.Grab.desktop.in'],
+  )
 endif
 
-appstream_file = i18n.merge_file(
-  input: 'io.github.houssemko.Grab.metainfo.xml.in',
-  output: 'io.github.houssemko.Grab.metainfo.xml',
-  po_dir: '../po',
-  install: true,
+install_data('io.github.houssemko.Grab.metainfo.xml.in',
+  rename: 'io.github.houssemko.Grab.metainfo.xml',
   install_dir: get_option('datadir') / 'metainfo',
 )
 
 appstreamcli = find_program('appstreamcli', required: false)
 if appstreamcli.found()
   test('Validate appstream file', appstreamcli,
-    args: ['validate', '--no-net', '--explain', appstream_file],
+    args: ['validate', '--no-net', '--explain',
+      meson.current_source_dir() / 'io.github.houssemko.Grab.metainfo.xml.in'],
   )
 endif
 

@@ -1,12 +1,7 @@
-//! Compile the GSettings schema next to the binary so `cargo run` works
-//! without a system install. Never fails the build: if
-//! `glib-compile-schemas` is missing we just skip and rely on an installed
-//! schema (Meson/Flatpak path).
-
 fn main() {
     println!("cargo:rerun-if-changed=data/io.github.houssemko.Grab.gschema.xml");
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let schema_dir = out_dir.join("wget-schemas/glib-2.0/schemas");
+    let schema_dir = out_dir.join("grab-schemas/glib-2.0/schemas");
     let _ = std::fs::create_dir_all(&schema_dir);
 
     let src = std::path::Path::new("data/io.github.houssemko.Grab.gschema.xml");

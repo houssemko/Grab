@@ -9,9 +9,6 @@ use libadwaita as adw;
 
 pub const APP_ID: &str = "io.github.houssemko.Grab";
 
-/// Point GSettings at the build-time compiled schema dir so `cargo run`
-/// works without installing. A pre-set GSETTINGS_SCHEMA_DIR or a
-/// system-installed schema always wins.
 fn ensure_schema_dir() {
     if std::env::var_os("GSETTINGS_SCHEMA_DIR").is_some() {
         return;

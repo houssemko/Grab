@@ -21,7 +21,6 @@ struct State {
 pub fn setup(app: &adw::Application) {
     let state: Rc<RefCell<Option<Rc<State>>>> = Rc::new(RefCell::new(None));
 
-    // -- startup: runs once. Actions, accelerators, model ------------------
     {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
@@ -46,7 +45,6 @@ pub fn setup(app: &adw::Application) {
         });
     }
 
-    // -- activate: present the window --------------------------------------
     {
         let st = Rc::clone(&state);
         app.connect_activate(move |_| {
@@ -56,7 +54,6 @@ pub fn setup(app: &adw::Application) {
         });
     }
 
-    // -- open: files/URIs passed on the command line ------------------------
     {
         let st = Rc::clone(&state);
         app.connect_open(move |_, files, _| {
@@ -65,7 +62,6 @@ pub fn setup(app: &adw::Application) {
                 None => return,
             };
             for f in files {
-                // Direct http(s) URI? Enqueue it.
                 if let Ok(uri) = f.uri().parse::<url::Url>() {
                     if matches!(uri.scheme(), "http" | "https" | "ftp") {
                         if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
@@ -74,8 +70,6 @@ pub fn setup(app: &adw::Application) {
                         continue;
                     }
                 }
-                // Otherwise treat as a text file with one URL per line.
-                // Capped: URL lists are small text, never slurp arbitrary dumps.
                 if let Some(path) = f.path() {
                     const MAX_LIST_BYTES: u64 = 1_000_000;
                     const MAX_LIST_LINES: usize = 1000;
@@ -103,7 +97,6 @@ pub fn setup(app: &adw::Application) {
         });
     }
 
-    // -- shutdown: no wget outlives the UI ----------------------------------
     {
         let st = Rc::clone(&state);
         app.connect_shutdown(move |_| {

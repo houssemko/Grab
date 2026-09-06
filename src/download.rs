@@ -1,18 +1,8 @@
-//! wget backend: GObject model, progress parser, subprocess manager.
-//!
-//! GTK rule respected here: all `spawn_future_local` futures run on the main
-//! thread, so widget/model updates inside them are safe. `wget` itself runs as
-//! a child process; only its stderr *bytes* cross the boundary.
-
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-
-// ---------------------------------------------------------------------------
-// Status enum
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
 #[enum_type(name = "WgetDownloadStatus")]
@@ -39,16 +29,11 @@ impl DownloadStatus {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Persisted queue model (queue.json). Plain data, kept separate from the
-// GObject so serialization never touches GTK types.
-// ---------------------------------------------------------------------------
-
 const QUEUE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum StoredStatus {
+pub enum StoredStatus {
     Queued,
     Paused,
     Downloading,
@@ -57,8 +42,6 @@ enum StoredStatus {
 }
 
 impl StoredStatus {
-    /// Which live statuses survive a restart (`None` = dropped, e.g.
-    /// Cancelled means the user threw it away).
     fn from_item(status: DownloadStatus) -> Option<Self> {
         match status {
             DownloadStatus::Queued => Some(StoredStatus::Queued),
@@ -87,10 +70,6 @@ struct StoredQueue {
     items: Vec<StoredItem>,
 }
 
-// ---------------------------------------------------------------------------
-// DownloadItem GObject (lives in a gio::ListStore)
-// ---------------------------------------------------------------------------
-
 mod imp {
     use super::*;
     use gtk4::glib::subclass::prelude::*;
@@ -108,7 +87,6 @@ mod imp {
         pub dest_dir: RefCell<String>,
         #[property(get, set, builder(DownloadStatus::Queued))]
         pub status: Cell<DownloadStatus>,
-        /// 0.0..=1.0
         #[property(get, set)]
         pub progress: Cell<f64>,
         #[property(get, set)]
@@ -148,15 +126,7 @@ impl DownloadItem {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Pure helpers (unit-tested, no GTK needed)
-// ---------------------------------------------------------------------------
-
-/// Parse one `wget --progress=dot:mega` stderr line.
-/// Example: `  1500K .......... .......... ....  25% 1.23M 45s`
-/// Returns (fraction 0..1, speed, eta).
 pub fn parse_progress_line(line: &str) -> Option<(f64, String, String)> {
-    // ponytail: one regex-free scan; wget dot format is stable enough.
     let pct_end = line.find('%')?;
     let pct_start = line[..pct_end].rfind(|c: char| !c.is_ascii_digit())? + 1;
     let pct: f64 = line[pct_start..pct_end].trim().parse().ok()?;
@@ -167,7 +137,6 @@ pub fn parse_progress_line(line: &str) -> Option<(f64, String, String)> {
     if rest.is_empty() {
         return None;
     }
-    // Final line joins speed and time: `100% 2.10M=12s`.
     let (speed, eta) = match rest.as_slice() {
         [single] => {
             let mut parts = single.splitn(2, '=');
@@ -185,28 +154,20 @@ pub fn parse_progress_line(line: &str) -> Option<(f64, String, String)> {
     Some((pct / 100.0, speed, eta))
 }
 
-/// Parse one legacy `url<TAB>dir<TAB>filename` queue line.
-fn parse_legacy_line(line: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = line.split('\t').collect();
-    if parts.len() >= 2 && !parts[0].is_empty() {
-        let filename = parts.get(2).copied().filter(|s| !s.is_empty())?;
-        return Some((
-            parts[0].to_string(),
-            parts[1].to_string(),
-            filename.to_string(),
-        ));
-    }
-    None
-}
-
-/// Pick the most useful failure cause from recent wget stderr lines.
-/// Prefers an explicit ERROR line, else the last line seen.
 pub fn failure_hint<'a>(mut lines: impl DoubleEndedIterator<Item = &'a String>) -> Option<String> {
     let last = lines.next_back().cloned();
     lines.rfind(|l| l.contains("ERROR")).cloned().or(last)
 }
 
-/// Nautilus-style dedupe: "f.iso" -> "f (1).iso" while `taken` holds.
+fn restored_status(stored: StoredStatus) -> DownloadStatus {
+    match stored {
+        StoredStatus::Paused => DownloadStatus::Paused,
+        StoredStatus::Failed => DownloadStatus::Failed,
+        StoredStatus::Done => DownloadStatus::Done,
+        _ => DownloadStatus::Queued,
+    }
+}
+
 pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(filename) {
         return filename.to_string();
@@ -228,15 +189,10 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     }
 }
 
-/// File names we accept from users and queue files: no separators, no NUL,
-/// and never bare `.`/`..` (path escape via `dest_dir/..`).
 fn sane_filename(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\0') && s != "." && s != ".."
 }
 
-/// Guess a filename from a URL's last path segment. Routed through the same
-/// invariant as every other name source rather than relying on `url`'s
-/// dot-segment normalization to have stripped `.`/`..`.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
         .ok()
@@ -248,17 +204,12 @@ pub fn filename_from_url(url_str: &str) -> String {
         .unwrap_or_else(|| "index.html".to_string())
 }
 
-/// Normalize user input into an absolute URL string, adding a default
-/// `https://` scheme for bare `host/path` input like browsers do.
 pub fn normalize_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if let Ok(u) = url::Url::parse(trimmed) {
         if matches!(u.scheme(), "http" | "https" | "ftp") {
             return Ok(u.to_string());
         }
-        // "localhost:8080/x" parses with scheme "localhost" — a bare host in
-        // disguise. Only retry those when the user gave no "://" at all, so
-        // real "file:///..." URLs still get validate_url's scheme error.
         if trimmed.contains("://") {
             return Ok(u.to_string());
         }
@@ -276,8 +227,6 @@ fn looks_like_bare_host(s: &str) -> bool {
     !s.contains("://") && !s.contains(' ') && (s.contains('.') || s.starts_with("localhost"))
 }
 
-/// Only http/https/ftp go to wget (blocks `--post-file`-style flag injection
-/// at the UI layer; argv still uses `--` separator defensively).
 pub fn validate_url(url_str: &str) -> Result<(), String> {
     let u = url::Url::parse(url_str).map_err(|_| format!("Invalid URL: {url_str}"))?;
     match u.scheme() {
@@ -305,7 +254,6 @@ impl WgetOptions {
     }
 }
 
-/// Build a wget argv. argv[0] is the program name for `Subprocess::newv`.
 pub fn build_wget_argv(url: &str, dest_file: &std::path::Path, opts: &WgetOptions) -> Vec<String> {
     let mut argv = vec![
         "wget".to_string(),
@@ -326,10 +274,6 @@ pub fn build_wget_argv(url: &str, dest_file: &std::path::Path, opts: &WgetOption
     argv
 }
 
-// ---------------------------------------------------------------------------
-// Manager: owns the ListStore, enforces max-concurrent, drives wget
-// ---------------------------------------------------------------------------
-
 const SIGSTOP: i32 = 19;
 const SIGCONT: i32 = 18;
 
@@ -339,8 +283,6 @@ pub struct DownloadManager {
     running: RefCell<HashMap<u64, gio::Subprocess>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
-    /// While true, `persist_queue` is a no-op: restoring N items must not do
-    /// N durable (fsync) writes. The restorer persists once at the end.
     batch: Cell<bool>,
 }
 
@@ -356,7 +298,6 @@ impl DownloadManager {
         })
     }
 
-    /// UI refresh hook (status page vs list, header sensitivity).
     pub fn set_on_change(&self, cb: impl Fn() + 'static) {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
     }
@@ -399,49 +340,34 @@ impl DownloadManager {
             .filter(|s| sane_filename(s))
             .map(|s| s.to_string())
             .unwrap_or_else(|| filename_from_url(&url));
-        // Never let two downloads (or an existing file) share one path:
-        // concurrent `wget -O` writers would corrupt each other.
-        let name = self.resolve_name(&dir, &name, true);
+        let name = dedupe_filename(&name, |n| {
+            std::path::Path::new(&dir).join(n).exists()
+                || (0..self.store.n_items())
+                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                    .any(|it| it.dest_dir() == dir && it.filename() == n)
+        });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         Ok(self.insert(item))
     }
 
-    /// Re-add a queue entry from a previous session. Unlike [`Self::enqueue`],
-    /// the stored filename is kept verbatim: the file on disk (if any) is the
-    /// partial download `wget --continue` must resume, not a clash.
     pub fn restore_existing(
         self: &Rc<Self>,
         url: &str,
         dest_dir: &str,
         filename: &str,
+        status: StoredStatus,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         validate_url(&url)?;
-        // Same invariant as new downloads: a hand-edited queue file must not
-        // plant absolute/traversing names (they end up in --output-document
-        // and behind the Delete button). Destinations must be absolute too:
-        // relative ones would resolve against an unpredictable CWD.
         if !sane_filename(filename) {
             return Err(format!("Invalid filename in queue: {filename}"));
         }
         if !std::path::Path::new(dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {dest_dir}"));
         }
-        let name = self.resolve_name(dest_dir, filename, false);
-        let item = DownloadItem::new(self.alloc_id(), &url, &name, dest_dir);
+        let item = DownloadItem::new(self.alloc_id(), &url, filename, dest_dir);
+        item.set_status(restored_status(status));
         Ok(self.insert(item))
-    }
-
-    fn resolve_name(&self, dir: &str, filename: &str, dedupe: bool) -> String {
-        if !dedupe {
-            return filename.to_string();
-        }
-        dedupe_filename(filename, |n| {
-            std::path::Path::new(dir).join(n).exists()
-                || (0..self.store.n_items())
-                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-                    .any(|it| it.dest_dir() == dir && it.filename() == n)
-        })
     }
 
     fn insert(self: &Rc<Self>, item: DownloadItem) -> DownloadItem {
@@ -452,10 +378,6 @@ impl DownloadManager {
         item
     }
 
-    /// Re-create a finished download from a previous session for display.
-    /// Never spawns: the item lands Done, so `start_next` ignores it.
-    /// Validated like any other entry: a hand-edited queue file must not
-    /// plant `file://` rows or path escapes behind the Delete button.
     fn insert_history(self: &Rc<Self>, url: String, dir: String, name: String, progress: f64) {
         let Ok(url) = normalize_url(&url) else {
             eprintln!("Grab: skipping history entry with bad URL");
@@ -528,20 +450,9 @@ impl DownloadManager {
         let this = Rc::clone(self);
         let id = item.id();
         glib::spawn_future_local(async move {
-            // Drain stderr in raw chunks and split lines by hand. Two traps
-            // this avoids:
-            // - the byte line API conflates a blank "\n" line with EOF, and
-            //   closing the pipe early kills wget with EPIPE (exit 1);
-            // - the UTF-8 line API errors out on non-UTF-8 bytes (locale
-            //   messages, hostile filenames) with the same fatal result.
-            // from_utf8_lossy never fails, and only a truly empty read
-            // means EOF.
-            // Recent non-progress lines: on failure the last one usually
-            // names the cause ("ERROR 404: Not Found", "Connection refused").
             let mut last_lines: VecDeque<String> = VecDeque::new();
             let mut handle_line = |text: &str| {
                 if let Some((frac, speed, eta)) = parse_progress_line(text) {
-                    // Skip updates for paused items (SIGSTOP freezes output anyway).
                     if item.status() == DownloadStatus::Downloading {
                         item.set_progress(frac);
                         item.set_speed(speed.clone());
@@ -565,7 +476,6 @@ impl DownloadManager {
             };
             if let Some(stderr) = proc.stderr_pipe() {
                 let mut buf: Vec<u8> = Vec::new();
-                // One channel for the whole drain, not one per chunk.
                 let (tx, rx) = async_channel::bounded(1);
                 loop {
                     let tx = tx.clone();
@@ -585,14 +495,13 @@ impl DownloadManager {
                                 handle_line(&String::from_utf8_lossy(&raw));
                             }
                         }
-                        _ => break, // EOF (empty) or error
+                        _ => break,
                     }
                 }
                 if !buf.is_empty() {
                     handle_line(&String::from_utf8_lossy(&buf));
                 }
             }
-            // Wait for exit without blocking: bridge the callback API.
             let (done_tx, done_rx) = async_channel::bounded::<bool>(1);
             proc.wait_check_async(gio::Cancellable::NONE, move |res| {
                 let _ = done_tx.send_blocking(res.is_ok());
@@ -600,7 +509,6 @@ impl DownloadManager {
             let exit_ok = done_rx.recv().await.unwrap_or(false);
             this.running.borrow_mut().remove(&id);
 
-            // Cancelled items were already marked by cancel(); don't overwrite.
             if item.status() == DownloadStatus::Cancelled || item.status() == DownloadStatus::Paused
             {
                 this.changed();
@@ -675,7 +583,6 @@ impl DownloadManager {
             proc.send_signal(SIGCONT);
         } else if let Some(item) = self.find(id) {
             if item.status() == DownloadStatus::Paused {
-                // Process went away (e.g. after restart): re-queue with -c.
                 item.set_status(DownloadStatus::Queued);
                 need_spawn = true;
             }
@@ -699,10 +606,6 @@ impl DownloadManager {
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
         }
-        // The running entry stays until the spawn future reaps the child and
-        // removes it: freeing the slot early would let start_next() exceed
-        // max-concurrent while the old wget is still terminating.
-        // start_next() below only helps never-started (Queued) items.
         self.persist_queue();
         self.changed();
         self.start_next();
@@ -717,6 +620,7 @@ impl DownloadManager {
                     item.set_eta(String::new());
                     item.set_detail(String::new());
                     item.set_status(DownloadStatus::Queued);
+                    self.persist_queue();
                     self.changed();
                     self.start_next();
                 }
@@ -740,8 +644,6 @@ impl DownloadManager {
         self.changed();
     }
 
-    /// Delete the downloaded file AND drop the row. Fails (keeping the row)
-    /// if the file cannot be removed; a missing file still drops the row.
     pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
         let item = self
             .find(id)
@@ -808,10 +710,6 @@ impl DownloadManager {
             .any(|it| pred(it.status()))
     }
 
-    // -- persistence: pending items resume, finished items survive as
-    // history. Cancelled items are dropped (cancelled means gone).
-    // GRAB_QUEUE_FILE overrides the location for tests so the suite never
-    // touches the user's real queue.
     fn queue_file() -> std::path::PathBuf {
         if let Some(p) = std::env::var_os("GRAB_QUEUE_FILE") {
             return std::path::PathBuf::from(p);
@@ -820,12 +718,6 @@ impl DownloadManager {
         dir.push("grab");
         let _ = std::fs::create_dir_all(&dir);
         dir.join("queue.json")
-    }
-
-    fn legacy_queue_file() -> std::path::PathBuf {
-        let mut dir = glib::user_data_dir();
-        dir.push("grab");
-        dir.join("queue.txt")
     }
 
     fn persist_queue(&self) {
@@ -850,8 +742,6 @@ impl DownloadManager {
             version: QUEUE_VERSION,
             items,
         };
-        // Atomic replace (tmp + fsync + rename): a crash mid-write must never
-        // leave a truncated queue.json, which restore would drop entirely.
         let text = match serde_json::to_string_pretty(&data) {
             Ok(text) => text,
             Err(e) => {
@@ -870,12 +760,9 @@ impl DownloadManager {
         match write_tmp() {
             Ok(()) => {
                 if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
-                    // Journal-visible; a lost queue means lost resume state.
                     eprintln!("Grab: could not replace download queue: {e}");
                     return;
                 }
-                // Best-effort durability for the rename itself; a failure
-                // here only widens the power-loss window, the file is fine.
                 if let Some(parent) = Self::queue_file().parent() {
                     if let Ok(dir) = std::fs::File::open(parent) {
                         let _ = dir.sync_all();
@@ -888,8 +775,6 @@ impl DownloadManager {
 
     pub fn restore_queue(self: &Rc<Self>) {
         if Self::queue_file().exists() {
-            // Cap: a corrupt/hand-made giant file must not freeze the UI
-            // with a million rows (processes stay capped regardless).
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
             const MAX_QUEUE_ITEMS: usize = 1000;
             if std::fs::metadata(Self::queue_file())
@@ -922,9 +807,9 @@ impl DownloadManager {
                     StoredStatus::Done => {
                         self.insert_history(item.url, item.dest_dir, item.filename, item.progress);
                     }
-                    _ => {
+                    status => {
                         if let Err(e) =
-                            self.restore_existing(&item.url, &item.dest_dir, &item.filename)
+                            self.restore_existing(&item.url, &item.dest_dir, &item.filename, status)
                         {
                             eprintln!("Grab: skipping queue entry: {e}");
                         }
@@ -933,31 +818,9 @@ impl DownloadManager {
             }
             self.batch.set(false);
             self.persist_queue();
-            return;
         }
-        self.restore_legacy_tsv();
     }
 
-    /// One-time upgrade from the pre-JSON `queue.txt` format.
-    fn restore_legacy_tsv(self: &Rc<Self>) {
-        let legacy = Self::legacy_queue_file();
-        let Ok(text) = std::fs::read_to_string(&legacy) else {
-            return;
-        };
-        self.batch.set(true);
-        for line in text.lines() {
-            // Exact names only: the on-disk file is the partial download
-            // to resume, never a naming clash (see restore_existing).
-            if let Some((url, dir, filename)) = parse_legacy_line(line) {
-                let _ = self.restore_existing(&url, &dir, &filename);
-            }
-        }
-        self.batch.set(false);
-        self.persist_queue();
-        let _ = std::fs::remove_file(legacy);
-    }
-
-    /// SIGTERM everything on shutdown so no wget outlives the UI.
     pub fn shutdown(&self) {
         for proc in self.running.borrow().values() {
             proc.force_exit();
@@ -970,12 +833,8 @@ impl DownloadManager {
 mod tests {
     use super::*;
 
-    /// Serializes queue-file access: several tests redirect GRAB_QUEUE_FILE
-    /// (process-global) at once, and must not read each other's files.
     static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// A fresh, per-test queue path (unique per thread; cleared on entry in
-    /// case a previous test on a reused thread panicked mid-run).
     fn test_queue_file(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "grab-q-{:?}-{tag}.json",
@@ -984,6 +843,12 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         std::env::set_var("GRAB_QUEUE_FILE", &p);
         p
+    }
+
+    fn test_settings() -> gio::Settings {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        gio::Settings::new("io.github.houssemko.Grab")
     }
     #[test]
     fn parses_dot_mega_lines() {
@@ -1057,7 +922,6 @@ mod tests {
         );
         assert!(normalize_url("not a url").is_err());
         assert!(normalize_url("").is_err());
-        // No more url-crate jargon in user-facing errors.
         assert_eq!(
             normalize_url("example .com").unwrap_err(),
             "Invalid URL: example .com"
@@ -1089,14 +953,12 @@ mod tests {
     fn delete_download_removes_file_and_row() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("del");
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let settings = test_settings();
         let dir = std::env::temp_dir().join(format!("grab-del-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("gone.bin");
         std::fs::write(&file, b"bye").unwrap();
 
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
         let store = gio::ListStore::new::<DownloadItem>();
         let manager = DownloadManager::new(store.clone(), settings);
         let item = DownloadItem::new(
@@ -1111,7 +973,6 @@ mod tests {
         assert!(manager.delete_download(7).is_ok());
         assert!(!file.exists());
         assert_eq!(store.n_items(), 0);
-        // Missing file still drops the row.
         let item2 = DownloadItem::new(
             8,
             "https://example.com/missing.bin",
@@ -1139,7 +1000,6 @@ mod tests {
             &opts,
         );
         assert!(argv.contains(&"--user-agent=Mozilla/5.0 Test".to_string()));
-        // Empty UA means no flag (wget default).
         let opts = WgetOptions::default();
         let argv = build_wget_argv(
             "https://example.com/f.iso",
@@ -1164,36 +1024,32 @@ mod tests {
 
     #[test]
     fn restore_keeps_exact_filename() {
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        test_settings();
         let dir = std::env::temp_dir().join(format!("grab-restore-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let dir_s = dir.to_string_lossy().into_owned();
-        // A partial download left on disk must NOT trigger dedupe on restore…
         std::fs::write(dir.join("ubuntu.iso"), b"partial").unwrap();
-        // …but must for brand-new downloads.
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-        assert_eq!(
-            manager.resolve_name(&dir_s, "ubuntu.iso", false),
-            "ubuntu.iso"
-        );
-        assert_eq!(
-            manager.resolve_name(&dir_s, "ubuntu.iso", true),
-            "ubuntu (1).iso"
-        );
-        assert_eq!(manager.resolve_name(&dir_s, "fresh.iso", true), "fresh.iso");
-        // …nor for in-flight names with nothing on disk.
-        let item = DownloadItem::new(1, "https://example.com/a.iso", "a.iso", &dir_s);
-        manager.store().append(&item);
-        assert_eq!(manager.resolve_name(&dir_s, "a.iso", true), "a (1).iso");
-        assert_eq!(manager.resolve_name(&dir_s, "a.iso", false), "a.iso");
+        let argv = [std::ffi::OsStr::new("sleep"), std::ffi::OsStr::new("60")];
+        let proc = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).unwrap();
+        manager.running.borrow_mut().insert(99, proc);
+        let item = manager
+            .restore_existing(
+                "https://example.com/ubuntu.iso",
+                &dir_s,
+                "ubuntu.iso",
+                StoredStatus::Downloading,
+            )
+            .unwrap();
+        assert_eq!(item.filename(), "ubuntu.iso");
+        assert_eq!(item.status(), DownloadStatus::Queued);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn queue_roundtrip_and_mapping() {
-        // Mapping: everything persists except Cancelled.
         assert_eq!(
             StoredStatus::from_item(DownloadStatus::Done),
             Some(StoredStatus::Done)
@@ -1207,7 +1063,6 @@ mod tests {
         ] {
             assert!(StoredStatus::from_item(s).is_some());
         }
-        // Roundtrip incl. defaults for old files without progress.
         let q = StoredQueue {
             version: QUEUE_VERSION,
             items: vec![
@@ -1238,36 +1093,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_legacy_lines() {
-        assert_eq!(
-            parse_legacy_line("https://example.com/a.iso\t/tmp/dl\ta.iso"),
-            Some((
-                "https://example.com/a.iso".to_string(),
-                "/tmp/dl".to_string(),
-                "a.iso".to_string()
-            ))
-        );
-        assert_eq!(parse_legacy_line(""), None);
-        assert_eq!(parse_legacy_line("only-url"), None);
-        // Missing filename: not restorable, skipped like before.
-        assert_eq!(
-            parse_legacy_line("https://example.com/a.iso\t/tmp/dl"),
-            None
-        );
-        assert_eq!(
-            parse_legacy_line("https://example.com/a.iso\t/tmp/dl\t"),
-            None
-        );
-    }
-
-    #[test]
     fn history_restore_roundtrip() {
-        // Done-only: exercises persist -> restore with no subprocess, no loop.
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let qf = test_queue_file("history");
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let settings = test_settings();
         let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
         let done = DownloadItem::new(1, "https://example.com/old.iso", "old.iso", "/tmp/dl");
         done.set_progress(1.0);
@@ -1307,30 +1136,34 @@ mod tests {
     fn restore_rejects_bad_filenames() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("restore-bad");
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let settings = test_settings();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
         for bad in ["/etc/passwd", "..", ".", "a/b", ""] {
             assert!(manager
-                .restore_existing("https://example.com/f.iso", "/tmp/dl", bad)
+                .restore_existing(
+                    "https://example.com/f.iso",
+                    "/tmp/dl",
+                    bad,
+                    StoredStatus::Queued
+                )
                 .is_err());
         }
-        // Relative destinations resolve against an unpredictable CWD.
         assert!(manager
-            .restore_existing("https://example.com/f.iso", "relative/dir", "f.iso")
+            .restore_existing(
+                "https://example.com/f.iso",
+                "relative/dir",
+                "f.iso",
+                StoredStatus::Queued
+            )
             .is_err());
         assert_eq!(manager.store().n_items(), 0);
     }
 
     #[test]
     fn batch_restore_hundred_done() {
-        // Correctness at scale; single persist is by construction (one call
-        // site at the end of restore_queue).
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let qf = test_queue_file("batch");
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let settings = test_settings();
         let items: Vec<StoredItem> = (0..100)
             .map(|i| StoredItem {
                 url: format!("https://example.com/f{i}.iso"),
@@ -1345,7 +1178,6 @@ mod tests {
             items,
         };
         std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
         let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
         m.restore_queue();
         assert_eq!(m.store().n_items(), 100);
@@ -1357,15 +1189,9 @@ mod tests {
 
     #[test]
     fn cancel_holds_slot_until_reaped() {
-        // Crafted by hand, no MainLoop: A downloading with a live child, B
-        // queued. No async epilogue can run here, so nothing reaps except
-        // what cancel() itself does — and no dangling future is left on the
-        // process-global MainContext for other tests to trip over.
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("cancel-slot");
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
+        let settings = test_settings();
         settings.set_int("max-concurrent", 1).unwrap();
         let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
         let a = DownloadItem::new(41, "https://example.com/a.bin", "a.bin", "/tmp/dl");
@@ -1382,6 +1208,90 @@ mod tests {
         assert!(manager.running.borrow().contains_key(&41));
         assert_eq!(b.status(), DownloadStatus::Queued);
         assert_eq!(manager.running.borrow().len(), 1);
+    }
+
+    #[test]
+    fn restore_preserves_intent() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("intent");
+        let settings = test_settings();
+        let items: Vec<StoredItem> = [
+            ("p.iso", StoredStatus::Paused),
+            ("f.iso", StoredStatus::Failed),
+            ("d.iso", StoredStatus::Done),
+        ]
+        .into_iter()
+        .map(|(f, status)| StoredItem {
+            url: format!("https://example.com/{f}"),
+            dest_dir: "/tmp/dl".to_string(),
+            filename: f.to_string(),
+            status,
+            progress: 0.5,
+        })
+        .collect();
+        let queue = StoredQueue {
+            version: QUEUE_VERSION,
+            items,
+        };
+        std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+        let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        m.restore_queue();
+        assert_eq!(m.store().n_items(), 3);
+        assert!(m.running.borrow().is_empty());
+        let status_of = |name: &str| {
+            (0..m.store().n_items())
+                .filter_map(|i| m.store().item(i).and_downcast::<DownloadItem>())
+                .find(|it| it.filename() == name)
+                .map(|it| it.status())
+        };
+        assert_eq!(status_of("p.iso"), Some(DownloadStatus::Paused));
+        assert_eq!(status_of("f.iso"), Some(DownloadStatus::Failed));
+        assert_eq!(status_of("d.iso"), Some(DownloadStatus::Done));
+        let _ = std::fs::remove_file(&qf);
+    }
+
+    #[test]
+    fn restored_status_mapping() {
+        assert_eq!(
+            restored_status(StoredStatus::Paused),
+            DownloadStatus::Paused
+        );
+        assert_eq!(
+            restored_status(StoredStatus::Failed),
+            DownloadStatus::Failed
+        );
+        assert_eq!(
+            restored_status(StoredStatus::Queued),
+            DownloadStatus::Queued
+        );
+        assert_eq!(
+            restored_status(StoredStatus::Downloading),
+            DownloadStatus::Queued
+        );
+    }
+
+    #[test]
+    fn retry_persists_immediately() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("retry-persist");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let item = DownloadItem::new(51, "https://example.com/r.bin", "r.bin", "/tmp/dl");
+        item.set_status(DownloadStatus::Cancelled);
+        manager.store().append(&item);
+        let argv = [std::ffi::OsStr::new("sleep"), std::ffi::OsStr::new("60")];
+        let proc = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE).unwrap();
+        manager.running.borrow_mut().insert(52, proc);
+        manager.retry(51);
+        assert_eq!(item.status(), DownloadStatus::Queued);
+        assert_eq!(manager.running.borrow().len(), 1);
+        let text = std::fs::read_to_string(&qf).unwrap();
+        let queue: StoredQueue = serde_json::from_str(&text).unwrap();
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].filename, "r.bin");
+        assert_eq!(queue.items[0].status, StoredStatus::Queued);
+        let _ = std::fs::remove_file(&qf);
     }
 
     #[test]
@@ -1404,17 +1314,11 @@ mod tests {
         assert_eq!(argv[argv.len() - 2], "--");
     }
 
-    /// Full lifecycle against a local HTTP server: download → pause (bytes
-    /// freeze) → resume → Done (bytes match) → cancel. Headless: no widgets,
-    /// just the ListStore + MainLoop.
     #[test]
     fn manager_pause_resume_cancel() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("lifecycle");
-        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-        // Memory backend: the test never touches the user's real dconf db,
-        // even if it times out or panics mid-run.
-        std::env::set_var("GSETTINGS_BACKEND", "memory");
+        let settings = test_settings();
 
         let dir = std::env::temp_dir().join(format!("wgetmgr-test-{}", std::process::id()));
         let srv = dir.join("srv");
@@ -1424,12 +1328,9 @@ mod tests {
         let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(srv.join("t.bin"), &payload).unwrap();
 
-        // PID-unique port: never collide with orphaned servers from earlier runs.
         let port = 20000 + (std::process::id() % 5000) as u16;
         let server_log = dir.join("server.log");
         let server_log_file = std::fs::File::create(&server_log).unwrap();
-        // Throttled single-file server (~160KB/s) so pause() always lands
-        // mid-transfer. No http.server quirks, no Range/keep-alive surprises.
         let server_py = format!("{}/tests/throttled_server.py", env!("CARGO_MANIFEST_DIR"));
         let server = std::process::Command::new("python3")
             .arg(&server_py)
@@ -1439,7 +1340,6 @@ mod tests {
             .stderr(server_log_file)
             .spawn()
             .expect("python3 throttled server");
-        // Wait for accept (connect+close is enough; no GET, no body served).
         let mut ready = false;
         for _ in 0..100 {
             if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
@@ -1450,7 +1350,6 @@ mod tests {
         }
         assert!(ready, "test HTTP server did not listen on port {port}");
 
-        let settings = gio::Settings::new("io.github.houssemko.Grab");
         settings.set_boolean("show-notifications", false).unwrap();
 
         let store = gio::ListStore::new::<DownloadItem>();
@@ -1483,7 +1382,6 @@ mod tests {
                 .unwrap_or_else(|e| fail(&e));
             let id = item.id();
 
-            // Let it run, then pause and check bytes freeze.
             glib::timeout_future(std::time::Duration::from_secs(1)).await;
             if item.status() != DownloadStatus::Downloading {
                 fail("expected Downloading after 1s");
@@ -1495,7 +1393,6 @@ mod tests {
             let size_b = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             assert_eq!(size_a, size_b, "bytes moved while paused");
 
-            // Resume to completion.
             manager.resume(id);
             let mut waited = 0;
             while item.status() != DownloadStatus::Done && waited < 300 {
@@ -1509,17 +1406,14 @@ mod tests {
                 fail("bytes differ");
             }
 
-            // Cancel path.
             let item2 = manager.enqueue(&url, Some(&dest), Some("t2.bin")).unwrap();
             manager.cancel(item2.id());
             assert_eq!(item2.status(), DownloadStatus::Cancelled);
 
-            // Cleanup.
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);
             quit.quit();
         });
-        // Watchdog: never hang CI.
         let watchdog = main_loop.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(90));
@@ -1529,7 +1423,5 @@ mod tests {
             }
         });
         main_loop.run();
-        // (Server is killed by the driver on all in-loop paths; the watchdog
-        // path may orphan it, but its port is PID-unique.)
     }
 }
