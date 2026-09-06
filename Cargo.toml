@@ -2,7 +2,7 @@
 name = "grab"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 description = "A GNOME download manager frontend for wget (GTK 4 / libadwaita)"
 license = "MIT"
 
@@ -14,3 +14,6 @@ url = "2"
 async-channel = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util"] }
+futures-util = "0.3.34"
+reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream"] }
