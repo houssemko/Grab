@@ -438,10 +438,6 @@ impl DownloadManager {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
     }
 
-    pub fn is_batching(&self) -> bool {
-        self.batch.get()
-    }
-
     fn changed(&self) {
         if let Some(cb) = self.on_change.borrow().as_ref() {
             cb();
@@ -640,42 +636,32 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::Finished => {
-                        this.running.borrow_mut().remove(&id);
-                        if item.status() == DownloadStatus::Cancelled
-                            || item.status() == DownloadStatus::Paused
+                        if item.status() != DownloadStatus::Cancelled
+                            && item.status() != DownloadStatus::Paused
                         {
-                            this.changed();
-                            this.start_next();
-                            break;
+                            item.set_progress(1.0);
+                            item.set_status(DownloadStatus::Done);
+                            item.set_detail("Finished".to_string());
+                            this.notify_finished(&item, true, None);
                         }
-                        item.set_progress(1.0);
-                        item.set_status(DownloadStatus::Done);
-                        item.set_detail("Finished".to_string());
-                        this.notify_finished(&item, true, None);
-                        this.persist_queue();
-                        this.changed();
-                        this.start_next();
                         break;
                     }
                     EngineMsg::Failed(e) => {
-                        this.running.borrow_mut().remove(&id);
-                        if item.status() == DownloadStatus::Cancelled
-                            || item.status() == DownloadStatus::Paused
+                        if item.status() != DownloadStatus::Cancelled
+                            && item.status() != DownloadStatus::Paused
                         {
-                            this.changed();
-                            this.start_next();
-                            break;
+                            item.set_status(DownloadStatus::Failed);
+                            item.set_detail(e.clone());
+                            this.notify_finished(&item, false, Some(e));
                         }
-                        item.set_status(DownloadStatus::Failed);
-                        item.set_detail(e.clone());
-                        this.notify_finished(&item, false, Some(e));
-                        this.persist_queue();
-                        this.changed();
-                        this.start_next();
                         break;
                     }
                 }
             }
+            this.running.borrow_mut().remove(&id);
+            this.persist_queue();
+            this.changed();
+            this.start_next();
         });
     }
 
@@ -717,6 +703,7 @@ impl DownloadManager {
             }
         }
         self.changed();
+        self.start_next();
     }
 
     pub fn resume(self: &Rc<Self>, id: u64) {
@@ -1107,6 +1094,8 @@ mod tests {
 
     #[test]
     fn restore_keeps_exact_filename() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("restore-exact");
         test_settings();
         let dir = std::env::temp_dir().join(format!("grab-restore-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1194,6 +1183,14 @@ mod tests {
         m2.restore_queue();
         assert_eq!(m2.store().n_items(), 1);
         let it = m2.store().item(0).and_downcast::<DownloadItem>().unwrap();
+        if it.filename() != "old.iso" {
+            eprintln!("FLAKE-DEBUG file content:\n{}", std::fs::read_to_string(&qf).unwrap_or_default());
+            eprintln!(
+                "FLAKE-DEBUG env var: {:?}",
+                std::env::var_os("GRAB_QUEUE_FILE")
+            );
+            eprintln!("FLAKE-DEBUG qf path: {:?}", qf);
+        }
         assert_eq!(it.filename(), "old.iso");
         assert_eq!(it.status(), DownloadStatus::Done);
         assert!((it.progress() - 1.0).abs() < f64::EPSILON);
@@ -1307,6 +1304,39 @@ mod tests {
     }
 
     #[test]
+    fn pause_starts_next_queued() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("pause-next");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager =
+            DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let a = DownloadItem::new(61, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+        a.set_status(DownloadStatus::Downloading);
+        manager.store().append(&a);
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(61, holder);
+        let b = DownloadItem::new(62, "http://127.0.0.1:9/b.bin", "b.bin", "/tmp/dl");
+        manager.store().append(&b);
+        manager.pause(61);
+        assert_eq!(a.status(), DownloadStatus::Paused);
+        assert!(!manager.running.borrow().contains_key(&61));
+        assert_eq!(b.status(), DownloadStatus::Downloading);
+        assert!(manager.running.borrow().contains_key(&62));
+        let ctx = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.running.borrow().contains_key(&62)
+            && std::time::Instant::now() < deadline
+        {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!manager.running.borrow().contains_key(&62));
+    }
+
+    #[test]
     fn restore_preserves_intent() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let qf = test_queue_file("intent");
@@ -1408,11 +1438,13 @@ mod tests {
         let port = 20000 + (std::process::id() % 5000) as u16;
         let server_log = dir.join("server.log");
         let server_log_file = std::fs::File::create(&server_log).unwrap();
+        let ranges_log = dir.join("ranges.log");
         let server_py = format!("{}/tests/throttled_server.py", env!("CARGO_MANIFEST_DIR"));
         let server = std::process::Command::new("python3")
             .arg(&server_py)
             .arg(port.to_string())
             .arg(srv.join("t.bin"))
+            .arg(&ranges_log)
             .stdout(std::process::Stdio::null())
             .stderr(server_log_file)
             .spawn()
@@ -1482,6 +1514,10 @@ mod tests {
             if std::fs::read(&path).unwrap() != payload {
                 fail("bytes differ");
             }
+            let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+            if !ranges.lines().any(|l| l.starts_with("bytes=")) {
+                fail("resume never sent a Range request (206 path untested)");
+            }
 
             let item2 = manager.enqueue(&url, Some(&dest), Some("t2.bin")).unwrap();
             manager.cancel(item2.id());
@@ -1500,6 +1536,20 @@ mod tests {
             }
         });
         main_loop.run();
+        // Quiescence drain on THIS thread: cancel() aborted t2's task, whose
+        // UI future completes only when pumped. A fixed iteration count races
+        // abort latency; instead pump until the context goes quiet, so no
+        // pending future is left for another test's loop to trip over.
+        let ctx = glib::MainContext::default();
+        let mut idle_rounds = 0;
+        while idle_rounds < 50 {
+            if ctx.iteration(false) {
+                idle_rounds = 0;
+            } else {
+                idle_rounds += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     #[test]

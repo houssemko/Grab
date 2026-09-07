@@ -450,9 +450,7 @@ pub fn build_window(
         let w = window.downgrade();
         let armed = Rc::clone(&ever_shown);
         manager.set_on_change(move || {
-            if !m.is_batching() {
-                sync();
-            }
+            sync();
             if let Some(app) = app_weak.upgrade() {
                 if let Some(a) = app
                     .lookup_action("cancel-all")
