@@ -341,7 +341,7 @@ pub fn build_window(
         .build();
     let empty_add = gtk4::Button::builder()
         .label("New Download")
-        .css_classes(["pill", "suggested-action"])
+        .css_classes(["suggested-action"])
         .build();
     empty.set_child(Some(&empty_add));
     {
@@ -390,6 +390,7 @@ pub fn build_window(
         let m = Rc::clone(&manager);
         let t = Rc::clone(&toasts);
         let r = Rc::clone(&rows);
+        let add = add_btn.clone();
         let s = stack.clone();
         let l_active = active_list.clone();
         let l_downloaded = downloaded_list.clone();
@@ -447,7 +448,10 @@ pub fn build_window(
             }
             sec_active.set_visible(n_active > 0);
             sec_downloaded.set_visible(n_downloaded > 0);
-            s.set_visible_child_name(if store.n_items() > 0 { "list" } else { "empty" });
+            let has_items = store.n_items() > 0;
+            // Header + duplicates the empty-state pill, so show it only with the list.
+            add.set_visible(has_items);
+            s.set_visible_child_name(if has_items { "list" } else { "empty" });
         })
     };
 
