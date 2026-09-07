@@ -185,8 +185,15 @@ pub fn filename_from_url(url_str: &str) -> String {
 ///
 /// # Errors
 /// Returns a display-ready message when the input is not a usable URL.
+/// Maximum accepted URL length (bytes); browsers and servers rarely
+/// tolerate more, and it bounds queue-file and UI memory.
+pub const MAX_URL_LEN: usize = 2048;
+
 pub fn normalize_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
+    if trimmed.len() > MAX_URL_LEN {
+        return Err(format!("URL is too long (max {MAX_URL_LEN} characters)"));
+    }
     if let Ok(u) = url::Url::parse(trimmed) {
         if matches!(u.scheme(), "http" | "https") {
             return Ok(u.to_string());
@@ -1109,6 +1116,13 @@ mod tests {
             normalize_url("example .com").unwrap_err(),
             "Invalid URL: example .com"
         );
+        let long = format!("https://example.com/{}", "a".repeat(MAX_URL_LEN));
+        assert_eq!(
+            normalize_url(&long).unwrap_err(),
+            format!("URL is too long (max {MAX_URL_LEN} characters)")
+        );
+        let maxed = format!("https://example.com/{}", "a".repeat(MAX_URL_LEN - 20));
+        assert!(normalize_url(&maxed).is_ok());
     }
 
     #[test]
