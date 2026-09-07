@@ -7,10 +7,14 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # ubuntu-latest ships GTK 4.14 / libadwaita 1.4, but the gtk4 (v4_18)
+    # and libadwaita (v1_8) crate features need system libs >= 4.18 / 1.8,
+    # so run inside Fedora instead of on the host runner.
+    container: fedora:44
     steps:
-      - uses: actions/checkout@v4
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+        run: dnf install -y git nodejs gcc pkg-config gtk4-devel libadwaita-devel python3
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
