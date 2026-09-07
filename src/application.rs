@@ -30,6 +30,7 @@ pub fn setup(app: &adw::Application) {
             manager.restore_queue();
 
             let toasts = Rc::new(adw::ToastOverlay::new());
+            register_actions(app, &st);
             let win = window::build_window(app, manager.clone(), settings.clone(), toasts.clone());
             st.borrow_mut().replace(Rc::new(State {
                 manager: manager.clone(),
@@ -38,7 +39,6 @@ pub fn setup(app: &adw::Application) {
                 window: win,
             }));
 
-            register_actions(app, &st);
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
             app.set_accels_for_action("app.quit", &["<Control>q"]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);

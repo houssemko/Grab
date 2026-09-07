@@ -409,7 +409,6 @@ pub fn build_window(
             s.set_visible_child_name(if store.n_items() > 0 { "list" } else { "empty" });
         })
     };
-    sync();
 
     // ponytail: hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));
@@ -449,7 +448,7 @@ pub fn build_window(
         let sync = Rc::clone(&sync);
         let w = window.downgrade();
         let armed = Rc::clone(&ever_shown);
-        manager.set_on_change(move || {
+        let hook: Rc<dyn Fn()> = Rc::new(move || {
             sync();
             if let Some(app) = app_weak.upgrade() {
                 if let Some(a) = app
@@ -474,6 +473,11 @@ pub fn build_window(
                 }
             }
         });
+        manager.set_on_change({
+            let hook = Rc::clone(&hook);
+            move || hook()
+        });
+        hook();
     }
 
     window
