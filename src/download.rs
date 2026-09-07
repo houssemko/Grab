@@ -1183,14 +1183,6 @@ mod tests {
         m2.restore_queue();
         assert_eq!(m2.store().n_items(), 1);
         let it = m2.store().item(0).and_downcast::<DownloadItem>().unwrap();
-        if it.filename() != "old.iso" {
-            eprintln!("FLAKE-DEBUG file content:\n{}", std::fs::read_to_string(&qf).unwrap_or_default());
-            eprintln!(
-                "FLAKE-DEBUG env var: {:?}",
-                std::env::var_os("GRAB_QUEUE_FILE")
-            );
-            eprintln!("FLAKE-DEBUG qf path: {:?}", qf);
-        }
         assert_eq!(it.filename(), "old.iso");
         assert_eq!(it.status(), DownloadStatus::Done);
         assert!((it.progress() - 1.0).abs() < f64::EPSILON);
@@ -1309,8 +1301,7 @@ mod tests {
         let _qf = test_queue_file("pause-next");
         let settings = test_settings();
         settings.set_int("max-concurrent", 1).unwrap();
-        let manager =
-            DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
         let a = DownloadItem::new(61, "https://example.com/a.bin", "a.bin", "/tmp/dl");
         a.set_status(DownloadStatus::Downloading);
         manager.store().append(&a);
@@ -1327,9 +1318,7 @@ mod tests {
         assert!(manager.running.borrow().contains_key(&62));
         let ctx = glib::MainContext::default();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while manager.running.borrow().contains_key(&62)
-            && std::time::Instant::now() < deadline
-        {
+        while manager.running.borrow().contains_key(&62) && std::time::Instant::now() < deadline {
             ctx.iteration(false);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
