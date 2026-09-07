@@ -308,15 +308,12 @@ async fn attempt_once(
     if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && start > 0 {
         return Ok(());
     }
-    if status.is_client_error() || status.is_server_error() {
+    if !status.is_success() {
         return Err(format!(
             "HTTP {}: {}",
             status.as_u16(),
             status.canonical_reason().unwrap_or("error")
         ));
-    }
-    if !status.is_success() {
-        return Err(format!("HTTP {}", status.as_u16()));
     }
     let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
     let total = resp
@@ -335,7 +332,7 @@ async fn attempt_once(
     let mut stream = resp.bytes_stream();
     let pace_start = Instant::now();
     let mut paced: u64 = 0;
-    let mut last_sent = Instant::now() - Duration::from_secs(3600);
+    let mut last_sent = Instant::now();
     use tokio::io::AsyncWriteExt as _;
     loop {
         let chunk = match tokio::time::timeout(timeout, stream.next()).await {
@@ -376,11 +373,11 @@ fn parse_rate(s: &str) -> Option<u64> {
     if s.is_empty() || s == "0" {
         return None;
     }
-    let (num, mult) = match s.chars().last()? {
-        'K' | 'k' => (s[..s.len() - 1].to_string(), 1024u64),
-        'M' | 'm' => (s[..s.len() - 1].to_string(), 1024 * 1024),
-        'G' | 'g' => (s[..s.len() - 1].to_string(), 1024 * 1024 * 1024),
-        c if c.is_ascii_digit() => (s.to_string(), 1),
+    let (num, mult) = match s.as_bytes().last()? {
+        b'K' | b'k' => (&s[..s.len() - 1], 1024u64),
+        b'M' | b'm' => (&s[..s.len() - 1], 1024 * 1024),
+        b'G' | b'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        b'0'..=b'9' => (s, 1),
         _ => return None,
     };
     num.trim()
