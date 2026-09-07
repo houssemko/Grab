@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.1-alpha.4" date="2026-09-07">
+      <description>
+        <p>New Download keeps its pill shape but sizes to its text instead of stretching full-width.</p>
+      </description>
+    </release>
     <release version="0.2.1-alpha.3" date="2026-09-07">
       <description>
         <p>Smaller New Download button; header add button only shows alongside the download list.</p>

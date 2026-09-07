@@ -341,7 +341,8 @@ pub fn build_window(
         .build();
     let empty_add = gtk4::Button::builder()
         .label("New Download")
-        .css_classes(["suggested-action"])
+        .css_classes(["pill", "suggested-action"])
+        .halign(gtk4::Align::Center)
         .build();
     empty.set_child(Some(&empty_add));
     {
