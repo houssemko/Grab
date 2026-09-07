@@ -20,6 +20,7 @@ pub enum DownloadStatus {
 }
 
 impl DownloadStatus {
+    /// Short human-readable label for the status, for list rows and toasts.
     pub fn label(self) -> &'static str {
         match self {
             DownloadStatus::Queued => "Queued",
@@ -115,6 +116,7 @@ glib::wrapper! {
 }
 
 impl DownloadItem {
+    /// Create a list item; prefer [`DownloadManager::enqueue`] which dedupes.
     pub fn new(id: u64, url: &str, filename: &str, dest_dir: &str) -> Self {
         glib::Object::builder()
             .property("id", id)
@@ -124,6 +126,7 @@ impl DownloadItem {
             .build()
     }
 
+    /// Full destination path (`dest_dir` joined with `filename`).
     pub fn file_path(&self) -> std::path::PathBuf {
         std::path::Path::new(&self.dest_dir()).join(self.filename())
     }
@@ -138,6 +141,9 @@ fn restored_status(stored: StoredStatus) -> DownloadStatus {
     }
 }
 
+/// Append ` (n)` before the extension until `taken` returns false.
+///
+/// Example: `dedupe_filename("f.iso", |n| n == "f.iso")` returns `"f (1).iso"`.
 pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(filename) {
         return filename.to_string();
@@ -163,6 +169,7 @@ fn sane_filename(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\0') && s != "." && s != ".."
 }
 
+/// Best-effort filename from a URL path, falling back to `index.html`.
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
         .ok()
@@ -174,6 +181,10 @@ pub fn filename_from_url(url_str: &str) -> String {
         .unwrap_or_else(|| "index.html".to_string())
 }
 
+/// Normalize user input into a URL string, adding `https://` to bare hosts.
+///
+/// # Errors
+/// Returns a display-ready message when the input is not a usable URL.
 pub fn normalize_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if let Ok(u) = url::Url::parse(trimmed) {
@@ -196,6 +207,10 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     Err(format!("Invalid URL: {trimmed}"))
 }
 
+/// Reject non-http(s) URLs.
+///
+/// # Errors
+/// Returns a display-ready message for unsupported schemes or bad URLs.
 pub fn validate_url(url_str: &str) -> Result<(), String> {
     let u = url::Url::parse(url_str).map_err(|_| format!("Invalid URL: {url_str}"))?;
     match u.scheme() {
@@ -214,6 +229,7 @@ pub struct DownloadOptions {
 }
 
 impl DownloadOptions {
+    /// Snapshot the network-related GSettings keys.
     pub fn from_settings(s: &gio::Settings) -> Self {
         Self {
             tries: s.int("retries"),
@@ -422,7 +438,9 @@ pub struct DownloadManager {
     batch: Cell<bool>,
 }
 
+/// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
+    /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: gio::Settings) -> Rc<Self> {
         Rc::new(Self {
             store,
@@ -434,6 +452,7 @@ impl DownloadManager {
         })
     }
 
+    /// UI refresh callback, invoked after every state change.
     pub fn set_on_change(&self, cb: impl Fn() + 'static) {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
     }
@@ -450,16 +469,22 @@ impl DownloadManager {
         id
     }
 
+    /// The underlying download list.
     pub fn store(&self) -> &gio::ListStore {
         &self.store
     }
 
+    /// Find an item by id.
     pub fn find(&self, id: u64) -> Option<DownloadItem> {
         (0..self.store.n_items())
             .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
             .find(|it| it.id() == id)
     }
 
+    /// Validate, dedupe and queue a download, starting it when a slot is free.
+    ///
+    /// # Errors
+    /// Returns a display-ready message when the URL or filename is invalid.
     pub fn enqueue(
         self: &Rc<Self>,
         url: &str,
@@ -486,6 +511,10 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
+    /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
+    ///
+    /// # Errors
+    /// Returns a display-ready message when the stored entry is invalid.
     pub fn restore_existing(
         self: &Rc<Self>,
         url: &str,
@@ -534,10 +563,12 @@ impl DownloadManager {
         self.insert(item);
     }
 
+    /// Whether finish/fail desktop notifications are enabled.
     pub fn notifications_enabled(&self) -> bool {
         self.settings.boolean("show-notifications")
     }
 
+    /// Configured folder, or the system Downloads folder when empty.
     pub fn effective_download_dir(&self) -> String {
         let configured = self.settings.string("download-dir").to_string();
         if !configured.is_empty() {
@@ -548,6 +579,7 @@ impl DownloadManager {
             .unwrap_or_else(|| "/tmp".to_string())
     }
 
+    /// Simultaneous-download limit (at least 1).
     pub fn max_concurrent(&self) -> usize {
         self.settings.int("max-concurrent").max(1) as usize
     }
@@ -691,6 +723,7 @@ impl DownloadManager {
         }
     }
 
+    /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
@@ -706,6 +739,7 @@ impl DownloadManager {
         self.start_next();
     }
 
+    /// Re-queue a paused download.
     pub fn resume(self: &Rc<Self>, id: u64) {
         if let Some(item) = self.find(id) {
             if item.status() == DownloadStatus::Paused {
@@ -716,6 +750,7 @@ impl DownloadManager {
         }
     }
 
+    /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
@@ -730,6 +765,7 @@ impl DownloadManager {
         self.start_next();
     }
 
+    /// Re-queue a failed or cancelled download.
     pub fn retry(self: &Rc<Self>, id: u64) {
         if let Some(item) = self.find(id) {
             match item.status() {
@@ -748,6 +784,7 @@ impl DownloadManager {
         }
     }
 
+    /// Cancel and drop a row; restore with [`DownloadManager::unremove`].
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.cancel(id);
         if let Some(pos) = (0..self.store.n_items()).find(|&i| {
@@ -763,19 +800,46 @@ impl DownloadManager {
         self.changed();
     }
 
+    /// Re-insert a previously removed download (Undo). Restores the prior
+    /// status except `Downloading`, which restarts as `Queued`.
+    pub fn unremove(
+        self: &Rc<Self>,
+        url: String,
+        dest_dir: String,
+        filename: String,
+        status: DownloadStatus,
+        progress: f64,
+        detail: String,
+    ) -> DownloadItem {
+        let item = DownloadItem::new(self.alloc_id(), &url, &filename, &dest_dir);
+        item.set_progress(progress.clamp(0.0, 1.0));
+        item.set_detail(detail);
+        item.set_status(match status {
+            DownloadStatus::Downloading => DownloadStatus::Queued,
+            s => s,
+        });
+        self.insert(item.clone());
+        item
+    }
+
+    /// Move the downloaded file to Trash, then remove the row.
+    ///
+    /// # Errors
+    /// Returns a display-ready message when trashing fails.
     pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
         let item = self
             .find(id)
             .ok_or_else(|| "Download not found".to_string())?;
-        match std::fs::remove_file(item.file_path()) {
+        match gio::File::for_path(item.file_path()).trash(gio::Cancellable::NONE) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("Could not delete {}: {e}", item.filename())),
+            Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
+            Err(e) => return Err(format!("Could not move {} to Trash: {e}", item.filename())),
         }
         self.remove(id);
         Ok(())
     }
 
+    /// Cancel every queued, downloading or paused item.
     pub fn cancel_all(self: &Rc<Self>) {
         self.for_matching(
             |s| {
@@ -788,6 +852,7 @@ impl DownloadManager {
         );
     }
 
+    /// Re-queue every failed or cancelled item.
     pub fn retry_failed(self: &Rc<Self>) {
         self.for_matching(
             |s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled),
@@ -810,6 +875,7 @@ impl DownloadManager {
         }
     }
 
+    /// Whether any item is queued, downloading or paused.
     pub fn has_active(&self) -> bool {
         self.any_status(|s| {
             matches!(
@@ -819,6 +885,7 @@ impl DownloadManager {
         })
     }
 
+    /// Whether any item failed or was cancelled.
     pub fn has_failed(&self) -> bool {
         self.any_status(|s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled))
     }
@@ -892,6 +959,7 @@ impl DownloadManager {
         }
     }
 
+    /// Load the persisted queue (cap: 1000 items / 10 MB), then resume.
     pub fn restore_queue(self: &Rc<Self>) {
         if Self::queue_file().exists() {
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
@@ -941,6 +1009,7 @@ impl DownloadManager {
         }
     }
 
+    /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {
         for handle in self.running.borrow().values() {
             handle.abort();
@@ -1047,7 +1116,8 @@ mod tests {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("del");
         let settings = test_settings();
-        let dir = std::env::temp_dir().join(format!("grab-del-{}", std::process::id()));
+        // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+        let dir = glib::user_data_dir().join(format!("grab-del-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("gone.bin");
         std::fs::write(&file, b"bye").unwrap();
@@ -1066,6 +1136,10 @@ mod tests {
         assert!(manager.delete_download(7).is_ok());
         assert!(!file.exists());
         assert_eq!(store.n_items(), 0);
+        // Undo the test's own Trash litter.
+        let trash = glib::user_data_dir().join("Trash");
+        let _ = std::fs::remove_file(trash.join("files/gone.bin"));
+        let _ = std::fs::remove_file(trash.join("info/gone.bin.trashinfo"));
         let item2 = DownloadItem::new(
             8,
             "https://example.com/missing.bin",

@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.1-alpha.2" date="2026-09-07">
+      <description>
+        <p>HIG compliance pass: failure banner, undo for removals, keyboard shortcuts, screen-reader labels, and release hardening.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-09-07">
       <description>
         <p>Native HTTP backend with pause/resume, background downloads, and download history.</p>

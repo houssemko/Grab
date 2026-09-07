@@ -10,12 +10,14 @@ use std::rc::Rc;
 pub const BACKGROUND_NOTIF_ID: &str = "grab-background";
 
 fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
-    gtk4::Button::builder()
+    let b = gtk4::Button::builder()
         .icon_name(icon)
         .css_classes(["flat"])
         .tooltip_text(tooltip)
         .valign(gtk4::Align::Center)
-        .build()
+        .build();
+    b.update_property(&[gtk4::accessible::Property::Label(tooltip)]);
+    b
 }
 
 pub fn reveal_file(path: &std::path::Path, toasts: &adw::ToastOverlay) {
@@ -90,8 +92,8 @@ fn build_row(
     toasts: &Rc<adw::ToastOverlay>,
 ) -> gtk4::ListBoxRow {
     let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    outer.set_margin_top(10);
-    outer.set_margin_bottom(10);
+    outer.set_margin_top(12);
+    outer.set_margin_bottom(12);
     outer.set_margin_start(12);
     outer.set_margin_end(12);
 
@@ -115,7 +117,7 @@ fn build_row(
     let toggle_btn = icon_button("media-playback-pause-symbolic", "Pause");
     let stop_btn = icon_button("process-stop-symbolic", "Cancel");
     let reveal_btn = icon_button("folder-open-symbolic", "Show in Folder");
-    let delete_btn = icon_button("user-trash-symbolic", "Delete file");
+    let delete_btn = icon_button("user-trash-symbolic", "Move to Trash");
     let remove_btn = icon_button("list-remove-symbolic", "Remove from list");
 
     top.append(&name);
@@ -168,20 +170,24 @@ fn build_row(
             w_status.upgrade(),
             w_name.upgrade(),
         ) {
-            let st: gtk4::Label = st.downcast().unwrap();
-            let n: gtk4::Label = n.downcast().unwrap();
+            let st: gtk4::Label = st.downcast().expect("Grab: status widget is a Label (bug)");
+            let n: gtk4::Label = n.downcast().expect("Grab: name widget is a Label (bug)");
             n.set_text(&it.filename());
             st.set_text(it.status().label());
             refresh_row(
                 it,
                 &RowWidgets {
-                    detail: d.downcast().unwrap(),
-                    progress: p.downcast().unwrap(),
-                    spinner: s.downcast().unwrap(),
-                    toggle_btn: t.downcast().unwrap(),
-                    stop_btn: x.downcast().unwrap(),
-                    reveal_btn: o.downcast().unwrap(),
-                    delete_btn: y.downcast().unwrap(),
+                    detail: d.downcast().expect("Grab: detail widget is a Label (bug)"),
+                    progress: p
+                        .downcast()
+                        .expect("Grab: progress widget is a ProgressBar (bug)"),
+                    spinner: s
+                        .downcast()
+                        .expect("Grab: spinner widget is a Spinner (bug)"),
+                    toggle_btn: t.downcast().expect("Grab: toggle widget is a Button (bug)"),
+                    stop_btn: x.downcast().expect("Grab: stop widget is a Button (bug)"),
+                    reveal_btn: o.downcast().expect("Grab: reveal widget is a Button (bug)"),
+                    delete_btn: y.downcast().expect("Grab: delete widget is a Button (bug)"),
                 },
             );
         }
@@ -239,12 +245,35 @@ fn build_row(
         delete_btn.connect_clicked(move |_| {
             if let Err(e) = m.delete_download(id) {
                 t.add_toast(adw::Toast::new(&e));
+            } else {
+                t.add_toast(adw::Toast::new("Moved to Trash"));
             }
         });
     }
     {
         let m = Rc::clone(manager);
-        remove_btn.connect_clicked(move |_| m.remove(id));
+        let t = Rc::clone(toasts);
+        remove_btn.connect_clicked(move |_| {
+            let Some(it) = m.find(id) else { return };
+            let snapshot = (
+                it.url().to_string(),
+                it.dest_dir().to_string(),
+                it.filename().to_string(),
+                it.status(),
+                it.progress(),
+                it.detail().to_string(),
+            );
+            let name = snapshot.2.clone();
+            m.remove(id);
+            let toast = adw::Toast::new(&format!("Removed {name}"));
+            toast.set_button_label(Some("Undo"));
+            let m2 = Rc::clone(&m);
+            toast.connect_button_clicked(move |_| {
+                let (url, dir, fname, status, prog, detail) = snapshot.clone();
+                m2.unremove(url, dir, fname, status, prog, detail);
+            });
+            t.add_toast(toast);
+        });
     }
     row
 }
@@ -281,6 +310,7 @@ pub fn build_window(
     menu.append_section(None, &section);
     let section2 = gio::Menu::new();
     section2.append(Some("Preferences"), Some("app.preferences"));
+    section2.append(Some("Keyboard Shortcuts"), Some("app.shortcuts"));
     section2.append(Some("About"), Some("app.about"));
     menu.append_section(None, &section2);
     let menu_btn = gtk4::MenuButton::builder()
@@ -288,6 +318,7 @@ pub fn build_window(
         .menu_model(&menu)
         .tooltip_text("Main Menu")
         .build();
+    menu_btn.update_property(&[gtk4::accessible::Property::Label("Main Menu")]);
     header.pack_start(&menu_btn);
 
     let add_btn = gtk4::Button::builder()
@@ -295,6 +326,7 @@ pub fn build_window(
         .css_classes(["suggested-action"])
         .tooltip_text("New Download (Ctrl+N)")
         .build();
+    add_btn.update_property(&[gtk4::accessible::Property::Label("New Download")]);
     {
         let m = Rc::clone(&manager);
         add_btn.connect_clicked(move |_| show_add_dialog(m.clone()));
@@ -307,6 +339,15 @@ pub fn build_window(
         .title("No Downloads Yet")
         .description("Add a download to get started.")
         .build();
+    let empty_add = gtk4::Button::builder()
+        .label("New Download")
+        .css_classes(["pill", "suggested-action"])
+        .build();
+    empty.set_child(Some(&empty_add));
+    {
+        let m = Rc::clone(&manager);
+        empty_add.connect_clicked(move |_| show_add_dialog(m.clone()));
+    }
     stack.add_named(&empty, Some("empty"));
 
     fn section_list(title: &str) -> (gtk4::Box, gtk4::ListBox) {
@@ -326,7 +367,7 @@ pub fn build_window(
     }
     let (active_section, active_list) = section_list("Active");
     let (downloaded_section, downloaded_list) = section_list("Downloaded");
-    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 18);
+    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
     content.set_margin_start(12);
@@ -436,8 +477,17 @@ pub fn build_window(
         window.connect_map(move |_| armed.set(true));
     }
 
+    let banner = adw::Banner::new("Some downloads failed");
+    banner.set_button_label(Some("Retry Failed"));
+    {
+        let m = Rc::clone(&manager);
+        banner.connect_button_clicked(move |_| m.retry_failed());
+    }
+    banner.set_revealed(false);
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&banner);
     toolbar.set_content(Some(&stack));
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
@@ -464,6 +514,7 @@ pub fn build_window(
                     a.set_enabled(m.has_failed());
                 }
             }
+            banner.set_revealed(m.has_failed());
             let idle_hidden =
                 armed.get() && !m.has_active() && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden {
@@ -514,8 +565,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .build();
     let dest_btn = gtk4::Button::builder()
         .label("Choose…")
+        .tooltip_text("Choose download folder")
         .valign(gtk4::Align::Center)
         .build();
+    dest_btn.update_property(&[gtk4::accessible::Property::Label("Choose download folder")]);
     let dest_row = adw::ActionRow::builder().title("Save to").build();
     dest_row.add_suffix(&dest_label);
     dest_row.add_suffix(&dest_btn);
@@ -551,6 +604,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .visible(false)
         .build();
     group.add(&error_label);
+    {
+        let el = error_label.clone();
+        let ur = url_row.clone();
+        url_row.connect_changed(move |_| {
+            el.set_visible(false);
+            ur.remove_css_class("error");
+        });
+    }
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
@@ -603,6 +664,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 Err(e) => {
                     error_label.set_text(&e);
                     error_label.set_visible(true);
+                    url_row.add_css_class("error");
                 }
             }
         });
@@ -611,6 +673,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let m = manager.clone();
         let dd = dest_dir.clone();
         let dialog = dialog.downgrade();
+        let error_label = error_label.clone();
         url_row.connect_apply(move |row| {
             let url = row.text().trim().to_string();
             if url.is_empty() {
@@ -625,6 +688,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 Err(e) => {
                     error_label.set_text(&e);
                     error_label.set_visible(true);
+                    row.add_css_class("error");
                 }
             }
         });

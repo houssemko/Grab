@@ -42,6 +42,7 @@ pub fn setup(app: &adw::Application) {
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
             app.set_accels_for_action("app.quit", &["<Control>q"]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
+            app.set_accels_for_action("app.shortcuts", &["<Control>question"]);
         });
     }
 
@@ -177,6 +178,35 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             .comments("A GNOME download manager")
                             .build();
                         about.present(Some(&s.window));
+                    }
+                })
+                .build()
+        },
+        {
+            let st = Rc::clone(st);
+            gio::ActionEntry::builder("shortcuts")
+                .activate(move |_, _, _| {
+                    if let Some(s) = st.borrow().as_ref() {
+                        let dialog = adw::ShortcutsDialog::new();
+                        let section = adw::ShortcutsSection::new(Some("Downloads"));
+                        section.add(adw::ShortcutsItem::new("New Download", "<Control>n"));
+                        section.add(adw::ShortcutsItem::from_action(
+                            "Cancel All",
+                            "app.cancel-all",
+                        ));
+                        section.add(adw::ShortcutsItem::from_action(
+                            "Retry Failed",
+                            "app.retry-failed",
+                        ));
+                        dialog.add(section);
+                        let section2 = adw::ShortcutsSection::new(Some("General"));
+                        section2.add(adw::ShortcutsItem::from_action(
+                            "Preferences",
+                            "app.preferences",
+                        ));
+                        section2.add(adw::ShortcutsItem::new("Quit", "<Control>q"));
+                        dialog.add(section2);
+                        dialog.present(Some(&s.window));
                     }
                 })
                 .build()

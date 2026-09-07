@@ -55,14 +55,17 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .build();
     let dest_btn = gtk4::Button::builder()
         .label("Choose…")
+        .tooltip_text("Choose download folder")
         .valign(gtk4::Align::Center)
         .build();
+    dest_btn.update_property(&[gtk4::accessible::Property::Label("Choose download folder")]);
     let reset_btn = gtk4::Button::builder()
         .icon_name("edit-clear-symbolic")
         .css_classes(["flat"])
         .tooltip_text("Use system default")
         .valign(gtk4::Align::Center)
         .build();
+    reset_btn.update_property(&[gtk4::accessible::Property::Label("Use system default")]);
     let dest_row = adw::ActionRow::builder().title("Download folder").build();
     dest_row.add_suffix(&dest_label);
     dest_row.add_suffix(&reset_btn);
@@ -112,9 +115,10 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     net_group.add(&concurrent);
 
     let limit = adw::EntryRow::builder()
-        .title("Speed limit (e.g. 500K, 2M; empty = unlimited)")
+        .title("Speed limit")
         .text(settings.string("speed-limit").as_str())
         .build();
+    limit.set_tooltip_text(Some("e.g. 500K, 2M; empty means unlimited"));
     limit.set_input_purpose(gtk4::InputPurpose::FreeForm);
     settings.bind("speed-limit", &limit, "text").build();
     net_group.add(&limit);

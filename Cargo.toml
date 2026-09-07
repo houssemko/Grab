@@ -1,15 +1,15 @@
 [package]
 name = "grab"
-version = "0.2.1-alpha.1"
+version = "0.2.1-alpha.2"
 edition = "2021"
 rust-version = "1.92"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
 license = "MIT"
 
 [dependencies]
-# Version features must match the system libs (GTK 4.18+ / Adw 1.7+ API used).
+# Version features must match the system libs (GTK 4.18+ / Adw 1.8+ API used).
 gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18"] }
-libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7"] }
+libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7", "v1_8"] }
 url = "2"
 async-channel = "2"
 serde = { version = "1", features = ["derive"] }
@@ -17,3 +17,16 @@ serde_json = "1"
 tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util"] }
 futures-util = "0.3.34"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+style = "warn"
+complexity = "warn"
+perf = "warn"
