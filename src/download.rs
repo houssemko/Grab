@@ -2,9 +2,12 @@ use futures_util::StreamExt as _;
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
@@ -170,6 +173,96 @@ fn sane_filename(s: &str) -> bool {
 }
 
 /// Best-effort filename from a URL path, falling back to `index.html`.
+/// Decode `%XX` escapes (RFC 5987 `filename*=`); leaves everything else
+/// (including `+`) untouched. No new dependency for ten lines.
+fn percent_decode(s: &str) -> String {
+    fn hex(b: u8) -> Option<u8> {
+        match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            b'A'..=b'F' => Some(b - b'A' + 10),
+            _ => None,
+        }
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let mut decoded = None;
+        if bytes[i] == b'%' {
+            if let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2)) {
+                if let (Some(h), Some(l)) = (hex(h), hex(l)) {
+                    decoded = Some(h << 4 | l);
+                }
+            }
+        }
+        if let Some(b) = decoded {
+            out.push(b);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Filename from a `Content-Disposition` header (RFC 6266): prefers
+/// `filename*=UTF-8''...`, falls back to quoted `filename="..."`, strips
+/// any directory components servers sometimes include. `None` when absent
+/// or unusable (caller keeps the URL-derived name).
+pub fn filename_from_content_disposition(value: &str) -> Option<String> {
+    let mut fallback = None;
+    for part in value.split(';').map(str::trim) {
+        if let Some(rest) = part.strip_prefix("filename*=") {
+            // Form: filename*=UTF-8''%E2%82%ACrates.mp4 (charset'lang'data).
+            let data = rest.split('\'').next_back().unwrap_or("").trim();
+            let name = data.rsplit(['/', '\\']).next().unwrap_or("").trim();
+            let name = percent_decode(name);
+            if sane_filename(&name) {
+                return Some(name);
+            }
+        } else if fallback.is_none() {
+            if let Some(rest) = part.strip_prefix("filename=") {
+                let name = rest
+                    .trim()
+                    .trim_matches('"')
+                    .trim()
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if sane_filename(name) {
+                    fallback = Some(name.to_string());
+                }
+            }
+        }
+    }
+    // Case-insensitive retry for `FILENAME=` variants servers emit.
+    if fallback.is_none() {
+        for part in value.split(';').map(str::trim) {
+            if let Some(rest) = part
+                .get(9..)
+                .filter(|_| part[..9].eq_ignore_ascii_case("filename="))
+            {
+                let name = rest
+                    .trim()
+                    .trim_matches('"')
+                    .trim()
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if sane_filename(name) {
+                    fallback = Some(name.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    fallback
+}
+
 pub fn filename_from_url(url_str: &str) -> String {
     url::Url::parse(url_str)
         .ok()
@@ -233,6 +326,8 @@ pub struct DownloadOptions {
     pub timeout: i32,
     pub limit_rate: String,
     pub user_agent: String,
+    /// Parallel range connections for large downloads (1 = single stream).
+    pub connections: i32,
 }
 
 impl DownloadOptions {
@@ -243,6 +338,7 @@ impl DownloadOptions {
             timeout: s.int("timeout"),
             limit_rate: s.string("speed-limit").to_string(),
             user_agent: s.string("user-agent").to_string(),
+            connections: s.int("connections"),
         }
     }
 }
@@ -265,35 +361,89 @@ fn http_client() -> &'static reqwest::Client {
 }
 
 enum EngineMsg {
-    Progress { downloaded: u64, total: Option<u64> },
-    Finished { size: u64 },
+    Progress {
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    Finished {
+        size: u64,
+    },
     Failed(String),
+    /// A multi worker finished one piece; the UI thread records it for resume.
+    PieceDone(u64),
+    /// Multi attempt failed terminally: shrink the file to the completed
+    /// prefix (kept bitmap stays valid for a later segmented retry).
+    TruncatePrefix,
+    /// Fresh multi probe succeeded; the UI thread creates the resume bitmap.
+    SegmentsInit {
+        total: u64,
+    },
+    /// Server-advertised filename (Content-Disposition). The UI thread adopts
+    /// it when the current name is extensionless, after deduping.
+    SuggestName(String),
 }
 
-async fn run_download(
+/// Shared inputs for one download's engine task. Groups the params every
+/// attempt function needs instead of threading eight loose arguments.
+struct FetchCtx {
     client: &'static reqwest::Client,
     url: String,
     dest: std::path::PathBuf,
     opts: DownloadOptions,
     rate_limit: Option<u64>,
+    timeout: Duration,
     tx: async_channel::Sender<EngineMsg>,
-) {
-    let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
-    let mut tries = opts.tries.max(1);
+}
+
+async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
+    let timeout = Duration::from_secs(ctx.opts.timeout.max(1) as u64);
+    let mut tries = ctx.opts.tries.max(1);
+    match mode {
+        StartMode::Single => {
+            single_loop(&ctx, &mut tries).await;
+        }
+        StartMode::Fresh => match probe_ranges(ctx.client, &ctx.url, &ctx.opts, timeout).await {
+            Ok(total) if !plan_pieces(total, connections).is_empty() => {
+                ctx.tx.send(EngineMsg::SegmentsInit { total }).await.ok();
+                multi_loop(&ctx, total, None, &mut tries).await;
+            }
+            _ => {
+                single_loop(&ctx, &mut tries).await;
+            }
+        },
+        StartMode::Resume(st) => {
+            let total = st.total;
+            multi_loop(&ctx, total, Some(st), &mut tries).await;
+        }
+    }
+}
+
+/// Generous single-stream fallback with retries.
+async fn single_loop(ctx: &FetchCtx, tries: &mut i32) {
     loop {
-        match attempt_once(client, &url, &dest, &opts, rate_limit, timeout, &tx).await {
+        match attempt_once(
+            ctx.client,
+            &ctx.url,
+            &ctx.dest,
+            &ctx.opts,
+            ctx.rate_limit,
+            ctx.timeout,
+            &ctx.tx,
+        )
+        .await
+        {
             Ok(()) => {
-                let size = tokio::fs::metadata(&dest)
+                let size = tokio::fs::metadata(&ctx.dest)
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
-                tx.send(EngineMsg::Finished { size }).await.ok();
+                ctx.tx.send(EngineMsg::Finished { size }).await.ok();
                 return;
             }
             Err(e) => {
-                tries -= 1;
-                if tries <= 0 {
-                    tx.send(EngineMsg::Failed(e)).await.ok();
+                *tries -= 1;
+                if *tries <= 0 {
+                    ctx.tx.send(EngineMsg::Failed(e)).await.ok();
                     return;
                 }
             }
@@ -301,6 +451,189 @@ async fn run_download(
     }
 }
 
+/// Retry loop around segmented attempts. The resume bitmap lives in the
+/// manager (fed by PieceDone), so each retry transparently refetches only
+/// the still-missing pieces. On terminal failure the file is first shrunk
+/// to the completed prefix, keeping any later single-stream resume correct.
+async fn multi_loop(ctx: &FetchCtx, total: u64, saved: Option<SegmentState>, tries: &mut i32) {
+    loop {
+        match attempt_multi(ctx, total, saved.clone()).await {
+            Ok(()) => {
+                let size = tokio::fs::metadata(&ctx.dest)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                ctx.tx.send(EngineMsg::Finished { size }).await.ok();
+                return;
+            }
+            Err(e) => {
+                *tries -= 1;
+                if *tries <= 0 {
+                    // Same channel, FIFO per sender: truncation lands first.
+                    ctx.tx.send(EngineMsg::TruncatePrefix).await.ok();
+                    ctx.tx.send(EngineMsg::Failed(e)).await.ok();
+                    return;
+                }
+            }
+        }
+    }
+}
+/// One segmented attempt: N workers pull 1 MB pieces off a shared queue
+/// (fast connections steal more work, bounding straggler damage) while one
+/// writer task sequences everything to disk. All futures run inside this
+/// one task, so aborting the supervisor JoinHandle stops the whole attempt.
+async fn attempt_multi(
+    ctx: &FetchCtx,
+    total: u64,
+    saved: Option<SegmentState>,
+) -> Result<(), String> {
+    let st = saved.unwrap_or_else(|| SegmentState::new(total));
+    if st.total != total {
+        return Err("File changed on server".to_string());
+    }
+    let missing: Vec<(u64, u64, u64)> = st.missing();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let expect_bytes: u64 = missing.iter().map(|(_, s, e)| e - s + 1).sum();
+    // Ensure the file exists at full size so workers can write at offsets.
+    // Missing pieces stay sparse until fetched; resume always re-runs this.
+    tokio::fs::File::create(&ctx.dest)
+        .await
+        .map_err(|e| format!("Cannot write file: {e}"))?
+        .set_len(total)
+        .await
+        .map_err(|e| format!("Cannot write file: {e}"))?;
+    let queue: Arc<Mutex<VecDeque<(u64, u64, u64)>>> =
+        Arc::new(Mutex::new(missing.into_iter().collect()));
+    let failed = Arc::new(AtomicBool::new(false));
+    let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // (offset, bytes, piece index); bounded so a slow disk throttles fetchers.
+    let (wtx, wrx) = async_channel::bounded::<(u64, Vec<u8>, u64)>(8);
+    let name_offered = Arc::new(AtomicBool::new(false));
+    let n_workers = queue
+        .lock()
+        .expect("Grab: piece queue poisoned (bug)")
+        .len()
+        .clamp(1, 16);
+    let mut workers = Vec::with_capacity(n_workers);
+    for _ in 0..n_workers {
+        let (ctx, wtx, queue, failed, first_err, name_offered, name_tx) = (
+            ctx,
+            wtx.clone(),
+            Arc::clone(&queue),
+            Arc::clone(&failed),
+            Arc::clone(&first_err),
+            Arc::clone(&name_offered),
+            ctx.tx.clone(),
+        );
+        workers.push(async move {
+            loop {
+                if failed.load(Ordering::SeqCst) {
+                    break;
+                }
+                let piece = queue
+                    .lock()
+                    .expect("Grab: piece queue poisoned (bug)")
+                    .pop_front();
+                let Some((idx, s, e)) = piece else { break };
+                match fetch_piece(ctx, s, e, total, &name_offered, &name_tx).await {
+                    Ok(bytes) => {
+                        if wtx.send((s, bytes, idx)).await.is_err() {
+                            break; // Writer gone; attempt is over.
+                        }
+                    }
+                    Err(err) => {
+                        first_err
+                            .lock()
+                            .expect("Grab: error slot poisoned (bug)")
+                            .get_or_insert(err);
+                        failed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    drop(wtx);
+    let writer = {
+        let wrx = wrx;
+        let dest = ctx.dest.clone();
+        async move {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&dest)
+                .await
+                .map_err(|e| format!("Cannot write file: {e}"))?;
+            let mut downloaded = st.completed_bytes();
+            ctx.tx
+                .send(EngineMsg::Progress {
+                    downloaded,
+                    total: Some(total),
+                })
+                .await
+                .ok();
+            let pace_start = Instant::now();
+            let mut paced: u64 = 0;
+            let mut last_sent = Instant::now();
+            let mut written: u64 = 0;
+            use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
+            while let Ok((offset, bytes, idx)) = wrx.recv().await {
+                file.seek(std::io::SeekFrom::Start(offset))
+                    .await
+                    .map_err(|e| format!("Cannot write file: {e}"))?;
+                file.write_all(&bytes)
+                    .await
+                    .map_err(|e| format!("Cannot write file: {e}"))?;
+                downloaded += bytes.len() as u64;
+                written += bytes.len() as u64;
+                ctx.tx.send(EngineMsg::PieceDone(idx)).await.ok();
+                if let Some(rate) = ctx.rate_limit {
+                    paced += bytes.len() as u64;
+                    let wait = paced as f64 / rate as f64 - pace_start.elapsed().as_secs_f64();
+                    if wait > 0.0 {
+                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                    }
+                }
+                if last_sent.elapsed() >= Duration::from_millis(100) {
+                    ctx.tx
+                        .send(EngineMsg::Progress {
+                            downloaded,
+                            total: Some(total),
+                        })
+                        .await
+                        .ok();
+                    last_sent = Instant::now();
+                }
+            }
+            file.flush()
+                .await
+                .map_err(|e| format!("Cannot write file: {e}"))?;
+            ctx.tx
+                .send(EngineMsg::Progress {
+                    downloaded,
+                    total: Some(total),
+                })
+                .await
+                .ok();
+            Ok::<u64, String>(written)
+        }
+    };
+    let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
+    let written = wres?;
+    if failed.load(Ordering::SeqCst) {
+        let msg = first_err
+            .lock()
+            .expect("Grab: error slot poisoned (bug)")
+            .take()
+            .unwrap_or_else(|| "Download interrupted".to_string());
+        return Err(msg);
+    }
+    if written != expect_bytes {
+        return Err("Incomplete download".to_string());
+    }
+    Ok(())
+}
 async fn attempt_once(
     client: &reqwest::Client,
     url: &str,
@@ -352,6 +685,16 @@ async fn attempt_once(
         tokio::fs::File::create(dest).await
     }
     .map_err(|e| format!("Cannot write file: {e}"))?;
+    if !partial {
+        if let Some(name) = resp
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(filename_from_content_disposition)
+        {
+            tx.send(EngineMsg::SuggestName(name)).await.ok();
+        }
+    }
     let mut downloaded = if partial { start } else { 0 };
     tx.send(EngineMsg::Progress { downloaded, total })
         .await
@@ -440,6 +783,253 @@ fn fmt_eta(secs: u64) -> String {
     }
 }
 
+/// Piece size for segmented downloads. Small enough that one slow
+/// connection only ever delays the tail by ~1 MB of progress.
+const PIECE_SIZE: u64 = 1024 * 1024;
+/// A file is split only when it holds at least this much per connection
+/// (aria2-style: connections x MIN_SEGMENT), keeping small downloads on the
+/// cheaper single-stream path.
+const MIN_SEGMENT: u64 = 4 * 1024 * 1024;
+/// Per-piece fetch attempts before a worker gives up on it.
+const PIECE_TRIES: u32 = 3;
+
+/// How many connections a download may use: at least 2 to bother splitting,
+/// at most 16, and never more than one per MIN_SEGMENT of file.
+fn split_count(total: u64, connections: usize) -> usize {
+    (connections.max(1) as u64).min(total / MIN_SEGMENT).min(16) as usize
+}
+
+/// Split `total` bytes into 1 MB `(start, end)` pieces (inclusive ends).
+/// Empty when the file is too small to split: caller uses single-stream.
+fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
+    if split_count(total, connections) < 2 || total == 0 {
+        return Vec::new();
+    }
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    while start < total {
+        let end = (start + PIECE_SIZE).min(total) - 1;
+        pieces.push((start, end));
+        start = end + 1;
+    }
+    pieces
+}
+
+/// Session-only resume bitmap for one segmented download. Never persisted:
+/// the queue file keeps no piece state, so cross-session restores always
+/// resume single-stream (files are truncated to a contiguous prefix first,
+/// which keeps that path correct).
+#[derive(Debug, Clone)]
+struct SegmentState {
+    total: u64,
+    done: Vec<bool>,
+}
+
+impl SegmentState {
+    fn new(total: u64) -> Self {
+        Self {
+            total,
+            done: vec![false; total.div_ceil(PIECE_SIZE) as usize],
+        }
+    }
+
+    fn mark(&mut self, idx: u64) {
+        if let Some(slot) = self.done.get_mut(idx as usize) {
+            *slot = true;
+        }
+    }
+
+    /// Missing `(piece index, start, end)` ranges, in order.
+    fn missing(&self) -> Vec<(u64, u64, u64)> {
+        let mut out = Vec::new();
+        for (i, done) in self.done.iter().enumerate() {
+            if !done {
+                let start = i as u64 * PIECE_SIZE;
+                out.push((i as u64, start, (start + PIECE_SIZE).min(self.total) - 1));
+            }
+        }
+        out
+    }
+
+    /// Bytes already on disk according to the bitmap.
+    fn completed_bytes(&self) -> u64 {
+        self.done
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                if *d {
+                    PIECE_SIZE.min(self.total.saturating_sub(i as u64 * PIECE_SIZE))
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+}
+
+/// Shrink `path` to the longest completed piece prefix. Parallel writes can
+/// leave holes; a later single-stream resume appends at EOF, which is only
+/// correct on a contiguous prefix. Only ever shrinks.
+fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
+    let n = st.done.iter().take_while(|b| **b).count() as u64;
+    let prefix = n.saturating_mul(PIECE_SIZE);
+    if let Ok(md) = std::fs::metadata(path) {
+        if md.len() > prefix {
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
+                let _ = f.set_len(prefix);
+            }
+        }
+    }
+}
+
+/// How the engine task should start this download.
+#[derive(Debug)]
+enum StartMode {
+    /// Classic single stream (small/unknown size, no range support, or a
+    /// contiguous partial file from a non-segmented session).
+    Single,
+    /// Fresh file: probe range support, then go multi or single.
+    Fresh,
+    /// Segmented resume from the in-memory bitmap (holes possible on disk).
+    Resume(SegmentState),
+}
+
+/// One `Range: bytes=0-0` round trip: proves range support AND yields the
+/// total (`Accept-Ranges` headers alone are unreliable). Any error means
+/// "fall back to single-stream", never a user-facing failure.
+async fn probe_ranges(
+    client: &reqwest::Client,
+    url: &str,
+    opts: &DownloadOptions,
+    timeout: Duration,
+) -> Result<u64, String> {
+    let mut req = client.get(url).header("Range", "bytes=0-0");
+    if !opts.user_agent.trim().is_empty() {
+        req = req.header("User-Agent", opts.user_agent.trim());
+    }
+    let resp = match tokio::time::timeout(
+        timeout,
+        client.execute(req.build().map_err(|e| e.to_string())?),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(e.to_string()),
+        Err(_) => return Err("Connection timed out".to_string()),
+    };
+    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err("Range requests not supported".to_string());
+    }
+    let value = resp
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    parse_range_total(&value, 0).ok_or_else(|| "Bad Content-Range".to_string())
+}
+
+/// Parse `Content-Range: bytes <start>-<end>/<total>`, checking the range
+/// starts where we asked (pins all chunks to one file version).
+fn parse_range_total(value: &str, expect_start: u64) -> Option<u64> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, _) = range.split_once('-')?;
+    if start.parse::<u64>().ok()? != expect_start {
+        return None;
+    }
+    let total: u64 = total.parse().ok()?;
+    (total > 0).then_some(total)
+}
+
+/// Fetch one `[start, end]` piece, retrying stalls. Verifies the server
+/// still serves the probed file version via the Content-Range total.
+async fn fetch_piece(
+    ctx: &FetchCtx,
+    start: u64,
+    end: u64,
+    total: u64,
+    name_offered: &Arc<AtomicBool>,
+    name_tx: &async_channel::Sender<EngineMsg>,
+) -> Result<Vec<u8>, String> {
+    let timeout = ctx.timeout;
+    let mut last_err = "Empty response".to_string();
+    for _ in 0..PIECE_TRIES {
+        let mut req = ctx
+            .client
+            .get(&ctx.url)
+            .header("Range", format!("bytes={start}-{end}"));
+        if !ctx.opts.user_agent.trim().is_empty() {
+            req = req.header("User-Agent", ctx.opts.user_agent.trim());
+        }
+        let resp = match tokio::time::timeout(
+            timeout,
+            ctx.client.execute(req.build().map_err(|e| e.to_string())?),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                last_err = e.to_string();
+                continue;
+            }
+            Err(_) => {
+                last_err = "Connection timed out".to_string();
+                continue;
+            }
+        };
+        if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            last_err = format!("Range rejected: HTTP {}", resp.status().as_u16());
+            continue;
+        }
+        let cr = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        if parse_range_total(&cr, start) != Some(total) {
+            last_err = "File changed on server".to_string();
+            continue;
+        }
+        if !name_offered.swap(true, Ordering::SeqCst) {
+            if let Some(name) = resp
+                .headers()
+                .get(reqwest::header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(filename_from_content_disposition)
+            {
+                name_tx.send(EngineMsg::SuggestName(name)).await.ok();
+            }
+        }
+        let mut body = Vec::with_capacity((end - start + 1).min(2 * PIECE_SIZE) as usize);
+        let mut stream = resp.bytes_stream();
+        let piece_deadline = tokio::time::sleep(timeout.saturating_mul(10));
+        tokio::pin!(piece_deadline);
+        let failed = loop {
+            tokio::select! {
+                _ = &mut piece_deadline => break Some("Piece stalled".to_string()),
+                next = tokio::time::timeout(timeout, stream.next()) => match next {
+                    Ok(Some(Ok(c))) => {
+                        if body.len() + c.len() > (end - start + 1) as usize + 1024 {
+                            break Some("Server sent too much data".to_string());
+                        }
+                        body.extend_from_slice(&c);
+                    }
+                    Ok(Some(Err(e))) => break Some(format!("Download interrupted: {e}")),
+                    Ok(None) => break None,
+                    Err(_) => break Some("Stalled connection timed out".to_string()),
+                },
+            }
+        };
+        if let Some(e) = failed {
+            last_err = e;
+            continue;
+        }
+        return Ok(body);
+    }
+    Err(last_err)
+}
+
 pub struct DownloadManager {
     store: gio::ListStore,
     settings: gio::Settings,
@@ -447,6 +1037,8 @@ pub struct DownloadManager {
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<bool>,
+    /// Resume bitmaps for segmented downloads (session-only, main thread).
+    segment_state: RefCell<HashMap<u64, SegmentState>>,
 }
 
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
@@ -460,6 +1052,7 @@ impl DownloadManager {
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(false),
+            segment_state: RefCell::new(HashMap::new()),
         })
     }
 
@@ -635,8 +1228,32 @@ impl DownloadManager {
             }
         };
         let url = item.url().to_string();
+        let connections = (opts.connections.max(1) as usize).min(16);
+        let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
+        // A saved bitmap means this item wrote non-contiguous pieces: only a
+        // segmented resume is correct (single-stream appends at EOF).
+        let mode = match self.segment_state.borrow().get(&item.id()).cloned() {
+            Some(st) => {
+                let frac = (st.completed_bytes() as f64 / st.total.max(1) as f64).clamp(0.0, 1.0);
+                item.set_progress(frac);
+                StartMode::Resume(st)
+            }
+            None => match std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) {
+                0 => StartMode::Fresh,
+                _ => StartMode::Single,
+            },
+        };
         let (tx, rx) = async_channel::unbounded();
-        let handle = tokio_rt().spawn(run_download(http_client(), url, dest, opts, rate, tx));
+        let ctx = FetchCtx {
+            client: http_client(),
+            url,
+            dest,
+            opts,
+            rate_limit: rate,
+            timeout,
+            tx,
+        };
+        let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         item.set_status(DownloadStatus::Downloading);
         let host = url::Url::parse(&item.url())
@@ -696,6 +1313,7 @@ impl DownloadManager {
                             } else {
                                 "Finished".to_string()
                             });
+                            this.segment_state.borrow_mut().remove(&id);
                             this.notify_finished(&item, true, None);
                         }
                         break;
@@ -709,6 +1327,60 @@ impl DownloadManager {
                             this.notify_finished(&item, false, Some(e));
                         }
                         break;
+                    }
+                    EngineMsg::SegmentsInit { total } => {
+                        this.segment_state
+                            .borrow_mut()
+                            .insert(id, SegmentState::new(total));
+                    }
+                    EngineMsg::PieceDone(idx) => {
+                        if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
+                            st.mark(idx);
+                        }
+                    }
+                    EngineMsg::TruncatePrefix => {
+                        if let Some(st) = this.segment_state.borrow().get(&id) {
+                            truncate_to_prefix(&item.file_path(), st);
+                        }
+                    }
+                    EngineMsg::SuggestName(name) => {
+                        // Adopt the server-advertised name only while the
+                        // download is fresh: the engine writes through an open
+                        // handle, so renaming the path underneath is safe, and
+                        // resume offsets are unaffected.
+                        if item.status() != DownloadStatus::Downloading {
+                            continue;
+                        }
+                        let current = item.filename().to_string();
+                        if current != "index.html" && current.contains('.') {
+                            continue;
+                        }
+                        if name == current || !sane_filename(&name) {
+                            continue;
+                        }
+                        let dir = item.dest_dir().to_string();
+                        let taken = |n: &str| {
+                            std::path::Path::new(&dir).join(n).exists()
+                                || (0..this.store.n_items())
+                                    .filter_map(|i| {
+                                        this.store.item(i).and_downcast::<DownloadItem>()
+                                    })
+                                    .any(|it| it.dest_dir() == dir && it.filename() == n)
+                        };
+                        let final_name = dedupe_filename(&name, taken);
+                        if final_name == current {
+                            continue;
+                        }
+                        let old_path = item.file_path();
+                        let new_path = std::path::Path::new(&dir).join(&final_name);
+                        if old_path != new_path {
+                            if old_path.exists() && std::fs::rename(&old_path, &new_path).is_err() {
+                                continue;
+                            }
+                            item.set_filename(final_name);
+                            this.persist_queue();
+                            this.changed();
+                        }
                     }
                 }
             }
@@ -778,7 +1450,11 @@ impl DownloadManager {
             handle.abort();
         }
         self.running.borrow_mut().remove(&id);
+        let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         if let Some(item) = self.find(id) {
+            if had_segments {
+                let _ = std::fs::remove_file(item.file_path());
+            }
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
         }
@@ -1033,9 +1709,26 @@ impl DownloadManager {
 
     /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {
-        for handle in self.running.borrow().values() {
+        let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
+        for handle in &handles {
             handle.abort();
         }
+        // Engine tasks touch only the tokio runtime (never the main thread),
+        // so joining them here is prompt and deadlock-free.
+        tokio_rt().block_on(async {
+            for handle in handles {
+                let _ = handle.await;
+            }
+        });
+        let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
+        for id in ids {
+            if let (Some(st), Some(item)) =
+                (self.segment_state.borrow().get(&id).cloned(), self.find(id))
+            {
+                truncate_to_prefix(&item.file_path(), &st);
+            }
+        }
+        self.segment_state.borrow_mut().clear();
         self.persist_queue();
     }
 }
@@ -1061,6 +1754,110 @@ mod tests {
         std::env::set_var("GSETTINGS_BACKEND", "memory");
         gio::Settings::new("io.github.houssemko.Grab")
     }
+    #[test]
+    fn splits_pieces() {
+        // Too small: single-stream fallback.
+        assert!(plan_pieces(0, 4).is_empty());
+        assert!(plan_pieces(1024, 4).is_empty());
+        assert!(plan_pieces(8 * 1024 * 1024 - 1, 4).is_empty());
+        // Just under one segment per connection still splits if >= 2 fit.
+        assert!(!plan_pieces(16 * 1024 * 1024 - 1, 4).is_empty());
+        // One connection disables splitting entirely.
+        assert!(plan_pieces(100 * 1024 * 1024, 1).is_empty());
+        assert!(plan_pieces(100 * 1024 * 1024, 0).is_empty());
+        // 100 MB at 4 connections: full 1 MB coverage, inclusive ends.
+        let pieces = plan_pieces(100 * 1024 * 1024, 4);
+        assert_eq!(pieces.len(), 100);
+        assert_eq!(pieces[0], (0, 1024 * 1024 - 1));
+        assert_eq!(pieces[99].1, 100 * 1024 * 1024 - 1);
+        for w in pieces.windows(2) {
+            assert_eq!(w[0].1 + 1, w[1].0);
+        }
+        // Uneven tail.
+        let pieces = plan_pieces(9_000_000, 4);
+        assert_eq!(pieces.len(), 9);
+        assert_eq!(pieces.last().unwrap().1, 8_999_999);
+        // Worker split count follows connections x 4 MB.
+        assert_eq!(split_count(100 * 1024 * 1024, 4), 4);
+        assert_eq!(split_count(100 * 1024 * 1024, 99), 16);
+        assert_eq!(split_count(1024, 4), 0);
+    }
+
+    #[test]
+    fn parses_range_totals() {
+        assert_eq!(parse_range_total("bytes 0-0/12345", 0), Some(12345));
+        assert_eq!(
+            parse_range_total("bytes 1048576-2097151/12345", 1048576),
+            Some(12345)
+        );
+        // Wrong start (different file version) or garbage rejected.
+        assert_eq!(parse_range_total("bytes 0-99/12345", 50), None);
+        assert_eq!(parse_range_total("bytes */12345", 0), None);
+        assert_eq!(parse_range_total("nonsense", 0), None);
+        assert_eq!(parse_range_total("bytes 0-0/0", 0), None);
+    }
+
+    #[test]
+    fn truncates_to_prefix() {
+        let dir = std::env::temp_dir().join(format!("grab-trunc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("p.bin");
+        std::fs::write(&file, vec![7u8; 3 * PIECE_SIZE as usize]).unwrap();
+        // Pieces 0,1 done, 2 missing: shrink to 2 MB.
+        let mut st = SegmentState::new(3 * PIECE_SIZE);
+        st.mark(0);
+        st.mark(1);
+        truncate_to_prefix(&file, &st);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_SIZE);
+        // Already short: untouched.
+        truncate_to_prefix(&file, &st);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_SIZE);
+        // Nothing done: emptied.
+        let st = SegmentState::new(3 * PIECE_SIZE);
+        truncate_to_prefix(&file, &st);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parses_content_disposition() {
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=\"movie.mp4\""),
+            Some("movie.mp4".to_string())
+        );
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=movie.mp4"),
+            Some("movie.mp4".to_string())
+        );
+        // RFC 5987 encoding wins over the plain fallback.
+        assert_eq!(
+            filename_from_content_disposition(
+                "attachment; filename=\"fallback.bin\"; filename*=UTF-8''%E2%82%ACrates.mp4"
+            ),
+            Some("€rates.mp4".to_string())
+        );
+        // Directory components stripped (some servers send Windows paths).
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=\"C:\\\\dl\\\\movie.mp4\""),
+            Some("movie.mp4".to_string())
+        );
+        assert_eq!(
+            filename_from_content_disposition("attachment; FILENAME=\"upper.mp4\""),
+            Some("upper.mp4".to_string())
+        );
+        // Garbage rejected: traversal, empty, missing.
+        assert_eq!(filename_from_content_disposition("attachment"), None);
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=\"../evil.sh\""),
+            Some("evil.sh".to_string())
+        );
+        assert_eq!(
+            filename_from_content_disposition("attachment; filename=\"\""),
+            None
+        );
+        assert_eq!(filename_from_content_disposition(""), None);
+    }
+
     #[test]
     fn parses_rates() {
         assert_eq!(parse_rate(""), None);
@@ -1632,6 +2429,226 @@ mod tests {
         // UI future completes only when pumped. A fixed iteration count races
         // abort latency; instead pump until the context goes quiet, so no
         // pending future is left for another test's loop to trip over.
+        let ctx = glib::MainContext::default();
+        let mut idle_rounds = 0;
+        while idle_rounds < 50 {
+            if ctx.iteration(false) {
+                idle_rounds = 0;
+            } else {
+                idle_rounds += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn segmented_multi_connection_download() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("segmented");
+        let settings = test_settings();
+        settings.set_int("connections", 4).unwrap();
+
+        // 20 MB clears the 4 x 4 MB split threshold; unthrottled loopback
+        // keeps the test to a few seconds.
+        let dir = std::env::temp_dir().join(format!("grab-seg-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let payload: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(srv.join("big.bin"), &payload).unwrap();
+
+        let port = 20000 + (std::process::id() % 5000) as u16 + 13;
+        let ranges_log = dir.join("ranges.log");
+        let server = std::process::Command::new("python3")
+            .arg(format!(
+                "{}/tests/throttled_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg(port.to_string())
+            .arg(srv.join("big.bin"))
+            .arg(&ranges_log)
+            .arg("0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        let url = format!("http://127.0.0.1:{port}/big.bin");
+        let dest = dl.to_string_lossy().into_owned();
+
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        let server = Rc::new(RefCell::new(server));
+        glib::MainContext::default().spawn_local(async move {
+            let server_kill = Rc::clone(&server);
+            let path = dl.join("big.bin");
+            let fail = move |msg: &str| -> ! {
+                eprintln!("TEST FAILURE: {msg}");
+                let _ = server_kill.borrow_mut().kill();
+                std::process::exit(1);
+            };
+            let item = manager
+                .enqueue(&url, Some(&dest), Some("big.bin"))
+                .unwrap_or_else(|e| fail(&e));
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Done && waited < 600 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Done {
+                fail(&format!("expected Done, got {:?}", item.status()));
+            }
+            if std::fs::read(&path).unwrap() != payload {
+                fail("bytes differ");
+            }
+            if !item.detail().starts_with("Finished \u{2022} ") {
+                fail(&format!("expected size in detail, got {:?}", item.detail()));
+            }
+            // Distinct bounded ranges prove parallel segmented fetching
+            // (a single stream would log one open-ended "bytes=0" line).
+            let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+            let mut distinct = std::collections::HashSet::new();
+            for line in ranges.lines().filter(|l| l.starts_with("bytes=")) {
+                if line.contains('-') && !line.ends_with('-') && line.split('-').count() == 2 {
+                    distinct.insert(line.to_string());
+                }
+            }
+            if distinct.len() < 2 {
+                fail(&format!("expected 2+ distinct ranges, log: {ranges:?}"));
+            }
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            quit.quit();
+        });
+        let watchdog = main_loop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            if watchdog.is_running() {
+                eprintln!("TEST TIMEOUT");
+                std::process::exit(2);
+            }
+        });
+        main_loop.run();
+        // Quiescence drain on THIS thread so no pending future trips another test.
+        let ctx = glib::MainContext::default();
+        let mut idle_rounds = 0;
+        while idle_rounds < 50 {
+            if ctx.iteration(false) {
+                idle_rounds = 0;
+            } else {
+                idle_rounds += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn adopts_content_disposition_filename() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("disposition");
+        let settings = test_settings();
+
+        let dir = std::env::temp_dir().join(format!("grab-cd-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(srv.join("clip.mp4"), &payload).unwrap();
+
+        let port = 20000 + (std::process::id() % 5000) as u16 + 17;
+        let ranges_log = dir.join("ranges.log");
+        let server = std::process::Command::new("python3")
+            .arg(format!(
+                "{}/tests/throttled_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg(port.to_string())
+            .arg(srv.join("clip.mp4"))
+            .arg(&ranges_log)
+            .arg("0.05")
+            .arg("attachment; filename=\"movie.mp4\"")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        // Extensionless path, like CDN /videoplayback links.
+        let url = format!("http://127.0.0.1:{port}/getfile");
+        let dest = dl.to_string_lossy().into_owned();
+
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        let server = Rc::new(RefCell::new(server));
+        glib::MainContext::default().spawn_local(async move {
+            let server_kill = Rc::clone(&server);
+            let fail = move |msg: &str| -> ! {
+                eprintln!("TEST FAILURE: {msg}");
+                let _ = server_kill.borrow_mut().kill();
+                std::process::exit(1);
+            };
+            let item = manager
+                .enqueue(&url, Some(&dest), None)
+                .unwrap_or_else(|e| fail(&e));
+            assert_eq!(item.filename(), "getfile");
+            let mut waited = 0;
+            while (item.filename() != "movie.mp4" || item.status() != DownloadStatus::Done)
+                && waited < 600
+            {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.filename() != "movie.mp4" {
+                fail(&format!("expected rename, got {:?}", item.filename()));
+            }
+            if item.status() != DownloadStatus::Done {
+                fail(&format!("expected Done, got {:?}", item.status()));
+            }
+            let new_path = dl.join("movie.mp4");
+            if std::fs::read(&new_path).unwrap() != payload {
+                fail("bytes differ");
+            }
+            if dl.join("getfile").exists() {
+                fail("stale file left behind");
+            }
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            quit.quit();
+        });
+        let watchdog = main_loop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            if watchdog.is_running() {
+                eprintln!("TEST TIMEOUT");
+                std::process::exit(2);
+            }
+        });
+        main_loop.run();
         let ctx = glib::MainContext::default();
         let mut idle_rounds = 0;
         while idle_rounds < 50 {

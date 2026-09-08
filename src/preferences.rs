@@ -114,6 +114,15 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     bind_spin(settings, "max-concurrent", &concurrent);
     net_group.add(&concurrent);
 
+    let connections = adw::SpinRow::builder()
+        .title("Connections per download")
+        .subtitle("Parallel connections for large files (1 = single stream)")
+        .adjustment(&gtk4::Adjustment::new(4.0, 1.0, 16.0, 1.0, 1.0, 0.0))
+        .build();
+    connections.set_tooltip_text(Some("Files under ~16 MB always use one connection"));
+    bind_spin(settings, "connections", &connections);
+    net_group.add(&connections);
+
     let limit = adw::EntryRow::builder()
         .title("Speed limit")
         .text(settings.string("speed-limit").as_str())

@@ -12,6 +12,12 @@
       <summary>Simultaneous downloads</summary>
       <description>How many downloads may run at once.</description>
     </key>
+    <key name="connections" type="i">
+      <default>4</default>
+      <range min="1" max="16"/>
+      <summary>Connections per download</summary>
+      <description>How many parallel range connections a large download may use. 1 disables segmented downloading.</description>
+    </key>
     <key name="speed-limit" type="s">
       <default>''</default>
       <summary>Speed limit</summary>
