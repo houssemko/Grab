@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.1-alpha.11" date="2026-09-08">
+      <description>
+        <p>Download speed measures new bytes only, so resumed downloads read correctly.</p>
+      </description>
+    </release>
     <release version="0.2.1-alpha.10" date="2026-09-08">
       <description>
         <p>Segmented downloads resume across restarts instead of starting over.</p>

@@ -1455,7 +1455,10 @@ impl DownloadManager {
 
         let this = Rc::clone(self);
         let id = item.id();
-        let t0 = Instant::now();
+        // Speed baseline: deltas from here, not totals from zero. Resumes
+        // seed `downloaded` with pre-existing bytes, which lifetime-average
+        // math would otherwise report as fantasy GB/s on the first updates.
+        let mut base: Option<(u64, Instant)> = None;
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
@@ -1463,7 +1466,16 @@ impl DownloadManager {
                         if item.status() != DownloadStatus::Downloading {
                             continue;
                         }
-                        let bps = downloaded as f64 / t0.elapsed().as_secs_f64().max(0.001);
+                        let (d0, tb) = match base {
+                            Some((d0, tb)) if downloaded >= d0 => (d0, tb),
+                            _ => {
+                                let b = (downloaded, Instant::now());
+                                base = Some(b);
+                                b
+                            }
+                        };
+                        let bps = downloaded.saturating_sub(d0) as f64
+                            / Instant::now().duration_since(tb).as_secs_f64().max(0.001);
                         let speed = format!("{}/s", fmt_bytes(bps as u64));
                         match total {
                             Some(t) if t > 0 => {
