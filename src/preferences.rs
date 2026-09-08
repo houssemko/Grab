@@ -136,9 +136,7 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         let mark = move |row: &adw::EntryRow| {
             let t = row.text().to_string();
             let t = t.trim();
-            let ok = t.is_empty()
-                || t == "0"
-                || crate::download::parse_rate(t).is_some();
+            let ok = t.is_empty() || t == "0" || crate::download::parse_rate(t).is_some();
             if ok {
                 l.remove_css_class("error");
             } else {

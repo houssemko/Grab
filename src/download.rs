@@ -1096,16 +1096,23 @@ fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io
     }
     const AT_FDCWD: std::os::raw::c_int = -100;
     const RENAME_NOREPLACE: std::os::raw::c_uint = 1; // renameat2(2)
-    // Queue/dedupe names never contain NUL (sane_filename), but fail
-    // visibly instead of truncating if one ever slips through.
+                                                      // Queue/dedupe names never contain NUL (sane_filename), but fail
+                                                      // visibly instead of truncating if one ever slips through.
     let cvt = |p: &std::path::Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
     };
     let (old, new) = (cvt(old)?, cvt(new)?);
     // SAFETY: NUL-terminated buffers outlive the call; the rest are integers.
-    let r =
-        unsafe { renameat2(AT_FDCWD, old.as_ptr(), AT_FDCWD, new.as_ptr(), RENAME_NOREPLACE) };
+    let r = unsafe {
+        renameat2(
+            AT_FDCWD,
+            old.as_ptr(),
+            AT_FDCWD,
+            new.as_ptr(),
+            RENAME_NOREPLACE,
+        )
+    };
     if r == 0 {
         Ok(())
     } else {
@@ -1704,8 +1711,7 @@ impl DownloadManager {
                         let mut final_name = dedupe_filename(&name, taken);
                         let mut moved = !old_path.exists();
                         for _ in 0..8 {
-                            if moved || old_path == std::path::Path::new(&dir).join(&final_name)
-                            {
+                            if moved || old_path == std::path::Path::new(&dir).join(&final_name) {
                                 break;
                             }
                             match rename_noreplace(
@@ -1715,9 +1721,7 @@ impl DownloadManager {
                                 Ok(()) => {
                                     moved = true;
                                 }
-                                Err(e)
-                                    if e.kind() == std::io::ErrorKind::AlreadyExists =>
-                                {
+                                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                                     final_name = dedupe_filename(&name, taken);
                                 }
                                 Err(_) => break,
@@ -2074,7 +2078,10 @@ impl DownloadManager {
                 return;
             };
             if queue.version == 0 || queue.version > QUEUE_VERSION {
-                eprintln!("Grab: quarantining download queue version {}", queue.version);
+                eprintln!(
+                    "Grab: quarantining download queue version {}",
+                    queue.version
+                );
                 Self::quarantine_queue();
                 return;
             }
@@ -2090,9 +2097,7 @@ impl DownloadManager {
                     .into_iter()
                     .partition(|it| !matches!(it.status, StoredStatus::Done));
                 active.truncate(MAX_QUEUE_ITEMS);
-                let skip = done
-                    .len()
-                    .saturating_sub(MAX_QUEUE_ITEMS - active.len());
+                let skip = done.len().saturating_sub(MAX_QUEUE_ITEMS - active.len());
                 items = active
                     .into_iter()
                     .chain(done.into_iter().skip(skip))
