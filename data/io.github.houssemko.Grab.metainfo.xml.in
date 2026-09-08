@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.1-alpha.6" date="2026-09-07">
+      <description>
+        <p>Finished downloads show their final size where the speed was.</p>
+      </description>
+    </release>
     <release version="0.2.1-alpha.5" date="2026-09-07">
       <description>
         <p>URL length limit, CI checks on every push, and contributor documentation.</p>

@@ -266,7 +266,7 @@ fn http_client() -> &'static reqwest::Client {
 
 enum EngineMsg {
     Progress { downloaded: u64, total: Option<u64> },
-    Finished,
+    Finished { size: u64 },
     Failed(String),
 }
 
@@ -283,7 +283,11 @@ async fn run_download(
     loop {
         match attempt_once(client, &url, &dest, &opts, rate_limit, timeout, &tx).await {
             Ok(()) => {
-                tx.send(EngineMsg::Finished).await.ok();
+                let size = tokio::fs::metadata(&dest)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                tx.send(EngineMsg::Finished { size }).await.ok();
                 return;
             }
             Err(e) => {
@@ -566,7 +570,14 @@ impl DownloadManager {
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
-        item.set_detail("Finished".to_string());
+        let size = std::fs::metadata(item.file_path())
+            .map(|m| m.len())
+            .unwrap_or(0);
+        item.set_detail(if size > 0 {
+            format!("Finished • {}", fmt_bytes(size))
+        } else {
+            "Finished".to_string()
+        });
         self.insert(item);
     }
 
@@ -674,13 +685,17 @@ impl DownloadManager {
                             }
                         }
                     }
-                    EngineMsg::Finished => {
+                    EngineMsg::Finished { size } => {
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
-                            item.set_detail("Finished".to_string());
+                            item.set_detail(if size > 0 {
+                                format!("Finished • {}", fmt_bytes(size))
+                            } else {
+                                "Finished".to_string()
+                            });
                             this.notify_finished(&item, true, None);
                         }
                         break;
