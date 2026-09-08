@@ -378,6 +378,13 @@ enum EngineMsg {
     SegmentsInit {
         total: u64,
     },
+    /// The server is throttling parallel connections: the UI thread shrinks
+    /// the file to the completed prefix and drops the bitmap, then acks so
+    /// the engine may continue single-stream. Handshake (not fire-and-forget)
+    /// so a concurrent pause/resume can never observe bitmap without file.
+    FallbackSingle {
+        ack: async_channel::Sender<()>,
+    },
     /// Server-advertised filename (Content-Disposition). The UI thread adopts
     /// it when the current name is extensionless, after deduping.
     SuggestName(String),
@@ -405,7 +412,10 @@ async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
         StartMode::Fresh => match probe_ranges(ctx.client, &ctx.url, &ctx.opts, timeout).await {
             Ok(total) if !plan_pieces(total, connections).is_empty() => {
                 ctx.tx.send(EngineMsg::SegmentsInit { total }).await.ok();
-                multi_loop(&ctx, total, None, &mut tries).await;
+                if multi_loop(&ctx, total, None, connections, &mut tries).await {
+                    let mut single_tries = ctx.opts.tries.max(1);
+                    single_loop(&ctx, &mut single_tries).await;
+                }
             }
             _ => {
                 single_loop(&ctx, &mut tries).await;
@@ -413,7 +423,10 @@ async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
         },
         StartMode::Resume(st) => {
             let total = st.total;
-            multi_loop(&ctx, total, Some(st), &mut tries).await;
+            if multi_loop(&ctx, total, Some(st), connections, &mut tries).await {
+                let mut single_tries = ctx.opts.tries.max(1);
+                single_loop(&ctx, &mut single_tries).await;
+            }
         }
     }
 }
@@ -455,24 +468,45 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32) {
 /// manager (fed by PieceDone), so each retry transparently refetches only
 /// the still-missing pieces. On terminal failure the file is first shrunk
 /// to the completed prefix, keeping any later single-stream resume correct.
-async fn multi_loop(ctx: &FetchCtx, total: u64, saved: Option<SegmentState>, tries: &mut i32) {
+/// Returns true when the server throttled parallel connections: the caller
+/// continues single-stream after the UI thread shrinks the file to the
+/// completed prefix and drops the bitmap (see FallbackSingle).
+async fn multi_loop(
+    ctx: &FetchCtx,
+    total: u64,
+    saved: Option<SegmentState>,
+    max_workers: usize,
+    tries: &mut i32,
+) -> bool {
     loop {
-        match attempt_multi(ctx, total, saved.clone()).await {
+        match attempt_multi(ctx, total, saved.clone(), max_workers).await {
             Ok(()) => {
                 let size = tokio::fs::metadata(&ctx.dest)
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
                 ctx.tx.send(EngineMsg::Finished { size }).await.ok();
-                return;
+                return false;
             }
-            Err(e) => {
+            Err(AttemptFail::Throttled(_)) => {
+                let (ack_tx, ack_rx) = async_channel::bounded::<()>(1);
+                ctx.tx
+                    .send(EngineMsg::FallbackSingle { ack: ack_tx })
+                    .await
+                    .ok();
+                // Wait until the UI thread truncated + dropped the bitmap:
+                // starting single-stream any earlier could append over holes.
+                // If we get aborted here (pause/cancel), there is nothing to do.
+                let _ = ack_rx.recv().await;
+                return true;
+            }
+            Err(AttemptFail::Retryable(e)) => {
                 *tries -= 1;
                 if *tries <= 0 {
                     // Same channel, FIFO per sender: truncation lands first.
                     ctx.tx.send(EngineMsg::TruncatePrefix).await.ok();
                     ctx.tx.send(EngineMsg::Failed(e)).await.ok();
-                    return;
+                    return false;
                 }
             }
         }
@@ -486,10 +520,11 @@ async fn attempt_multi(
     ctx: &FetchCtx,
     total: u64,
     saved: Option<SegmentState>,
-) -> Result<(), String> {
+    max_workers: usize,
+) -> Result<(), AttemptFail> {
     let st = saved.unwrap_or_else(|| SegmentState::new(total));
     if st.total != total {
-        return Err("File changed on server".to_string());
+        return Err(AttemptFail::Retryable("File changed on server".to_string()));
     }
     let missing: Vec<(u64, u64, u64)> = st.missing();
     if missing.is_empty() {
@@ -498,32 +533,35 @@ async fn attempt_multi(
     let expect_bytes: u64 = missing.iter().map(|(_, s, e)| e - s + 1).sum();
     // Ensure the file exists at full size so workers can write at offsets.
     // Missing pieces stay sparse until fetched; resume always re-runs this.
-    tokio::fs::File::create(&ctx.dest)
+    // Never truncate here: completed pieces are already on disk.
+    ensure_sized(&ctx.dest, total)
         .await
-        .map_err(|e| format!("Cannot write file: {e}"))?
-        .set_len(total)
-        .await
-        .map_err(|e| format!("Cannot write file: {e}"))?;
+        .map_err(AttemptFail::Retryable)?;
     let queue: Arc<Mutex<VecDeque<(u64, u64, u64)>>> =
         Arc::new(Mutex::new(missing.into_iter().collect()));
     let failed = Arc::new(AtomicBool::new(false));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let throttled = Arc::new(AtomicBool::new(false));
     // (offset, bytes, piece index); bounded so a slow disk throttles fetchers.
     let (wtx, wrx) = async_channel::bounded::<(u64, Vec<u8>, u64)>(8);
     let name_offered = Arc::new(AtomicBool::new(false));
+    // Never exceed the configured connections: extra range requests are
+    // what throttling hosts punish.
     let n_workers = queue
         .lock()
         .expect("Grab: piece queue poisoned (bug)")
         .len()
+        .min(max_workers.max(1))
         .clamp(1, 16);
     let mut workers = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
-        let (ctx, wtx, queue, failed, first_err, name_offered, name_tx) = (
+        let (ctx, wtx, queue, failed, first_err, throttled, name_offered, name_tx) = (
             ctx,
             wtx.clone(),
             Arc::clone(&queue),
             Arc::clone(&failed),
             Arc::clone(&first_err),
+            Arc::clone(&throttled),
             Arc::clone(&name_offered),
             ctx.tx.clone(),
         );
@@ -543,11 +581,20 @@ async fn attempt_multi(
                             break; // Writer gone; attempt is over.
                         }
                     }
-                    Err(err) => {
+                    Err(AttemptFail::Throttled(msg)) => {
                         first_err
                             .lock()
                             .expect("Grab: error slot poisoned (bug)")
-                            .get_or_insert(err);
+                            .get_or_insert(msg);
+                        throttled.store(true, Ordering::SeqCst);
+                        failed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Err(AttemptFail::Retryable(msg)) => {
+                        first_err
+                            .lock()
+                            .expect("Grab: error slot poisoned (bug)")
+                            .get_or_insert(msg);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -620,17 +667,25 @@ async fn attempt_multi(
         }
     };
     let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
-    let written = wres?;
+    let written = wres.map_err(AttemptFail::Retryable)?;
+    if throttled.load(Ordering::SeqCst) {
+        let msg = first_err
+            .lock()
+            .expect("Grab: error slot poisoned (bug)")
+            .take()
+            .unwrap_or_else(|| "Download interrupted".to_string());
+        return Err(AttemptFail::Throttled(msg));
+    }
     if failed.load(Ordering::SeqCst) {
         let msg = first_err
             .lock()
             .expect("Grab: error slot poisoned (bug)")
             .take()
             .unwrap_or_else(|| "Download interrupted".to_string());
-        return Err(msg);
+        return Err(AttemptFail::Retryable(msg));
     }
     if written != expect_bytes {
-        return Err("Incomplete download".to_string());
+        return Err(AttemptFail::Retryable("Incomplete download".to_string()));
     }
     Ok(())
 }
@@ -851,6 +906,11 @@ impl SegmentState {
         out
     }
 
+    /// Contiguous completed prefix, in bytes.
+    fn prefix_len(&self) -> u64 {
+        self.done.iter().take_while(|b| **b).count() as u64 * PIECE_SIZE
+    }
+
     /// Bytes already on disk according to the bitmap.
     fn completed_bytes(&self) -> u64 {
         self.done
@@ -871,8 +931,7 @@ impl SegmentState {
 /// leave holes; a later single-stream resume appends at EOF, which is only
 /// correct on a contiguous prefix. Only ever shrinks.
 fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
-    let n = st.done.iter().take_while(|b| **b).count() as u64;
-    let prefix = n.saturating_mul(PIECE_SIZE);
+    let prefix = st.prefix_len();
     if let Ok(md) = std::fs::metadata(path) {
         if md.len() > prefix {
             if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
@@ -880,6 +939,26 @@ fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
             }
         }
     }
+}
+
+/// Open for writing (creating), sizing to `total` only when the size
+/// differs. `File::create` would truncate already-downloaded pieces on
+/// every resume/retry and silently corrupt the file while the bitmap still
+/// claims those pieces as done.
+async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), String> {
+    let file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dest)
+        .await
+        .map_err(|e| format!("Cannot write file: {e}"))?;
+    if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total {
+        file.set_len(total)
+            .await
+            .map_err(|e| format!("Cannot write file: {e}"))?;
+    }
+    Ok(())
 }
 
 /// How the engine task should start this download.
@@ -941,6 +1020,14 @@ fn parse_range_total(value: &str, expect_start: u64) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
+/// Why a piece or segmented attempt failed. Throttled means the server is
+/// rejecting parallel range requests (per-IP connection limits, common on
+/// file hosts) while a single stream still works: downgrade, don't retry.
+enum AttemptFail {
+    Retryable(String),
+    Throttled(String),
+}
+
 /// Fetch one `[start, end]` piece, retrying stalls. Verifies the server
 /// still serves the probed file version via the Content-Range total.
 async fn fetch_piece(
@@ -950,9 +1037,10 @@ async fn fetch_piece(
     total: u64,
     name_offered: &Arc<AtomicBool>,
     name_tx: &async_channel::Sender<EngineMsg>,
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, AttemptFail> {
     let timeout = ctx.timeout;
-    let mut last_err = "Empty response".to_string();
+    use AttemptFail::{Retryable, Throttled};
+    let mut last_err = Retryable("Empty response".to_string());
     for _ in 0..PIECE_TRIES {
         let mut req = ctx
             .client
@@ -961,24 +1049,34 @@ async fn fetch_piece(
         if !ctx.opts.user_agent.trim().is_empty() {
             req = req.header("User-Agent", ctx.opts.user_agent.trim());
         }
-        let resp = match tokio::time::timeout(
-            timeout,
-            ctx.client.execute(req.build().map_err(|e| e.to_string())?),
-        )
-        .await
-        {
+        let built = match req.build() {
+            Ok(r) => r,
+            Err(e) => {
+                last_err = Retryable(e.to_string());
+                continue;
+            }
+        };
+        let resp = match tokio::time::timeout(timeout, ctx.client.execute(built)).await {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                last_err = e.to_string();
+                last_err = Retryable(e.to_string());
                 continue;
             }
             Err(_) => {
-                last_err = "Connection timed out".to_string();
+                last_err = Retryable("Connection timed out".to_string());
                 continue;
             }
         };
         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-            last_err = format!("Range rejected: HTTP {}", resp.status().as_u16());
+            let code = resp.status().as_u16();
+            // Per-IP connection limits speak 403/429/503 (and 509 on some
+            // hosts) while a single stream still works: downgrade, not fail.
+            let throttled = matches!(code, 403 | 429 | 503) || code == 509;
+            last_err = if throttled {
+                Throttled(format!("Range rejected: HTTP {code}"))
+            } else {
+                Retryable(format!("Range rejected: HTTP {code}"))
+            };
             continue;
         }
         let cr = resp
@@ -988,7 +1086,7 @@ async fn fetch_piece(
             .unwrap_or_default()
             .to_string();
         if parse_range_total(&cr, start) != Some(total) {
-            last_err = "File changed on server".to_string();
+            last_err = Retryable("File changed on server".to_string());
             continue;
         }
         if !name_offered.swap(true, Ordering::SeqCst) {
@@ -1005,19 +1103,25 @@ async fn fetch_piece(
         let mut stream = resp.bytes_stream();
         let piece_deadline = tokio::time::sleep(timeout.saturating_mul(10));
         tokio::pin!(piece_deadline);
-        let failed = loop {
+        let failed: Option<AttemptFail> = loop {
             tokio::select! {
-                _ = &mut piece_deadline => break Some("Piece stalled".to_string()),
+                _ = &mut piece_deadline => {
+                    break Some(Retryable("Piece stalled".to_string()))
+                }
                 next = tokio::time::timeout(timeout, stream.next()) => match next {
                     Ok(Some(Ok(c))) => {
                         if body.len() + c.len() > (end - start + 1) as usize + 1024 {
-                            break Some("Server sent too much data".to_string());
+                            break Some(Retryable("Server sent too much data".to_string()));
                         }
                         body.extend_from_slice(&c);
                     }
-                    Ok(Some(Err(e))) => break Some(format!("Download interrupted: {e}")),
+                    Ok(Some(Err(e))) => {
+                        break Some(Retryable(format!("Download interrupted: {e}")))
+                    }
                     Ok(None) => break None,
-                    Err(_) => break Some("Stalled connection timed out".to_string()),
+                    Err(_) => {
+                        break Some(Retryable("Stalled connection timed out".to_string()))
+                    }
                 },
             }
         };
@@ -1234,9 +1338,22 @@ impl DownloadManager {
         // segmented resume is correct (single-stream appends at EOF).
         let mode = match self.segment_state.borrow().get(&item.id()).cloned() {
             Some(st) => {
-                let frac = (st.completed_bytes() as f64 / st.total.max(1) as f64).clamp(0.0, 1.0);
-                item.set_progress(frac);
-                StartMode::Resume(st)
+                // The bitmap is only valid if the file still holds at least
+                // the completed prefix (and nothing beyond the total): the
+                // user may have deleted, truncated, or replaced the partial
+                // file while paused. A stale bitmap would skip pieces that
+                // are no longer on disk, so drop it and start over instead.
+                let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+                if len < st.prefix_len() || len > st.total {
+                    self.segment_state.borrow_mut().remove(&item.id());
+                    let _ = std::fs::remove_file(&dest);
+                    StartMode::Fresh
+                } else {
+                    let frac =
+                        (st.completed_bytes() as f64 / st.total.max(1) as f64).clamp(0.0, 1.0);
+                    item.set_progress(frac);
+                    StartMode::Resume(st)
+                }
             }
             None => match std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0) {
                 0 => StartMode::Fresh,
@@ -1342,6 +1459,18 @@ impl DownloadManager {
                         if let Some(st) = this.segment_state.borrow().get(&id) {
                             truncate_to_prefix(&item.file_path(), st);
                         }
+                    }
+                    EngineMsg::FallbackSingle { ack } => {
+                        // Server throttled parallel connections: shrink to the
+                        // completed prefix and forget the bitmap, all here on
+                        // the main thread so no spawn can observe a half-done
+                        // transition. The engine waits for this ack before it
+                        // appends single-stream at EOF.
+                        if let Some(st) = this.segment_state.borrow().get(&id) {
+                            truncate_to_prefix(&item.file_path(), st);
+                        }
+                        this.segment_state.borrow_mut().remove(&id);
+                        ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {
                         // Adopt the server-advertised name only while the
@@ -2635,6 +2764,242 @@ mod tests {
             }
             if dl.join("getfile").exists() {
                 fail("stale file left behind");
+            }
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            quit.quit();
+        });
+        let watchdog = main_loop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            if watchdog.is_running() {
+                eprintln!("TEST TIMEOUT");
+                std::process::exit(2);
+            }
+        });
+        main_loop.run();
+        let ctx = glib::MainContext::default();
+        let mut idle_rounds = 0;
+        while idle_rounds < 50 {
+            if ctx.iteration(false) {
+                idle_rounds = 0;
+            } else {
+                idle_rounds += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn falls_back_to_single_stream_when_throttled() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("throttle");
+        let settings = test_settings();
+        settings.set_int("connections", 4).unwrap();
+
+        // Big enough to split; the server 403s every range except the probe,
+        // so the engine must downgrade to one stream and still finish intact.
+        let dir = std::env::temp_dir().join(format!("grab-thr-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let payload: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(srv.join("big.bin"), &payload).unwrap();
+
+        let port = 20000 + (std::process::id() % 5000) as u16 + 19;
+        let ranges_log = dir.join("ranges.log");
+        let server = std::process::Command::new("python3")
+            .arg(format!(
+                "{}/tests/throttled_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg(port.to_string())
+            .arg(srv.join("big.bin"))
+            .arg(&ranges_log)
+            .arg("0")
+            .arg("")
+            .arg("throttle-ranges")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        let url = format!("http://127.0.0.1:{port}/big.bin");
+        let dest = dl.to_string_lossy().into_owned();
+
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        let server = Rc::new(RefCell::new(server));
+        glib::MainContext::default().spawn_local(async move {
+            let server_kill = Rc::clone(&server);
+            let path = dl.join("big.bin");
+            let fail = move |msg: &str| -> ! {
+                eprintln!("TEST FAILURE: {msg}");
+                let _ = server_kill.borrow_mut().kill();
+                std::process::exit(1);
+            };
+            let item = manager
+                .enqueue(&url, Some(&dest), Some("big.bin"))
+                .unwrap_or_else(|e| fail(&e));
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Done && waited < 600 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Done {
+                fail(&format!("expected Done, got {:?}", item.status()));
+            }
+            if std::fs::read(&path).unwrap() != payload {
+                fail("bytes differ");
+            }
+            // A full (unranged) request proves the single-stream fallback ran:
+            // pure multi would only ever log bounded ranges.
+            let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+            if !ranges.lines().any(|l| l == "full") {
+                fail(&format!("expected single-stream fallback, log: {ranges:?}"));
+            }
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            quit.quit();
+        });
+        let watchdog = main_loop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            if watchdog.is_running() {
+                eprintln!("TEST TIMEOUT");
+                std::process::exit(2);
+            }
+        });
+        main_loop.run();
+        let ctx = glib::MainContext::default();
+        let mut idle_rounds = 0;
+        while idle_rounds < 50 {
+            if ctx.iteration(false) {
+                idle_rounds = 0;
+            } else {
+                idle_rounds += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn segmented_pause_resume_keeps_bytes() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("seg-pause");
+        let settings = test_settings();
+        settings.set_int("connections", 4).unwrap();
+
+        // 20 MB clears the split threshold; unthrottled loopback is slow
+        // enough to land a pause mid-transfer, fast enough for CI.
+        let dir = std::env::temp_dir().join(format!("grab-segp-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let payload: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(srv.join("big.bin"), &payload).unwrap();
+
+        let port = 20000 + (std::process::id() % 5000) as u16 + 23;
+        let ranges_log = dir.join("ranges.log");
+        let server = std::process::Command::new("python3")
+            .arg(format!(
+                "{}/tests/throttled_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg(port.to_string())
+            .arg(srv.join("big.bin"))
+            .arg(&ranges_log)
+            .arg("0")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        let url = format!("http://127.0.0.1:{port}/big.bin");
+        let dest = dl.to_string_lossy().into_owned();
+
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        let server = Rc::new(RefCell::new(server));
+        glib::MainContext::default().spawn_local(async move {
+            let server_kill = Rc::clone(&server);
+            let path = dl.join("big.bin");
+            let fail = move |msg: &str| -> ! {
+                eprintln!("TEST FAILURE: {msg}");
+                let _ = server_kill.borrow_mut().kill();
+                std::process::exit(1);
+            };
+            let item = manager
+                .enqueue(&url, Some(&dest), Some("big.bin"))
+                .unwrap_or_else(|e| fail(&e));
+            let id = item.id();
+            // Wait until at least one 1 MB piece (5%) landed, then pause.
+            // The status check is part of the loop condition (same thread runs
+            // to pause() with no await in between, so it cannot slip to Done).
+            let mut waited = 0;
+            while item.status() == DownloadStatus::Downloading
+                && item.progress() < 0.05
+                && waited < 2000
+            {
+                glib::timeout_future(std::time::Duration::from_millis(5)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Downloading {
+                fail("finished before pause could land mid-transfer");
+            }
+            manager.pause(id);
+            if item.status() != DownloadStatus::Paused {
+                fail(&format!("expected Paused, got {:?}", item.status()));
+            }
+            // Resume must reuse the bitmap (partially done, not all).
+            let mid: bool = manager
+                .segment_state
+                .borrow()
+                .get(&id)
+                .map(|st| st.done.iter().any(|b| *b) && st.done.iter().any(|b| !b))
+                .unwrap_or(false);
+            if !mid {
+                fail("resume bitmap is not mid-transfer");
+            }
+            manager.resume(id);
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Done && waited < 600 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Done {
+                fail(&format!("expected Done, got {:?}", item.status()));
+            }
+            // The regression: resume used to truncate completed pieces to
+            // zero while the bitmap still claimed them as done.
+            if std::fs::read(&path).unwrap() != payload {
+                fail("bytes differ after pause/resume");
             }
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);

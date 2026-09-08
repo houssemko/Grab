@@ -14,6 +14,9 @@ with open(sys.argv[2], "rb") as f:
 RANGELOG = sys.argv[3]
 SLEEP = float(sys.argv[4]) if len(sys.argv) > 4 else 0.05
 DISPOSITION = sys.argv[5] if len(sys.argv) > 5 else None
+# "throttle-ranges": 206 only for the bytes=0-0 probe, 403 for every other
+# Range request (simulates per-IP connection limits on file hosts).
+MODE = sys.argv[6] if len(sys.argv) > 6 else "normal"
 
 
 class H(BaseHTTPRequestHandler):
@@ -37,6 +40,10 @@ class H(BaseHTTPRequestHandler):
         if start >= len(DATA):
             self.send_response(416)
             self.send_header("Content-Range", f"bytes */{len(DATA)}")
+            self.end_headers()
+            return
+        if MODE == "throttle-ranges" and is_range and not (start == 0 and end == 0):
+            self.send_response(403)
             self.end_headers()
             return
         body = DATA[start : end + 1]
