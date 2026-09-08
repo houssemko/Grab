@@ -877,6 +877,11 @@ fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// "900 MB of 2.0 GB" for progress rows (Files copy-dialog convention).
+fn format_amounts(downloaded: u64, total: u64) -> String {
+    format!("{} of {}", fmt_bytes(downloaded), fmt_bytes(total))
+}
+
 fn fmt_eta(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 {
@@ -1489,8 +1494,9 @@ impl DownloadManager {
                                 };
                                 item.set_eta(eta.clone());
                                 item.set_detail(format!(
-                                    "{}% • {} • ETA {}",
+                                    "{}% • {} • {} • ETA {}",
                                     (frac * 100.0) as u64,
+                                    format_amounts(downloaded, t),
                                     speed,
                                     eta
                                 ));
@@ -1798,6 +1804,13 @@ impl DownloadManager {
                 DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
             )
         })
+    }
+
+    /// Whether anything is actually transferring (queued or downloading).
+    /// Paused items don't count: closing over only-paused downloads quits
+    /// instead of hiding to a "background" notification.
+    pub fn has_transferring(&self) -> bool {
+        self.any_status(|s| matches!(s, DownloadStatus::Queued | DownloadStatus::Downloading))
     }
 
     /// Whether any item failed or was cancelled.
@@ -2244,6 +2257,33 @@ mod tests {
         assert_eq!(parse_rate("1024"), Some(1024));
         assert_eq!(parse_rate("junk"), None);
         assert_eq!(parse_rate("-5K"), None);
+    }
+
+    #[test]
+    fn transferring_ignores_paused() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("transferring");
+        let settings = test_settings();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        assert!(!manager.has_transferring());
+        let paused = DownloadItem::new(1, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+        paused.set_status(DownloadStatus::Paused);
+        manager.store().append(&paused);
+        assert!(manager.has_active());
+        assert!(!manager.has_transferring());
+        let queued = DownloadItem::new(2, "https://example.com/b.bin", "b.bin", "/tmp/dl");
+        queued.set_status(DownloadStatus::Queued);
+        manager.store().append(&queued);
+        assert!(manager.has_transferring());
+    }
+
+    #[test]
+    fn formats_amounts() {
+        assert_eq!(format_amounts(0, 1024), "0 B of 1.0 KB");
+        assert_eq!(
+            format_amounts(5 * 1024 * 1024, 2 * 1024 * 1024 * 1024),
+            "5.0 MB of 2.0 GB"
+        );
     }
 
     #[test]

@@ -461,7 +461,10 @@ pub fn build_window(
     {
         let m = Rc::clone(&manager);
         window.connect_close_request(move |win| {
-            if m.has_active() {
+            // Only hide to background while bytes are actually moving. Paused
+            // items (or none at all) quit normally: notifying "continues in
+            // the background" would be a lie with nothing transferring.
+            if m.has_transferring() {
                 win.set_visible(false);
                 if m.notifications_enabled() {
                     if let Some(app) = gio::Application::default() {
