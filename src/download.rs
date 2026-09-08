@@ -1494,7 +1494,7 @@ impl DownloadManager {
                                 };
                                 item.set_eta(eta.clone());
                                 item.set_detail(format!(
-                                    "{}% • {} • {} • ETA {}",
+                                    "{}% ({}) • {} • ETA {}",
                                     (frac * 100.0) as u64,
                                     format_amounts(downloaded, t),
                                     speed,
