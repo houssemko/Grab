@@ -153,18 +153,28 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     settings.bind("user-agent", &ua, "text").build();
     net_group.add(&ua);
 
-    let ui_group = adw::PreferencesGroup::builder().title("Interface").build();
+    let notif_group = adw::PreferencesGroup::builder()
+        .title("Notifications")
+        .build();
     let notif = adw::SwitchRow::builder()
         .title("Notify when downloads finish")
         .build();
     settings
         .bind("show-notifications", &notif, "active")
         .build();
-    ui_group.add(&notif);
+    notif_group.add(&notif);
+    let bg_notif = adw::SwitchRow::builder()
+        .title("Notify for background downloads")
+        .subtitle("When closing with downloads still running")
+        .build();
+    settings
+        .bind("notify-background", &bg_notif, "active")
+        .build();
+    notif_group.add(&bg_notif);
 
     page.add(&dest_group);
     page.add(&net_group);
-    page.add(&ui_group);
+    page.add(&notif_group);
     dialog.add(&page);
     dialog.present(Some(parent));
 }

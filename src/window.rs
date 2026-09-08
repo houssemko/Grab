@@ -466,7 +466,7 @@ pub fn build_window(
             // the background" would be a lie with nothing transferring.
             if m.has_transferring() {
                 win.set_visible(false);
-                if m.notifications_enabled() {
+                if m.background_notifications_enabled() {
                     if let Some(app) = gio::Application::default() {
                         let n = gio::Notification::new("Downloads continue in the background");
                         n.set_body(Some("Grab stays open until they finish."));

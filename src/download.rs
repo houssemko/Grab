@@ -1357,6 +1357,11 @@ impl DownloadManager {
         self.settings.boolean("show-notifications")
     }
 
+    /// Whether closing over active downloads notifies.
+    pub fn background_notifications_enabled(&self) -> bool {
+        self.settings.boolean("notify-background")
+    }
+
     /// Configured folder, or the system Downloads folder when empty.
     pub fn effective_download_dir(&self) -> String {
         let configured = self.settings.string("download-dir").to_string();
@@ -2257,6 +2262,22 @@ mod tests {
         assert_eq!(parse_rate("1024"), Some(1024));
         assert_eq!(parse_rate("junk"), None);
         assert_eq!(parse_rate("-5K"), None);
+    }
+
+    #[test]
+    fn notification_toggles() {
+        // NOTE: no pristine-defaults assert here: the memory GSettings
+        // backend is process-shared, so other tests' set_boolean(false)
+        // calls are visible. This checks live key -> method wiring instead.
+        let settings = test_settings();
+        settings.set_boolean("show-notifications", true).unwrap();
+        settings.set_boolean("notify-background", true).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        assert!(manager.notifications_enabled());
+        assert!(manager.background_notifications_enabled());
+        settings.set_boolean("notify-background", false).unwrap();
+        assert!(!manager.background_notifications_enabled());
+        assert!(manager.notifications_enabled());
     }
 
     #[test]

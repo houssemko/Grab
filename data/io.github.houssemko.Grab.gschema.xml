@@ -45,6 +45,11 @@
       <summary>Notify on completion</summary>
       <description>Send a desktop notification when a download finishes or fails.</description>
     </key>
+    <key name="notify-background" type="b">
+      <default>true</default>
+      <summary>Notify for background downloads</summary>
+      <description>Send a desktop notification when closing the window while downloads keep running in the background.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>
