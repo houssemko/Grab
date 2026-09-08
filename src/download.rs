@@ -181,7 +181,20 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
 }
 
 fn sane_filename(s: &str) -> bool {
-    !s.is_empty() && !s.contains('/') && !s.contains('\0') && s != "." && s != ".."
+    /// Explicit bidi controls (marks, embeddings/overrides, isolates).
+    /// No std helper exists, so match the assigned ranges with escapes
+    /// (never literal glyphs: they are invisible in source).
+    fn is_bidi_control(c: char) -> bool {
+        matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    }
+    !s.is_empty()
+        && !s.contains('/')
+        && !s.contains('\0')
+        && s != "."
+        && s != ".."
+        // Control/bidi-override characters deceive in listings and
+        // notification text (FIND-03/04); servers love to send them.
+        && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
 /// Best-effort filename from a URL path, falling back to `index.html`.
@@ -900,6 +913,10 @@ const PIECE_SIZE: u64 = 1024 * 1024;
 /// (aria2-style: connections x MIN_SEGMENT), keeping small downloads on the
 /// cheaper single-stream path.
 const MIN_SEGMENT: u64 = 4 * 1024 * 1024;
+/// Largest server-claimed size eligible for splitting. A lying Content-Range
+/// would otherwise size a bitmap and sparse file to absurdity; above this,
+/// downloads stay single-stream (which preallocates nothing).
+const MAX_SEGMENTED_TOTAL: u64 = 1 << 40;
 /// Per-piece fetch attempts before a worker gives up on it.
 const PIECE_TRIES: u32 = 3;
 
@@ -910,9 +927,10 @@ fn split_count(total: u64, connections: usize) -> usize {
 }
 
 /// Split `total` bytes into 1 MB `(start, end)` pieces (inclusive ends).
-/// Empty when the file is too small to split: caller uses single-stream.
+/// Empty when the file is too small — or too big to trust — to split:
+/// caller uses single-stream.
 fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
-    if split_count(total, connections) < 2 || total == 0 {
+    if total > MAX_SEGMENTED_TOTAL || split_count(total, connections) < 2 || total == 0 {
         return Vec::new();
     }
     let mut pieces = Vec::new();
@@ -1212,6 +1230,9 @@ pub struct DownloadManager {
     batch: Cell<bool>,
     /// Resume bitmaps for segmented downloads (session-only, main thread).
     segment_state: RefCell<HashMap<u64, SegmentState>>,
+    /// Set by shutdown(): stale engine futures must not re-persist or
+    /// re-mark rows once the authoritative shutdown persist has run.
+    draining: Cell<bool>,
 }
 
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
@@ -1226,6 +1247,7 @@ impl DownloadManager {
             on_change: RefCell::new(None),
             batch: Cell::new(false),
             segment_state: RefCell::new(HashMap::new()),
+            draining: Cell::new(false),
         })
     }
 
@@ -1469,6 +1491,10 @@ impl DownloadManager {
         // seed `downloaded` with pre-existing bytes, which lifetime-average
         // math would otherwise report as fantasy GB/s on the first updates.
         let mut base: Option<(u64, Instant)> = None;
+        // Set on Finished/Failed. If the channel closes first, the engine
+        // task died without reporting (panic): fail the row instead of
+        // stranding it as "Downloading" forever.
+        let mut done = false;
         glib::spawn_future_local(async move {
             while let Ok(msg) = rx.recv().await {
                 match msg {
@@ -1525,6 +1551,7 @@ impl DownloadManager {
                             this.segment_state.borrow_mut().remove(&id);
                             this.notify_finished(&item, true, None);
                         }
+                        done = true;
                         break;
                     }
                     EngineMsg::Failed(e) => {
@@ -1535,6 +1562,7 @@ impl DownloadManager {
                             item.set_detail(e.clone());
                             this.notify_finished(&item, false, Some(e));
                         }
+                        done = true;
                         break;
                     }
                     EngineMsg::SegmentsInit { total } => {
@@ -1610,6 +1638,14 @@ impl DownloadManager {
                 }
             }
             this.running.borrow_mut().remove(&id);
+            if this.draining.get() {
+                return;
+            }
+            if !done && item.status() == DownloadStatus::Downloading {
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail("Download interrupted".to_string());
+                this.notify_finished(&item, false, Some("Download interrupted".to_string()));
+            }
             this.persist_queue();
             this.changed();
             this.start_next();
@@ -1943,6 +1979,7 @@ impl DownloadManager {
                         let segments = match item.segments {
                             Some(s)
                                 if s.total > 0
+                                    && s.total <= MAX_SEGMENTED_TOTAL
                                     && s.done.len() == s.total.div_ceil(PIECE_SIZE) as usize =>
                             {
                                 Some(SegmentState {
@@ -1972,6 +2009,7 @@ impl DownloadManager {
 
     /// Abort running tasks and persist the queue for the next launch.
     pub fn shutdown(&self) {
+        self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
         for handle in &handles {
             handle.abort();
@@ -2139,6 +2177,10 @@ mod tests {
         let pieces = plan_pieces(9_000_000, 4);
         assert_eq!(pieces.len(), 9);
         assert_eq!(pieces.last().unwrap().1, 8_999_999);
+        // Absurd server-claimed sizes never split (FIND-01): no giant
+        // bitmap, no terabyte sparse file, just single-stream.
+        assert!(plan_pieces(u64::MAX, 16).is_empty());
+        assert!(plan_pieces(2 * (1 << 40), 16).is_empty());
         // Worker split count follows connections x 4 MB.
         assert_eq!(split_count(100 * 1024 * 1024, 4), 4);
         assert_eq!(split_count(100 * 1024 * 1024, 99), 16);
@@ -2542,6 +2584,11 @@ mod tests {
         assert!(!sane_filename("/etc/passwd"));
         assert!(!sane_filename("a/b"));
         assert!(!sane_filename("a\0b"));
+        // Control and bidi-override characters deceive in listings and
+        // notification text, and arrive via Content-Disposition decoding.
+        assert!(!sane_filename("a\nb.mp4"));
+        assert!(!sane_filename("a\tb.mp4"));
+        assert!(!sane_filename("evil\u{202e}mp4.txt"));
     }
 
     #[test]
@@ -3354,6 +3401,90 @@ mod tests {
             quit.quit();
         });
         run_loop(&main_loop, 120);
+    }
+
+    #[test]
+    fn aborted_engine_marks_failed() {
+        // Simulates an engine task dying without reporting (panic): aborting
+        // its handle must fail the row instead of stranding it Downloading.
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("abortwatch");
+        let settings = test_settings();
+
+        let dir = std::env::temp_dir().join(format!("grab-abw-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(srv.join("t.bin"), &payload).unwrap();
+
+        let port = 20000 + (std::process::id() % 5000) as u16 + 37;
+        let ranges_log = dir.join("ranges.log");
+        let server = std::process::Command::new("python3")
+            .arg(format!(
+                "{}/tests/throttled_server.py",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .arg(port.to_string())
+            .arg(srv.join("t.bin"))
+            .arg(&ranges_log)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings);
+        let url = format!("http://127.0.0.1:{port}/t.bin");
+        let dest = dl.to_string_lossy().into_owned();
+
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        let server = Rc::new(RefCell::new(server));
+        glib::MainContext::default().spawn_local(async move {
+            let item = manager
+                .enqueue(&url, Some(&dest), Some("t.bin"))
+                .unwrap_or_else(|e| abort(&server, &e));
+            let id = item.id();
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Downloading && waited < 200 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Downloading {
+                abort(&server, "never started downloading");
+            }
+            // Kill the engine task without touching row state, as a panic would.
+            if let Some(handle) = manager.running.borrow().get(&id) {
+                handle.abort();
+            }
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Failed && waited < 100 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Failed {
+                abort(
+                    &server,
+                    &format!("dead engine left row {:?}", item.status()),
+                );
+            }
+            assert_eq!(item.detail(), "Download interrupted");
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            quit.quit();
+        });
+        run_loop(&main_loop, 60);
     }
 
     #[test]
