@@ -36,7 +36,7 @@ impl DownloadStatus {
     }
 }
 
-const QUEUE_VERSION: u32 = 1;
+const QUEUE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +69,18 @@ struct StoredItem {
     status: StoredStatus,
     #[serde(default)]
     progress: f64,
+    /// Completed 1 MB pieces for segmented resume across restarts (v2+).
+    /// Absent on v1 files and for items that need no resume.
+    #[serde(default)]
+    segments: Option<StoredSegments>,
+}
+
+/// Persisted piece bitmap: `done[i]` covers
+/// `[i * PIECE_SIZE, min((i+1) * PIECE_SIZE, total))`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct StoredSegments {
+    total: u64,
+    done: Vec<bool>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -913,7 +925,7 @@ fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
 /// resume single-stream (files are truncated to a contiguous prefix first,
 /// which keeps that path correct).
 #[derive(Debug, Clone)]
-struct SegmentState {
+pub(crate) struct SegmentState {
     total: u64,
     done: Vec<bool>,
 }
@@ -947,6 +959,20 @@ impl SegmentState {
     /// Contiguous completed prefix, in bytes.
     fn prefix_len(&self) -> u64 {
         self.done.iter().take_while(|b| **b).count() as u64 * PIECE_SIZE
+    }
+
+    /// Forget every piece from the first gap on, keeping the bitmap
+    /// consistent with a file truncated to the completed prefix. Used
+    /// wherever the file is shrunk while the bitmap is kept.
+    fn forget_beyond_prefix(&mut self) {
+        let mut gap = false;
+        for slot in self.done.iter_mut() {
+            if !*slot {
+                gap = true;
+            } else if gap {
+                *slot = false;
+            }
+        }
     }
 
     /// Bytes already on disk according to the bitmap.
@@ -1258,6 +1284,7 @@ impl DownloadManager {
     }
 
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
+    /// A validated piece bitmap resumes segmented instead of restarting.
     ///
     /// # Errors
     /// Returns a display-ready message when the stored entry is invalid.
@@ -1267,6 +1294,7 @@ impl DownloadManager {
         dest_dir: &str,
         filename: &str,
         status: StoredStatus,
+        segments: Option<SegmentState>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         validate_url(&url)?;
@@ -1278,6 +1306,9 @@ impl DownloadManager {
         }
         let item = DownloadItem::new(self.alloc_id(), &url, filename, dest_dir);
         item.set_status(restored_status(status));
+        if let Some(st) = segments {
+            self.segment_state.borrow_mut().insert(item.id(), st);
+        }
         Ok(self.insert(item))
     }
 
@@ -1494,8 +1525,12 @@ impl DownloadManager {
                         }
                     }
                     EngineMsg::TruncatePrefix => {
-                        if let Some(st) = this.segment_state.borrow().get(&id) {
+                        if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
                             truncate_to_prefix(&item.file_path(), st);
+                            // The file just lost everything past the prefix;
+                            // the bitmap must forget it too, or a later resume
+                            // would skip pieces that are no longer on disk.
+                            st.forget_beyond_prefix();
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {
@@ -1596,6 +1631,8 @@ impl DownloadManager {
                 item.set_detail(format!("Paused • {}%", (item.progress() * 100.0) as u64));
             }
         }
+        // Persist the bitmap too: a kill while paused must resume segmented.
+        self.persist_queue();
         self.changed();
         self.start_next();
     }
@@ -1605,6 +1642,7 @@ impl DownloadManager {
         if let Some(item) = self.find(id) {
             if item.status() == DownloadStatus::Paused {
                 item.set_status(DownloadStatus::Queued);
+                self.persist_queue();
                 self.changed();
                 self.start_next();
             }
@@ -1779,12 +1817,21 @@ impl DownloadManager {
         for i in 0..self.store.n_items() {
             if let Some(it) = self.store.item(i).and_downcast::<DownloadItem>() {
                 if let Some(status) = StoredStatus::from_item(it.status()) {
+                    let segments =
+                        self.segment_state
+                            .borrow()
+                            .get(&it.id())
+                            .map(|st| StoredSegments {
+                                total: st.total,
+                                done: st.done.clone(),
+                            });
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
                         filename: it.filename().to_string(),
                         status,
                         progress: it.progress(),
+                        segments,
                     });
                 }
             }
@@ -1843,7 +1890,7 @@ impl DownloadManager {
                 eprintln!("Grab: ignoring unreadable download queue");
                 return;
             };
-            if queue.version != QUEUE_VERSION {
+            if queue.version == 0 || queue.version > QUEUE_VERSION {
                 eprintln!("Grab: ignoring download queue version {}", queue.version);
                 return;
             }
@@ -1860,9 +1907,28 @@ impl DownloadManager {
                         self.insert_history(item.url, item.dest_dir, item.filename, item.progress);
                     }
                     status => {
-                        if let Err(e) =
-                            self.restore_existing(&item.url, &item.dest_dir, &item.filename, status)
-                        {
+                        // A stored bitmap resumes segmented; anything
+                        // misshapen is dropped (single-stream fallback stays
+                        // correct via the spawn-time file checks).
+                        let segments = match item.segments {
+                            Some(s)
+                                if s.total > 0
+                                    && s.done.len() == s.total.div_ceil(PIECE_SIZE) as usize =>
+                            {
+                                Some(SegmentState {
+                                    total: s.total,
+                                    done: s.done,
+                                })
+                            }
+                            _ => None,
+                        };
+                        if let Err(e) = self.restore_existing(
+                            &item.url,
+                            &item.dest_dir,
+                            &item.filename,
+                            status,
+                            segments,
+                        ) {
                             eprintln!("Grab: skipping queue entry: {e}");
                         }
                     }
@@ -1889,13 +1955,18 @@ impl DownloadManager {
         });
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
         for id in ids {
-            if let (Some(st), Some(item)) =
-                (self.segment_state.borrow().get(&id).cloned(), self.find(id))
-            {
-                truncate_to_prefix(&item.file_path(), &st);
+            if let Some(item) = self.find(id) {
+                if let Some(st) = self.segment_state.borrow_mut().get_mut(&id) {
+                    truncate_to_prefix(&item.file_path(), st);
+                    st.forget_beyond_prefix();
+                }
             }
         }
-        self.segment_state.borrow_mut().clear();
+        // Persist BEFORE returning: the bitmaps are what let the next launch
+        // resume segmented instead of restarting. The map itself stays: the
+        // engine futures still draining will re-persist as they exit, and
+        // dropping the bitmaps here would make those rewrites lose them.
+        // (Fresh process exit frees the map anyway; shutdown only runs once.)
         self.persist_queue();
     }
 }
@@ -2056,6 +2127,23 @@ mod tests {
         assert_eq!(parse_range_total("bytes */12345", 0), None);
         assert_eq!(parse_range_total("nonsense", 0), None);
         assert_eq!(parse_range_total("bytes 0-0/0", 0), None);
+    }
+
+    #[test]
+    fn forgets_bitmap_beyond_prefix() {
+        let mut st = SegmentState::new(4 * PIECE_SIZE);
+        st.mark(0);
+        st.mark(1);
+        st.mark(3);
+        st.forget_beyond_prefix();
+        assert_eq!(
+            st.missing(),
+            vec![
+                (2, 2 * PIECE_SIZE, 3 * PIECE_SIZE - 1),
+                (3, 3 * PIECE_SIZE, 4 * PIECE_SIZE - 1),
+            ]
+        );
+        assert_eq!(st.prefix_len(), 2 * PIECE_SIZE);
     }
 
     #[test]
@@ -2289,6 +2377,7 @@ mod tests {
                 &dir_s,
                 "ubuntu.iso",
                 StoredStatus::Downloading,
+                None,
             )
             .unwrap();
         assert_eq!(item.filename(), "ubuntu.iso");
@@ -2320,6 +2409,7 @@ mod tests {
                     filename: "a.iso".to_string(),
                     status: StoredStatus::Queued,
                     progress: 0.0,
+                    segments: None,
                 },
                 StoredItem {
                     url: "https://example.com/b.iso".to_string(),
@@ -2327,6 +2417,7 @@ mod tests {
                     filename: "b.iso".to_string(),
                     status: StoredStatus::Done,
                     progress: 1.0,
+                    segments: None,
                 },
             ],
         };
@@ -2392,7 +2483,8 @@ mod tests {
                     "https://example.com/f.iso",
                     "/tmp/dl",
                     bad,
-                    StoredStatus::Queued
+                    StoredStatus::Queued,
+                    None,
                 )
                 .is_err());
         }
@@ -2401,7 +2493,8 @@ mod tests {
                 "https://example.com/f.iso",
                 "relative/dir",
                 "f.iso",
-                StoredStatus::Queued
+                StoredStatus::Queued,
+                None,
             )
             .is_err());
         assert_eq!(manager.store().n_items(), 0);
@@ -2419,6 +2512,7 @@ mod tests {
                 filename: format!("f{i}.iso"),
                 status: StoredStatus::Done,
                 progress: 1.0,
+                segments: None,
             })
             .collect();
         let queue = StoredQueue {
@@ -2517,6 +2611,7 @@ mod tests {
             filename: f.to_string(),
             status,
             progress: 0.5,
+            segments: None,
         })
         .collect();
         let queue = StoredQueue {
@@ -2978,6 +3073,43 @@ mod tests {
     }
 
     #[test]
+    fn bitmap_persists_across_managers() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("segpersist");
+        let settings = test_settings();
+        let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let item = DownloadItem::new(1, "https://example.com/big.bin", "big.bin", "/tmp/dl");
+        item.set_status(DownloadStatus::Paused);
+        m1.store().append(&item);
+        let mut st = SegmentState::new(4 * PIECE_SIZE);
+        st.mark(0);
+        st.mark(2);
+        m1.segment_state.borrow_mut().insert(1, st);
+        m1.persist_queue();
+
+        // v1 readers ignore the unknown field; v2 keeps it.
+        let text = std::fs::read_to_string(&qf).unwrap();
+        assert!(text.contains("\"segments\""));
+        let legacy = r#"{"version":1,"items":[{"url":"https://example.com/a.iso","dest_dir":"/tmp/dl","filename":"a.iso","status":"queued","progress":0.0}]}"#;
+        let back: StoredQueue = serde_json::from_str(legacy).unwrap();
+        assert!(back.items[0].segments.is_none());
+
+        let m2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        m2.restore_queue();
+        let restored = m2.segment_state.borrow();
+        let st = restored.get(&1).expect("bitmap restored");
+        assert_eq!(st.total, 4 * PIECE_SIZE);
+        assert_eq!(
+            st.missing(),
+            vec![
+                (1, PIECE_SIZE, 2 * PIECE_SIZE - 1),
+                (3, 3 * PIECE_SIZE, 4 * PIECE_SIZE - 1),
+            ]
+        );
+        let _ = std::fs::remove_file(&qf);
+    }
+
+    #[test]
     fn killed_segmented_resume_starts_over() {
         // Simulates SIGKILL mid-segmented-download: a sparse full-size file
         // with holes plus a stale Queued entry, no resume bitmap (RAM died
@@ -3015,6 +3147,7 @@ mod tests {
                     filename: "big.bin".to_string(),
                     status: StoredStatus::Queued,
                     progress: 0.0,
+                    segments: None,
                 }],
             })
             .unwrap(),
@@ -3045,6 +3178,102 @@ mod tests {
             }
             if std::fs::read(&dest).unwrap() != payload {
                 abort(&server, "holey file was marked Done instead of re-fetched");
+            }
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_file(&qf);
+            quit.quit();
+        });
+        run_loop(&main_loop, 120);
+    }
+
+    #[test]
+    fn shutdown_restart_resumes_segmented() {
+        // Full kill-restart cycle in-process: manager1 downloads segmented,
+        // shuts down mid-transfer (abort + truncate + persist WITH bitmap),
+        // then a fresh manager2 on the same queue file resumes segmented.
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("segrestart");
+        let settings = test_settings();
+        settings.set_int("connections", 4).unwrap();
+
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture("segr", "big.bin", 20_000_000, "0.002", &[], 31);
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let manager1 =
+            DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let url = format!("http://127.0.0.1:{port}/big.bin");
+            let dest = dl.to_string_lossy().into_owned();
+            let item = manager1
+                .enqueue(&url, Some(&dest), Some("big.bin"))
+                .unwrap_or_else(|e| abort(&server, &e));
+            let id = item.id();
+            let mut waited = 0;
+            while item.status() == DownloadStatus::Downloading
+                && item.progress() < 0.05
+                && waited < 2000
+            {
+                glib::timeout_future(std::time::Duration::from_millis(5)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Downloading {
+                abort(&server, "finished before shutdown could land mid-transfer");
+            }
+            manager1.shutdown();
+            // Bitmap survived shutdown, mid-transfer, and was persisted.
+            let mid1 = manager1
+                .segment_state
+                .borrow()
+                .get(&id)
+                .map(|st| st.done.iter().any(|b| *b) && st.done.iter().any(|b| !b))
+                .unwrap_or(false);
+            if !mid1 {
+                abort(&server, "no mid-transfer bitmap at shutdown");
+            }
+            let text = std::fs::read_to_string(&qf).unwrap();
+            if !text.contains("\"segments\"") {
+                abort(&server, "bitmap was not persisted");
+            }
+            // Fresh manager, same queue file: must pick up the bitmap and
+            // resume segmented, not restart.
+            let manager2 =
+                DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+            manager2.restore_queue();
+            if manager2.store().n_items() != 1 {
+                abort(&server, "queue did not restore");
+            }
+            let mid2 = manager2
+                .segment_state
+                .borrow()
+                .values()
+                .any(|st| st.done.iter().any(|b| *b) && st.done.iter().any(|b| !b));
+            if !mid2 {
+                abort(&server, "restored manager has no segmented resume state");
+            }
+            let item2 = manager2
+                .store()
+                .item(0)
+                .and_downcast::<DownloadItem>()
+                .unwrap();
+            let mut waited = 0;
+            while item2.status() != DownloadStatus::Done && waited < 600 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item2.status() != DownloadStatus::Done {
+                abort(&server, &format!("expected Done, got {:?}", item2.status()));
+            }
+            if std::fs::read(dl.join("big.bin")).unwrap() != payload {
+                abort(&server, "bytes differ after kill-restart-resume");
             }
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);
