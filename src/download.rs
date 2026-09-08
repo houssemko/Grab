@@ -689,6 +689,21 @@ async fn attempt_multi(
     }
     Ok(())
 }
+/// True when the file has unallocated (sparse) regions. Parallel writes can
+/// leave holes that a later append-at-EOF resume must not inherit: fully
+/// written files always satisfy `blocks * 512 >= len`, so a shortfall proves
+/// holes. Needs no new dependency (std `MetadataExt` only). On exotic
+/// filesystems with unreliable block counts this degrades to "holes", i.e.
+/// a safe full re-download, never silent corruption.
+fn has_holes(path: &std::path::Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| {
+            use std::os::unix::fs::MetadataExt;
+            m.blocks().saturating_mul(512) < m.len()
+        })
+        .unwrap_or(false)
+}
+
 async fn attempt_once(
     client: &reqwest::Client,
     url: &str,
@@ -698,98 +713,121 @@ async fn attempt_once(
     timeout: Duration,
     tx: &async_channel::Sender<EngineMsg>,
 ) -> Result<(), String> {
-    let start = tokio::fs::metadata(dest)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-    let mut req = client.get(url);
-    if start > 0 {
-        req = req.header("Range", format!("bytes={start}-"));
-    }
-    if !opts.user_agent.trim().is_empty() {
-        req = req.header("User-Agent", opts.user_agent.trim());
-    }
-    let resp = match tokio::time::timeout(
-        timeout,
-        client.execute(req.build().map_err(|e| e.to_string())?),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => return Err(e.to_string()),
-        Err(_) => return Err("Connection timed out".to_string()),
-    };
-    let status = resp.status();
-    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && start > 0 {
-        return Ok(());
-    }
-    if !status.is_success() {
-        return Err(format!(
-            "HTTP {}: {}",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("error")
-        ));
-    }
-    let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
-    let total = resp
-        .content_length()
-        .map(|t| if partial { t + start } else { t });
-    let mut file = if partial {
-        tokio::fs::OpenOptions::new().append(true).open(dest).await
-    } else {
-        tokio::fs::File::create(dest).await
-    }
-    .map_err(|e| format!("Cannot write file: {e}"))?;
-    if !partial {
-        if let Some(name) = resp
-            .headers()
-            .get(reqwest::header::CONTENT_DISPOSITION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(filename_from_content_disposition)
-        {
-            tx.send(EngineMsg::SuggestName(name)).await.ok();
-        }
-    }
-    let mut downloaded = if partial { start } else { 0 };
-    tx.send(EngineMsg::Progress { downloaded, total })
-        .await
-        .ok();
-    let mut stream = resp.bytes_stream();
-    let pace_start = Instant::now();
-    let mut paced: u64 = 0;
-    let mut last_sent = Instant::now();
-    use tokio::io::AsyncWriteExt as _;
+    // At most one restart: a 416 may only trigger a single delete-and-retry.
+    let mut restarted = false;
     loop {
-        let chunk = match tokio::time::timeout(timeout, stream.next()).await {
-            Ok(Some(Ok(c))) => c,
-            Ok(Some(Err(e))) => return Err(format!("Download interrupted: {e}")),
-            Ok(None) => break,
-            Err(_) => return Err("Stalled connection timed out".to_string()),
-        };
-        file.write_all(&chunk)
+        let start = tokio::fs::metadata(dest)
             .await
-            .map_err(|e| format!("Cannot write file: {e}"))?;
-        downloaded += chunk.len() as u64;
-        if let Some(rate) = rate_limit {
-            paced += chunk.len() as u64;
-            let wait = paced as f64 / rate as f64 - pace_start.elapsed().as_secs_f64();
-            if wait > 0.0 {
-                tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let mut req = client.get(url);
+        if start > 0 {
+            req = req.header("Range", format!("bytes={start}-"));
+        }
+        if !opts.user_agent.trim().is_empty() {
+            req = req.header("User-Agent", opts.user_agent.trim());
+        }
+        let resp = match tokio::time::timeout(
+            timeout,
+            client.execute(req.build().map_err(|e| e.to_string())?),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => return Err(e.to_string()),
+            Err(_) => return Err("Connection timed out".to_string()),
+        };
+        let status = resp.status();
+        if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // The range is past EOF. That means "already complete" ONLY with
+            // proof: our length matches the server total AND every byte is
+            // really allocated. A SIGKILLed segmented download leaves a sparse
+            // full-size file that must never take this shortcut.
+            let claimed = resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split('/').next_back())
+                .and_then(|t| t.parse::<u64>().ok());
+            if start > 0 && claimed == Some(start) && !has_holes(dest) {
+                return Ok(());
+            }
+            if restarted {
+                // Even a plain GET gets 416: pathological server, stop looping.
+                return Err("Server rejects range requests".to_string());
+            }
+            let _ = std::fs::remove_file(dest);
+            restarted = true;
+            continue;
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                status.canonical_reason().unwrap_or("error")
+            ));
+        }
+        let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        let total = resp
+            .content_length()
+            .map(|t| if partial { t + start } else { t });
+        let mut file = if partial {
+            tokio::fs::OpenOptions::new().append(true).open(dest).await
+        } else {
+            tokio::fs::File::create(dest).await
+        }
+        .map_err(|e| format!("Cannot write file: {e}"))?;
+        if !partial {
+            if let Some(name) = resp
+                .headers()
+                .get(reqwest::header::CONTENT_DISPOSITION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(filename_from_content_disposition)
+            {
+                tx.send(EngineMsg::SuggestName(name)).await.ok();
             }
         }
-        if last_sent.elapsed() >= Duration::from_millis(100) {
-            tx.send(EngineMsg::Progress { downloaded, total })
+        let mut downloaded = if partial { start } else { 0 };
+        tx.send(EngineMsg::Progress { downloaded, total })
+            .await
+            .ok();
+        let mut stream = resp.bytes_stream();
+        let pace_start = Instant::now();
+        let mut paced: u64 = 0;
+        let mut last_sent = Instant::now();
+        use tokio::io::AsyncWriteExt as _;
+        loop {
+            let chunk = match tokio::time::timeout(timeout, stream.next()).await {
+                Ok(Some(Ok(c))) => c,
+                Ok(Some(Err(e))) => return Err(format!("Download interrupted: {e}")),
+                Ok(None) => break,
+                Err(_) => return Err("Stalled connection timed out".to_string()),
+            };
+            file.write_all(&chunk)
                 .await
-                .ok();
-            last_sent = Instant::now();
+                .map_err(|e| format!("Cannot write file: {e}"))?;
+            downloaded += chunk.len() as u64;
+            if let Some(rate) = rate_limit {
+                paced += chunk.len() as u64;
+                let wait = paced as f64 / rate as f64 - pace_start.elapsed().as_secs_f64();
+                if wait > 0.0 {
+                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+                }
+            }
+            if last_sent.elapsed() >= Duration::from_millis(100) {
+                tx.send(EngineMsg::Progress { downloaded, total })
+                    .await
+                    .ok();
+                last_sent = Instant::now();
+            }
         }
-    }
-    file.flush()
-        .await
-        .map_err(|e| format!("Cannot write file: {e}"))?;
-    match total {
-        Some(t) if downloaded != t => Err("Incomplete download".to_string()),
-        _ => Ok(()),
+        file.flush()
+            .await
+            .map_err(|e| format!("Cannot write file: {e}"))?;
+        return match total {
+            Some(t) if downloaded != t => Err("Incomplete download".to_string()),
+            _ => Ok(()),
+        };
     }
 }
 
@@ -1883,6 +1921,100 @@ mod tests {
         std::env::set_var("GSETTINGS_BACKEND", "memory");
         gio::Settings::new("io.github.houssemko.Grab")
     }
+
+    /// One throwaway HTTP fixture: temp dirs, payload file, and a running
+    /// throttled_server.py. On success the test kills the server and removes
+    /// `dir`; on failure everything stays behind (ranges.log replay).
+    struct Fixture {
+        dir: std::path::PathBuf,
+        dl: std::path::PathBuf,
+        payload: Vec<u8>,
+        port: u16,
+        server: Rc<RefCell<std::process::Child>>,
+    }
+
+    fn spawn_fixture(
+        tag: &str,
+        served_name: &str,
+        payload_len: u32,
+        sleep_secs: &str,
+        extra_args: &[&str],
+        port_offset: u16,
+    ) -> Fixture {
+        let dir = std::env::temp_dir().join(format!("grab-{tag}-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
+        std::fs::write(srv.join(served_name), &payload).unwrap();
+        let port = 20000 + (std::process::id() % 5000) as u16 + port_offset;
+        let mut cmd = std::process::Command::new("python3");
+        cmd.arg(format!(
+            "{}/tests/throttled_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .arg(port.to_string())
+        .arg(srv.join(served_name))
+        .arg(dir.join("ranges.log"))
+        .arg(sleep_secs);
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        let server = cmd
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 range server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+        Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server: Rc::new(RefCell::new(server)),
+        }
+    }
+
+    /// Fail the current test, killing its server first (dirs stay for logs).
+    fn abort(server: &Rc<RefCell<std::process::Child>>, msg: &str) -> ! {
+        eprintln!("TEST FAILURE: {msg}");
+        let _ = server.borrow_mut().kill();
+        std::process::exit(1);
+    }
+
+    /// Watchdog + run + quiescence drain shared by every main-loop test: the
+    /// drain pumps until the context goes quiet so no pending future is left
+    /// for another test's loop to trip over.
+    fn run_loop(main_loop: &glib::MainLoop, watchdog_secs: u64) {
+        let watchdog = main_loop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(watchdog_secs));
+            if watchdog.is_running() {
+                eprintln!("TEST TIMEOUT");
+                std::process::exit(2);
+            }
+        });
+        main_loop.run();
+        let ctx = glib::MainContext::default();
+        let mut idle_rounds = 0;
+        while idle_rounds < 50 {
+            if ctx.iteration(false) {
+                idle_rounds = 0;
+            } else {
+                idle_rounds += 1;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
     #[test]
     fn splits_pieces() {
         // Too small: single-stream fallback.
@@ -1985,6 +2117,20 @@ mod tests {
             None
         );
         assert_eq!(filename_from_content_disposition(""), None);
+    }
+
+    #[test]
+    fn detects_sparse_holes() {
+        let dir = std::env::temp_dir().join(format!("grab-holes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sparse = dir.join("sparse.bin");
+        let f = std::fs::File::create(&sparse).unwrap();
+        f.set_len(20_000_000).unwrap();
+        assert!(has_holes(&sparse));
+        std::fs::write(&sparse, vec![9u8; 100]).unwrap();
+        assert!(!has_holes(&sparse));
+        assert!(!has_holes(&dir.join("missing.bin")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2545,29 +2691,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             quit.quit();
         });
-        let watchdog = main_loop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(90));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
-            }
-        });
-        main_loop.run();
-        // Quiescence drain on THIS thread: cancel() aborted t2's task, whose
-        // UI future completes only when pumped. A fixed iteration count races
-        // abort latency; instead pump until the context goes quiet, so no
-        // pending future is left for another test's loop to trip over.
-        let ctx = glib::MainContext::default();
-        let mut idle_rounds = 0;
-        while idle_rounds < 50 {
-            if ctx.iteration(false) {
-                idle_rounds = 0;
-            } else {
-                idle_rounds += 1;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        run_loop(&main_loop, 90);
     }
 
     #[test]
@@ -2579,38 +2703,13 @@ mod tests {
 
         // 20 MB clears the 4 x 4 MB split threshold; unthrottled loopback
         // keeps the test to a few seconds.
-        let dir = std::env::temp_dir().join(format!("grab-seg-{}", std::process::id()));
-        let srv = dir.join("srv");
-        let dl = dir.join("dl");
-        std::fs::create_dir_all(&srv).unwrap();
-        std::fs::create_dir_all(&dl).unwrap();
-        let payload: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(srv.join("big.bin"), &payload).unwrap();
-
-        let port = 20000 + (std::process::id() % 5000) as u16 + 13;
-        let ranges_log = dir.join("ranges.log");
-        let server = std::process::Command::new("python3")
-            .arg(format!(
-                "{}/tests/throttled_server.py",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .arg(port.to_string())
-            .arg(srv.join("big.bin"))
-            .arg(&ranges_log)
-            .arg("0")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("python3 range server");
-        let mut ready = false;
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                ready = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(ready, "test HTTP server did not listen on port {port}");
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture("seg", "big.bin", 20_000_000, "0", &[], 13);
 
         settings.set_boolean("show-notifications", false).unwrap();
         let store = gio::ListStore::new::<DownloadItem>();
@@ -2620,31 +2719,27 @@ mod tests {
 
         let main_loop = glib::MainLoop::new(None, false);
         let quit = main_loop.clone();
-        let server = Rc::new(RefCell::new(server));
         glib::MainContext::default().spawn_local(async move {
-            let server_kill = Rc::clone(&server);
             let path = dl.join("big.bin");
-            let fail = move |msg: &str| -> ! {
-                eprintln!("TEST FAILURE: {msg}");
-                let _ = server_kill.borrow_mut().kill();
-                std::process::exit(1);
-            };
             let item = manager
                 .enqueue(&url, Some(&dest), Some("big.bin"))
-                .unwrap_or_else(|e| fail(&e));
+                .unwrap_or_else(|e| abort(&server, &e));
             let mut waited = 0;
             while item.status() != DownloadStatus::Done && waited < 600 {
                 glib::timeout_future(std::time::Duration::from_millis(100)).await;
                 waited += 1;
             }
             if item.status() != DownloadStatus::Done {
-                fail(&format!("expected Done, got {:?}", item.status()));
+                abort(&server, &format!("expected Done, got {:?}", item.status()));
             }
             if std::fs::read(&path).unwrap() != payload {
-                fail("bytes differ");
+                abort(&server, "bytes differ");
             }
             if !item.detail().starts_with("Finished \u{2022} ") {
-                fail(&format!("expected size in detail, got {:?}", item.detail()));
+                abort(
+                    &server,
+                    &format!("expected size in detail, got {:?}", item.detail()),
+                );
             }
             // Distinct bounded ranges prove parallel segmented fetching
             // (a single stream would log one open-ended "bytes=0" line).
@@ -2656,32 +2751,16 @@ mod tests {
                 }
             }
             if distinct.len() < 2 {
-                fail(&format!("expected 2+ distinct ranges, log: {ranges:?}"));
+                abort(
+                    &server,
+                    &format!("expected 2+ distinct ranges, log: {ranges:?}"),
+                );
             }
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);
             quit.quit();
         });
-        let watchdog = main_loop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(120));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
-            }
-        });
-        main_loop.run();
-        // Quiescence drain on THIS thread so no pending future trips another test.
-        let ctx = glib::MainContext::default();
-        let mut idle_rounds = 0;
-        while idle_rounds < 50 {
-            if ctx.iteration(false) {
-                idle_rounds = 0;
-            } else {
-                idle_rounds += 1;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        run_loop(&main_loop, 120);
     }
 
     #[test]
@@ -2690,39 +2769,20 @@ mod tests {
         let _qf = test_queue_file("disposition");
         let settings = test_settings();
 
-        let dir = std::env::temp_dir().join(format!("grab-cd-{}", std::process::id()));
-        let srv = dir.join("srv");
-        let dl = dir.join("dl");
-        std::fs::create_dir_all(&srv).unwrap();
-        std::fs::create_dir_all(&dl).unwrap();
-        let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(srv.join("clip.mp4"), &payload).unwrap();
-
-        let port = 20000 + (std::process::id() % 5000) as u16 + 17;
-        let ranges_log = dir.join("ranges.log");
-        let server = std::process::Command::new("python3")
-            .arg(format!(
-                "{}/tests/throttled_server.py",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .arg(port.to_string())
-            .arg(srv.join("clip.mp4"))
-            .arg(&ranges_log)
-            .arg("0.05")
-            .arg("attachment; filename=\"movie.mp4\"")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("python3 range server");
-        let mut ready = false;
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                ready = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(ready, "test HTTP server did not listen on port {port}");
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture(
+            "cd",
+            "clip.mp4",
+            300_000,
+            "0.05",
+            &["attachment; filename=\"movie.mp4\""],
+            17,
+        );
 
         settings.set_boolean("show-notifications", false).unwrap();
         let store = gio::ListStore::new::<DownloadItem>();
@@ -2733,17 +2793,10 @@ mod tests {
 
         let main_loop = glib::MainLoop::new(None, false);
         let quit = main_loop.clone();
-        let server = Rc::new(RefCell::new(server));
         glib::MainContext::default().spawn_local(async move {
-            let server_kill = Rc::clone(&server);
-            let fail = move |msg: &str| -> ! {
-                eprintln!("TEST FAILURE: {msg}");
-                let _ = server_kill.borrow_mut().kill();
-                std::process::exit(1);
-            };
             let item = manager
                 .enqueue(&url, Some(&dest), None)
-                .unwrap_or_else(|e| fail(&e));
+                .unwrap_or_else(|e| abort(&server, &e));
             assert_eq!(item.filename(), "getfile");
             let mut waited = 0;
             while (item.filename() != "movie.mp4" || item.status() != DownloadStatus::Done)
@@ -2753,41 +2806,26 @@ mod tests {
                 waited += 1;
             }
             if item.filename() != "movie.mp4" {
-                fail(&format!("expected rename, got {:?}", item.filename()));
+                abort(
+                    &server,
+                    &format!("expected rename, got {:?}", item.filename()),
+                );
             }
             if item.status() != DownloadStatus::Done {
-                fail(&format!("expected Done, got {:?}", item.status()));
+                abort(&server, &format!("expected Done, got {:?}", item.status()));
             }
             let new_path = dl.join("movie.mp4");
             if std::fs::read(&new_path).unwrap() != payload {
-                fail("bytes differ");
+                abort(&server, "bytes differ");
             }
             if dl.join("getfile").exists() {
-                fail("stale file left behind");
+                abort(&server, "stale file left behind");
             }
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);
             quit.quit();
         });
-        let watchdog = main_loop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(120));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
-            }
-        });
-        main_loop.run();
-        let ctx = glib::MainContext::default();
-        let mut idle_rounds = 0;
-        while idle_rounds < 50 {
-            if ctx.iteration(false) {
-                idle_rounds = 0;
-            } else {
-                idle_rounds += 1;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        run_loop(&main_loop, 120);
     }
 
     #[test]
@@ -2799,40 +2837,20 @@ mod tests {
 
         // Big enough to split; the server 403s every range except the probe,
         // so the engine must downgrade to one stream and still finish intact.
-        let dir = std::env::temp_dir().join(format!("grab-thr-{}", std::process::id()));
-        let srv = dir.join("srv");
-        let dl = dir.join("dl");
-        std::fs::create_dir_all(&srv).unwrap();
-        std::fs::create_dir_all(&dl).unwrap();
-        let payload: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(srv.join("big.bin"), &payload).unwrap();
-
-        let port = 20000 + (std::process::id() % 5000) as u16 + 19;
-        let ranges_log = dir.join("ranges.log");
-        let server = std::process::Command::new("python3")
-            .arg(format!(
-                "{}/tests/throttled_server.py",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .arg(port.to_string())
-            .arg(srv.join("big.bin"))
-            .arg(&ranges_log)
-            .arg("0")
-            .arg("")
-            .arg("throttle-ranges")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("python3 range server");
-        let mut ready = false;
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                ready = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(ready, "test HTTP server did not listen on port {port}");
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture(
+            "thr",
+            "big.bin",
+            20_000_000,
+            "0",
+            &["", "throttle-ranges"],
+            19,
+        );
 
         settings.set_boolean("show-notifications", false).unwrap();
         let store = gio::ListStore::new::<DownloadItem>();
@@ -2842,58 +2860,36 @@ mod tests {
 
         let main_loop = glib::MainLoop::new(None, false);
         let quit = main_loop.clone();
-        let server = Rc::new(RefCell::new(server));
         glib::MainContext::default().spawn_local(async move {
-            let server_kill = Rc::clone(&server);
             let path = dl.join("big.bin");
-            let fail = move |msg: &str| -> ! {
-                eprintln!("TEST FAILURE: {msg}");
-                let _ = server_kill.borrow_mut().kill();
-                std::process::exit(1);
-            };
             let item = manager
                 .enqueue(&url, Some(&dest), Some("big.bin"))
-                .unwrap_or_else(|e| fail(&e));
+                .unwrap_or_else(|e| abort(&server, &e));
             let mut waited = 0;
             while item.status() != DownloadStatus::Done && waited < 600 {
                 glib::timeout_future(std::time::Duration::from_millis(100)).await;
                 waited += 1;
             }
             if item.status() != DownloadStatus::Done {
-                fail(&format!("expected Done, got {:?}", item.status()));
+                abort(&server, &format!("expected Done, got {:?}", item.status()));
             }
             if std::fs::read(&path).unwrap() != payload {
-                fail("bytes differ");
+                abort(&server, "bytes differ");
             }
             // A full (unranged) request proves the single-stream fallback ran:
             // pure multi would only ever log bounded ranges.
             let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
             if !ranges.lines().any(|l| l == "full") {
-                fail(&format!("expected single-stream fallback, log: {ranges:?}"));
+                abort(
+                    &server,
+                    &format!("expected single-stream fallback, log: {ranges:?}"),
+                );
             }
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);
             quit.quit();
         });
-        let watchdog = main_loop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(120));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
-            }
-        });
-        main_loop.run();
-        let ctx = glib::MainContext::default();
-        let mut idle_rounds = 0;
-        while idle_rounds < 50 {
-            if ctx.iteration(false) {
-                idle_rounds = 0;
-            } else {
-                idle_rounds += 1;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        run_loop(&main_loop, 120);
     }
 
     #[test]
@@ -2903,40 +2899,17 @@ mod tests {
         let settings = test_settings();
         settings.set_int("connections", 4).unwrap();
 
-        // 20 MB clears the split threshold; unthrottled loopback is slow
-        // enough to land a pause mid-transfer, fast enough for CI.
-        let dir = std::env::temp_dir().join(format!("grab-segp-{}", std::process::id()));
-        let srv = dir.join("srv");
-        let dl = dir.join("dl");
-        std::fs::create_dir_all(&srv).unwrap();
-        std::fs::create_dir_all(&dl).unwrap();
-        let payload: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
-        std::fs::write(srv.join("big.bin"), &payload).unwrap();
-
-        let port = 20000 + (std::process::id() % 5000) as u16 + 23;
-        let ranges_log = dir.join("ranges.log");
-        let server = std::process::Command::new("python3")
-            .arg(format!(
-                "{}/tests/throttled_server.py",
-                env!("CARGO_MANIFEST_DIR")
-            ))
-            .arg(port.to_string())
-            .arg(srv.join("big.bin"))
-            .arg(&ranges_log)
-            .arg("0")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("python3 range server");
-        let mut ready = false;
-        for _ in 0..100 {
-            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-                ready = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(ready, "test HTTP server did not listen on port {port}");
+        // 20 MB clears the split threshold. Slightly throttled (~3 MB/s,
+        // ~6 s total): the transfer must stay well above the 100 ms progress
+        // granularity or no poll can land mid-transfer (unthrottled loopback
+        // finishes in ~100 ms and polls only ever see 0% then Done).
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture("segp", "big.bin", 20_000_000, "0.002", &[], 23);
 
         settings.set_boolean("show-notifications", false).unwrap();
         let store = gio::ListStore::new::<DownloadItem>();
@@ -2946,18 +2919,11 @@ mod tests {
 
         let main_loop = glib::MainLoop::new(None, false);
         let quit = main_loop.clone();
-        let server = Rc::new(RefCell::new(server));
         glib::MainContext::default().spawn_local(async move {
-            let server_kill = Rc::clone(&server);
             let path = dl.join("big.bin");
-            let fail = move |msg: &str| -> ! {
-                eprintln!("TEST FAILURE: {msg}");
-                let _ = server_kill.borrow_mut().kill();
-                std::process::exit(1);
-            };
             let item = manager
                 .enqueue(&url, Some(&dest), Some("big.bin"))
-                .unwrap_or_else(|e| fail(&e));
+                .unwrap_or_else(|e| abort(&server, &e));
             let id = item.id();
             // Wait until at least one 1 MB piece (5%) landed, then pause.
             // The status check is part of the loop condition (same thread runs
@@ -2971,11 +2937,14 @@ mod tests {
                 waited += 1;
             }
             if item.status() != DownloadStatus::Downloading {
-                fail("finished before pause could land mid-transfer");
+                abort(&server, "finished before pause could land mid-transfer");
             }
             manager.pause(id);
             if item.status() != DownloadStatus::Paused {
-                fail(&format!("expected Paused, got {:?}", item.status()));
+                abort(
+                    &server,
+                    &format!("expected Paused, got {:?}", item.status()),
+                );
             }
             // Resume must reuse the bitmap (partially done, not all).
             let mid: bool = manager
@@ -2985,7 +2954,7 @@ mod tests {
                 .map(|st| st.done.iter().any(|b| *b) && st.done.iter().any(|b| !b))
                 .unwrap_or(false);
             if !mid {
-                fail("resume bitmap is not mid-transfer");
+                abort(&server, "resume bitmap is not mid-transfer");
             }
             manager.resume(id);
             let mut waited = 0;
@@ -2994,36 +2963,95 @@ mod tests {
                 waited += 1;
             }
             if item.status() != DownloadStatus::Done {
-                fail(&format!("expected Done, got {:?}", item.status()));
+                abort(&server, &format!("expected Done, got {:?}", item.status()));
             }
             // The regression: resume used to truncate completed pieces to
             // zero while the bitmap still claimed them as done.
             if std::fs::read(&path).unwrap() != payload {
-                fail("bytes differ after pause/resume");
+                abort(&server, "bytes differ after pause/resume");
             }
             let _ = server.borrow_mut().kill();
             let _ = std::fs::remove_dir_all(&dir);
             quit.quit();
         });
-        let watchdog = main_loop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(120));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
-            }
-        });
-        main_loop.run();
-        let ctx = glib::MainContext::default();
-        let mut idle_rounds = 0;
-        while idle_rounds < 50 {
-            if ctx.iteration(false) {
-                idle_rounds = 0;
-            } else {
-                idle_rounds += 1;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+        run_loop(&main_loop, 120);
+    }
+
+    #[test]
+    fn killed_segmented_resume_starts_over() {
+        // Simulates SIGKILL mid-segmented-download: a sparse full-size file
+        // with holes plus a stale Queued entry, no resume bitmap (RAM died
+        // with the process). Restart must discard and re-fetch, never mark
+        // the holey file Done via the 416 shortcut.
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("kill");
+        let settings = test_settings();
+
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture("kill", "big.bin", 20_000_000, "0", &[], 29);
+
+        // Sparse corpse: full size, only the first megabyte real.
+        let dest = dl.join("big.bin");
+        {
+            let f = std::fs::File::create(&dest).unwrap();
+            f.set_len(20_000_000).unwrap();
+            use std::io::Write;
+            let mut f = f;
+            f.write_all(&payload[..1_000_000]).unwrap();
         }
+        assert!(has_holes(&dest));
+        std::fs::write(
+            &qf,
+            serde_json::to_string(&StoredQueue {
+                version: QUEUE_VERSION,
+                items: vec![StoredItem {
+                    url: format!("http://127.0.0.1:{port}/big.bin"),
+                    dest_dir: dl.to_string_lossy().into_owned(),
+                    filename: "big.bin".to_string(),
+                    status: StoredStatus::Queued,
+                    progress: 0.0,
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        glib::MainContext::default().spawn_local(async move {
+            manager.restore_queue();
+            if manager.store().n_items() != 1 {
+                abort(&server, "queue did not restore");
+            }
+            let item = manager
+                .store()
+                .item(0)
+                .and_downcast::<DownloadItem>()
+                .unwrap();
+            let mut waited = 0;
+            while item.status() != DownloadStatus::Done && waited < 600 {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.status() != DownloadStatus::Done {
+                abort(&server, &format!("expected Done, got {:?}", item.status()));
+            }
+            if std::fs::read(&dest).unwrap() != payload {
+                abort(&server, "holey file was marked Done instead of re-fetched");
+            }
+            let _ = server.borrow_mut().kill();
+            let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_file(&qf);
+            quit.quit();
+        });
+        run_loop(&main_loop, 120);
     }
 
     #[test]
@@ -3048,11 +3076,6 @@ mod tests {
         let main_loop = glib::MainLoop::new(None, false);
         let quit = main_loop.clone();
         glib::MainContext::default().spawn_local(async move {
-            let fail = |msg: &str| -> ! {
-                eprintln!("TEST FAILURE: {msg}");
-                let _ = server.borrow_mut().kill();
-                std::process::exit(1);
-            };
             let store = gio::ListStore::new::<DownloadItem>();
             let manager = DownloadManager::new(store, settings);
             let item = manager
@@ -3061,29 +3084,27 @@ mod tests {
                     None,
                     Some("nope.bin"),
                 )
-                .unwrap_or_else(|e| fail(&e));
+                .unwrap_or_else(|e| abort(&server, &e));
             let mut waited = 0;
             while item.status() != DownloadStatus::Failed && waited < 200 {
                 glib::timeout_future(std::time::Duration::from_millis(100)).await;
                 waited += 1;
             }
             if item.status() != DownloadStatus::Failed {
-                fail(&format!("expected Failed, got {:?}", item.status()));
+                abort(
+                    &server,
+                    &format!("expected Failed, got {:?}", item.status()),
+                );
             }
             if !item.detail().contains("404") {
-                fail(&format!("expected 404 hint, got {:?}", item.detail()));
+                abort(
+                    &server,
+                    &format!("expected 404 hint, got {:?}", item.detail()),
+                );
             }
             let _ = server.borrow_mut().kill();
             quit.quit();
         });
-        let watchdog = main_loop.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(60));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
-            }
-        });
-        main_loop.run();
+        run_loop(&main_loop, 60);
     }
 }
