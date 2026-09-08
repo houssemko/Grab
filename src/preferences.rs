@@ -130,6 +130,24 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     limit.set_tooltip_text(Some("e.g. 500K, 2M; empty means unlimited"));
     limit.set_input_purpose(gtk4::InputPurpose::FreeForm);
     settings.bind("speed-limit", &limit, "text").build();
+    // Flag junk immediately instead of failing rows at spawn time.
+    {
+        let l = limit.clone();
+        let mark = move |row: &adw::EntryRow| {
+            let t = row.text().to_string();
+            let t = t.trim();
+            let ok = t.is_empty()
+                || t == "0"
+                || crate::download::parse_rate(t).is_some();
+            if ok {
+                l.remove_css_class("error");
+            } else {
+                l.add_css_class("error");
+            }
+        };
+        mark(&limit);
+        limit.connect_changed(mark);
+    }
     net_group.add(&limit);
 
     let retries = adw::SpinRow::builder()

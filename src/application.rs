@@ -65,7 +65,7 @@ pub fn setup(app: &adw::Application) {
             };
             for f in files {
                 if let Ok(uri) = f.uri().parse::<url::Url>() {
-                    if matches!(uri.scheme(), "http" | "https" | "ftp") {
+                    if matches!(uri.scheme(), "http" | "https") {
                         if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
                             s.toasts.add_toast(adw::Toast::new(&e));
                         }
@@ -82,16 +82,19 @@ pub fn setup(app: &adw::Application) {
                         continue;
                     }
                     if let Ok(text) = std::fs::read_to_string(&path) {
+                        // One persist for the whole import, not one per line.
+                        s.manager.begin_batch();
                         for line in text
                             .lines()
                             .map(str::trim)
-                            .filter(|l| !l.is_empty())
+                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
                             .take(MAX_LIST_LINES)
                         {
                             if let Err(e) = s.manager.enqueue(line, None, None) {
                                 s.toasts.add_toast(adw::Toast::new(&e));
                             }
                         }
+                        s.manager.end_batch();
                     }
                 }
             }

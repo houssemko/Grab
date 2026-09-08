@@ -168,7 +168,7 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
         _ => (filename, None),
     };
     let mut n = 1;
-    loop {
+    for _ in 1..=9999 {
         let cand = match ext {
             Some(e) => format!("{stem} ({n}).{e}"),
             None => format!("{filename} ({n})"),
@@ -177,6 +177,12 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
             return cand;
         }
         n += 1;
+    }
+    // Absurd collision count: return the next candidate anyway (a later
+    // write visibly fails) rather than stat-ing the disk forever.
+    match ext {
+        Some(e) => format!("{stem} ({n}).{e}"),
+        None => format!("{filename} ({n})"),
     }
 }
 
@@ -239,7 +245,13 @@ fn percent_decode(s: &str) -> String {
 pub fn filename_from_content_disposition(value: &str) -> Option<String> {
     let mut fallback = None;
     for part in value.split(';').map(str::trim) {
-        if let Some(rest) = part.strip_prefix("filename*=") {
+        // Parameter names are case-insensitive; `get(..10)` succeeding
+        // proves byte 10 is a char boundary, so `&part[10..]` is safe.
+        if let Some(rest) = part
+            .get(..10)
+            .filter(|p| p.eq_ignore_ascii_case("filename*="))
+            .map(|_| &part[10..])
+        {
             // Form: filename*=UTF-8''%E2%82%ACrates.mp4 (charset'lang'data).
             let data = rest.split('\'').next_back().unwrap_or("").trim();
             let name = data.rsplit(['/', '\\']).next().unwrap_or("").trim();
@@ -569,7 +581,6 @@ async fn attempt_multi(
     let throttled = Arc::new(AtomicBool::new(false));
     // (offset, bytes, piece index); bounded so a slow disk throttles fetchers.
     let (wtx, wrx) = async_channel::bounded::<(u64, Vec<u8>, u64)>(8);
-    let name_offered = Arc::new(AtomicBool::new(false));
     // Never exceed the configured connections: extra range requests are
     // what throttling hosts punish.
     let n_workers = queue
@@ -580,15 +591,13 @@ async fn attempt_multi(
         .clamp(1, 16);
     let mut workers = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
-        let (ctx, wtx, queue, failed, first_err, throttled, name_offered, name_tx) = (
+        let (ctx, wtx, queue, failed, first_err, throttled) = (
             ctx,
             wtx.clone(),
             Arc::clone(&queue),
             Arc::clone(&failed),
             Arc::clone(&first_err),
             Arc::clone(&throttled),
-            Arc::clone(&name_offered),
-            ctx.tx.clone(),
         );
         workers.push(async move {
             loop {
@@ -600,7 +609,7 @@ async fn attempt_multi(
                     .expect("Grab: piece queue poisoned (bug)")
                     .pop_front();
                 let Some((idx, s, e)) = piece else { break };
-                match fetch_piece(ctx, s, e, total, &name_offered, &name_tx).await {
+                match fetch_piece(ctx, s, e, total).await {
                     Ok(bytes) => {
                         if wtx.send((s, bytes, idx)).await.is_err() {
                             break; // Writer gone; attempt is over.
@@ -856,7 +865,9 @@ async fn attempt_once(
     }
 }
 
-fn parse_rate(s: &str) -> Option<u64> {
+/// Parse a speed limit like `500K`, `2M`, `1.5G` (or plain bytes) into
+/// bytes/sec. `None` means unlimited (empty, `0`) or invalid.
+pub(crate) fn parse_rate(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() || s == "0" {
         return None;
@@ -979,9 +990,10 @@ impl SegmentState {
         out
     }
 
-    /// Contiguous completed prefix, in bytes.
+    /// Contiguous completed prefix, in bytes (never past `total`: the tail
+    /// piece is usually short, so an uncapped count would overshoot).
     fn prefix_len(&self) -> u64 {
-        self.done.iter().take_while(|b| **b).count() as u64 * PIECE_SIZE
+        (self.done.iter().take_while(|b| **b).count() as u64 * PIECE_SIZE).min(self.total)
     }
 
     /// Forget every piece from the first gap on, keeping the bitmap
@@ -1048,6 +1060,58 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), String> 
     Ok(())
 }
 
+/// Rename without clobbering: `std::fs::rename` silently replaces the
+/// destination. Prefers `renameat2(RENAME_NOREPLACE)` (atomic on any
+/// filesystem, FAT included); falls back to claiming `new` with a hard
+/// link, and to a checked plain rename only where neither exists.
+fn rename_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    match rename_noreplace_sys(old, new) {
+        // Ancient kernels (< 3.15) lack renameat2: use the portable path.
+        // ENOSYS is 38 in the Linux UAPI (asm-generic and x86 alike).
+        Err(e) if e.raw_os_error() == Some(38) => {}
+        r => return r,
+    }
+    match std::fs::hard_link(old, new) {
+        Ok(()) => std::fs::remove_file(old),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) if !new.exists() => std::fs::rename(old, new),
+        Err(e) => Err(e),
+    }
+}
+
+/// `renameat2(olddirfd, old, newdirfd, new, RENAME_NOREPLACE)` without a
+/// libc dependency: one syscall, three stable constants.
+#[cfg(target_os = "linux")]
+fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+    extern "C" {
+        fn renameat2(
+            olddirfd: std::os::raw::c_int,
+            oldpath: *const std::os::raw::c_char,
+            newdirfd: std::os::raw::c_int,
+            newpath: *const std::os::raw::c_char,
+            flags: std::os::raw::c_uint,
+        ) -> std::os::raw::c_int;
+    }
+    const AT_FDCWD: std::os::raw::c_int = -100;
+    const RENAME_NOREPLACE: std::os::raw::c_uint = 1; // renameat2(2)
+    // Queue/dedupe names never contain NUL (sane_filename), but fail
+    // visibly instead of truncating if one ever slips through.
+    let cvt = |p: &std::path::Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+    };
+    let (old, new) = (cvt(old)?, cvt(new)?);
+    // SAFETY: NUL-terminated buffers outlive the call; the rest are integers.
+    let r =
+        unsafe { renameat2(AT_FDCWD, old.as_ptr(), AT_FDCWD, new.as_ptr(), RENAME_NOREPLACE) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
 /// How the engine task should start this download.
 #[derive(Debug)]
 enum StartMode {
@@ -1117,13 +1181,15 @@ enum AttemptFail {
 
 /// Fetch one `[start, end]` piece, retrying stalls. Verifies the server
 /// still serves the probed file version via the Content-Range total.
+/// Never offers server-advertised filenames: the engine writes segmented
+/// data through `ctx.dest`, so a mid-download rename would desync the
+/// running attempt (which keeps writing the old path) from the queue
+/// (which records the new name). Only the single-stream path suggests names.
 async fn fetch_piece(
     ctx: &FetchCtx,
     start: u64,
     end: u64,
     total: u64,
-    name_offered: &Arc<AtomicBool>,
-    name_tx: &async_channel::Sender<EngineMsg>,
 ) -> Result<Vec<u8>, AttemptFail> {
     let timeout = ctx.timeout;
     use AttemptFail::{Retryable, Throttled};
@@ -1176,16 +1242,6 @@ async fn fetch_piece(
             last_err = Retryable("File changed on server".to_string());
             continue;
         }
-        if !name_offered.swap(true, Ordering::SeqCst) {
-            if let Some(name) = resp
-                .headers()
-                .get(reqwest::header::CONTENT_DISPOSITION)
-                .and_then(|v| v.to_str().ok())
-                .and_then(filename_from_content_disposition)
-            {
-                name_tx.send(EngineMsg::SuggestName(name)).await.ok();
-            }
-        }
         let mut body = Vec::with_capacity((end - start + 1).min(2 * PIECE_SIZE) as usize);
         let mut stream = resp.bytes_stream();
         let piece_deadline = tokio::time::sleep(timeout.saturating_mul(10));
@@ -1197,7 +1253,7 @@ async fn fetch_piece(
                 }
                 next = tokio::time::timeout(timeout, stream.next()) => match next {
                     Ok(Some(Ok(c))) => {
-                        if body.len() + c.len() > (end - start + 1) as usize + 1024 {
+                        if body.len() + c.len() > (end - start + 1) as usize {
                             break Some(Retryable("Server sent too much data".to_string()));
                         }
                         body.extend_from_slice(&c);
@@ -1214,6 +1270,12 @@ async fn fetch_piece(
         };
         if let Some(e) = failed {
             last_err = e;
+            continue;
+        }
+        // A truncated stream would otherwise be recorded as a done piece
+        // (zeros on disk) and skipped on every later resume.
+        if body.len() as u64 != end - start + 1 {
+            last_err = Retryable("Incomplete piece".to_string());
             continue;
         }
         return Ok(body);
@@ -1254,6 +1316,20 @@ impl DownloadManager {
     /// UI refresh callback, invoked after every state change.
     pub fn set_on_change(&self, cb: impl Fn() + 'static) {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
+    }
+
+    /// Delay queue persists across bulk inserts (URL-list import): each
+    /// `enqueue` otherwise rewrites + fsyncs the whole queue file, turning
+    /// a 1000-line import into 1000 full rewrites. Pair with `end_batch`.
+    pub fn begin_batch(&self) {
+        self.batch.set(true);
+    }
+
+    /// Persist once after a `begin_batch` block and refresh the UI.
+    pub fn end_batch(self: &Rc<Self>) {
+        self.batch.set(false);
+        self.persist_queue();
+        self.changed();
     }
 
     fn changed(&self) {
@@ -1598,9 +1674,10 @@ impl DownloadManager {
                     }
                     EngineMsg::SuggestName(name) => {
                         // Adopt the server-advertised name only while the
-                        // download is fresh: the engine writes through an open
-                        // handle, so renaming the path underneath is safe, and
-                        // resume offsets are unaffected.
+                        // download is fresh single-stream (segmented attempts
+                        // never suggest): the engine writes through an open
+                        // handle, so moving that inode underneath is safe on
+                        // Unix, and resume offsets are unaffected.
                         if item.status() != DownloadStatus::Downloading {
                             continue;
                         }
@@ -1620,20 +1697,38 @@ impl DownloadManager {
                                     })
                                     .any(|it| it.dest_dir() == dir && it.filename() == n)
                         };
-                        let final_name = dedupe_filename(&name, taken);
-                        if final_name == current {
+                        // Claim-then-move so a file appearing between the
+                        // dedupe check and the rename is never clobbered:
+                        // retry with a fresh deduped name instead.
+                        let old_path = item.file_path();
+                        let mut final_name = dedupe_filename(&name, taken);
+                        let mut moved = !old_path.exists();
+                        for _ in 0..8 {
+                            if moved || old_path == std::path::Path::new(&dir).join(&final_name)
+                            {
+                                break;
+                            }
+                            match rename_noreplace(
+                                &old_path,
+                                &std::path::Path::new(&dir).join(&final_name),
+                            ) {
+                                Ok(()) => {
+                                    moved = true;
+                                }
+                                Err(e)
+                                    if e.kind() == std::io::ErrorKind::AlreadyExists =>
+                                {
+                                    final_name = dedupe_filename(&name, taken);
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        if !moved || final_name == current {
                             continue;
                         }
-                        let old_path = item.file_path();
-                        let new_path = std::path::Path::new(&dir).join(&final_name);
-                        if old_path != new_path {
-                            if old_path.exists() && std::fs::rename(&old_path, &new_path).is_err() {
-                                continue;
-                            }
-                            item.set_filename(final_name);
-                            this.persist_queue();
-                            this.changed();
-                        }
+                        item.set_filename(final_name);
+                        this.persist_queue();
+                        this.changed();
                     }
                 }
             }
@@ -1710,6 +1805,13 @@ impl DownloadManager {
 
     /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
+        self.cancel_inner(id);
+        self.persist_queue();
+        self.changed();
+        self.start_next();
+    }
+
+    fn cancel_inner(&self, id: u64) {
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -1722,9 +1824,6 @@ impl DownloadManager {
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
         }
-        self.persist_queue();
-        self.changed();
-        self.start_next();
     }
 
     /// Re-queue a failed or cancelled download.
@@ -1732,7 +1831,11 @@ impl DownloadManager {
         if let Some(item) = self.find(id) {
             match item.status() {
                 DownloadStatus::Failed | DownloadStatus::Cancelled => {
-                    item.set_progress(0.0);
+                    // A kept segment bitmap resumes where it left off, so
+                    // leave the progress bar there instead of flashing 0%.
+                    if !self.segment_state.borrow().contains_key(&id) {
+                        item.set_progress(0.0);
+                    }
                     item.set_speed(String::new());
                     item.set_eta(String::new());
                     item.set_detail(String::new());
@@ -1748,7 +1851,7 @@ impl DownloadManager {
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`].
     pub fn remove(self: &Rc<Self>, id: u64) {
-        self.cancel(id);
+        self.cancel_inner(id);
         if let Some(pos) = (0..self.store.n_items()).find(|&i| {
             self.store
                 .item(i)
@@ -1760,6 +1863,7 @@ impl DownloadManager {
         }
         self.persist_queue();
         self.changed();
+        self.start_next();
     }
 
     /// Re-insert a previously removed download (Undo). Restores the prior
@@ -1875,6 +1979,15 @@ impl DownloadManager {
         dir.join("queue.json")
     }
 
+    /// Move a broken queue file aside (`queue.json.bak`) so its bytes
+    /// survive for inspection and the next persist starts fresh.
+    fn quarantine_queue() {
+        let bak = Self::queue_file().with_extension("json.bak");
+        if let Err(e) = std::fs::rename(Self::queue_file(), &bak) {
+            eprintln!("Grab: could not quarantine download queue: {e}");
+        }
+    }
+
     fn persist_queue(&self) {
         if self.batch.get() {
             return;
@@ -1938,6 +2051,8 @@ impl DownloadManager {
     }
 
     /// Load the persisted queue (cap: 1000 items / 10 MB), then resume.
+    /// Unusable files are moved to `queue.json.bak` (not deleted), so a
+    /// single bad write can never silently wipe the whole queue.
     pub fn restore_queue(self: &Rc<Self>) {
         if Self::queue_file().exists() {
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
@@ -1946,28 +2061,45 @@ impl DownloadManager {
                 .map(|m| m.len() > MAX_QUEUE_BYTES)
                 .unwrap_or(true)
             {
-                eprintln!("Grab: ignoring oversized download queue");
+                eprintln!("Grab: quarantining oversized download queue");
+                Self::quarantine_queue();
                 return;
             }
             let Ok(text) = std::fs::read_to_string(Self::queue_file()) else {
                 return;
             };
             let Ok(queue) = serde_json::from_str::<StoredQueue>(&text) else {
-                eprintln!("Grab: ignoring unreadable download queue");
+                eprintln!("Grab: quarantining unreadable download queue");
+                Self::quarantine_queue();
                 return;
             };
             if queue.version == 0 || queue.version > QUEUE_VERSION {
-                eprintln!("Grab: ignoring download queue version {}", queue.version);
+                eprintln!("Grab: quarantining download queue version {}", queue.version);
+                Self::quarantine_queue();
                 return;
             }
-            if queue.items.len() > MAX_QUEUE_ITEMS {
+            // Over-cap queues keep every resumable item first, then the
+            // newest history: active rows are user intent, Done rows are not.
+            let mut items = queue.items;
+            if items.len() > MAX_QUEUE_ITEMS {
                 eprintln!(
-                    "Grab: truncating download queue ({} items)",
-                    queue.items.len()
+                    "Grab: truncating download queue ({} items, keeping active first)",
+                    items.len()
                 );
+                let (mut active, done): (Vec<StoredItem>, Vec<StoredItem>) = items
+                    .into_iter()
+                    .partition(|it| !matches!(it.status, StoredStatus::Done));
+                active.truncate(MAX_QUEUE_ITEMS);
+                let skip = done
+                    .len()
+                    .saturating_sub(MAX_QUEUE_ITEMS - active.len());
+                items = active
+                    .into_iter()
+                    .chain(done.into_iter().skip(skip))
+                    .collect();
             }
             self.batch.set(true);
-            for item in queue.items.into_iter().take(MAX_QUEUE_ITEMS) {
+            for item in items {
                 match item.status {
                     StoredStatus::Done => {
                         self.insert_history(item.url, item.dest_dir, item.filename, item.progress);
@@ -2061,6 +2193,14 @@ mod tests {
         gio::Settings::new("io.github.houssemko.Grab")
     }
 
+    /// Fresh loopback port per call. Parallel tests share one process (and
+    /// pid), so pid-derived ports collide; a counter never repeats.
+    fn test_port(offset: u16) -> u16 {
+        static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
+        21000 + (n.wrapping_mul(173).wrapping_add(offset)) % 40000
+    }
+
     /// One throwaway HTTP fixture: temp dirs, payload file, and a running
     /// throttled_server.py. On success the test kills the server and removes
     /// `dir`; on failure everything stays behind (ranges.log replay).
@@ -2087,7 +2227,7 @@ mod tests {
         std::fs::create_dir_all(&dl).unwrap();
         let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
         std::fs::write(srv.join(served_name), &payload).unwrap();
-        let port = 20000 + (std::process::id() % 5000) as u16 + port_offset;
+        let port = test_port(port_offset);
         let mut cmd = std::process::Command::new("python3");
         cmd.arg(format!(
             "{}/tests/throttled_server.py",
@@ -2125,9 +2265,8 @@ mod tests {
 
     /// Fail the current test, killing its server first (dirs stay for logs).
     fn abort(server: &Rc<RefCell<std::process::Child>>, msg: &str) -> ! {
-        eprintln!("TEST FAILURE: {msg}");
         let _ = server.borrow_mut().kill();
-        std::process::exit(1);
+        panic!("TEST FAILURE: {msg}");
     }
 
     /// Watchdog + run + quiescence drain shared by every main-loop test: the
@@ -2135,14 +2274,25 @@ mod tests {
     /// for another test's loop to trip over.
     fn run_loop(main_loop: &glib::MainLoop, watchdog_secs: u64) {
         let watchdog = main_loop.clone();
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (flag, done) = (Arc::clone(&timed_out), Arc::clone(&finished));
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(watchdog_secs));
-            if watchdog.is_running() {
-                eprintln!("TEST TIMEOUT");
-                std::process::exit(2);
+            // Poll so a finished test doesn't leave us sleeping for minutes.
+            for _ in 0..watchdog_secs.max(1) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if done.load(Ordering::SeqCst) || !watchdog.is_running() {
+                    return;
+                }
+            }
+            if !done.load(Ordering::SeqCst) && watchdog.is_running() {
+                flag.store(true, Ordering::SeqCst);
+                watchdog.quit();
             }
         });
         main_loop.run();
+        finished.store(true, Ordering::SeqCst);
+        assert!(!timed_out.load(Ordering::SeqCst), "TEST TIMEOUT");
         let ctx = glib::MainContext::default();
         let mut idle_rounds = 0;
         while idle_rounds < 50 {
@@ -2199,6 +2349,126 @@ mod tests {
         assert_eq!(parse_range_total("bytes */12345", 0), None);
         assert_eq!(parse_range_total("nonsense", 0), None);
         assert_eq!(parse_range_total("bytes 0-0/0", 0), None);
+    }
+
+    #[test]
+    fn prefix_len_caps_at_total() {
+        // Tail piece is short: two done pieces of a 1.5 MB file cover
+        // 1.5 MB, not 2 MB (an uncapped prefix could extend the file).
+        let mut st = SegmentState::new(1_500_000);
+        st.mark(0);
+        st.mark(1);
+        assert_eq!(st.prefix_len(), 1_500_000);
+    }
+
+    #[test]
+    fn content_disposition_star_case_insensitive() {
+        // Servers emit FILENAME*= too; parameter names are case-insensitive.
+        assert_eq!(
+            filename_from_content_disposition("attachment; FILENAME*=UTF-8''%E2%82%ACrates.mp4"),
+            Some("€rates.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn dedupe_caps_iterations() {
+        // Everything taken: must still return (not stat the disk forever).
+        let name = dedupe_filename("f.iso", |_| true);
+        assert!(name.starts_with("f ("));
+    }
+
+    #[test]
+    fn corrupt_queue_is_quarantined() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("quarantine");
+        std::fs::write(&qf, b"{not json").unwrap();
+        let settings = test_settings();
+        let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        m.restore_queue();
+        assert_eq!(m.store().n_items(), 0);
+        let bak = qf.with_extension("json.bak");
+        assert!(bak.exists());
+        let _ = std::fs::remove_file(&bak);
+        let _ = std::fs::remove_file(&qf);
+    }
+
+    #[test]
+    fn rename_noreplace_never_clobbers() {
+        let dir = std::env::temp_dir().join(format!("grab-rename-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b, c) = (dir.join("a.bin"), dir.join("b.bin"), dir.join("c.bin"));
+        std::fs::write(&a, b"aaa").unwrap();
+        std::fs::write(&b, b"bbb").unwrap();
+        // Occupied destination: error, victim untouched.
+        assert!(rename_noreplace(&a, &b).is_err());
+        assert_eq!(std::fs::read(&b).unwrap(), b"bbb");
+        assert_eq!(std::fs::read(&a).unwrap(), b"aaa");
+        // Free destination: moved, source gone.
+        assert!(rename_noreplace(&a, &c).is_ok());
+        assert!(!a.exists());
+        assert_eq!(std::fs::read(&c).unwrap(), b"aaa");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overcap_queue_keeps_active_first() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("overcap");
+        let settings = test_settings();
+        let mut items = vec![
+            StoredItem {
+                url: "https://example.com/active.iso".to_string(),
+                dest_dir: "/tmp/dl".to_string(),
+                filename: "active.iso".to_string(),
+                status: StoredStatus::Queued,
+                progress: 0.0,
+                segments: None,
+            },
+            StoredItem {
+                url: "https://example.com/paused.iso".to_string(),
+                dest_dir: "/tmp/dl".to_string(),
+                filename: "paused.iso".to_string(),
+                status: StoredStatus::Paused,
+                progress: 0.5,
+                segments: None,
+            },
+        ];
+        for i in 0..1000 {
+            items.push(StoredItem {
+                url: format!("https://example.com/f{i}.iso"),
+                dest_dir: "/tmp/dl".to_string(),
+                filename: format!("f{i}.iso"),
+                status: StoredStatus::Done,
+                progress: 1.0,
+                segments: None,
+            });
+        }
+        let queue = StoredQueue {
+            version: QUEUE_VERSION,
+            items,
+        };
+        std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+        settings.set_int("max-concurrent", 1).unwrap();
+        let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        // Occupy the only slot so Queued restores can't spawn downloads.
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        m.running.borrow_mut().insert(99, holder);
+        m.restore_queue();
+        assert_eq!(m.store().n_items(), 1000);
+        let names: Vec<String> = (0..m.store().n_items())
+            .filter_map(|i| m.store().item(i).and_downcast::<DownloadItem>())
+            .map(|it| it.filename().to_string())
+            .collect();
+        // Resumable intent survives even though it was oldest in the file.
+        assert!(names.contains(&"active.iso".to_string()));
+        assert!(names.contains(&"paused.iso".to_string()));
+        // Newest history kept, oldest history dropped.
+        assert!(names.contains(&"f999.iso".to_string()));
+        assert!(!names.contains(&"f0.iso".to_string()));
+        assert!(!names.contains(&"f1.iso".to_string()));
+        let _ = std::fs::remove_file(&qf);
     }
 
     #[test]
@@ -2814,7 +3084,7 @@ mod tests {
         let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(srv.join("t.bin"), &payload).unwrap();
 
-        let port = 20000 + (std::process::id() % 5000) as u16;
+        let port = test_port(0);
         let server_log = dir.join("server.log");
         let server_log_file = std::fs::File::create(&server_log).unwrap();
         let ranges_log = dir.join("ranges.log");
@@ -3419,7 +3689,7 @@ mod tests {
         let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         std::fs::write(srv.join("t.bin"), &payload).unwrap();
 
-        let port = 20000 + (std::process::id() % 5000) as u16 + 37;
+        let port = test_port(37);
         let ranges_log = dir.join("ranges.log");
         let server = std::process::Command::new("python3")
             .arg(format!(
@@ -3492,7 +3762,7 @@ mod tests {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("http-error");
         let settings = test_settings();
-        let port = 20000 + (std::process::id() % 5000) as u16 + 7;
+        let port = test_port(7);
         let server = std::process::Command::new("python3")
             .args(["-m", "http.server", &port.to_string()])
             .stdout(std::process::Stdio::null())
