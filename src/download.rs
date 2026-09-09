@@ -1774,11 +1774,15 @@ impl DownloadManager {
             } else {
                 "Download failed"
             });
-            let mut body = format!(
-                "{} → {}",
-                item.filename(),
-                item.file_path().to_string_lossy()
-            );
+            let mut body = if ok {
+                item.filename().to_string()
+            } else {
+                format!(
+                    "{} → {}",
+                    item.filename(),
+                    item.file_path().to_string_lossy()
+                )
+            };
             if !ok {
                 if let Some(h) = hint {
                     body.push_str(&format!("\n{h}"));
