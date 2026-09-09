@@ -128,9 +128,41 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             let st = Rc::clone(st);
             gio::ActionEntry::builder("cancel-all")
                 .activate(move |_, _, _| {
-                    if let Some(s) = st.borrow().as_ref() {
-                        s.manager.cancel_all();
+                    let Some(s) = st.borrow().as_ref().cloned() else {
+                        return;
+                    };
+                    let n = s.manager.active_count();
+                    if n == 0 {
+                        return;
                     }
+                    let body = if n == 1 {
+                        "This will cancel the active download.".to_string()
+                    } else {
+                        format!("This will cancel {n} active downloads.")
+                    };
+                    let dialog = adw::AlertDialog::builder()
+                        .heading("Cancel All Downloads?")
+                        .body(&body)
+                        .build();
+                    dialog.add_response("cancel", "Cancel");
+                    dialog.add_response("confirm", "Cancel All");
+                    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
+                    let manager = s.manager.clone();
+                    let toasts = s.toasts.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "confirm" {
+                            manager.cancel_all();
+                            let toast = if n == 1 {
+                                adw::Toast::new("Cancelled download")
+                            } else {
+                                adw::Toast::new(&format!("Cancelled {n} downloads"))
+                            };
+                            toasts.add_toast(toast);
+                        }
+                    });
+                    dialog.present(Some(&s.window));
                 })
                 .build()
         },

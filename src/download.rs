@@ -1960,12 +1960,20 @@ impl DownloadManager {
 
     /// Whether any item is queued, downloading or paused.
     pub fn has_active(&self) -> bool {
-        self.any_status(|s| {
-            matches!(
-                s,
-                DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
-            )
-        })
+        self.active_count() > 0
+    }
+
+    /// Rows `cancel_all` would touch (queued, downloading, paused).
+    pub fn active_count(&self) -> usize {
+        (0..self.store.n_items())
+            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            .filter(|it| {
+                matches!(
+                    it.status(),
+                    DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
+                )
+            })
+            .count()
     }
 
     /// Whether anything is actually transferring (queued or downloading).
@@ -2642,6 +2650,29 @@ mod tests {
         queued.set_status(DownloadStatus::Queued);
         manager.store().append(&queued);
         assert!(manager.has_transferring());
+    }
+
+    #[test]
+    fn active_count_covers_cancel_all_scope() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("active-count");
+        let settings = test_settings();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        assert_eq!(manager.active_count(), 0);
+        for (id, status) in [
+            (1, DownloadStatus::Queued),
+            (2, DownloadStatus::Downloading),
+            (3, DownloadStatus::Paused),
+            (4, DownloadStatus::Done),
+            (5, DownloadStatus::Failed),
+            (6, DownloadStatus::Cancelled),
+        ] {
+            let it = DownloadItem::new(id, "https://example.com/f.bin", "f.bin", "/tmp/dl");
+            it.set_status(status);
+            manager.store().append(&it);
+        }
+        assert_eq!(manager.active_count(), 3);
+        assert!(manager.has_active());
     }
 
     #[test]

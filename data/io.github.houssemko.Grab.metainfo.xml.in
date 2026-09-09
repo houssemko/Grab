@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.1" date="2026-09-09">
+      <description>
+        <p>Cancel All now asks for confirmation first; background notification simplified to a single line.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-09-09">
       <description>
         <p>First stable release: segmented downloads with smart auto-resume, pause/resume, download history, live preferences, and a native HIG-compliant interface.</p>

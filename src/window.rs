@@ -475,7 +475,6 @@ pub fn build_window(
                 if m.background_notifications_enabled() {
                     if let Some(app) = gio::Application::default() {
                         let n = gio::Notification::new("Downloads continue in the background");
-                        n.set_body(Some("Grab stays open until they finish."));
                         n.set_default_action_and_target_value("app.present", None);
                         app.send_notification(Some(BACKGROUND_NOTIF_ID), &n);
                     }
