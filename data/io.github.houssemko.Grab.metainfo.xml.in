@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.4" date="2026-09-09">
+      <description>
+        <p>Queue-for-later button, auto-park when lowering simultaneous downloads, no more phantom failures or flickering progress on re-queued rows.</p>
+      </description>
+    </release>
     <release version="1.0.3" date="2026-09-09">
       <description>
         <p>Finished-download notifications show just the filename.</p>
