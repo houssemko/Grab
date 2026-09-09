@@ -47,7 +47,7 @@ The first build takes a few minutes. The app window opens and the download start
 ```bash
 GTK_DEBUG=interactive cargo run
 G_MESSAGES_DEBUG=all cargo run
-cargo test
+cargo test -- --test-threads=1
 ```
 
 ## Notes for packagers

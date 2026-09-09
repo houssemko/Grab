@@ -21,7 +21,9 @@ Threading rule: network I/O runs on a dedicated tokio runtime and only sends
 ```bash
 cargo fmt --check          # must be clean
 cargo clippy --all-targets -- -D warnings   # must be zero warnings
-cargo test                 # 21 tests, incl. live-HTTP pause/resume/cancel
+cargo test -- --test-threads=1   # serial: parallel runs abort when one
+                                  # test's loop polls another's glib source
+                                  # (thread-bound futures, shared context)
 cargo run -- https://example.com/file.iso
 ```
 

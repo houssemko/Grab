@@ -20,4 +20,7 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # Serial: the suite shares one glib default MainContext across test
+      # threads, and glib futures are bound to their spawning thread, so
+      # parallel runs abort when one test's loop polls another's source.
+      - run: cargo test -- --test-threads=1

@@ -1282,6 +1282,16 @@ pub struct DownloadManager {
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<bool>,
+    /// Cached count of queued rows; backs the per-row Queue button without
+    /// scanning the store on every progress tick. Refreshed in changed(),
+    /// which follows every status transition (progress-only updates change
+    /// no statuses, so they need no recount).
+    queued: Cell<usize>,
+    /// Spawn generation per row, bumped on every engine start. A pump
+    /// future whose generation is stale (defer or a quick pause-resume
+    /// started a newer engine first) must not touch progress, status,
+    /// notifications, or the new engine's handle.
+    epoch: RefCell<HashMap<u64, u64>>,
     /// Resume bitmaps for segmented downloads (session-only, main thread).
     segment_state: RefCell<HashMap<u64, SegmentState>>,
     /// Set by shutdown(): stale engine futures must not re-persist or
@@ -1300,19 +1310,35 @@ impl DownloadManager {
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(false),
+            queued: Cell::new(0),
+            epoch: RefCell::new(HashMap::new()),
             segment_state: RefCell::new(HashMap::new()),
             draining: Cell::new(false),
         });
         // Live preferences: raising the download limit must wake queued
         // rows now (nothing else re-runs start_next until the next
-        // insert/finish event); speed edits republish the shared engine
-        // cap. Weak ref: the settings object would otherwise keep the
+        // insert/finish event); lowering it parks the newest running rows
+        // back to queued. Speed edits republish the shared engine cap.
+        // Weak ref: the settings object would otherwise keep the
         // manager alive forever.
+        //
+        // Owner-thread guard: engine futures are bound to the thread that
+        // spawned them, so queue actions must only run where the manager
+        // was created. Invariant: in production every settings write
+        // originates on the main thread (preferences UI, dconf dispatch),
+        // so this never skips there; foreign-thread writes only happen
+        // through the test suite's shared memory backend, where reacting
+        // would spawn engines on the wrong thread.
+        let owner = std::thread::current().id();
         let weak = Rc::downgrade(&this);
         this.settings
             .connect_changed(Some("max-concurrent"), move |_, _| {
+                if std::thread::current().id() != owner {
+                    return;
+                }
                 if let Some(m) = weak.upgrade() {
                     m.start_next();
+                    m.preempt_excess();
                     m.changed();
                 }
             });
@@ -1346,6 +1372,12 @@ impl DownloadManager {
     }
 
     fn changed(&self) {
+        self.queued.set(
+            (0..self.store.n_items())
+                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                .filter(|it| it.status() == DownloadStatus::Queued)
+                .count(),
+        );
         if let Some(cb) = self.on_change.borrow().as_ref() {
             cb();
         }
@@ -1546,6 +1578,8 @@ impl DownloadManager {
                 _ => StartMode::Single,
             },
         };
+        let gen = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(item.id(), gen);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = FetchCtx {
             client: http_client(),
@@ -1581,6 +1615,12 @@ impl DownloadManager {
         let mut done = false;
         glib::spawn_future_local(async move {
             while let Some(msg) = rx.recv().await {
+                // Superseded by a newer spawn for this row: its progress
+                // reports would drag the bar backwards, and its tail would
+                // fail the row or steal the new engine's handle.
+                if !this.is_current(id, gen) {
+                    break;
+                }
                 match msg {
                     EngineMsg::Progress { downloaded, total } => {
                         if item.status() != DownloadStatus::Downloading {
@@ -1749,6 +1789,11 @@ impl DownloadManager {
                     }
                 }
             }
+            // Superseded pump future: touch nothing, especially not the
+            // new engine's handle in `running`.
+            if !this.is_current(id, gen) {
+                return;
+            }
             this.running.borrow_mut().remove(&id);
             if this.draining.get() {
                 return;
@@ -1824,6 +1869,78 @@ impl DownloadManager {
         }
     }
 
+    /// Send a downloading/paused row to the back of the queue, keeping its
+    /// progress and partial file. The freed slot goes to the longest-waiting
+    /// queued row.
+    pub fn defer(self: &Rc<Self>, id: u64) {
+        let Some(item) = self.find(id) else {
+            return;
+        };
+        if !matches!(
+            item.status(),
+            DownloadStatus::Downloading | DownloadStatus::Paused
+        ) {
+            return;
+        }
+        self.park(id);
+        self.move_to_back(id);
+        self.persist_queue();
+        self.changed();
+        self.start_next();
+    }
+
+    /// Stop the engine for `id`, keeping file, bitmap and progress, and
+    /// mark it queued. Unlike pause the row yields its slot; unlike cancel
+    /// nothing is deleted and progress is kept.
+    fn park(&self, id: u64) {
+        if let Some(handle) = self.running.borrow().get(&id) {
+            handle.abort();
+        }
+        self.running.borrow_mut().remove(&id);
+        if let Some(item) = self.find(id) {
+            if matches!(
+                item.status(),
+                DownloadStatus::Downloading | DownloadStatus::Paused
+            ) {
+                item.set_status(DownloadStatus::Queued);
+                item.set_detail("Queued".to_string());
+            }
+        }
+    }
+
+    fn move_to_back(&self, id: u64) {
+        let pos = (0..self.store.n_items()).find(|&i| {
+            self.store
+                .item(i)
+                .and_downcast::<DownloadItem>()
+                .map(|it| it.id() == id)
+                .unwrap_or(false)
+        });
+        if let Some(pos) = pos {
+            if let Some(obj) = self.store.item(pos) {
+                self.store.remove(pos);
+                self.store.append(&obj);
+            }
+        }
+    }
+
+    /// Park running rows past the shrunk limit, lowest ids (earliest
+    /// enqueued) keep their slots. Id order approximates start order;
+    /// parked rows keep progress and resume later either way.
+    fn preempt_excess(&self) {
+        let max = self.max_concurrent();
+        let mut ids: Vec<u64> = self.running.borrow().keys().cloned().collect();
+        if ids.len() <= max {
+            return;
+        }
+        ids.sort_unstable();
+        for id in ids.into_iter().skip(max) {
+            self.park(id);
+        }
+        self.persist_queue();
+        self.changed();
+    }
+
     /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
         self.cancel_inner(id);
@@ -1873,6 +1990,7 @@ impl DownloadManager {
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`].
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.cancel_inner(id);
+        self.epoch.borrow_mut().remove(&id);
         if let Some(pos) = (0..self.store.n_items()).find(|&i| {
             self.store
                 .item(i)
@@ -1966,6 +2084,16 @@ impl DownloadManager {
         for id in ids {
             op(self, id);
         }
+    }
+
+    /// Whether `gen` is still the row's latest engine spawn.
+    fn is_current(&self, id: u64, gen: u64) -> bool {
+        self.epoch.borrow().get(&id).cloned().unwrap_or(0) == gen
+    }
+
+    /// Rows waiting queued (cached; see `queued`).
+    pub fn queued_count(&self) -> usize {
+        self.queued.get()
     }
 
     /// Whether any item is queued, downloading or paused.
@@ -2209,6 +2337,24 @@ mod tests {
     use super::*;
 
     static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Serializes every test that iterates the shared glib default
+    /// MainContext (MainLoops and drain pumps). glib futures are bound to
+    /// their spawning thread: a foreign iteration polling another test's
+    /// pending source aborts on the thread-affinity guard. Take AFTER
+    /// QUEUE_FILE_LOCK, always that order.
+    static MAIN_LOOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Both test locks in the one safe order (queue, then loop). Take these
+    /// together and never the loop lock before the queue lock: a reversed
+    /// order across tests would deadlock the suite into a CI-timeout hang.
+    fn test_locks() -> (
+        std::sync::MutexGuard<'static, ()>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let q = QUEUE_FILE_LOCK.lock().unwrap();
+        let l = MAIN_LOOP_LOCK.lock().unwrap();
+        (q, l)
+    }
 
     fn test_queue_file(tag: &str) -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
@@ -2228,10 +2374,26 @@ mod tests {
 
     /// Fresh loopback port per call. Parallel tests share one process (and
     /// pid), so pid-derived ports collide; a counter never repeats.
+    /// Salted per process: crashed runs leak python servers that keep
+    /// listening, and without the salt the next run reuses their ports and
+    /// talks to stale fixtures.
     fn test_port(offset: u16) -> u16 {
         static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+        static SALT: OnceLock<u64> = OnceLock::new();
+        let salt = *SALT.get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0);
+            std::process::id() as u64 ^ nanos ^ ((nanos >> 17) | 1)
+        });
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
-        21000 + (n.wrapping_mul(173).wrapping_add(offset)) % 40000
+        21000
+            + ((n as u64)
+                .wrapping_mul(173)
+                .wrapping_add(offset as u64)
+                .wrapping_add(salt)
+                % 40000) as u16
     }
 
     /// One throwaway HTTP fixture: temp dirs, payload file, and a running
@@ -2310,7 +2472,8 @@ mod tests {
 
     /// Watchdog + run + quiescence drain shared by every main-loop test: the
     /// drain pumps until the context goes quiet so no pending future is left
-    /// for another test's loop to trip over.
+    /// for another test's loop to trip over. Callers must hold
+    /// MAIN_LOOP_LOCK: only one test may iterate at a time.
     fn run_loop(main_loop: &glib::MainLoop, watchdog_secs: u64) {
         let watchdog = main_loop.clone();
         let timed_out = Arc::new(AtomicBool::new(false));
@@ -3044,7 +3207,7 @@ mod tests {
 
     #[test]
     fn cancel_frees_slot_immediately() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("cancel-slot");
         let settings = test_settings();
         settings.set_int("max-concurrent", 1).unwrap();
@@ -3079,7 +3242,7 @@ mod tests {
 
     #[test]
     fn pause_starts_next_queued() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("pause-next");
         let settings = test_settings();
         settings.set_int("max-concurrent", 1).unwrap();
@@ -3109,7 +3272,7 @@ mod tests {
 
     #[test]
     fn raising_max_concurrent_starts_queued() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("concurrent-bump");
         let settings = test_settings();
         settings.set_int("max-concurrent", 1).unwrap();
@@ -3138,6 +3301,82 @@ mod tests {
         }
         assert!(!manager.running.borrow().contains_key(&64));
         // Restore: the memory backend is shared across tests.
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
+    fn defer_yields_slot_and_goes_last() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("defer");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        // Both slots busy with stand-in holders: deferring must not spawn
+        // any real engine, keeping this test fully synchronous (no main
+        // loop pumping, which would race other tests' glib sources).
+        for (id, progress) in [(71, 0.5), (72, 0.0)] {
+            let it = DownloadItem::new(id, "https://example.com/f.bin", "f.bin", "/tmp/dl");
+            it.set_status(DownloadStatus::Downloading);
+            it.set_progress(progress);
+            manager.store().append(&it);
+            let holder = tokio_rt().spawn(async {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            });
+            manager.running.borrow_mut().insert(id, holder);
+        }
+        manager.defer(71);
+        // Progress kept, row parked behind the other one, slot count kept.
+        let a = manager.find(71).unwrap();
+        assert_eq!(a.status(), DownloadStatus::Queued);
+        assert_eq!(a.progress(), 0.5);
+        let order: Vec<u64> = (0..manager.store.n_items())
+            .filter_map(|i| manager.store().item(i).and_downcast::<DownloadItem>())
+            .map(|it| it.id())
+            .collect();
+        assert_eq!(order, vec![72, 71]);
+        assert!(manager.running.borrow().contains_key(&72));
+        assert!(!manager.running.borrow().contains_key(&71));
+        // Teardown through the real API: cancelling everything first means
+        // no row is queued, so the backend restore below can't start_next a
+        // real engine whose UI future would outlive this test. The fake
+        // holders are aborted by the cancel itself.
+        manager.cancel_all();
+        assert!(!manager.running.borrow().contains_key(&72));
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
+    fn lowering_max_concurrent_parks_newest() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("preempt");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 2).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        for id in [81, 82] {
+            let it = DownloadItem::new(id, "https://example.com/f.bin", "f.bin", "/tmp/dl");
+            it.set_status(DownloadStatus::Downloading);
+            manager.store().append(&it);
+            let holder = tokio_rt().spawn(async {
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            });
+            manager.running.borrow_mut().insert(id, holder);
+        }
+        let c = DownloadItem::new(83, "https://example.com/g.bin", "g.bin", "/tmp/dl");
+        manager.store().append(&c);
+        // The preferences SpinRow writes this key; the newest running row
+        // must park itself without any other queue event.
+        settings.set_int("max-concurrent", 1).unwrap();
+        assert_eq!(
+            manager.find(81).unwrap().status(),
+            DownloadStatus::Downloading
+        );
+        assert_eq!(manager.find(82).unwrap().status(), DownloadStatus::Queued);
+        assert!(manager.running.borrow().contains_key(&81));
+        assert!(!manager.running.borrow().contains_key(&82));
+        // Same teardown constraint as the defer test: leave no queued row
+        // behind, or the backend restore spawns a real engine for it.
+        manager.cancel_all();
+        assert!(manager.running.borrow().is_empty());
         settings.set_int("max-concurrent", 3).unwrap();
     }
 
@@ -3229,7 +3468,7 @@ mod tests {
 
     #[test]
     fn manager_pause_resume_cancel() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("lifecycle");
         let settings = test_settings();
 
@@ -3337,7 +3576,7 @@ mod tests {
 
     #[test]
     fn segmented_multi_connection_download() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("segmented");
         let settings = test_settings();
         settings.set_int("connections", 4).unwrap();
@@ -3405,7 +3644,7 @@ mod tests {
 
     #[test]
     fn adopts_content_disposition_filename() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("disposition");
         let settings = test_settings();
 
@@ -3469,7 +3708,7 @@ mod tests {
 
     #[test]
     fn prefers_shorter_content_disposition_filename() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("disposition-short");
         let settings = test_settings();
 
@@ -3530,8 +3769,75 @@ mod tests {
     }
 
     #[test]
+    fn stale_pump_future_ignores_respawned_row() {
+        // Deferring (or a quick pause-resume) aborts the engine and starts a
+        // new one: the old pump future must not drag progress backwards,
+        // fail the row, or steal the new engine's handle. The hanging server
+        // keeps the second engine mid-transfer so any clobbering is visible.
+        let (_lock, _loop) = test_locks();
+        let _qf = test_queue_file("stale-pump");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
+
+        let Fixture {
+            dir,
+            dl,
+            payload: _,
+            port,
+            server,
+        } = spawn_fixture("hang", "h.bin", 20_000, "30", &[], 41);
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        let url = format!("http://127.0.0.1:{port}/h.bin");
+        let dest = dl.to_string_lossy().into_owned();
+        let item = manager
+            .enqueue(&url, Some(&dest), Some("h.bin"))
+            .unwrap_or_else(|e| abort(&server, &e));
+        let id = item.id();
+        assert_eq!(item.status(), DownloadStatus::Downloading);
+        // Let the first engine get going, then defer: park aborts it and a
+        // second engine takes over the same row.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        manager.defer(id);
+        assert_eq!(item.status(), DownloadStatus::Downloading);
+        // Let the aborted engine die and the hanging one settle, then pump:
+        // the stale future's tail runs here and must stay silent.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let ctx = glib::MainContext::default();
+        for _ in 0..20 {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if item.status() != DownloadStatus::Downloading {
+            abort(
+                &server,
+                &format!(
+                    "stale pump future clobbered the respawned row: {:?}",
+                    item.detail(),
+                ),
+            );
+        }
+        if !manager.running.borrow().contains_key(&id) {
+            abort(&server, "respawned engine lost its handle");
+        }
+        manager.cancel(id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if manager.running.borrow().contains_key(&id) {
+            abort(&server, "cancelled engine never exited");
+        }
+        cleanup(&server, &dir);
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
     fn falls_back_to_single_stream_when_throttled() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("throttle");
         let settings = test_settings();
         settings.set_int("connections", 4).unwrap();
@@ -3594,7 +3900,7 @@ mod tests {
 
     #[test]
     fn segmented_pause_resume_keeps_bytes() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("seg-pause");
         let settings = test_settings();
         settings.set_int("connections", 4).unwrap();
@@ -3719,7 +4025,7 @@ mod tests {
         // with holes plus a stale Queued entry, no resume bitmap (RAM died
         // with the process). Restart must discard and re-fetch, never mark
         // the holey file Done via the 416 shortcut.
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let qf = test_queue_file("kill");
         let settings = test_settings();
 
@@ -3795,7 +4101,7 @@ mod tests {
         // Full kill-restart cycle in-process: manager1 downloads segmented,
         // shuts down mid-transfer (abort + truncate + persist WITH bitmap),
         // then a fresh manager2 on the same queue file resumes segmented.
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let qf = test_queue_file("segrestart");
         let settings = test_settings();
         settings.set_int("connections", 4).unwrap();
@@ -3889,7 +4195,7 @@ mod tests {
     fn aborted_engine_marks_failed() {
         // Simulates an engine task dying without reporting (panic): aborting
         // its handle must fail the row instead of stranding it Downloading.
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("abortwatch");
         let settings = test_settings();
 
@@ -3970,7 +4276,7 @@ mod tests {
 
     #[test]
     fn failed_download_reports_cause() {
-        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let (_lock, _loop) = test_locks();
         let _qf = test_queue_file("http-error");
         let settings = test_settings();
         let port = test_port(7);

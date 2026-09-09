@@ -49,11 +49,21 @@ struct RowWidgets {
     spinner: adw::Spinner,
     toggle_btn: gtk4::Button,
     stop_btn: gtk4::Button,
+    queue_btn: gtk4::Button,
     reveal_btn: gtk4::Button,
     delete_btn: gtk4::Button,
 }
 
-fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets) {
+/// Whether deferring `item` could hand its slot to someone: another row is
+/// waiting queued. With nothing waiting the button would just stop and
+/// immediately restart the same download. O(1) off the cached count, so
+/// progress ticks can call it freely.
+fn another_queued(manager: &DownloadManager, item: &crate::download::DownloadItem) -> bool {
+    let n = manager.queued_count();
+    n > 1 || (n == 1 && item.status() != DownloadStatus::Queued)
+}
+
+fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_available: bool) {
     let frac = item.progress().clamp(0.0, 1.0);
     w.progress.set_fraction(frac);
     let active = item.status() == DownloadStatus::Downloading;
@@ -66,6 +76,15 @@ fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets) {
     );
     w.toggle_btn.set_visible(running);
     w.stop_btn.set_visible(running);
+    // Deferring only makes sense while holding a slot that someone else
+    // is waiting for; queued rows are already waiting.
+    w.queue_btn.set_visible(
+        defer_available
+            && matches!(
+                item.status(),
+                DownloadStatus::Downloading | DownloadStatus::Paused
+            ),
+    );
     let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
     w.delete_btn.set_visible(done);
@@ -109,6 +128,7 @@ fn build_row(
 
     let toggle_btn = icon_button("media-playback-pause-symbolic", "Pause");
     let stop_btn = icon_button("process-stop-symbolic", "Cancel");
+    let queue_btn = icon_button("go-down-symbolic", "Queue for later");
     let reveal_btn = icon_button("folder-open-symbolic", "Show in Folder");
     let delete_btn = icon_button("user-trash-symbolic", "Move to Trash");
     let remove_btn = icon_button("list-remove-symbolic", "Remove from list");
@@ -118,6 +138,7 @@ fn build_row(
     top.append(&spinner);
     top.append(&toggle_btn);
     top.append(&stop_btn);
+    top.append(&queue_btn);
     top.append(&reveal_btn);
     top.append(&delete_btn);
     top.append(&remove_btn);
@@ -145,19 +166,34 @@ fn build_row(
         w(spinner.upcast_ref()),
         w(toggle_btn.upcast_ref()),
         w(stop_btn.upcast_ref()),
+        w(queue_btn.upcast_ref()),
         w(reveal_btn.upcast_ref()),
         w(delete_btn.upcast_ref()),
         w(status.upcast_ref()),
         w(name.upcast_ref()),
     );
+    let m_sync = Rc::clone(manager);
     let updater = move |it: &crate::download::DownloadItem| {
-        let (w_detail, w_prog, w_spin, w_tog, w_stop, w_reveal, w_del, w_status, w_name) = &weaks;
-        if let (Some(d), Some(p), Some(s), Some(t), Some(x), Some(o), Some(y), Some(st), Some(n)) = (
+        let (w_detail, w_prog, w_spin, w_tog, w_stop, w_queue, w_reveal, w_del, w_status, w_name) =
+            &weaks;
+        if let (
+            Some(d),
+            Some(p),
+            Some(s),
+            Some(t),
+            Some(x),
+            Some(q),
+            Some(o),
+            Some(y),
+            Some(st),
+            Some(n),
+        ) = (
             w_detail.upgrade(),
             w_prog.upgrade(),
             w_spin.upgrade(),
             w_tog.upgrade(),
             w_stop.upgrade(),
+            w_queue.upgrade(),
             w_reveal.upgrade(),
             w_del.upgrade(),
             w_status.upgrade(),
@@ -179,9 +215,11 @@ fn build_row(
                         .expect("Grab: spinner widget is a Spinner (bug)"),
                     toggle_btn: t.downcast().expect("Grab: toggle widget is a Button (bug)"),
                     stop_btn: x.downcast().expect("Grab: stop widget is a Button (bug)"),
+                    queue_btn: q.downcast().expect("Grab: queue widget is a Button (bug)"),
                     reveal_btn: o.downcast().expect("Grab: reveal widget is a Button (bug)"),
                     delete_btn: y.downcast().expect("Grab: delete widget is a Button (bug)"),
                 },
+                another_queued(&m_sync, it),
             );
         }
     };
@@ -201,9 +239,11 @@ fn build_row(
             spinner: spinner.clone(),
             toggle_btn: toggle_btn.clone(),
             stop_btn: stop_btn.clone(),
+            queue_btn: queue_btn.clone(),
             reveal_btn: reveal_btn.clone(),
             delete_btn: delete_btn.clone(),
         },
+        another_queued(manager, item),
     );
 
     let id = item.id();
@@ -222,6 +262,23 @@ fn build_row(
     {
         let m = Rc::clone(manager);
         stop_btn.connect_clicked(move |_| m.cancel(id));
+    }
+    {
+        let m = Rc::clone(manager);
+        let t = Rc::clone(toasts);
+        queue_btn.connect_clicked(move |_| {
+            // Re-check: the button only refreshes on this row's own ticks,
+            // so the last waiter may have left since it was shown.
+            let Some(it) = m.find(id) else {
+                return;
+            };
+            if another_queued(&m, &it) {
+                m.defer(id);
+                t.add_toast(adw::Toast::new("Queued for later"));
+            } else {
+                t.add_toast(adw::Toast::new("No other downloads waiting"));
+            }
+        });
     }
     {
         let m = Rc::clone(manager);
