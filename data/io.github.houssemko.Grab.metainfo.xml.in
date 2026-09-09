@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.0.2" date="2026-09-09">
+      <description>
+        <p>Cancelled downloads no longer raise the failure banner; Cancel All is a single pass with no stray background tasks.</p>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-09-09">
       <description>
         <p>Cancel All now asks for confirmation first; background notification simplified to a single line.</p>

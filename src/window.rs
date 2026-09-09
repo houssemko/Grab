@@ -527,7 +527,7 @@ pub fn build_window(
                     a.set_enabled(m.has_failed());
                 }
             }
-            banner.set_revealed(m.has_failed());
+            banner.set_revealed(m.has_errored());
             let idle_hidden =
                 armed.get() && !m.has_active() && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden {

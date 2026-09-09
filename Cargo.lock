@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "grab"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "futures-util",
  "gtk4",

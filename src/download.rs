@@ -1924,6 +1924,9 @@ impl DownloadManager {
 
     /// Cancel every queued, downloading or paused item.
     pub fn cancel_all(self: &Rc<Self>) {
+        // One persist/sync at the end, and no per-row start_next: cancel()
+        // would briefly spawn the next queued row only to cancel it right
+        // after, leaving stray engine tasks and UI futures behind.
         self.for_matching(
             |s| {
                 matches!(
@@ -1931,8 +1934,11 @@ impl DownloadManager {
                     DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
                 )
             },
-            |m, id| m.cancel(id),
+            |m, id| m.cancel_inner(id),
         );
+        self.persist_queue();
+        self.changed();
+        self.start_next();
     }
 
     /// Re-queue every failed or cancelled item.
@@ -1986,6 +1992,13 @@ impl DownloadManager {
     /// Whether any item failed or was cancelled.
     pub fn has_failed(&self) -> bool {
         self.any_status(|s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled))
+    }
+
+    /// Whether any item genuinely failed. User-cancelled rows need no
+    /// error banner: cancelling was deliberate, and Retry Failed in the
+    /// menu still resurrects them via `has_failed`.
+    pub fn has_errored(&self) -> bool {
+        self.any_status(|s| matches!(s, DownloadStatus::Failed))
     }
 
     fn any_status(&self, pred: impl Fn(DownloadStatus) -> bool) -> bool {
@@ -2673,6 +2686,27 @@ mod tests {
         }
         assert_eq!(manager.active_count(), 3);
         assert!(manager.has_active());
+    }
+
+    #[test]
+    fn error_banner_ignores_cancelled() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("error-banner");
+        let settings = test_settings();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        assert!(!manager.has_failed());
+        assert!(!manager.has_errored());
+        for id in 1..=2 {
+            let it = DownloadItem::new(id, "https://example.com/f.bin", "f.bin", "/tmp/dl");
+            manager.store().append(&it);
+        }
+        manager.cancel_all();
+        assert!(manager.has_failed());
+        assert!(!manager.has_errored());
+        let failed = DownloadItem::new(3, "https://example.com/g.bin", "g.bin", "/tmp/dl");
+        failed.set_status(DownloadStatus::Failed);
+        manager.store().append(&failed);
+        assert!(manager.has_errored());
     }
 
     #[test]
