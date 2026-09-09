@@ -150,7 +150,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         let dir = s.manager.effective_download_dir();
-                        window::open_folder(std::path::Path::new(&dir), &s.toasts);
+                        window::launch_path(std::path::Path::new(&dir), &s.toasts, false);
                     }
                 })
                 .build()

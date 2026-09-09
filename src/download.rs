@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
@@ -72,15 +72,7 @@ struct StoredItem {
     /// Completed 1 MB pieces for segmented resume across restarts (v2+).
     /// Absent on v1 files and for items that need no resume.
     #[serde(default)]
-    segments: Option<StoredSegments>,
-}
-
-/// Persisted piece bitmap: `done[i]` covers
-/// `[i * PIECE_SIZE, min((i+1) * PIECE_SIZE, total))`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredSegments {
-    total: u64,
-    done: Vec<bool>,
+    segments: Option<SegmentState>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -156,6 +148,26 @@ fn restored_status(stored: StoredStatus) -> DownloadStatus {
     }
 }
 
+/// Cap a filename to filesystem limits (NAME_MAX is 255 bytes on
+/// ext4/tmpfs), keeping the extension. Truncates the stem on a char
+/// boundary; reserves room for the ` (n)` dedupe suffix.
+fn shorten_filename(name: &str) -> String {
+    const MAX_FILENAME_BYTES: usize = 240;
+    if name.len() <= MAX_FILENAME_BYTES {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
+        _ => (name, None),
+    };
+    let ext_len = ext.map_or(0, str::len);
+    let keep = stem.floor_char_boundary(MAX_FILENAME_BYTES.saturating_sub(ext_len));
+    match ext {
+        Some(e) => format!("{}{e}", &stem[..keep]),
+        None => stem[..keep].to_string(),
+    }
+}
+
 /// Append ` (n)` before the extension until `taken` returns false.
 ///
 /// Example: `dedupe_filename("f.iso", |n| n == "f.iso")` returns `"f (1).iso"`.
@@ -207,14 +219,6 @@ fn sane_filename(s: &str) -> bool {
 /// Decode `%XX` escapes (RFC 5987 `filename*=`); leaves everything else
 /// (including `+`) untouched. No new dependency for ten lines.
 fn percent_decode(s: &str) -> String {
-    fn hex(b: u8) -> Option<u8> {
-        match b {
-            b'0'..=b'9' => Some(b - b'0'),
-            b'a'..=b'f' => Some(b - b'a' + 10),
-            b'A'..=b'F' => Some(b - b'A' + 10),
-            _ => None,
-        }
-    }
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -222,8 +226,8 @@ fn percent_decode(s: &str) -> String {
         let mut decoded = None;
         if bytes[i] == b'%' {
             if let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2)) {
-                if let (Some(h), Some(l)) = (hex(h), hex(l)) {
-                    decoded = Some(h << 4 | l);
+                if let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16)) {
+                    decoded = Some((h << 4 | l) as u8);
                 }
             }
         }
@@ -243,57 +247,32 @@ fn percent_decode(s: &str) -> String {
 /// any directory components servers sometimes include. `None` when absent
 /// or unusable (caller keeps the URL-derived name).
 pub fn filename_from_content_disposition(value: &str) -> Option<String> {
+    fn basename(raw: &str) -> &str {
+        raw.trim()
+            .trim_matches('"')
+            .trim()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .trim()
+    }
     let mut fallback = None;
     for part in value.split(';').map(str::trim) {
-        // Parameter names are case-insensitive; `get(..10)` succeeding
-        // proves byte 10 is a char boundary, so `&part[10..]` is safe.
-        if let Some(rest) = part
-            .get(..10)
-            .filter(|p| p.eq_ignore_ascii_case("filename*="))
-            .map(|_| &part[10..])
-        {
+        // Parameter names are case-insensitive (`FILENAME=`, `FileName*=`).
+        let Some((pname, pval)) = part.split_once('=') else {
+            continue;
+        };
+        if pname.trim().eq_ignore_ascii_case("filename*") {
             // Form: filename*=UTF-8''%E2%82%ACrates.mp4 (charset'lang'data).
-            let data = rest.split('\'').next_back().unwrap_or("").trim();
-            let name = data.rsplit(['/', '\\']).next().unwrap_or("").trim();
-            let name = percent_decode(name);
+            let data = pval.split('\'').next_back().unwrap_or("").trim();
+            let name = percent_decode(basename(data));
             if sane_filename(&name) {
                 return Some(name);
             }
-        } else if fallback.is_none() {
-            if let Some(rest) = part.strip_prefix("filename=") {
-                let name = rest
-                    .trim()
-                    .trim_matches('"')
-                    .trim()
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if sane_filename(name) {
-                    fallback = Some(name.to_string());
-                }
-            }
-        }
-    }
-    // Case-insensitive retry for `FILENAME=` variants servers emit.
-    if fallback.is_none() {
-        for part in value.split(';').map(str::trim) {
-            if let Some(rest) = part
-                .get(9..)
-                .filter(|_| part[..9].eq_ignore_ascii_case("filename="))
-            {
-                let name = rest
-                    .trim()
-                    .trim_matches('"')
-                    .trim()
-                    .rsplit(['/', '\\'])
-                    .next()
-                    .unwrap_or("")
-                    .trim();
-                if sane_filename(name) {
-                    fallback = Some(name.to_string());
-                    break;
-                }
+        } else if pname.trim().eq_ignore_ascii_case("filename") && fallback.is_none() {
+            let name = basename(pval);
+            if sane_filename(name) {
+                fallback = Some(name.to_string());
             }
         }
     }
@@ -307,6 +286,8 @@ pub fn filename_from_url(url_str: &str) -> String {
             u.path_segments()
                 .and_then(|mut segs| segs.rfind(|s| !s.is_empty()).map(|s| s.to_string()))
         })
+        // Browsers decode %XX escapes: %20 is a space, not six chars.
+        .map(|s| percent_decode(&s))
         .filter(|s| sane_filename(s))
         .unwrap_or_else(|| "index.html".to_string())
 }
@@ -324,17 +305,20 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     if trimmed.len() > MAX_URL_LEN {
         return Err(format!("URL is too long (max {MAX_URL_LEN} characters)"));
     }
-    if let Ok(u) = url::Url::parse(trimmed) {
-        if matches!(u.scheme(), "http" | "https") {
-            return Ok(u.to_string());
-        }
-        if trimmed.contains("://") {
-            return Ok(u.to_string());
-        }
+    // An explicit scheme is authoritative: only http(s) passes, so the
+    // separate validate pass is unnecessary. (Bare `host:port` inputs must
+    // not take this branch: `localhost:8080/f` parses with scheme
+    // "localhost" and still needs `https://` prepended below.)
+    if trimmed.contains("://") {
+        let u = url::Url::parse(trimmed).map_err(|_| format!("Invalid URL: {trimmed}"))?;
+        return match u.scheme() {
+            "http" | "https" => Ok(u.to_string()),
+            "ftp" => Err("FTP is not supported (use http/https)".to_string()),
+            s => Err(format!("Unsupported scheme: {s} (use http/https)")),
+        };
     }
-    let bare = !trimmed.contains("://")
-        && !trimmed.contains(' ')
-        && (trimmed.contains('.') || trimmed.starts_with("localhost"));
+    let bare =
+        !trimmed.contains(' ') && (trimmed.contains('.') || trimmed.starts_with("localhost"));
     if bare {
         let with_scheme = format!("https://{trimmed}");
         if let Ok(u) = url::Url::parse(&with_scheme) {
@@ -342,19 +326,6 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
         }
     }
     Err(format!("Invalid URL: {trimmed}"))
-}
-
-/// Reject non-http(s) URLs.
-///
-/// # Errors
-/// Returns a display-ready message for unsupported schemes or bad URLs.
-pub fn validate_url(url_str: &str) -> Result<(), String> {
-    let u = url::Url::parse(url_str).map_err(|_| format!("Invalid URL: {url_str}"))?;
-    match u.scheme() {
-        "http" | "https" => Ok(()),
-        "ftp" => Err("FTP is not supported (use http/https)".to_string()),
-        s => Err(format!("Unsupported scheme: {s} (use http/https)")),
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -420,7 +391,7 @@ enum EngineMsg {
     /// the engine may continue single-stream. Handshake (not fire-and-forget)
     /// so a concurrent pause/resume can never observe bitmap without file.
     FallbackSingle {
-        ack: async_channel::Sender<()>,
+        ack: tokio::sync::mpsc::Sender<()>,
     },
     /// Server-advertised filename (Content-Disposition). The UI thread adopts
     /// it when the current name is extensionless, after deduping.
@@ -434,9 +405,8 @@ struct FetchCtx {
     url: String,
     dest: std::path::PathBuf,
     opts: DownloadOptions,
-    rate_limit: Option<u64>,
     timeout: Duration,
-    tx: async_channel::Sender<EngineMsg>,
+    tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
 }
 
 async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
@@ -448,7 +418,7 @@ async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
         }
         StartMode::Fresh => match probe_ranges(ctx.client, &ctx.url, &ctx.opts, timeout).await {
             Ok(total) if !plan_pieces(total, connections).is_empty() => {
-                ctx.tx.send(EngineMsg::SegmentsInit { total }).await.ok();
+                ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
                 if multi_loop(&ctx, total, None, connections, &mut tries).await {
                     let mut single_tries = ctx.opts.tries.max(1);
                     single_loop(&ctx, &mut single_tries).await;
@@ -476,7 +446,6 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32) {
             &ctx.url,
             &ctx.dest,
             &ctx.opts,
-            ctx.rate_limit,
             ctx.timeout,
             &ctx.tx,
         )
@@ -487,13 +456,13 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32) {
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
-                ctx.tx.send(EngineMsg::Finished { size }).await.ok();
+                ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return;
             }
             Err(e) => {
                 *tries -= 1;
                 if *tries <= 0 {
-                    ctx.tx.send(EngineMsg::Failed(e)).await.ok();
+                    ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;
                 }
             }
@@ -522,15 +491,12 @@ async fn multi_loop(
                     .await
                     .map(|m| m.len())
                     .unwrap_or(0);
-                ctx.tx.send(EngineMsg::Finished { size }).await.ok();
+                ctx.tx.send(EngineMsg::Finished { size }).ok();
                 return false;
             }
             Err(AttemptFail::Throttled(_)) => {
-                let (ack_tx, ack_rx) = async_channel::bounded::<()>(1);
-                ctx.tx
-                    .send(EngineMsg::FallbackSingle { ack: ack_tx })
-                    .await
-                    .ok();
+                let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
+                ctx.tx.send(EngineMsg::FallbackSingle { ack: ack_tx }).ok();
                 // Wait until the UI thread truncated + dropped the bitmap:
                 // starting single-stream any earlier could append over holes.
                 // If we get aborted here (pause/cancel), there is nothing to do.
@@ -541,8 +507,8 @@ async fn multi_loop(
                 *tries -= 1;
                 if *tries <= 0 {
                     // Same channel, FIFO per sender: truncation lands first.
-                    ctx.tx.send(EngineMsg::TruncatePrefix).await.ok();
-                    ctx.tx.send(EngineMsg::Failed(e)).await.ok();
+                    ctx.tx.send(EngineMsg::TruncatePrefix).ok();
+                    ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
                 }
             }
@@ -580,7 +546,7 @@ async fn attempt_multi(
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let throttled = Arc::new(AtomicBool::new(false));
     // (offset, bytes, piece index); bounded so a slow disk throttles fetchers.
-    let (wtx, wrx) = async_channel::bounded::<(u64, Vec<u8>, u64)>(8);
+    let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(8);
     // Never exceed the configured connections: extra range requests are
     // what throttling hosts punish.
     let n_workers = queue
@@ -638,7 +604,7 @@ async fn attempt_multi(
     }
     drop(wtx);
     let writer = {
-        let wrx = wrx;
+        let mut wrx = wrx;
         let dest = ctx.dest.clone();
         async move {
             let mut file = tokio::fs::OpenOptions::new()
@@ -652,14 +618,14 @@ async fn attempt_multi(
                     downloaded,
                     total: Some(total),
                 })
-                .await
                 .ok();
             let pace_start = Instant::now();
             let mut paced: u64 = 0;
             let mut last_sent = Instant::now();
             let mut written: u64 = 0;
+            let mut rate = live_rate_limit();
             use tokio::io::{AsyncSeekExt as _, AsyncWriteExt as _};
-            while let Ok((offset, bytes, idx)) = wrx.recv().await {
+            while let Some((offset, bytes, idx)) = wrx.recv().await {
                 file.seek(std::io::SeekFrom::Start(offset))
                     .await
                     .map_err(|e| format!("Cannot write file: {e}"))?;
@@ -668,21 +634,21 @@ async fn attempt_multi(
                     .map_err(|e| format!("Cannot write file: {e}"))?;
                 downloaded += bytes.len() as u64;
                 written += bytes.len() as u64;
-                ctx.tx.send(EngineMsg::PieceDone(idx)).await.ok();
-                if let Some(rate) = ctx.rate_limit {
+                ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
+                if let Some(r) = rate {
                     paced += bytes.len() as u64;
-                    let wait = paced as f64 / rate as f64 - pace_start.elapsed().as_secs_f64();
+                    let wait = paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
                     if wait > 0.0 {
                         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                     }
                 }
                 if last_sent.elapsed() >= Duration::from_millis(100) {
+                    rate = live_rate_limit();
                     ctx.tx
                         .send(EngineMsg::Progress {
                             downloaded,
                             total: Some(total),
                         })
-                        .await
                         .ok();
                     last_sent = Instant::now();
                 }
@@ -695,7 +661,6 @@ async fn attempt_multi(
                     downloaded,
                     total: Some(total),
                 })
-                .await
                 .ok();
             Ok::<u64, String>(written)
         }
@@ -743,9 +708,8 @@ async fn attempt_once(
     url: &str,
     dest: &std::path::Path,
     opts: &DownloadOptions,
-    rate_limit: Option<u64>,
     timeout: Duration,
-    tx: &async_channel::Sender<EngineMsg>,
+    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
 ) -> Result<(), String> {
     // At most one restart: a 416 may only trigger a single delete-and-retry.
     let mut restarted = false;
@@ -818,17 +782,16 @@ async fn attempt_once(
                 .and_then(|v| v.to_str().ok())
                 .and_then(filename_from_content_disposition)
             {
-                tx.send(EngineMsg::SuggestName(name)).await.ok();
+                tx.send(EngineMsg::SuggestName(name)).ok();
             }
         }
         let mut downloaded = if partial { start } else { 0 };
-        tx.send(EngineMsg::Progress { downloaded, total })
-            .await
-            .ok();
+        tx.send(EngineMsg::Progress { downloaded, total }).ok();
         let mut stream = resp.bytes_stream();
         let pace_start = Instant::now();
         let mut paced: u64 = 0;
         let mut last_sent = Instant::now();
+        let mut rate = live_rate_limit();
         use tokio::io::AsyncWriteExt as _;
         loop {
             let chunk = match tokio::time::timeout(timeout, stream.next()).await {
@@ -841,17 +804,16 @@ async fn attempt_once(
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
             downloaded += chunk.len() as u64;
-            if let Some(rate) = rate_limit {
+            if let Some(r) = rate {
                 paced += chunk.len() as u64;
-                let wait = paced as f64 / rate as f64 - pace_start.elapsed().as_secs_f64();
+                let wait = paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
                 if wait > 0.0 {
                     tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                 }
             }
             if last_sent.elapsed() >= Duration::from_millis(100) {
-                tx.send(EngineMsg::Progress { downloaded, total })
-                    .await
-                    .ok();
+                rate = live_rate_limit();
+                tx.send(EngineMsg::Progress { downloaded, total }).ok();
                 last_sent = Instant::now();
             }
         }
@@ -884,6 +846,26 @@ pub(crate) fn parse_rate(s: &str) -> Option<u64> {
         .ok()
         .filter(|v| *v > 0.0)
         .map(|v| (v * mult as f64) as u64)
+}
+
+/// App-global live speed cap in bytes/sec (0 = unlimited). The limit is a
+/// single preference shared by all downloads, so one atomic serves every
+/// engine: the settings watch publishes, pacing loops read each tick.
+/// `gio::Settings` is main-thread-only (`!Send`), hence the hop.
+static LIVE_RATE_LIMIT: AtomicU64 = AtomicU64::new(0);
+
+fn publish_rate_limit(settings: &gio::Settings) {
+    LIVE_RATE_LIMIT.store(
+        parse_rate(settings.string("speed-limit").as_str()).unwrap_or(0),
+        Ordering::Relaxed,
+    );
+}
+
+fn live_rate_limit() -> Option<u64> {
+    match LIVE_RATE_LIMIT.load(Ordering::Relaxed) {
+        0 => None,
+        r => Some(r),
+    }
 }
 
 fn fmt_bytes(n: u64) -> String {
@@ -958,7 +940,10 @@ fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
 /// the queue file keeps no piece state, so cross-session restores always
 /// resume single-stream (files are truncated to a contiguous prefix first,
 /// which keeps that path correct).
-#[derive(Debug, Clone)]
+/// Piece bitmap: `done[i]` covers
+/// `[i * PIECE_SIZE, min((i+1) * PIECE_SIZE, total))`.
+/// Doubled as the persisted queue form (same JSON shape).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentState {
     total: u64,
     done: Vec<bool>,
@@ -1308,7 +1293,7 @@ pub struct DownloadManager {
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: gio::Settings) -> Rc<Self> {
-        Rc::new(Self {
+        let this = Rc::new(Self {
             store,
             settings,
             running: RefCell::new(HashMap::new()),
@@ -1317,7 +1302,28 @@ impl DownloadManager {
             batch: Cell::new(false),
             segment_state: RefCell::new(HashMap::new()),
             draining: Cell::new(false),
-        })
+        });
+        // Live preferences: raising the download limit must wake queued
+        // rows now (nothing else re-runs start_next until the next
+        // insert/finish event); speed edits republish the shared engine
+        // cap. Weak ref: the settings object would otherwise keep the
+        // manager alive forever.
+        let weak = Rc::downgrade(&this);
+        this.settings
+            .connect_changed(Some("max-concurrent"), move |_, _| {
+                if let Some(m) = weak.upgrade() {
+                    m.start_next();
+                    m.changed();
+                }
+            });
+        let settings_weak = this.settings.downgrade();
+        this.settings
+            .connect_changed(Some("speed-limit"), move |_, _| {
+                if let Some(s) = settings_weak.upgrade() {
+                    publish_rate_limit(&s);
+                }
+            });
+        this
     }
 
     /// UI refresh callback, invoked after every state change.
@@ -1374,7 +1380,6 @@ impl DownloadManager {
         filename: Option<&str>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
-        validate_url(&url)?;
         let dir = dest_dir
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -1383,6 +1388,7 @@ impl DownloadManager {
             .filter(|s| sane_filename(s))
             .map(|s| s.to_string())
             .unwrap_or_else(|| filename_from_url(&url));
+        let name = shorten_filename(&name);
         let name = dedupe_filename(&name, |n| {
             std::path::Path::new(&dir).join(n).exists()
                 || (0..self.store.n_items())
@@ -1407,14 +1413,14 @@ impl DownloadManager {
         segments: Option<SegmentState>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
-        validate_url(&url)?;
         if !sane_filename(filename) {
             return Err(format!("Invalid filename in queue: {filename}"));
         }
         if !std::path::Path::new(dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {dest_dir}"));
         }
-        let item = DownloadItem::new(self.alloc_id(), &url, filename, dest_dir);
+        let filename = shorten_filename(filename);
+        let item = DownloadItem::new(self.alloc_id(), &url, &filename, dest_dir);
         item.set_status(restored_status(status));
         if let Some(st) = segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
@@ -1435,7 +1441,7 @@ impl DownloadManager {
             eprintln!("Grab: skipping history entry with bad URL");
             return;
         };
-        if validate_url(&url).is_err() || !sane_filename(&name) {
+        if !sane_filename(&name) {
             eprintln!("Grab: skipping invalid history entry for {name}");
             return;
         }
@@ -1501,20 +1507,16 @@ impl DownloadManager {
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // Fail fast on junk; the running engine follows the live value,
+        // so later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
-        let rate = if limit.is_empty() || limit == "0" {
-            None
-        } else {
-            match parse_rate(limit) {
-                Some(r) => Some(r),
-                None => {
-                    item.set_status(DownloadStatus::Failed);
-                    item.set_detail(format!("Invalid speed limit: {limit}"));
-                    self.changed();
-                    return;
-                }
-            }
-        };
+        if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
+            item.set_status(DownloadStatus::Failed);
+            item.set_detail(format!("Invalid speed limit: {limit}"));
+            self.changed();
+            return;
+        }
+        publish_rate_limit(&self.settings);
         let url = item.url().to_string();
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
@@ -1544,13 +1546,12 @@ impl DownloadManager {
                 _ => StartMode::Single,
             },
         };
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = FetchCtx {
             client: http_client(),
             url,
             dest,
             opts,
-            rate_limit: rate,
             timeout,
             tx,
         };
@@ -1579,7 +1580,7 @@ impl DownloadManager {
         // stranding it as "Downloading" forever.
         let mut done = false;
         glib::spawn_future_local(async move {
-            while let Ok(msg) = rx.recv().await {
+            while let Some(msg) = rx.recv().await {
                 match msg {
                     EngineMsg::Progress { downloaded, total } => {
                         if item.status() != DownloadStatus::Downloading {
@@ -1689,10 +1690,22 @@ impl DownloadManager {
                             continue;
                         }
                         let current = item.filename().to_string();
-                        if current != "index.html" && current.contains('.') {
+                        if name == current || !sane_filename(&name) {
                             continue;
                         }
-                        if name == current || !sane_filename(&name) {
+                        // Chromium parity: the server-advertised name wins
+                        // over the URL-derived one. Adopt when the current
+                        // name is a placeholder/extensionless, or when the
+                        // server name has an extension and is shorter (long
+                        // tracked/tokenized URL names lose to the real file).
+                        // A generic extensionless server name never clobbers
+                        // a good URL-derived name.
+                        let placeholder = current == "index.html" || !current.contains('.');
+                        if !placeholder && !(name.contains('.') && name.len() < current.len()) {
+                            continue;
+                        }
+                        let name = shorten_filename(&name);
+                        if name == current {
                             continue;
                         }
                         let dir = item.dest_dir().to_string();
@@ -2000,14 +2013,7 @@ impl DownloadManager {
         for i in 0..self.store.n_items() {
             if let Some(it) = self.store.item(i).and_downcast::<DownloadItem>() {
                 if let Some(status) = StoredStatus::from_item(it.status()) {
-                    let segments =
-                        self.segment_state
-                            .borrow()
-                            .get(&it.id())
-                            .map(|st| StoredSegments {
-                                total: st.total,
-                                done: st.done.clone(),
-                            });
+                    let segments = self.segment_state.borrow().get(&it.id()).cloned();
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
@@ -2119,10 +2125,7 @@ impl DownloadManager {
                                     && s.total <= MAX_SEGMENTED_TOTAL
                                     && s.done.len() == s.total.div_ceil(PIECE_SIZE) as usize =>
                             {
-                                Some(SegmentState {
-                                    total: s.total,
-                                    done: s.done,
-                                })
+                                Some(s)
                             }
                             _ => None,
                         };
@@ -2272,6 +2275,12 @@ mod tests {
     fn abort(server: &Rc<RefCell<std::process::Child>>, msg: &str) -> ! {
         let _ = server.borrow_mut().kill();
         panic!("TEST FAILURE: {msg}");
+    }
+
+    /// Success-path teardown shared by the live-server tests.
+    fn cleanup(server: &Rc<RefCell<std::process::Child>>, dir: &std::path::Path) {
+        let _ = server.borrow_mut().kill();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Watchdog + run + quiescence drain shared by every main-loop test: the
@@ -2582,6 +2591,26 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_follows_settings_live() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("rate-live");
+        let settings = test_settings();
+        // The manager's watch publishes; the engine cap follows with no
+        // re-queue. Junk reads as unlimited.
+        let _manager =
+            DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        settings.set_string("speed-limit", "1M").unwrap();
+        assert_eq!(live_rate_limit(), Some(1024 * 1024));
+        settings.set_string("speed-limit", "").unwrap();
+        assert_eq!(live_rate_limit(), None);
+        settings.set_string("speed-limit", "junk").unwrap();
+        assert_eq!(live_rate_limit(), None);
+        // Restore: the memory backend is shared across tests; a leaked
+        // value would throttle or fail other tests' spawns.
+        settings.set_string("speed-limit", "").unwrap();
+    }
+
+    #[test]
     fn notification_toggles() {
         // NOTE: no pristine-defaults assert here: the memory GSettings
         // backend is process-shared, so other tests' set_boolean(false)
@@ -2647,14 +2676,19 @@ mod tests {
         assert_eq!(filename_from_url("https://example.com/a/b.iso"), "b.iso");
         assert_eq!(filename_from_url("https://example.com/"), "index.html");
         assert_eq!(filename_from_url("not a url"), "index.html");
+        assert_eq!(
+            filename_from_url("https://example.com/a/my%20game.zip"),
+            "my game.zip"
+        );
     }
 
     #[test]
     fn urls() {
-        assert!(validate_url("https://example.com/f.iso").is_ok());
-        assert!(validate_url("ftp://example.com/f").is_err());
-        assert!(validate_url("file:///etc/passwd").is_err());
-        assert!(validate_url("--post-file=x").is_err());
+        assert!(normalize_url("https://example.com/f.iso").is_ok());
+        assert!(normalize_url("ftp://example.com/f").is_err());
+        assert!(normalize_url("file:///etc/passwd").is_err());
+        assert!(normalize_url("--post-file=x").is_err());
+        assert!(normalize_url("localhost:8080/f.iso").is_ok());
     }
 
     #[test]
@@ -2743,6 +2777,21 @@ mod tests {
         let taken = |_: &str| false;
         assert_eq!(dedupe_filename(".profile", taken), ".profile");
         assert_eq!(dedupe_filename("a.tar.gz", taken), "a.tar.gz");
+    }
+
+    #[test]
+    fn shortens_long_filenames() {
+        assert_eq!(shorten_filename("short.mp4"), "short.mp4");
+        let long = format!("{}.mp4", "a".repeat(300));
+        let short = shorten_filename(&long);
+        assert!(short.len() <= 240);
+        assert!(short.ends_with(".mp4"));
+        let wide = format!("{}.mp4", "é".repeat(200));
+        let short = shorten_filename(&wide);
+        assert!(short.len() <= 240);
+        assert!(short.ends_with(".mp4"));
+        let no_ext = "b".repeat(300);
+        assert!(shorten_filename(&no_ext).len() <= 240);
     }
 
     #[test]
@@ -2990,6 +3039,40 @@ mod tests {
     }
 
     #[test]
+    fn raising_max_concurrent_starts_queued() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("concurrent-bump");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let a = DownloadItem::new(63, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+        a.set_status(DownloadStatus::Downloading);
+        manager.store().append(&a);
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(63, holder);
+        let b = DownloadItem::new(64, "http://127.0.0.1:9/b.bin", "b.bin", "/tmp/dl");
+        manager.store().append(&b);
+        assert_eq!(b.status(), DownloadStatus::Queued);
+        // The preferences SpinRow writes this key; the queued row must start
+        // without any other queue event. Port 9 is closed so the spawned
+        // engine fails fast during the drain below.
+        settings.set_int("max-concurrent", 2).unwrap();
+        assert_eq!(b.status(), DownloadStatus::Downloading);
+        assert!(manager.running.borrow().contains_key(&64));
+        let ctx = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while manager.running.borrow().contains_key(&64) && std::time::Instant::now() < deadline {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!manager.running.borrow().contains_key(&64));
+        // Restore: the memory backend is shared across tests.
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
     fn restore_preserves_intent() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let qf = test_queue_file("intent");
@@ -3177,8 +3260,7 @@ mod tests {
             manager.cancel(item2.id());
             assert_eq!(item2.status(), DownloadStatus::Cancelled);
 
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             quit.quit();
         });
         run_loop(&main_loop, 90);
@@ -3246,8 +3328,7 @@ mod tests {
                     &format!("expected 2+ distinct ranges, log: {ranges:?}"),
                 );
             }
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             quit.quit();
         });
         run_loop(&main_loop, 120);
@@ -3311,8 +3392,69 @@ mod tests {
             if dl.join("getfile").exists() {
                 abort(&server, "stale file left behind");
             }
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
+            quit.quit();
+        });
+        run_loop(&main_loop, 120);
+    }
+
+    #[test]
+    fn prefers_shorter_content_disposition_filename() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("disposition-short");
+        let settings = test_settings();
+
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture(
+            "cds",
+            "short.zip",
+            300_000,
+            "0.05",
+            &["attachment; filename=\"short.zip\""],
+            41,
+        );
+
+        settings.set_boolean("show-notifications", false).unwrap();
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        // Long tracked/tokenized URL name with an extension, like file hosts emit.
+        let long_name = format!("{}.zip", "a".repeat(120));
+        let url = format!("http://127.0.0.1:{port}/{long_name}");
+        let dest = dl.to_string_lossy().into_owned();
+
+        let main_loop = glib::MainLoop::new(None, false);
+        let quit = main_loop.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let item = manager
+                .enqueue(&url, Some(&dest), None)
+                .unwrap_or_else(|e| abort(&server, &e));
+            assert_eq!(item.filename(), long_name);
+            let mut waited = 0;
+            while (item.filename() != "short.zip" || item.status() != DownloadStatus::Done)
+                && waited < 600
+            {
+                glib::timeout_future(std::time::Duration::from_millis(100)).await;
+                waited += 1;
+            }
+            if item.filename() != "short.zip" {
+                abort(
+                    &server,
+                    &format!("expected rename, got {:?}", item.filename()),
+                );
+            }
+            if item.status() != DownloadStatus::Done {
+                abort(&server, &format!("expected Done, got {:?}", item.status()));
+            }
+            let new_path = dl.join("short.zip");
+            if std::fs::read(&new_path).unwrap() != payload {
+                abort(&server, "bytes differ");
+            }
+            cleanup(&server, &dir);
             quit.quit();
         });
         run_loop(&main_loop, 120);
@@ -3375,8 +3517,7 @@ mod tests {
                     &format!("expected single-stream fallback, log: {ranges:?}"),
                 );
             }
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             quit.quit();
         });
         run_loop(&main_loop, 120);
@@ -3460,8 +3601,7 @@ mod tests {
             if std::fs::read(&path).unwrap() != payload {
                 abort(&server, "bytes differ after pause/resume");
             }
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             quit.quit();
         });
         run_loop(&main_loop, 120);
@@ -3574,8 +3714,7 @@ mod tests {
             if std::fs::read(&dest).unwrap() != payload {
                 abort(&server, "holey file was marked Done instead of re-fetched");
             }
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             let _ = std::fs::remove_file(&qf);
             quit.quit();
         });
@@ -3670,8 +3809,7 @@ mod tests {
             if std::fs::read(dl.join("big.bin")).unwrap() != payload {
                 abort(&server, "bytes differ after kill-restart-resume");
             }
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             let _ = std::fs::remove_file(&qf);
             quit.quit();
         });
@@ -3755,8 +3893,7 @@ mod tests {
                 );
             }
             assert_eq!(item.detail(), "Download interrupted");
-            let _ = server.borrow_mut().kill();
-            let _ = std::fs::remove_dir_all(&dir);
+            cleanup(&server, &dir);
             quit.quit();
         });
         run_loop(&main_loop, 60);

@@ -20,16 +20,9 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
     b
 }
 
-pub fn reveal_file(path: &std::path::Path, toasts: &adw::ToastOverlay) {
-    launch_path(path, toasts, true);
-}
-
-/// Open a folder itself in the file manager.
-pub fn open_folder(path: &std::path::Path, toasts: &adw::ToastOverlay) {
-    launch_path(path, toasts, false);
-}
-
-fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: bool) {
+/// Open `path` in the file manager (`reveal` shows the containing folder
+/// with the file selected instead of opening the folder itself).
+pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: bool) {
     let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
     let t = toasts.clone();
     let what = path.to_string_lossy().into_owned();
@@ -235,7 +228,7 @@ fn build_row(
         let t = Rc::clone(toasts);
         reveal_btn.connect_clicked(move |_| {
             if let Some(it) = m.find(id) {
-                reveal_file(&it.file_path(), &t);
+                launch_path(&it.file_path(), &t, true);
             }
         });
     }
@@ -367,6 +360,7 @@ pub fn build_window(
         (section, list)
     }
     let (active_section, active_list) = section_list("Active");
+    let (queued_section, queued_list) = section_list("Queued");
     let (downloaded_section, downloaded_list) = section_list("Downloaded");
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
@@ -374,6 +368,7 @@ pub fn build_window(
     content.set_margin_start(12);
     content.set_margin_end(12);
     content.append(&active_section);
+    content.append(&queued_section);
     content.append(&downloaded_section);
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
@@ -385,6 +380,9 @@ pub fn build_window(
     fn is_done(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Done
     }
+    fn is_queued(it: &crate::download::DownloadItem) -> bool {
+        it.status() == crate::download::DownloadStatus::Queued
+    }
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
@@ -394,13 +392,16 @@ pub fn build_window(
         let add = add_btn.clone();
         let s = stack.clone();
         let l_active = active_list.clone();
+        let l_queued = queued_list.clone();
         let l_downloaded = downloaded_list.clone();
         let sec_active = active_section.clone();
+        let sec_queued = queued_section.clone();
         let sec_downloaded = downloaded_section.clone();
         Rc::new(move || {
             let store = m.store();
             let mut present = std::collections::HashSet::new();
             let mut n_active = 0;
+            let mut n_queued = 0;
             let mut n_downloaded = 0;
             for i in 0..store.n_items() {
                 if let Some(it) = store
@@ -410,6 +411,8 @@ pub fn build_window(
                     present.insert(it.id());
                     if is_done(&it) {
                         n_downloaded += 1;
+                    } else if is_queued(&it) {
+                        n_queued += 1;
                     } else {
                         n_active += 1;
                     }
@@ -423,6 +426,8 @@ pub fn build_window(
                     };
                     let target = if is_done(&it) {
                         &l_downloaded
+                    } else if is_queued(&it) {
+                        &l_queued
                     } else {
                         &l_active
                     };
@@ -448,6 +453,7 @@ pub fn build_window(
                 }
             }
             sec_active.set_visible(n_active > 0);
+            sec_queued.set_visible(n_queued > 0);
             sec_downloaded.set_visible(n_downloaded > 0);
             let has_items = store.n_items() > 0;
             // Header + duplicates the empty-state pill, so show it only with the list.
@@ -576,7 +582,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .tooltip_text("Choose download folder")
         .valign(gtk4::Align::Center)
         .build();
-    dest_btn.update_property(&[gtk4::accessible::Property::Label("Choose download folder")]);
     let dest_row = adw::ActionRow::builder().title("Save to").build();
     dest_row.add_suffix(&dest_label);
     dest_row.add_suffix(&dest_btn);
@@ -706,5 +711,28 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         if let Some(win) = app.active_window() {
             dialog.present(Some(&win));
         }
+    }
+
+    // ponytail: single clipboard read per dialog open; no watch, no polling.
+    {
+        let url_row = url_row.clone();
+        let dialog_weak = dialog.downgrade();
+        glib::spawn_future_local(async move {
+            let clipboard = gtk4::gdk::Display::default().map(|d| d.clipboard());
+            let Some(clipboard) = clipboard else { return };
+            let Ok(Some(text)) = clipboard.read_text_future().await else {
+                return;
+            };
+            if dialog_weak.upgrade().is_none() {
+                return;
+            }
+            if !url_row.text().trim().is_empty() {
+                return;
+            }
+            let pasted = text.trim().to_string();
+            if let Ok(normalized) = crate::download::normalize_url(&pasted) {
+                url_row.set_text(&normalized);
+            }
+        });
     }
 }

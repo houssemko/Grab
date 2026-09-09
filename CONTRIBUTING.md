@@ -26,7 +26,7 @@ cargo run -- https://example.com/file.iso
 ```
 
 Disk cleanup: `target/` and `build/` are safe to delete anytime (regenerable).
-Keep `.flatpak-builder/` — it caches the 211 vendored crate downloads, so the
+Keep `.flatpak-builder/` — it caches vendored crate downloads, so the
 next Flatpak build skips the ~10 min re-download.
 
 CI (`.github/workflows/ci.yml`) runs all three on push/PR.
@@ -41,18 +41,14 @@ the HIG: <https://developer.gnome.org/hig/>.
 ## Releases (maintainers, Flatpak-only)
 
 ```bash
-# 1. Bump version in Cargo.toml + metainfo, commit, push, tag (e.g. v0.2.1-alpha.5)
+# 1. Bump version in Cargo.toml + metainfo, commit, push, tag (e.g. v0.3.0-beta.1)
 # 2. Regen vendored sources only if Cargo.lock gained/lost crates:
 python3 build-aux/gen-cargo-sources.py
-# 3. Build + install + smoke-test (incremental; keeps prior state for speed):
+# 3. Build + install + smoke-test (incremental, no force-clean):
 flatpak run org.flatpak.Builder --user --install \
   build build-aux/io.github.houssemko.Grab.json
-# For releases/tags, build clean instead so no stale files can leak
-# into the artifact (e.g. a deleted icon lingering in reused staging):
-flatpak run org.flatpak.Builder --force-clean --user --install \
-  build build-aux/io.github.houssemko.Grab.json
 flatpak run io.github.houssemko.Grab --help
-# 4. Bundle + publish (pre-release, matching previous notes style):
+# 4. Bundle locally, upload ONLY when approved:
 flatpak build-bundle ~/.local/share/flatpak/repo /tmp/Grab.flatpak io.github.houssemko.Grab
-gh release create <tag> /tmp/Grab.flatpak --title "Grab <tag>" --prerelease --notes "..."
+# gh release upload <tag> /tmp/Grab.flatpak --clobber   # run only after approval
 ```

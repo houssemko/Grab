@@ -3,30 +3,6 @@ use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-fn bind_spin(settings: &gio::Settings, key: &str, row: &adw::SpinRow) {
-    row.set_value(settings.int(key) as f64);
-    {
-        let s = settings.clone();
-        let k = key.to_string();
-        row.connect_value_notify(move |r| {
-            let _ = s.set_int(&k, r.value() as i32);
-        });
-    }
-    {
-        let r = row.downgrade();
-        let k = key.to_string();
-        let kd = k.clone();
-        settings.connect_changed(Some(kd.as_str()), move |s, _| {
-            if let Some(r) = r.upgrade() {
-                let v = s.int(&k) as f64;
-                if (r.value() - v).abs() > f64::EPSILON {
-                    r.set_value(v);
-                }
-            }
-        });
-    }
-}
-
 pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio::Settings) {
     let dialog = adw::PreferencesDialog::builder()
         .title("Preferences")
@@ -58,7 +34,6 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .tooltip_text("Choose download folder")
         .valign(gtk4::Align::Center)
         .build();
-    dest_btn.update_property(&[gtk4::accessible::Property::Label("Choose download folder")]);
     let reset_btn = gtk4::Button::builder()
         .icon_name("edit-clear-symbolic")
         .css_classes(["flat"])
@@ -111,7 +86,9 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .title("Simultaneous downloads")
         .adjustment(&gtk4::Adjustment::new(3.0, 1.0, 10.0, 1.0, 1.0, 0.0))
         .build();
-    bind_spin(settings, "max-concurrent", &concurrent);
+    settings
+        .bind("max-concurrent", &concurrent, "value")
+        .build();
     net_group.add(&concurrent);
 
     let connections = adw::SpinRow::builder()
@@ -120,13 +97,10 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .adjustment(&gtk4::Adjustment::new(4.0, 1.0, 16.0, 1.0, 1.0, 0.0))
         .build();
     connections.set_tooltip_text(Some("Files under ~16 MB always use one connection"));
-    bind_spin(settings, "connections", &connections);
+    settings.bind("connections", &connections, "value").build();
     net_group.add(&connections);
 
-    let limit = adw::EntryRow::builder()
-        .title("Speed limit")
-        .text(settings.string("speed-limit").as_str())
-        .build();
+    let limit = adw::EntryRow::builder().title("Speed limit").build();
     limit.set_tooltip_text(Some("e.g. 500K, 2M; empty means unlimited"));
     limit.set_input_purpose(gtk4::InputPurpose::FreeForm);
     settings.bind("speed-limit", &limit, "text").build();
@@ -152,19 +126,18 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .title("Retries")
         .adjustment(&gtk4::Adjustment::new(3.0, 1.0, 99.0, 1.0, 5.0, 0.0))
         .build();
-    bind_spin(settings, "retries", &retries);
+    settings.bind("retries", &retries, "value").build();
     net_group.add(&retries);
 
     let timeout = adw::SpinRow::builder()
         .title("Timeout (seconds)")
         .adjustment(&gtk4::Adjustment::new(30.0, 5.0, 300.0, 5.0, 30.0, 0.0))
         .build();
-    bind_spin(settings, "timeout", &timeout);
+    settings.bind("timeout", &timeout, "value").build();
     net_group.add(&timeout);
 
     let ua = adw::EntryRow::builder()
         .title("User agent (optional)")
-        .text(settings.string("user-agent").as_str())
         .build();
     settings.bind("user-agent", &ua, "text").build();
     net_group.add(&ua);

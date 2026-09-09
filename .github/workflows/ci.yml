@@ -13,7 +13,7 @@ jobs:
     container: fedora:44
     steps:
       - name: Install system dependencies
-        run: dnf install -y git nodejs gcc pkg-config gtk4-devel libadwaita-devel python3
+        run: dnf install -y git gcc pkg-config gtk4-devel libadwaita-devel python3
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:

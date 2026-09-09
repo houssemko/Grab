@@ -11,7 +11,6 @@ license = "MIT"
 gtk4 = { version = "0.11", features = ["v4_10", "v4_12", "v4_14", "v4_16", "v4_18"] }
 libadwaita = { version = "0.9", features = ["v1_4", "v1_5", "v1_6", "v1_7", "v1_8"] }
 url = "2"
-async-channel = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros"] }
