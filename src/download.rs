@@ -846,6 +846,17 @@ async fn attempt_once(
         if rejects_unexpected_restart(partial, start, expected_total, resp.content_length()) {
             return Err("Server returned an unexpected file size".to_string());
         }
+        // Unprobed resume the server answers from zero with a SMALLER object
+        // than what we hold: a different file (login wall, throttle page),
+        // not our download. Fail loudly and keep the partial bytes instead
+        // of truncating them away for it.
+        if !partial && start > 0 {
+            if let Some(l) = resp.content_length() {
+                if l < start {
+                    return Err("Server restarted the download with a smaller file".to_string());
+                }
+            }
+        }
         let mut file = if partial {
             tokio::fs::OpenOptions::new().append(true).open(dest).await
         } else {
@@ -869,6 +880,10 @@ async fn attempt_once(
         let mut paced: u64 = 0;
         let mut last_sent = Instant::now();
         let mut rate = live_rate_limit();
+        // Chunked terminators surface as stream end, never as empty chunks:
+        // a run of them is a stalled connection gaming the per-chunk
+        // timeout, not data.
+        let mut empty_streak: u32 = 0;
         use tokio::io::AsyncWriteExt as _;
         loop {
             let chunk = match tokio::time::timeout(timeout, stream.next()).await {
@@ -877,6 +892,14 @@ async fn attempt_once(
                 Ok(None) => break,
                 Err(_) => return Err("Stalled connection timed out".to_string()),
             };
+            if chunk.is_empty() {
+                empty_streak += 1;
+                if empty_streak > 32 {
+                    return Err("Stalled connection timed out".to_string());
+                }
+                continue;
+            }
+            empty_streak = 0;
             file.write_all(&chunk)
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
@@ -1394,7 +1417,11 @@ async fn fetch_piece(
                             break Some(Retryable("Server sent too much data".to_string()));
                         }
                         body.extend_from_slice(&c);
-                        last_progress = Instant::now();
+                        // Empty chunks carry no bytes: only real data resets
+                        // the silence clock, or keep-alives mask stalls.
+                        if !c.is_empty() {
+                            last_progress = Instant::now();
+                        }
                     }
                     Ok(Some(Err(e))) => {
                         break Some(Retryable(format!("Download interrupted: {e}")))
@@ -4569,5 +4596,83 @@ mod tests {
             quit.quit();
         });
         run_loop(&main_loop, 60);
+    }
+
+    #[test]
+    fn restart_with_smaller_file_keeps_partial() {
+        // A resume the server answers from zero with a SMALLER object than
+        // we hold is a different file (login wall, throttle page): fail
+        // loudly and keep the partial bytes instead of truncating them.
+        // Plain http.server ignores Range, which is exactly the shape.
+        let (_lock, _loop) = test_locks();
+        let _qf = test_queue_file("shrink-guard");
+        let settings = test_settings();
+        let dir = std::env::temp_dir().join(format!("grab-shrink-{}", std::process::id()));
+        let srv = dir.join("srv");
+        let dl = dir.join("dl");
+        std::fs::create_dir_all(&srv).unwrap();
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::write(srv.join("t.bin"), vec![7u8; 10 * 1024]).unwrap();
+        std::fs::write(dl.join("t.bin"), vec![0u8; 1024 * 1024]).unwrap();
+
+        let port = test_port(53);
+        let server = std::process::Command::new("python3")
+            .args([
+                "-m",
+                "http.server",
+                &port.to_string(),
+                "--directory",
+                &srv.to_string_lossy(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("python3 http.server");
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready, "test HTTP server did not listen on port {port}");
+
+        let server = Rc::new(RefCell::new(server));
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store, settings.clone());
+        let url = format!("http://127.0.0.1:{port}/t.bin");
+        let dest = dl.to_string_lossy().into_owned();
+        // restore_existing, not enqueue: enqueue would dedupe away from the
+        // pre-written partial, and the restore path is synchronous, so no
+        // race with the engine's first metadata read.
+        let item = manager
+            .restore_existing(&url, &dest, "t.bin", StoredStatus::Downloading, None)
+            .unwrap_or_else(|e| abort(&server, &e));
+        let id = item.id();
+        // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).
+        let ctx = glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+            ctx.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if item.status() != DownloadStatus::Failed {
+            abort(
+                &server,
+                &format!("expected loud failure, got {:?}", item.status()),
+            );
+        }
+        if !item.detail().contains("smaller file") {
+            abort(&server, &format!("wrong cause: {:?}", item.detail()));
+        }
+        if std::fs::metadata(dl.join("t.bin"))
+            .map(|m| m.len())
+            .unwrap_or(0)
+            != 1024 * 1024
+        {
+            abort(&server, "partial file was truncated");
+        }
+        cleanup(&server, &dir);
     }
 }

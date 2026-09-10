@@ -50,6 +50,11 @@
       <summary>Notify for background downloads</summary>
       <description>Send a desktop notification when closing the window while downloads keep running in the background.</description>
     </key>
+    <key name="inhibit-suspend" type="b">
+      <default>true</default>
+      <summary>Prevent sleep during downloads</summary>
+      <description>Block system suspend while downloads are queued or running.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>

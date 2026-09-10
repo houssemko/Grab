@@ -161,8 +161,17 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .build();
     notif_group.add(&bg_notif);
 
+    let power_group = adw::PreferencesGroup::builder().title("Power").build();
+    let inhibit = adw::SwitchRow::builder()
+        .title("Prevent sleep during downloads")
+        .subtitle("Block suspend while downloads are queued or running")
+        .build();
+    settings.bind("inhibit-suspend", &inhibit, "active").build();
+    power_group.add(&inhibit);
+
     page.add(&dest_group);
     page.add(&net_group);
+    page.add(&power_group);
     page.add(&notif_group);
     dialog.add(&page);
     dialog.present(Some(parent));

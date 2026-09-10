@@ -361,6 +361,149 @@ fn build_row(
     row
 }
 
+/// Suspend block held through the desktop portal. `request` is the portal
+/// request path while held; `sub` watches its Response so a denial clears
+/// the hold instead of pretending to block. Both die with the process,
+/// which also releases the lock server-side.
+struct InhibitState {
+    request: Option<String>,
+    sub: Option<gio::SignalSubscription>,
+    seq: u64,
+}
+
+/// Ask the portal to block suspend. Stores the request only if still wanted
+/// when the reply lands; otherwise closes it at once so no block leaks.
+/// Anything failing (no bus, no portal, denied) leaves nothing held.
+async fn request_inhibit(
+    state: Rc<RefCell<InhibitState>>,
+    manager: Rc<DownloadManager>,
+    settings: gio::Settings,
+) {
+    const PORTAL: &str = "org.freedesktop.portal.Desktop";
+    const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
+    const SUSPEND: u32 = 4;
+    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+        return; // Headless/test: no session bus, nothing to block on.
+    };
+    let token = {
+        let mut st = state.borrow_mut();
+        st.seq += 1;
+        format!("grab{}", st.seq)
+    };
+    let options = glib::VariantDict::new(None);
+    options.insert("handle_token", token);
+    options.insert("reason", "Downloading files");
+    options.insert("flags", SUSPEND);
+    let params = glib::variant::ToVariant::to_variant(&(String::new(), options.end()));
+    let Ok(reply) = conn
+        .call_future(
+            Some(PORTAL),
+            DESKTOP_PATH,
+            "org.freedesktop.portal.Inhibit",
+            "Inhibit",
+            Some(&params),
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+        )
+        .await
+    else {
+        return;
+    };
+    let path = (reply.n_children() == 1)
+        .then(|| reply.child_value(0))
+        .and_then(|v| v.str().map(String::from));
+    let Some(path) = path else {
+        return;
+    };
+    // The queue may have idled during the round trip: close at once instead
+    // of leaking a block nobody will release.
+    if !(settings.boolean("inhibit-suspend") && manager.has_transferring()) {
+        release_inhibit(conn, path).await;
+        return;
+    }
+    let st2 = Rc::clone(&state);
+    let sub = conn.subscribe_to_signal(
+        None,
+        Some("org.freedesktop.portal.Request"),
+        Some("Response"),
+        Some(&path),
+        None,
+        gio::DBusSignalFlags::NONE,
+        move |sig| {
+            let denied = sig.parameters.n_children() != 2
+                || sig.parameters.child_value(0).get::<u32>() != Some(0);
+            if denied {
+                let mut st = st2.borrow_mut();
+                if st.request.as_deref() == Some(sig.object_path) {
+                    st.request = None;
+                    drop(st.sub.take());
+                }
+            }
+        },
+    );
+    let mut st = state.borrow_mut();
+    st.request = Some(path);
+    st.sub = Some(sub);
+}
+
+/// Release a held portal block. Fire-and-forget: the lock dies with the
+/// bus connection anyway, so a failed Close loses nothing.
+async fn release_inhibit(conn: gio::DBusConnection, path: String) {
+    let _ = conn
+        .call_future(
+            Some("org.freedesktop.portal.Desktop"),
+            &path,
+            "org.freedesktop.portal.Request",
+            "Close",
+            None,
+            None,
+            gio::DBusCallFlags::NONE,
+            -1,
+        )
+        .await;
+}
+
+/// Tell the desktop we keep running without windows (Background portal):
+/// the cross-desktop way to survive window close on strict desktops, and
+/// what lists Grab in the system's background-apps settings. Fire-and-forget:
+/// a denial changes nothing about the current transfer, it just means the
+/// host may still reap us. No autostart requested: relaunch stays the user's
+/// choice.
+fn request_background() {
+    glib::spawn_future_local(async move {
+        let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+            return;
+        };
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let token = format!(
+            "grabbg{}",
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let options = glib::VariantDict::new(None);
+        options.insert("handle_token", token);
+        options.insert(
+            "reason",
+            "Downloads continue in the background after the window is closed",
+        );
+        options.insert("autostart", false);
+        options.insert("background", true);
+        let params = glib::variant::ToVariant::to_variant(&(String::new(), options.end()));
+        let _ = conn
+            .call_future(
+                Some("org.freedesktop.portal.Desktop"),
+                "/org/freedesktop/portal/desktop",
+                "org.freedesktop.portal.Background",
+                "RequestBackground",
+                Some(&params),
+                None,
+                gio::DBusCallFlags::NONE,
+                -1,
+            )
+            .await;
+    });
+}
+
 pub fn build_window(
     app: &adw::Application,
     manager: Rc<DownloadManager>,
@@ -562,6 +705,7 @@ pub fn build_window(
             // the background" would be a lie with nothing transferring.
             if m.has_transferring() {
                 win.set_visible(false);
+                request_background();
                 if m.background_notifications_enabled() {
                     if let Some(app) = gio::Application::default() {
                         let n = gio::Notification::new("Downloads continue in the background");
@@ -588,6 +732,50 @@ pub fn build_window(
     }
     banner.set_revealed(false);
 
+    // Sleep inhibition through the desktop portal
+    // (`org.freedesktop.portal.Inhibit`, flag 4 = suspend): the cross-desktop
+    // path, sandbox-safe with no extra permissions. GtkApplication's inhibit
+    // only speaks to GNOME SessionManager, so KDE/Sway/etc would silently
+    // never block. No request held while idle; a failed call simply leaves
+    // nothing held and the next queue sync retries.
+    let inhibit = Rc::new(RefCell::new(InhibitState {
+        request: None,
+        sub: None,
+        seq: 0,
+    }));
+    let sync_inhibit: Rc<dyn Fn()> = {
+        let m = Rc::clone(&manager);
+        let s = settings.clone();
+        let st = Rc::clone(&inhibit);
+        Rc::new(move || {
+            let want = s.boolean("inhibit-suspend") && m.has_transferring();
+            if want && st.borrow().request.is_none() {
+                let (st2, m2, s2) = (Rc::clone(&st), Rc::clone(&m), s.clone());
+                glib::spawn_future_local(async move {
+                    request_inhibit(st2, m2, s2).await;
+                });
+            } else if !want {
+                // Separate statements: the first borrow must end before the
+                // second begins, or RefCell panics on release.
+                let path = st.borrow_mut().request.take();
+                drop(st.borrow_mut().sub.take());
+                if let Some(path) = path {
+                    if let Ok(conn) =
+                        gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>)
+                    {
+                        glib::spawn_future_local(async move {
+                            release_inhibit(conn, path).await;
+                        });
+                    }
+                }
+            }
+        })
+    };
+    {
+        let inhibit = Rc::clone(&sync_inhibit);
+        settings.connect_changed(Some("inhibit-suspend"), move |_, _| inhibit());
+    }
+
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&banner);
@@ -601,8 +789,10 @@ pub fn build_window(
         let sync = Rc::clone(&sync);
         let w = window.downgrade();
         let armed = Rc::clone(&ever_shown);
+        let inhibit = Rc::clone(&sync_inhibit);
         let hook: Rc<dyn Fn()> = Rc::new(move || {
             sync();
+            inhibit();
             if let Some(app) = app_weak.upgrade() {
                 if let Some(a) = app
                     .lookup_action("cancel-all")
