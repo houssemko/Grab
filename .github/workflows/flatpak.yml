@@ -39,9 +39,11 @@ jobs:
       - name: Regenerate vendored cargo sources
         run: python3 build-aux/gen-cargo-sources.py
 
+      # --user: the flathub remote above is user-scoped, so dependency
+      # resolution must run in user scope too (system scope can't see it).
       - name: Clean Flatpak build
         run: >
-          flatpak-builder --force-clean --repo=flatpak-repo
+          flatpak-builder --force-clean --user --repo=flatpak-repo
           --install-deps-from=flathub build
           build-aux/io.github.houssemko.Grab.json
 
