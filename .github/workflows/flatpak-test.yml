@@ -1,0 +1,64 @@
+name: Flatpak test bundle
+
+# On-demand test builds for local testing: builds Grab.flatpak from any
+# branch, tag, or SHA in CI and uploads it as a workflow artifact to
+# download. Nothing touches releases.
+#
+# No --force-clean here (that flag is for release hygiene). Note the honest
+# caveat: runners are ephemeral, so there is no previous build state to be
+# incremental against — the speed lever is the SDK cache below, not the flag.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build"
+        required: false
+        default: "main"
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out requested ref
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak flatpak-builder python3
+
+      - name: Restore SDK cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-sdk-${{ hashFiles('build-aux/io.github.houssemko.Grab.json') }}
+          restore-keys: |
+            flatpak-sdk-
+
+      - name: Install GNOME SDK and Platform
+        run: |
+          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])")
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub "org.gnome.Platform//$RUNTIME" "org.gnome.Sdk//$RUNTIME"
+
+      - name: Regenerate vendored cargo sources
+        run: python3 build-aux/gen-cargo-sources.py
+
+      - name: Flatpak build
+        run: >
+          flatpak-builder --user --repo=flatpak-repo
+          --install-deps-from=flathub build
+          build-aux/io.github.houssemko.Grab.json
+
+      - name: Bundle
+        run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.houssemko.Grab
+
+      - name: Upload test bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: Grab.flatpak
+          path: Grab.flatpak
+          retention-days: 14

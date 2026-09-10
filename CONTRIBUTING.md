@@ -55,3 +55,14 @@ gh release create <tag> --title "Grab <tag>" --notes "..."
 # Rebuild/attach again later without a new release:
 gh workflow run flatpak.yml -f tag=<tag>
 ```
+
+## Test builds (no local building)
+
+Need a bundle from a branch to try out? Build it in CI, download the
+artifact — no `--force-clean`, nothing touches releases:
+
+```bash
+gh workflow run flatpak-test.yml -f ref=<branch>
+# then: Actions tab -> Flatpak test bundle run -> Artifacts -> Grab.flatpak
+# (kept 14 days; runners are ephemeral, so speed comes from the SDK cache)
+```
