@@ -12,53 +12,9 @@ flatpak install --user Grab.flatpak
 
 Then open Grab from the app grid. The GNOME 50 runtime comes from Flathub on its own.
 
-## Try it without installing
-
-Run Grab straight from source. Nothing is installed on your system.
-
-**1. Install the build tools** (one time):
-
-```bash
-# Fedora / RHEL
-sudo dnf install rustc cargo gtk4-devel libadwaita-devel
-# Arch / CachyOS
-sudo pacman -S rust gtk4 libadwaita
-# Debian / Ubuntu
-sudo apt install cargo libgtk-4-dev libadwaita-1-dev
-```
-
-**2. Get the code:**
-
-```bash
-git clone https://github.com/houssemko/Grab.git
-cd Grab
-```
-
-**3. Run it:**
-
-```bash
-cargo run -- https://example.com/file.iso
-```
-
-The first build takes a few minutes. The app window opens and the download starts. Settings are stored per-user, so your system is untouched — delete the folder to remove everything.
-
-## Debug
-
-```bash
-GTK_DEBUG=interactive cargo run
-G_MESSAGES_DEBUG=all cargo run
-cargo test -- --test-threads=1
-```
-
 ## Notes for packagers
 
-System-wide install (needs meson and ninja):
-
-```bash
-meson setup build && ninja -C build && sudo ninja -C build install
-```
-
-Flatpak (needs Builder and the GNOME 50 SDK):
+Flatpak-only: Grab ships as a Flatpak bundle and offers no system-wide install. To build it (needs Builder and the GNOME 50 SDK):
 
 ```bash
 flatpak-builder --user --install build build-aux/io.github.houssemko.Grab.json

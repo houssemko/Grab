@@ -24,7 +24,6 @@ cargo clippy --all-targets -- -D warnings   # must be zero warnings
 cargo test -- --test-threads=1   # serial: parallel runs abort when one
                                   # test's loop polls another's glib source
                                   # (thread-bound futures, shared context)
-cargo run -- https://example.com/file.iso
 ```
 
 Disk cleanup: `target/` and `build/` are safe to delete anytime (regenerable).

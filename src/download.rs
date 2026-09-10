@@ -565,8 +565,10 @@ async fn attempt_multi(
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let throttled = Arc::new(AtomicBool::new(false));
     let changed = Arc::new(AtomicBool::new(false));
-    // (offset, bytes, piece index); bounded so a slow disk throttles fetchers.
-    let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(8);
+    // Bound in-flight BYTES, not pieces: big pieces would otherwise hold
+    // hundreds of MB between fetchers and writer on a slow disk.
+    let depth = ((8 * PIECE_MIN) / piece_len(total)).clamp(2, 8) as usize;
+    let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(depth);
     // Never exceed the configured connections: extra range requests are
     // what throttling hosts punish.
     let n_workers = queue
@@ -999,9 +1001,24 @@ fn fmt_eta(secs: u64) -> String {
     }
 }
 
-/// Piece size for segmented downloads. Small enough that one slow
-/// connection only ever delays the tail by ~1 MB of progress.
-const PIECE_SIZE: u64 = 1024 * 1024;
+/// Smallest piece size: everything at or under ~4 GB splits into 1 MB
+/// pieces, so one slow connection only ever delays the tail by ~1 MB.
+const PIECE_MIN: u64 = 1024 * 1024;
+/// Largest piece size: bounds per-request overhead on huge files without
+/// starving the work-stealing queue (still thousands of pieces).
+const PIECE_MAX: u64 = 16 * 1024 * 1024;
+/// Pieces per download to aim for; beyond this the piece size grows.
+const PIECE_TARGET_COUNT: u64 = 4096;
+
+/// Byte range each segmented piece covers. Pure function of the total, so
+/// persisted bitmaps stay valid across restarts: DO NOT change the formula
+/// without a queue migration (restore drops mismatched bitmaps to a safe
+/// single-stream resume instead of corrupting).
+fn piece_len(total: u64) -> u64 {
+    total
+        .div_ceil(PIECE_TARGET_COUNT)
+        .clamp(PIECE_MIN, PIECE_MAX)
+}
 /// A file is split only when it holds at least this much per connection
 /// (aria2-style: connections x MIN_SEGMENT), keeping small downloads on the
 /// cheaper single-stream path.
@@ -1019,30 +1036,28 @@ fn split_count(total: u64, connections: usize) -> usize {
     (connections.max(1) as u64).min(total / MIN_SEGMENT).min(16) as usize
 }
 
-/// Split `total` bytes into 1 MB `(start, end)` pieces (inclusive ends).
-/// Empty when the file is too small — or too big to trust — to split:
-/// caller uses single-stream.
+/// Split `total` bytes into `piece_len` `(start, end)` pieces (inclusive
+/// ends). Empty when the file is too small — or too big to trust — to
+/// split: caller uses single-stream.
 fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
     if total > MAX_SEGMENTED_TOTAL || split_count(total, connections) < 2 || total == 0 {
         return Vec::new();
     }
+    let piece = piece_len(total);
     let mut pieces = Vec::new();
     let mut start = 0;
     while start < total {
-        let end = (start + PIECE_SIZE).min(total) - 1;
+        let end = (start + piece).min(total) - 1;
         pieces.push((start, end));
         start = end + 1;
     }
     pieces
 }
 
-/// Session-only resume bitmap for one segmented download. Never persisted:
-/// the queue file keeps no piece state, so cross-session restores always
-/// resume single-stream (files are truncated to a contiguous prefix first,
-/// which keeps that path correct).
+/// Resume bitmap for one segmented download, persisted in the queue file
+/// (same JSON shape) so restarts resume segmented instead of starting over.
 /// Piece bitmap: `done[i]` covers
-/// `[i * PIECE_SIZE, min((i+1) * PIECE_SIZE, total))`.
-/// Doubled as the persisted queue form (same JSON shape).
+/// `[i * piece_len(total), min((i+1) * piece_len(total), total))`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentState {
     total: u64,
@@ -1053,7 +1068,7 @@ impl SegmentState {
     fn new(total: u64) -> Self {
         Self {
             total,
-            done: vec![false; total.div_ceil(PIECE_SIZE) as usize],
+            done: vec![false; total.div_ceil(piece_len(total)) as usize],
         }
     }
 
@@ -1065,11 +1080,12 @@ impl SegmentState {
 
     /// Missing `(piece index, start, end)` ranges, in order.
     fn missing(&self) -> Vec<(u64, u64, u64)> {
+        let piece = piece_len(self.total);
         let mut out = Vec::new();
         for (i, done) in self.done.iter().enumerate() {
             if !done {
-                let start = i as u64 * PIECE_SIZE;
-                out.push((i as u64, start, (start + PIECE_SIZE).min(self.total) - 1));
+                let start = i as u64 * piece;
+                out.push((i as u64, start, (start + piece).min(self.total) - 1));
             }
         }
         out
@@ -1078,7 +1094,8 @@ impl SegmentState {
     /// Contiguous completed prefix, in bytes (never past `total`: the tail
     /// piece is usually short, so an uncapped count would overshoot).
     fn prefix_len(&self) -> u64 {
-        (self.done.iter().take_while(|b| **b).count() as u64 * PIECE_SIZE).min(self.total)
+        (self.done.iter().take_while(|b| **b).count() as u64 * piece_len(self.total))
+            .min(self.total)
     }
 
     /// Forget every piece from the first gap on, keeping the bitmap
@@ -1097,12 +1114,13 @@ impl SegmentState {
 
     /// Bytes already on disk according to the bitmap.
     fn completed_bytes(&self) -> u64 {
+        let piece = piece_len(self.total);
         self.done
             .iter()
             .enumerate()
             .map(|(i, d)| {
                 if *d {
-                    PIECE_SIZE.min(self.total.saturating_sub(i as u64 * PIECE_SIZE))
+                    piece.min(self.total.saturating_sub(i as u64 * piece))
                 } else {
                     0
                 }
@@ -1394,7 +1412,7 @@ async fn fetch_piece(
                 return Err(Throttled("Server ignored range request".to_string()));
             }
         }
-        let mut body = Vec::with_capacity((end - start + 1).min(2 * PIECE_SIZE) as usize);
+        let mut body = Vec::with_capacity((end - start + 1).min(2 * piece_len(total)) as usize);
         let mut stream = resp.bytes_stream();
         // Silence deadline, not a total one: slow-but-progressing pieces
         // survive, while a stalled connection fails after 10x timeout with
@@ -2484,7 +2502,8 @@ impl DownloadManager {
                             Some(s)
                                 if s.total > 0
                                     && s.total <= MAX_SEGMENTED_TOTAL
-                                    && s.done.len() == s.total.div_ceil(PIECE_SIZE) as usize =>
+                                    && s.done.len()
+                                        == s.total.div_ceil(piece_len(s.total)) as usize =>
                             {
                                 Some(s)
                             }
@@ -2746,6 +2765,23 @@ mod tests {
     }
 
     #[test]
+    fn piece_size_scales_with_total() {
+        // Floor holds through ~4 GB: everything ordinary splits as before.
+        assert_eq!(piece_len(1024), PIECE_MIN);
+        assert_eq!(piece_len(4 * 1024 * 1024 * 1024), PIECE_MIN);
+        // Beyond that pieces grow toward ~4k per download, capped at 16 MB.
+        assert_eq!(piece_len(20 * 1024 * 1024 * 1024), 5 * 1024 * 1024);
+        assert_eq!(piece_len(1 << 40), PIECE_MAX);
+        // Bitmap stays aligned: the piece count covers the total exactly.
+        let total = 20 * 1024 * 1024 * 1024;
+        let st = SegmentState::new(total);
+        assert_eq!(st.done.len() as u64, total.div_ceil(piece_len(total)));
+        let pieces = plan_pieces(total, 4);
+        assert_eq!(pieces.len() as u64, total.div_ceil(piece_len(total)));
+        assert_eq!(pieces.last().unwrap().1, total - 1);
+    }
+
+    #[test]
     fn parses_range_totals() {
         assert_eq!(parse_content_range("bytes 0-0/12345"), Some((0, 0, 12345)));
         assert_eq!(
@@ -2908,7 +2944,7 @@ mod tests {
 
     #[test]
     fn forgets_bitmap_beyond_prefix() {
-        let mut st = SegmentState::new(4 * PIECE_SIZE);
+        let mut st = SegmentState::new(4 * PIECE_MIN);
         st.mark(0);
         st.mark(1);
         st.mark(3);
@@ -2916,11 +2952,11 @@ mod tests {
         assert_eq!(
             st.missing(),
             vec![
-                (2, 2 * PIECE_SIZE, 3 * PIECE_SIZE - 1),
-                (3, 3 * PIECE_SIZE, 4 * PIECE_SIZE - 1),
+                (2, 2 * PIECE_MIN, 3 * PIECE_MIN - 1),
+                (3, 3 * PIECE_MIN, 4 * PIECE_MIN - 1),
             ]
         );
-        assert_eq!(st.prefix_len(), 2 * PIECE_SIZE);
+        assert_eq!(st.prefix_len(), 2 * PIECE_MIN);
     }
 
     #[test]
@@ -2928,18 +2964,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("grab-trunc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("p.bin");
-        std::fs::write(&file, vec![7u8; 3 * PIECE_SIZE as usize]).unwrap();
+        std::fs::write(&file, vec![7u8; 3 * PIECE_MIN as usize]).unwrap();
         // Pieces 0,1 done, 2 missing: shrink to 2 MB.
-        let mut st = SegmentState::new(3 * PIECE_SIZE);
+        let mut st = SegmentState::new(3 * PIECE_MIN);
         st.mark(0);
         st.mark(1);
         truncate_to_prefix(&file, &st);
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_SIZE);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_MIN);
         // Already short: untouched.
         truncate_to_prefix(&file, &st);
-        assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_SIZE);
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_MIN);
         // Nothing done: emptied.
-        let st = SegmentState::new(3 * PIECE_SIZE);
+        let st = SegmentState::new(3 * PIECE_MIN);
         truncate_to_prefix(&file, &st);
         assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -4261,7 +4297,7 @@ mod tests {
         let item = DownloadItem::new(1, "https://example.com/big.bin", "big.bin", "/tmp/dl");
         item.set_status(DownloadStatus::Paused);
         m1.store().append(&item);
-        let mut st = SegmentState::new(4 * PIECE_SIZE);
+        let mut st = SegmentState::new(4 * PIECE_MIN);
         st.mark(0);
         st.mark(2);
         m1.segment_state.borrow_mut().insert(1, st);
@@ -4278,12 +4314,12 @@ mod tests {
         m2.restore_queue();
         let restored = m2.segment_state.borrow();
         let st = restored.get(&1).expect("bitmap restored");
-        assert_eq!(st.total, 4 * PIECE_SIZE);
+        assert_eq!(st.total, 4 * PIECE_MIN);
         assert_eq!(
             st.missing(),
             vec![
-                (1, PIECE_SIZE, 2 * PIECE_SIZE - 1),
-                (3, 3 * PIECE_SIZE, 4 * PIECE_SIZE - 1),
+                (1, PIECE_MIN, 2 * PIECE_MIN - 1),
+                (3, 3 * PIECE_MIN, 4 * PIECE_MIN - 1),
             ]
         );
         let _ = std::fs::remove_file(&qf);
