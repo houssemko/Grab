@@ -65,4 +65,5 @@ artifact — no `--force-clean`, nothing touches releases:
 gh workflow run flatpak-test.yml -f ref=<branch>
 # then: Actions tab -> Flatpak test bundle run -> Artifacts -> Grab.flatpak
 # (kept 14 days; runners are ephemeral, so speed comes from the SDK cache)
+# Pull requests touching code/data/packaging build one automatically.
 ```
