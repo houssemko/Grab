@@ -393,9 +393,13 @@ enum EngineMsg {
     FallbackSingle {
         ack: tokio::sync::mpsc::Sender<()>,
     },
-    /// Server-advertised filename (Content-Disposition). The UI thread adopts
-    /// it when the current name is extensionless, after deduping.
+    /// Server-advertised filename (Content-Disposition). Stored for
+    /// adoption at Finished, when the current name qualifies.
     SuggestName(String),
+    /// The server object changed mid-download (version check failed). The
+    /// UI thread drops the resume bitmap so a later retry starts fresh
+    /// instead of failing on the dead file version forever.
+    FailedVersion(String),
 }
 
 /// Shared inputs for one download's engine task. Groups the params every
@@ -414,32 +418,38 @@ async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
     let mut tries = ctx.opts.tries.max(1);
     match mode {
         StartMode::Single => {
-            single_loop(&ctx, &mut tries).await;
+            single_loop(&ctx, &mut tries, None).await;
         }
         StartMode::Fresh => match probe_ranges(ctx.client, &ctx.url, &ctx.opts, timeout).await {
-            Ok(total) if !plan_pieces(total, connections).is_empty() => {
-                ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
-                if multi_loop(&ctx, total, None, connections, &mut tries).await {
-                    let mut single_tries = ctx.opts.tries.max(1);
-                    single_loop(&ctx, &mut single_tries).await;
+            Ok(total) => {
+                if plan_pieces(total, connections).is_empty() {
+                    single_loop(&ctx, &mut tries, Some(total)).await;
+                } else {
+                    ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
+                    if multi_loop(&ctx, total, None, connections, &mut tries).await {
+                        let mut single_tries = ctx.opts.tries.max(1);
+                        single_loop(&ctx, &mut single_tries, Some(total)).await;
+                    }
                 }
             }
-            _ => {
-                single_loop(&ctx, &mut tries).await;
+            Err(_) => {
+                single_loop(&ctx, &mut tries, None).await;
             }
         },
         StartMode::Resume(st) => {
             let total = st.total;
             if multi_loop(&ctx, total, Some(st), connections, &mut tries).await {
                 let mut single_tries = ctx.opts.tries.max(1);
-                single_loop(&ctx, &mut single_tries).await;
+                single_loop(&ctx, &mut single_tries, Some(total)).await;
             }
         }
     }
 }
 
-/// Generous single-stream fallback with retries.
-async fn single_loop(ctx: &FetchCtx, tries: &mut i32) {
+/// Generous single-stream fallback with retries. `expected` is the probed
+/// total when one is known, so a restarted 200 with a disagreeing length
+/// is rejected instead of clobbering good bytes.
+async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>) {
     loop {
         match attempt_once(
             ctx.client,
@@ -447,6 +457,7 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32) {
             &ctx.dest,
             &ctx.opts,
             ctx.timeout,
+            expected,
             &ctx.tx,
         )
         .await
@@ -484,8 +495,11 @@ async fn multi_loop(
     max_workers: usize,
     tries: &mut i32,
 ) -> bool {
+    // Working bitmap: attempts fold completed pieces into it, so each
+    // retry refetches only still-missing ranges instead of everything.
+    let mut st = saved.unwrap_or_else(|| SegmentState::new(total));
     loop {
-        match attempt_multi(ctx, total, saved.clone(), max_workers).await {
+        match attempt_multi(ctx, total, &mut st, max_workers).await {
             Ok(()) => {
                 let size = tokio::fs::metadata(&ctx.dest)
                     .await
@@ -502,6 +516,14 @@ async fn multi_loop(
                 // If we get aborted here (pause/cancel), there is nothing to do.
                 let _ = ack_rx.recv().await;
                 return true;
+            }
+            Err(AttemptFail::Changed(e)) => {
+                // Different object than probed: retrying these ranges can
+                // never succeed, so fail terminally without burning tries.
+                // The pump drops the dead bitmap; the next retry (or Retry
+                // button) starts fresh and re-probes the new file.
+                ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
+                return false;
             }
             Err(AttemptFail::Retryable(e)) => {
                 *tries -= 1;
@@ -522,10 +544,9 @@ async fn multi_loop(
 async fn attempt_multi(
     ctx: &FetchCtx,
     total: u64,
-    saved: Option<SegmentState>,
+    st: &mut SegmentState,
     max_workers: usize,
 ) -> Result<(), AttemptFail> {
-    let st = saved.unwrap_or_else(|| SegmentState::new(total));
     if st.total != total {
         return Err(AttemptFail::Retryable("File changed on server".to_string()));
     }
@@ -537,14 +558,13 @@ async fn attempt_multi(
     // Ensure the file exists at full size so workers can write at offsets.
     // Missing pieces stay sparse until fetched; resume always re-runs this.
     // Never truncate here: completed pieces are already on disk.
-    ensure_sized(&ctx.dest, total)
-        .await
-        .map_err(AttemptFail::Retryable)?;
+    ensure_sized(&ctx.dest, total).await?;
     let queue: Arc<Mutex<VecDeque<(u64, u64, u64)>>> =
         Arc::new(Mutex::new(missing.into_iter().collect()));
     let failed = Arc::new(AtomicBool::new(false));
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let throttled = Arc::new(AtomicBool::new(false));
+    let changed = Arc::new(AtomicBool::new(false));
     // (offset, bytes, piece index); bounded so a slow disk throttles fetchers.
     let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(8);
     // Never exceed the configured connections: extra range requests are
@@ -557,13 +577,14 @@ async fn attempt_multi(
         .clamp(1, 16);
     let mut workers = Vec::with_capacity(n_workers);
     for _ in 0..n_workers {
-        let (ctx, wtx, queue, failed, first_err, throttled) = (
+        let (ctx, wtx, queue, failed, first_err, throttled, changed) = (
             ctx,
             wtx.clone(),
             Arc::clone(&queue),
             Arc::clone(&failed),
             Arc::clone(&first_err),
             Arc::clone(&throttled),
+            Arc::clone(&changed),
         );
         workers.push(async move {
             loop {
@@ -590,6 +611,15 @@ async fn attempt_multi(
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
+                    Err(AttemptFail::Changed(msg)) => {
+                        first_err
+                            .lock()
+                            .expect("Grab: error slot poisoned (bug)")
+                            .get_or_insert(msg);
+                        changed.store(true, Ordering::SeqCst);
+                        failed.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     Err(AttemptFail::Retryable(msg)) => {
                         first_err
                             .lock()
@@ -606,6 +636,9 @@ async fn attempt_multi(
     let writer = {
         let mut wrx = wrx;
         let dest = ctx.dest.clone();
+        // Fold completed pieces into the caller's bitmap as they land, so
+        // a retry refetches only still-missing ranges instead of everything.
+        let st = &mut *st;
         async move {
             let mut file = tokio::fs::OpenOptions::new()
                 .write(true)
@@ -635,6 +668,7 @@ async fn attempt_multi(
                 downloaded += bytes.len() as u64;
                 written += bytes.len() as u64;
                 ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
+                st.mark(idx);
                 if let Some(r) = rate {
                     paced += bytes.len() as u64;
                     let wait = paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
@@ -667,6 +701,14 @@ async fn attempt_multi(
     };
     let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
     let written = wres.map_err(AttemptFail::Retryable)?;
+    if changed.load(Ordering::SeqCst) {
+        let msg = first_err
+            .lock()
+            .expect("Grab: error slot poisoned (bug)")
+            .take()
+            .unwrap_or_else(|| "Download interrupted".to_string());
+        return Err(AttemptFail::Changed(msg));
+    }
     if throttled.load(Ordering::SeqCst) {
         let msg = first_err
             .lock()
@@ -709,6 +751,7 @@ async fn attempt_once(
     dest: &std::path::Path,
     opts: &DownloadOptions,
     timeout: Duration,
+    expected_total: Option<u64>,
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
 ) -> Result<(), String> {
     // At most one restart: a 416 may only trigger a single delete-and-retry.
@@ -747,8 +790,34 @@ async fn attempt_once(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.split('/').next_back())
                 .and_then(|t| t.parse::<u64>().ok());
+            // NOTE: no server round trip can rescue this branch. A length
+            // match proves nothing about our bytes when the file has holes:
+            // a sparse full-size file would be marked Done with zeros where
+            // pieces are missing. Only fully allocated files take it.
+            // (On compressed/deduped filesystems the block heuristic can
+            // false-positive; that only costs a re-fetch, never corruption.)
             if start > 0 && claimed == Some(start) && !has_holes(dest) {
                 return Ok(());
+            }
+            if claimed.is_none() && start > 0 && !restarted {
+                // Bare 416 (no usable Content-Range): ask for the length
+                // directly before deleting anything that might be complete.
+                let mut hreq = client.head(url);
+                if !opts.user_agent.trim().is_empty() {
+                    hreq = hreq.header("User-Agent", opts.user_agent.trim());
+                }
+                if let Ok(built) = hreq.build() {
+                    if let Ok(Ok(hresp)) =
+                        tokio::time::timeout(timeout, client.execute(built)).await
+                    {
+                        if hresp.status().is_success()
+                            && hresp.content_length() == Some(start)
+                            && !has_holes(dest)
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
             }
             if restarted {
                 // Even a plain GET gets 416: pathological server, stop looping.
@@ -766,9 +835,17 @@ async fn attempt_once(
             ));
         }
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
-        let total = resp
-            .content_length()
-            .map(|t| if partial { t + start } else { t });
+        let total = response_total(
+            resp.content_length(),
+            resp.headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok()),
+            partial,
+            start,
+        );
+        if rejects_unexpected_restart(partial, start, expected_total, resp.content_length()) {
+            return Err("Server returned an unexpected file size".to_string());
+        }
         let mut file = if partial {
             tokio::fs::OpenOptions::new().append(true).open(dest).await
         } else {
@@ -848,10 +925,10 @@ pub(crate) fn parse_rate(s: &str) -> Option<u64> {
         .map(|v| (v * mult as f64) as u64)
 }
 
-/// App-global live speed cap in bytes/sec (0 = unlimited). The limit is a
-/// single preference shared by all downloads, so one atomic serves every
-/// engine: the settings watch publishes, pacing loops read each tick.
-/// `gio::Settings` is main-thread-only (`!Send`), hence the hop.
+/// Live speed cap in bytes/sec (0 = unlimited), applied per download: every
+/// engine paces to the full value. One atomic serves all engines because the
+/// preference is single: the settings watch publishes, pacing loops read
+/// each tick. `gio::Settings` is main-thread-only (`!Send`), hence the hop.
 static LIVE_RATE_LIMIT: AtomicU64 = AtomicU64::new(0);
 
 fn publish_rate_limit(settings: &gio::Settings) {
@@ -1029,18 +1106,27 @@ fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
 /// differs. `File::create` would truncate already-downloaded pieces on
 /// every resume/retry and silently corrupt the file while the bitmap still
 /// claims those pieces as done.
-async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), String> {
+async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptFail> {
     let file = tokio::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(false)
         .open(dest)
         .await
-        .map_err(|e| format!("Cannot write file: {e}"))?;
+        .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
     if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total {
-        file.set_len(total)
-            .await
-            .map_err(|e| format!("Cannot write file: {e}"))?;
+        if let Err(e) = file.set_len(total).await {
+            use std::io::ErrorKind::{FileTooLarge, StorageFull};
+            // No room (or no sparse support) for full-size staging: the
+            // single-stream path preallocates nothing, so downgrade to it.
+            let msg = format!("Cannot write file: {e}");
+            let storage = matches!(e.kind(), StorageFull | FileTooLarge);
+            return Err(if storage {
+                AttemptFail::Throttled(msg)
+            } else {
+                AttemptFail::Retryable(msg)
+            });
+        }
     }
     Ok(())
 }
@@ -1148,27 +1234,70 @@ async fn probe_ranges(
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    parse_range_total(&value, 0).ok_or_else(|| "Bad Content-Range".to_string())
+    parse_content_range(&value)
+        .filter(|(s, _, _)| *s == 0)
+        .map(|(_, _, t)| t)
+        .ok_or_else(|| "Bad Content-Range".to_string())
 }
 
-/// Parse `Content-Range: bytes <start>-<end>/<total>`, checking the range
-/// starts where we asked (pins all chunks to one file version).
-fn parse_range_total(value: &str, expect_start: u64) -> Option<u64> {
+/// Parse `Content-Range: bytes <start>-<end>/<total>`. Callers pin the
+/// fields they require: a wrong start or end means the server answered a
+/// different range than asked (pins all chunks to one file version).
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
-    let (start, _) = range.split_once('-')?;
-    if start.parse::<u64>().ok()? != expect_start {
-        return None;
-    }
-    let total: u64 = total.parse().ok()?;
-    (total > 0).then_some(total)
+    let (start, end) = range.split_once('-')?;
+    let (start, end, total) = (
+        start.parse::<u64>().ok()?,
+        end.parse::<u64>().ok()?,
+        total.parse::<u64>().ok()?,
+    );
+    (total > 0 && end >= start).then_some((start, end, total))
+}
+
+/// Total size for a response: Content-Length, else the Content-Range total
+/// for partial responses that omit it (chunked 206s). `None` only when
+/// neither header says (fresh chunked 200s), where EOF is the only signal.
+fn response_total(
+    content_length: Option<u64>,
+    content_range: Option<&str>,
+    partial: bool,
+    start: u64,
+) -> Option<u64> {
+    content_length
+        .map(|t| if partial { t + start } else { t })
+        .or_else(|| {
+            if !partial {
+                return None;
+            }
+            content_range
+                .and_then(parse_content_range)
+                .filter(|(s, _, _)| *s == start)
+                .map(|(_, _, t)| t)
+        })
+}
+
+/// A resumed range answered with a full 200 must still be the same object:
+/// a disagreeing declared length means login wall or throttle page, and
+/// `File::create` must not eat the good prefix for it.
+fn rejects_unexpected_restart(
+    partial: bool,
+    start: u64,
+    expected: Option<u64>,
+    content_length: Option<u64>,
+) -> bool {
+    !partial && start > 0 && matches!((expected, content_length), (Some(t), Some(l)) if l != t)
 }
 
 /// Why a piece or segmented attempt failed. Throttled means the server is
 /// rejecting parallel range requests (per-IP connection limits, common on
 /// file hosts) while a single stream still works: downgrade, don't retry.
+/// Changed means the object on the server is no longer the probed file:
+/// retrying the same ranges can never succeed, so fail terminally and let
+/// a later retry start fresh instead of looping forever.
 enum AttemptFail {
     Retryable(String),
     Throttled(String),
+    Changed(String),
 }
 
 /// Fetch one `[start, end]` piece, retrying stalls. Verifies the server
@@ -1184,7 +1313,7 @@ async fn fetch_piece(
     total: u64,
 ) -> Result<Vec<u8>, AttemptFail> {
     let timeout = ctx.timeout;
-    use AttemptFail::{Retryable, Throttled};
+    use AttemptFail::{Changed, Retryable, Throttled};
     let mut last_err = Retryable("Empty response".to_string());
     for _ in 0..PIECE_TRIES {
         let mut req = ctx
@@ -1215,13 +1344,12 @@ async fn fetch_piece(
         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             let code = resp.status().as_u16();
             // Per-IP connection limits speak 403/429/503 (and 509 on some
-            // hosts) while a single stream still works: downgrade, not fail.
-            let throttled = matches!(code, 403 | 429 | 503) || code == 509;
-            last_err = if throttled {
-                Throttled(format!("Range rejected: HTTP {code}"))
-            } else {
-                Retryable(format!("Range rejected: HTTP {code}"))
-            };
+            // hosts) while a single stream still works: downgrade at once
+            // instead of burning retries (and goodwill) against the limit.
+            if matches!(code, 403 | 429 | 503) || code == 509 {
+                return Err(Throttled(format!("Range rejected: HTTP {code}")));
+            }
+            last_err = Retryable(format!("Range rejected: HTTP {code}"));
             continue;
         }
         let cr = resp
@@ -1230,17 +1358,34 @@ async fn fetch_piece(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        if parse_range_total(&cr, start) != Some(total) {
-            last_err = Retryable("File changed on server".to_string());
-            continue;
+        match parse_content_range(&cr) {
+            Some((s, e, t)) if s == start && e == end && t == total => {}
+            Some((_, _, t)) if t != total => {
+                // Different object than probed: retrying these ranges can
+                // never succeed, so fail terminally right away.
+                return Err(Changed("File changed on server".to_string()));
+            }
+            // Unparseable or wrong range: the host ignores ranges, so
+            // downgrade to single-stream instead of retrying to Failed.
+            _ => {
+                return Err(Throttled("Server ignored range request".to_string()));
+            }
         }
         let mut body = Vec::with_capacity((end - start + 1).min(2 * PIECE_SIZE) as usize);
         let mut stream = resp.bytes_stream();
-        let piece_deadline = tokio::time::sleep(timeout.saturating_mul(10));
-        tokio::pin!(piece_deadline);
+        // Silence deadline, not a total one: slow-but-progressing pieces
+        // survive, while a stalled connection fails after 10x timeout with
+        // no bytes at all.
+        let quiet_limit = timeout.saturating_mul(10);
+        let mut last_progress = Instant::now();
         let failed: Option<AttemptFail> = loop {
+            if last_progress.elapsed() >= quiet_limit {
+                break Some(Retryable("Piece stalled".to_string()));
+            }
+            let idle = tokio::time::sleep(quiet_limit.saturating_sub(last_progress.elapsed()));
+            tokio::pin!(idle);
             tokio::select! {
-                _ = &mut piece_deadline => {
+                _ = &mut idle => {
                     break Some(Retryable("Piece stalled".to_string()))
                 }
                 next = tokio::time::timeout(timeout, stream.next()) => match next {
@@ -1249,6 +1394,7 @@ async fn fetch_piece(
                             break Some(Retryable("Server sent too much data".to_string()));
                         }
                         body.extend_from_slice(&c);
+                        last_progress = Instant::now();
                     }
                     Ok(Some(Err(e))) => {
                         break Some(Retryable(format!("Download interrupted: {e}")))
@@ -1282,6 +1428,10 @@ pub struct DownloadManager {
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<bool>,
+    /// Server-advertised names waiting for their download to finish. The
+    /// move happens at Finished so the engine never writes through a
+    /// renamed path mid-transfer (stale size reads, split files).
+    pending_names: RefCell<HashMap<u64, String>>,
     /// Cached count of queued rows; backs the per-row Queue button without
     /// scanning the store on every progress tick. Refreshed in changed(),
     /// which follows every status transition (progress-only updates change
@@ -1310,6 +1460,7 @@ impl DownloadManager {
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
             batch: Cell::new(false),
+            pending_names: RefCell::new(HashMap::new()),
             queued: Cell::new(0),
             epoch: RefCell::new(HashMap::new()),
             segment_state: RefCell::new(HashMap::new()),
@@ -1665,6 +1816,54 @@ impl DownloadManager {
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
+                            // A pause keeps its pending name: resumed
+                            // single-stream attempts never re-suggest.
+                            let pending = this.pending_names.borrow_mut().remove(&id);
+                            if let Some(name) = pending {
+                                let current = item.filename().to_string();
+                                let dir = item.dest_dir().to_string();
+                                let taken = |n: &str| {
+                                    std::path::Path::new(&dir).join(n).exists()
+                                        || (0..this.store.n_items())
+                                            .filter_map(|i| {
+                                                this.store.item(i).and_downcast::<DownloadItem>()
+                                            })
+                                            .any(|it| it.dest_dir() == dir && it.filename() == n)
+                                };
+                                // Claim-then-move so a file appearing between the
+                                // dedupe check and the rename is never clobbered:
+                                // retry with a fresh deduped name instead.
+                                let old_path = item.file_path();
+                                let mut final_name = dedupe_filename(&name, taken);
+                                let mut moved = !old_path.exists();
+                                for _ in 0..8 {
+                                    if moved
+                                        || old_path == std::path::Path::new(&dir).join(&final_name)
+                                    {
+                                        break;
+                                    }
+                                    match rename_noreplace(
+                                        &old_path,
+                                        &std::path::Path::new(&dir).join(&final_name),
+                                    ) {
+                                        Ok(()) => {
+                                            moved = true;
+                                        }
+                                        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                                            final_name = dedupe_filename(&name, taken);
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+                                if moved && final_name != current {
+                                    item.set_filename(final_name);
+                                }
+                            }
+                            // Size off the final path: the engine measured the
+                            // pre-rename one.
+                            let size = std::fs::metadata(item.file_path())
+                                .map(|m| m.len())
+                                .unwrap_or(size);
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
                             item.set_detail(if size > 0 {
@@ -1679,6 +1878,25 @@ impl DownloadManager {
                         break;
                     }
                     EngineMsg::Failed(e) => {
+                        // A failed download keeps its URL-derived name.
+                        this.pending_names.borrow_mut().remove(&id);
+                        if item.status() != DownloadStatus::Cancelled
+                            && item.status() != DownloadStatus::Paused
+                        {
+                            item.set_status(DownloadStatus::Failed);
+                            item.set_detail(e.clone());
+                            this.notify_finished(&item, false, Some(e));
+                        }
+                        done = true;
+                        break;
+                    }
+                    EngineMsg::FailedVersion(e) => {
+                        // The bytes on the server changed mid-download: any
+                        // resume bitmap describes a dead file version, so
+                        // drop it. The next attempt (or Retry) starts fresh
+                        // and re-probes instead of failing forever.
+                        this.segment_state.borrow_mut().remove(&id);
+                        this.pending_names.borrow_mut().remove(&id);
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
@@ -1721,11 +1939,10 @@ impl DownloadManager {
                         ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {
-                        // Adopt the server-advertised name only while the
-                        // download is fresh single-stream (segmented attempts
-                        // never suggest): the engine writes through an open
-                        // handle, so moving that inode underneath is safe on
-                        // Unix, and resume offsets are unaffected.
+                        // Stash the server-advertised name for adoption at
+                        // Finished. Moving mid-transfer would desync the
+                        // engine (stale size reads, split files), so only
+                        // fresh single-stream attempts suggest at all.
                         if item.status() != DownloadStatus::Downloading {
                             continue;
                         }
@@ -1748,44 +1965,7 @@ impl DownloadManager {
                         if name == current {
                             continue;
                         }
-                        let dir = item.dest_dir().to_string();
-                        let taken = |n: &str| {
-                            std::path::Path::new(&dir).join(n).exists()
-                                || (0..this.store.n_items())
-                                    .filter_map(|i| {
-                                        this.store.item(i).and_downcast::<DownloadItem>()
-                                    })
-                                    .any(|it| it.dest_dir() == dir && it.filename() == n)
-                        };
-                        // Claim-then-move so a file appearing between the
-                        // dedupe check and the rename is never clobbered:
-                        // retry with a fresh deduped name instead.
-                        let old_path = item.file_path();
-                        let mut final_name = dedupe_filename(&name, taken);
-                        let mut moved = !old_path.exists();
-                        for _ in 0..8 {
-                            if moved || old_path == std::path::Path::new(&dir).join(&final_name) {
-                                break;
-                            }
-                            match rename_noreplace(
-                                &old_path,
-                                &std::path::Path::new(&dir).join(&final_name),
-                            ) {
-                                Ok(()) => {
-                                    moved = true;
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                                    final_name = dedupe_filename(&name, taken);
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                        if !moved || final_name == current {
-                            continue;
-                        }
-                        item.set_filename(final_name);
-                        this.persist_queue();
-                        this.changed();
+                        this.pending_names.borrow_mut().insert(id, name);
                     }
                 }
             }
@@ -1954,6 +2134,7 @@ impl DownloadManager {
             handle.abort();
         }
         self.running.borrow_mut().remove(&id);
+        self.pending_names.borrow_mut().remove(&id);
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         if let Some(item) = self.find(id) {
             if had_segments {
@@ -2324,10 +2505,8 @@ impl DownloadManager {
             }
         }
         // Persist BEFORE returning: the bitmaps are what let the next launch
-        // resume segmented instead of restarting. The map itself stays: the
-        // engine futures still draining will re-persist as they exit, and
-        // dropping the bitmaps here would make those rewrites lose them.
-        // (Fresh process exit frees the map anyway; shutdown only runs once.)
+        // resume segmented instead of restarting. Pump tails exit silently
+        // once draining is set, so this is the only persist that matters.
         self.persist_queue();
     }
 }
@@ -2541,16 +2720,43 @@ mod tests {
 
     #[test]
     fn parses_range_totals() {
-        assert_eq!(parse_range_total("bytes 0-0/12345", 0), Some(12345));
+        assert_eq!(parse_content_range("bytes 0-0/12345"), Some((0, 0, 12345)));
         assert_eq!(
-            parse_range_total("bytes 1048576-2097151/12345", 1048576),
-            Some(12345)
+            parse_content_range("bytes 1048576-2097151/8388608"),
+            Some((1048576, 2097151, 8388608))
         );
-        // Wrong start (different file version) or garbage rejected.
-        assert_eq!(parse_range_total("bytes 0-99/12345", 50), None);
-        assert_eq!(parse_range_total("bytes */12345", 0), None);
-        assert_eq!(parse_range_total("nonsense", 0), None);
-        assert_eq!(parse_range_total("bytes 0-0/0", 0), None);
+        // Inverted range or garbage rejected.
+        assert_eq!(parse_content_range("bytes 99-0/12345"), None);
+        assert_eq!(parse_content_range("bytes */12345"), None);
+        assert_eq!(parse_content_range("nonsense"), None);
+        assert_eq!(parse_content_range("bytes 0-0/0"), None);
+    }
+
+    #[test]
+    fn resolves_response_totals() {
+        assert_eq!(response_total(Some(100), None, false, 0), Some(100));
+        assert_eq!(response_total(Some(60), None, true, 40), Some(100));
+        // Chunked 206 without Content-Length: trust Content-Range.
+        assert_eq!(
+            response_total(None, Some("bytes 40-99/100"), true, 40),
+            Some(100)
+        );
+        // Range starts elsewhere, or no headers at all: unknown.
+        assert_eq!(response_total(None, Some("bytes 0-0/100"), true, 40), None);
+        assert_eq!(response_total(None, None, true, 40), None);
+        assert_eq!(response_total(None, None, false, 0), None);
+    }
+
+    #[test]
+    fn rejects_size_mismatched_restarts() {
+        // Resumed range answered 200 with a different length: reject.
+        assert!(rejects_unexpected_restart(false, 40, Some(100), Some(12)));
+        // Same length, fresh start, or unknown lengths: proceed.
+        assert!(!rejects_unexpected_restart(false, 40, Some(100), Some(100)));
+        assert!(!rejects_unexpected_restart(false, 0, Some(100), Some(12)));
+        assert!(!rejects_unexpected_restart(true, 40, Some(100), Some(60)));
+        assert!(!rejects_unexpected_restart(false, 40, None, Some(12)));
+        assert!(!rejects_unexpected_restart(false, 40, Some(100), None));
     }
 
     #[test]
@@ -3833,6 +4039,43 @@ mod tests {
         }
         cleanup(&server, &dir);
         settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
+    fn piece_rejects_changed_file_version() {
+        // No locks: pure tokio + unique fixture, nothing shared.
+        let Fixture {
+            dir,
+            dl,
+            payload,
+            port,
+            server,
+        } = spawn_fixture("verc", "v.bin", 300_000, "0", &[], 43);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = FetchCtx {
+            client: http_client(),
+            url: format!("http://127.0.0.1:{port}/v.bin"),
+            dest: dl.join("v.bin"),
+            opts: DownloadOptions {
+                timeout: 30,
+                ..Default::default()
+            },
+            timeout: Duration::from_secs(30),
+            tx,
+        };
+        let total = payload.len() as u64;
+        // Bogus total: the server's Content-Range disagrees, so this must
+        // fail Changed at once instead of burning retries.
+        match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, 1)) {
+            Err(AttemptFail::Changed(_)) => {}
+            _ => abort(&server, "wrong-total piece must fail Changed"),
+        }
+        // Correct total: the piece comes back whole.
+        match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, total)) {
+            Ok(body) => assert_eq!(body.len(), 1024),
+            _ => abort(&server, "correct-total piece must succeed"),
+        }
+        cleanup(&server, &dir);
     }
 
     #[test]

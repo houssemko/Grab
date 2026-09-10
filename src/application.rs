@@ -153,6 +153,9 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     let toasts = s.toasts.clone();
                     dialog.connect_response(None, move |_, response| {
                         if response == "confirm" {
+                            // Count at confirm time, not dialog-open time:
+                            // the queue may have changed while it sat open.
+                            let n = manager.active_count();
                             manager.cancel_all();
                             let toast = if n == 1 {
                                 adw::Toast::new("Cancelled download")
@@ -225,14 +228,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         let dialog = adw::ShortcutsDialog::new();
                         let section = adw::ShortcutsSection::new(Some("Downloads"));
                         section.add(adw::ShortcutsItem::new("New Download", "<Control>n"));
-                        section.add(adw::ShortcutsItem::from_action(
-                            "Cancel All",
-                            "app.cancel-all",
-                        ));
-                        section.add(adw::ShortcutsItem::from_action(
-                            "Retry Failed",
-                            "app.retry-failed",
-                        ));
+                        // Plain items: these actions have no accelerators,
+                        // and from_action would render an empty shortcut cell
+                        // implying a keybinding that doesn't exist.
+                        section.add(adw::ShortcutsItem::new("Cancel All", ""));
+                        section.add(adw::ShortcutsItem::new("Retry Failed", ""));
                         dialog.add(section);
                         let section2 = adw::ShortcutsSection::new(Some("General"));
                         section2.add(adw::ShortcutsItem::from_action(

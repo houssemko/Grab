@@ -50,6 +50,7 @@ struct RowWidgets {
     toggle_btn: gtk4::Button,
     stop_btn: gtk4::Button,
     queue_btn: gtk4::Button,
+    retry_btn: gtk4::Button,
     reveal_btn: gtk4::Button,
     delete_btn: gtk4::Button,
 }
@@ -85,6 +86,12 @@ fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_avail
                 DownloadStatus::Downloading | DownloadStatus::Paused
             ),
     );
+    // Failed rows otherwise strand: bulk retry lives in the menu/banner,
+    // but a single failure deserves its own button.
+    w.retry_btn.set_visible(matches!(
+        item.status(),
+        DownloadStatus::Failed | DownloadStatus::Cancelled
+    ));
     let done = item.status() == DownloadStatus::Done;
     w.reveal_btn.set_visible(done);
     w.delete_btn.set_visible(done);
@@ -92,9 +99,13 @@ fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_avail
     if item.status() == DownloadStatus::Paused {
         w.toggle_btn.set_icon_name("media-playback-start-symbolic");
         w.toggle_btn.set_tooltip_text(Some("Resume"));
+        w.toggle_btn
+            .update_property(&[gtk4::accessible::Property::Label("Resume")]);
     } else {
         w.toggle_btn.set_icon_name("media-playback-pause-symbolic");
         w.toggle_btn.set_tooltip_text(Some("Pause"));
+        w.toggle_btn
+            .update_property(&[gtk4::accessible::Property::Label("Pause")]);
     }
 }
 
@@ -129,6 +140,7 @@ fn build_row(
     let toggle_btn = icon_button("media-playback-pause-symbolic", "Pause");
     let stop_btn = icon_button("process-stop-symbolic", "Cancel");
     let queue_btn = icon_button("go-down-symbolic", "Queue for later");
+    let retry_btn = icon_button("view-refresh-symbolic", "Retry");
     let reveal_btn = icon_button("folder-open-symbolic", "Show in Folder");
     let delete_btn = icon_button("user-trash-symbolic", "Move to Trash");
     let remove_btn = icon_button("list-remove-symbolic", "Remove from list");
@@ -139,6 +151,7 @@ fn build_row(
     top.append(&toggle_btn);
     top.append(&stop_btn);
     top.append(&queue_btn);
+    top.append(&retry_btn);
     top.append(&reveal_btn);
     top.append(&delete_btn);
     top.append(&remove_btn);
@@ -167,6 +180,7 @@ fn build_row(
         w(toggle_btn.upcast_ref()),
         w(stop_btn.upcast_ref()),
         w(queue_btn.upcast_ref()),
+        w(retry_btn.upcast_ref()),
         w(reveal_btn.upcast_ref()),
         w(delete_btn.upcast_ref()),
         w(status.upcast_ref()),
@@ -174,8 +188,19 @@ fn build_row(
     );
     let m_sync = Rc::clone(manager);
     let updater = move |it: &crate::download::DownloadItem| {
-        let (w_detail, w_prog, w_spin, w_tog, w_stop, w_queue, w_reveal, w_del, w_status, w_name) =
-            &weaks;
+        let (
+            w_detail,
+            w_prog,
+            w_spin,
+            w_tog,
+            w_stop,
+            w_queue,
+            w_retry,
+            w_reveal,
+            w_del,
+            w_status,
+            w_name,
+        ) = &weaks;
         if let (
             Some(d),
             Some(p),
@@ -183,6 +208,7 @@ fn build_row(
             Some(t),
             Some(x),
             Some(q),
+            Some(r),
             Some(o),
             Some(y),
             Some(st),
@@ -194,6 +220,7 @@ fn build_row(
             w_tog.upgrade(),
             w_stop.upgrade(),
             w_queue.upgrade(),
+            w_retry.upgrade(),
             w_reveal.upgrade(),
             w_del.upgrade(),
             w_status.upgrade(),
@@ -216,6 +243,7 @@ fn build_row(
                     toggle_btn: t.downcast().expect("Grab: toggle widget is a Button (bug)"),
                     stop_btn: x.downcast().expect("Grab: stop widget is a Button (bug)"),
                     queue_btn: q.downcast().expect("Grab: queue widget is a Button (bug)"),
+                    retry_btn: r.downcast().expect("Grab: retry widget is a Button (bug)"),
                     reveal_btn: o.downcast().expect("Grab: reveal widget is a Button (bug)"),
                     delete_btn: y.downcast().expect("Grab: delete widget is a Button (bug)"),
                 },
@@ -240,6 +268,7 @@ fn build_row(
             toggle_btn: toggle_btn.clone(),
             stop_btn: stop_btn.clone(),
             queue_btn: queue_btn.clone(),
+            retry_btn: retry_btn.clone(),
             reveal_btn: reveal_btn.clone(),
             delete_btn: delete_btn.clone(),
         },
@@ -262,6 +291,10 @@ fn build_row(
     {
         let m = Rc::clone(manager);
         stop_btn.connect_clicked(move |_| m.cancel(id));
+    }
+    {
+        let m = Rc::clone(manager);
+        retry_btn.connect_clicked(move |_| m.retry(id));
     }
     {
         let m = Rc::clone(manager);
@@ -585,8 +618,12 @@ pub fn build_window(
                 }
             }
             banner.set_revealed(m.has_errored());
-            let idle_hidden =
-                armed.get() && !m.has_active() && w.upgrade().is_some_and(|win| !win.is_visible());
+            // Same predicate as close-request: only quit/withdraw when
+            // nothing is transferring. Paused rows persist across launches,
+            // so counting them here would strand a hidden zombie.
+            let idle_hidden = armed.get()
+                && !m.has_transferring()
+                && w.upgrade().is_some_and(|win| !win.is_visible());
             if idle_hidden {
                 if let Some(app) = app_weak.upgrade() {
                     app.withdraw_notification(BACKGROUND_NOTIF_ID);
@@ -741,6 +778,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     {
         let m = manager.clone();
         let dd = dest_dir.clone();
+        let file_row = file_row.clone();
         let dialog = dialog.downgrade();
         let error_label = error_label.clone();
         url_row.connect_apply(move |row| {
@@ -748,7 +786,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             if url.is_empty() {
                 return;
             }
-            match m.enqueue(&url, Some(&dd.borrow()), None) {
+            let fname = file_row.text().trim().to_string();
+            match m.enqueue(
+                &url,
+                Some(&dd.borrow()),
+                if fname.is_empty() {
+                    None
+                } else {
+                    Some(fname.as_str())
+                },
+            ) {
                 Ok(_) => {
                     if let Some(dialog) = dialog.upgrade() {
                         dialog.close();
@@ -766,6 +813,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     if let Some(app) = gio::Application::default().and_downcast::<adw::Application>() {
         if let Some(win) = app.active_window() {
             dialog.present(Some(&win));
+        } else {
+            // No window (e.g. action fired while hidden): present standalone
+            // rather than silently dropping the dialog.
+            dialog.present(None::<&gtk4::Window>);
         }
     }
 

@@ -101,7 +101,7 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     net_group.add(&connections);
 
     let limit = adw::EntryRow::builder().title("Speed limit").build();
-    limit.set_tooltip_text(Some("e.g. 500K, 2M; empty means unlimited"));
+    limit.set_tooltip_text(Some("Per download, e.g. 500K, 2M; empty means unlimited"));
     limit.set_input_purpose(gtk4::InputPurpose::FreeForm);
     settings.bind("speed-limit", &limit, "text").build();
     // Flag junk immediately instead of failing rows at spawn time.
