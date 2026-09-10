@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.2.0" date="2026-09-10">
+      <description>
+        <p>Adaptive piece sizing for huge files, stall hardening, cross-desktop sleep inhibit with toggle, background portal support, and Flatpak-only distribution.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-09-09">
       <description>
         <p>Hardened downloads: verified sizes, resumable retries, healing server changes, per-row retry, and a full review pass over engine and interface.</p>
