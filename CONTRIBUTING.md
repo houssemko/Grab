@@ -42,14 +42,16 @@ the HIG: <https://developer.gnome.org/hig/>.
 ## Releases (maintainers, Flatpak-only)
 
 ```bash
-# 1. Bump version in Cargo.toml + metainfo, commit, push, tag (e.g. v0.3.0-beta.1)
+# 1. Bump version in Cargo.toml + metainfo, commit, push, tag (e.g. v1.2.0)
 # 2. Regen vendored sources only if Cargo.lock gained/lost crates:
 python3 build-aux/gen-cargo-sources.py
-# 3. Build + install + smoke-test (incremental, no force-clean):
+# 3. Smoke-test locally if you like (incremental, no force-clean, no bundle):
 flatpak run org.flatpak.Builder --user --install \
   build build-aux/io.github.houssemko.Grab.json
 flatpak run io.github.houssemko.Grab --help
-# 4. Bundle locally, upload ONLY when approved:
-flatpak build-bundle ~/.local/share/flatpak/repo /tmp/Grab.flatpak io.github.houssemko.Grab
-# gh release upload <tag> /tmp/Grab.flatpak --clobber   # run only after approval
+# 4. Publish the release; CI (.github/workflows/flatpak.yml) clean-builds
+#    the bundle from the tag and attaches Grab.flatpak itself:
+gh release create <tag> --title "Grab <tag>" --notes "..."
+# Rebuild/attach again later without a new release:
+gh workflow run flatpak.yml -f tag=<tag>
 ```
