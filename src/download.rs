@@ -311,6 +311,9 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     // "localhost" and still needs `https://` prepended below.)
     if trimmed.contains("://") {
         let u = url::Url::parse(trimmed).map_err(|_| format!("Invalid URL: {trimmed}"))?;
+        if !u.username().is_empty() || u.password().is_some() {
+            return Err("URLs with a username/password are not supported".to_string());
+        }
         return match u.scheme() {
             "http" | "https" => Ok(u.to_string()),
             "ftp" => Err("FTP is not supported (use http/https)".to_string()),
@@ -322,7 +325,9 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
     if bare {
         let with_scheme = format!("https://{trimmed}");
         if let Ok(u) = url::Url::parse(&with_scheme) {
-            return Ok(u.to_string());
+            if u.username().is_empty() && u.password().is_none() {
+                return Ok(u.to_string());
+            }
         }
     }
     Err(format!("Invalid URL: {trimmed}"))
@@ -365,7 +370,15 @@ fn tokio_rt() -> &'static tokio::runtime::Runtime {
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        // Bounded hops: a malicious server must not bounce the client
+        // around (or downgrade https→http) without limit. No cookie or
+        // auth store is enabled, so only the URL + UA cross origins.
+        reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(5))
+            .build()
+            .expect("http client")
+    })
 }
 
 enum EngineMsg {
@@ -418,29 +431,29 @@ async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
     let mut tries = ctx.opts.tries.max(1);
     match mode {
         StartMode::Single => {
-            single_loop(&ctx, &mut tries, None).await;
+            single_loop(&ctx, &mut tries, None, false).await;
         }
         StartMode::Fresh => match probe_ranges(ctx.client, &ctx.url, &ctx.opts, timeout).await {
             Ok(total) => {
                 if plan_pieces(total, connections).is_empty() {
-                    single_loop(&ctx, &mut tries, Some(total)).await;
+                    single_loop(&ctx, &mut tries, Some(total), true).await;
                 } else {
                     ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
                     if multi_loop(&ctx, total, None, connections, &mut tries).await {
                         let mut single_tries = ctx.opts.tries.max(1);
-                        single_loop(&ctx, &mut single_tries, Some(total)).await;
+                        single_loop(&ctx, &mut single_tries, Some(total), false).await;
                     }
                 }
             }
             Err(_) => {
-                single_loop(&ctx, &mut tries, None).await;
+                single_loop(&ctx, &mut tries, None, true).await;
             }
         },
         StartMode::Resume(st) => {
             let total = st.total;
             if multi_loop(&ctx, total, Some(st), connections, &mut tries).await {
                 let mut single_tries = ctx.opts.tries.max(1);
-                single_loop(&ctx, &mut single_tries, Some(total)).await;
+                single_loop(&ctx, &mut single_tries, Some(total), false).await;
             }
         }
     }
@@ -448,20 +461,16 @@ async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
 
 /// Generous single-stream fallback with retries. `expected` is the probed
 /// total when one is known, so a restarted 200 with a disagreeing length
-/// is rejected instead of clobbering good bytes.
-async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>) {
+/// is rejected instead of clobbering good bytes. `claim` marks the initial
+/// fresh attempt (foreign file at dest fails fast); fallback singles pass
+/// false since the prefix is ours.
+async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, claim: bool) {
+    // One-shot: only the first attempt may claim a missing file. Past
+    // it, any bytes at dest are ours (or a sanctioned restart), so later
+    // attempts keep truncate semantics.
+    let mut claim = claim;
     loop {
-        match attempt_once(
-            ctx.client,
-            &ctx.url,
-            &ctx.dest,
-            &ctx.opts,
-            ctx.timeout,
-            expected,
-            &ctx.tx,
-        )
-        .await
-        {
+        match attempt_once(ctx, expected, claim).await {
             Ok(()) => {
                 let size = tokio::fs::metadata(&ctx.dest)
                     .await
@@ -471,6 +480,13 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>) {
                 return;
             }
             Err(e) => {
+                // Retrying a taken path is futile (same dest): fail at
+                // once so the pump can requeue under a fresh name.
+                if e == DEST_EXISTS {
+                    ctx.tx.send(EngineMsg::Failed(e)).ok();
+                    return;
+                }
+                claim = false;
                 *tries -= 1;
                 if *tries <= 0 {
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
@@ -747,32 +763,36 @@ fn has_holes(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A fresh run found someone else's file at our path (it appeared after
+/// dedupe): the pump requeues under a fresh name instead of failing.
+const DEST_EXISTS: &str = "Destination already exists";
+
 async fn attempt_once(
-    client: &reqwest::Client,
-    url: &str,
-    dest: &std::path::Path,
-    opts: &DownloadOptions,
-    timeout: Duration,
+    ctx: &FetchCtx,
     expected_total: Option<u64>,
-    tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
+    // True only for the first attempt of an initial fresh single-stream
+    // run: a foreign file at `dest` must fail instead of being
+    // truncated. Retries (our own bytes), 416 restarts (file removed
+    // first), and fallback singles (our own prefix) pass false.
+    claim: bool,
 ) -> Result<(), String> {
     // At most one restart: a 416 may only trigger a single delete-and-retry.
     let mut restarted = false;
     loop {
-        let start = tokio::fs::metadata(dest)
+        let start = tokio::fs::metadata(&ctx.dest)
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        let mut req = client.get(url);
+        let mut req = ctx.client.get(&ctx.url);
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
         }
-        if !opts.user_agent.trim().is_empty() {
-            req = req.header("User-Agent", opts.user_agent.trim());
+        if !ctx.opts.user_agent.trim().is_empty() {
+            req = req.header("User-Agent", ctx.opts.user_agent.trim());
         }
         let resp = match tokio::time::timeout(
-            timeout,
-            client.execute(req.build().map_err(|e| e.to_string())?),
+            ctx.timeout,
+            ctx.client.execute(req.build().map_err(|e| e.to_string())?),
         )
         .await
         {
@@ -798,23 +818,23 @@ async fn attempt_once(
             // pieces are missing. Only fully allocated files take it.
             // (On compressed/deduped filesystems the block heuristic can
             // false-positive; that only costs a re-fetch, never corruption.)
-            if start > 0 && claimed == Some(start) && !has_holes(dest) {
+            if start > 0 && claimed == Some(start) && !has_holes(&ctx.dest) {
                 return Ok(());
             }
             if claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 (no usable Content-Range): ask for the length
                 // directly before deleting anything that might be complete.
-                let mut hreq = client.head(url);
-                if !opts.user_agent.trim().is_empty() {
-                    hreq = hreq.header("User-Agent", opts.user_agent.trim());
+                let mut hreq = ctx.client.head(&ctx.url);
+                if !ctx.opts.user_agent.trim().is_empty() {
+                    hreq = hreq.header("User-Agent", ctx.opts.user_agent.trim());
                 }
                 if let Ok(built) = hreq.build() {
                     if let Ok(Ok(hresp)) =
-                        tokio::time::timeout(timeout, client.execute(built)).await
+                        tokio::time::timeout(ctx.timeout, ctx.client.execute(built)).await
                     {
                         if hresp.status().is_success()
                             && hresp.content_length() == Some(start)
-                            && !has_holes(dest)
+                            && !has_holes(&ctx.dest)
                         {
                             return Ok(());
                         }
@@ -825,7 +845,7 @@ async fn attempt_once(
                 // Even a plain GET gets 416: pathological server, stop looping.
                 return Err("Server rejects range requests".to_string());
             }
-            let _ = std::fs::remove_file(dest);
+            let _ = std::fs::remove_file(&ctx.dest);
             restarted = true;
             continue;
         }
@@ -837,6 +857,10 @@ async fn attempt_once(
             ));
         }
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
+        // Fresh runs must never truncate a file they did not create.
+        if claim && start > 0 && !partial {
+            return Err(DEST_EXISTS.to_string());
+        }
         let total = response_total(
             resp.content_length(),
             resp.headers()
@@ -860,11 +884,34 @@ async fn attempt_once(
             }
         }
         let mut file = if partial {
-            tokio::fs::OpenOptions::new().append(true).open(dest).await
+            tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&ctx.dest)
+                .await
+                .map_err(|e| format!("Cannot write file: {e}"))?
+        } else if claim {
+            // One-shot claim, same ownership as the guard above: only the
+            // first attempt of an initial fresh run may fail on a foreign
+            // file. Retries (claim=false) truncate our own empty file.
+            // A file appearing after the metadata check is foreign, so
+            // fail for requeue instead of truncating it.
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&ctx.dest)
+                .await
+            {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(DEST_EXISTS.to_string());
+                }
+                Err(e) => return Err(format!("Cannot write file: {e}")),
+            }
         } else {
-            tokio::fs::File::create(dest).await
-        }
-        .map_err(|e| format!("Cannot write file: {e}"))?;
+            tokio::fs::File::create(&ctx.dest)
+                .await
+                .map_err(|e| format!("Cannot write file: {e}"))?
+        };
         if !partial {
             if let Some(name) = resp
                 .headers()
@@ -872,11 +919,11 @@ async fn attempt_once(
                 .and_then(|v| v.to_str().ok())
                 .and_then(filename_from_content_disposition)
             {
-                tx.send(EngineMsg::SuggestName(name)).ok();
+                ctx.tx.send(EngineMsg::SuggestName(name)).ok();
             }
         }
         let mut downloaded = if partial { start } else { 0 };
-        tx.send(EngineMsg::Progress { downloaded, total }).ok();
+        ctx.tx.send(EngineMsg::Progress { downloaded, total }).ok();
         let mut stream = resp.bytes_stream();
         let pace_start = Instant::now();
         let mut paced: u64 = 0;
@@ -888,7 +935,7 @@ async fn attempt_once(
         let mut empty_streak: u32 = 0;
         use tokio::io::AsyncWriteExt as _;
         loop {
-            let chunk = match tokio::time::timeout(timeout, stream.next()).await {
+            let chunk = match tokio::time::timeout(ctx.timeout, stream.next()).await {
                 Ok(Some(Ok(c))) => c,
                 Ok(Some(Err(e))) => return Err(format!("Download interrupted: {e}")),
                 Ok(None) => break,
@@ -915,7 +962,7 @@ async fn attempt_once(
             }
             if last_sent.elapsed() >= Duration::from_millis(100) {
                 rate = live_rate_limit();
-                tx.send(EngineMsg::Progress { downloaded, total }).ok();
+                ctx.tx.send(EngineMsg::Progress { downloaded, total }).ok();
                 last_sent = Instant::now();
             }
         }
@@ -1608,8 +1655,11 @@ impl DownloadManager {
         filename: Option<&str>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
+        // An explicit destination must be absolute: a relative dir would
+        // resolve against the launcher CWD (and fail the sandbox). Restore
+        // already rejects these; live input gets the same gate.
         let dir = dest_dir
-            .filter(|s| !s.is_empty())
+            .filter(|s| !s.is_empty() && std::path::Path::new(s).is_absolute())
             .map(|s| s.to_string())
             .unwrap_or_else(|| self.effective_download_dir());
         let name = filename
@@ -1701,10 +1751,11 @@ impl DownloadManager {
         self.settings.boolean("notify-background")
     }
 
-    /// Configured folder, or the system Downloads folder when empty.
+    /// Configured folder, or the system Downloads folder when empty or
+    /// relative (a relative dir would resolve against the launcher CWD).
     pub fn effective_download_dir(&self) -> String {
         let configured = self.settings.string("download-dir").to_string();
-        if !configured.is_empty() {
+        if !configured.is_empty() && std::path::Path::new(&configured).is_absolute() {
             return configured;
         }
         glib::user_special_dir(glib::UserDirectory::Downloads)
@@ -1925,6 +1976,32 @@ impl DownloadManager {
                     EngineMsg::Failed(e) => {
                         // A failed download keeps its URL-derived name.
                         this.pending_names.borrow_mut().remove(&id);
+                        if e == DEST_EXISTS
+                            && item.status() != DownloadStatus::Cancelled
+                            && item.status() != DownloadStatus::Paused
+                        {
+                            // A foreign file appeared at our path after
+                            // dedupe: pick a fresh free name and requeue
+                            // instead of failing. The new name is free by
+                            // construction, so this terminates.
+                            let dir = item.dest_dir().to_string();
+                            let current = item.filename().to_string();
+                            let new_name = dedupe_filename(&current, |n| {
+                                std::path::Path::new(&dir).join(n).exists()
+                                    || (0..this.store.n_items())
+                                        .filter_map(|i| {
+                                            this.store.item(i).and_downcast::<DownloadItem>()
+                                        })
+                                        .any(|it| it.dest_dir() == dir && it.filename() == n)
+                            });
+                            item.set_filename(new_name);
+                            item.set_status(DownloadStatus::Queued);
+                            this.persist_queue();
+                            this.changed();
+                            this.start_next();
+                            done = true;
+                            break;
+                        }
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
@@ -3187,6 +3264,48 @@ mod tests {
         assert!(normalize_url("file:///etc/passwd").is_err());
         assert!(normalize_url("--post-file=x").is_err());
         assert!(normalize_url("localhost:8080/f.iso").is_ok());
+        // Userinfo would persist plaintext creds in queue.json: reject.
+        assert!(normalize_url("https://user:pass@example.com/f.iso").is_err());
+        assert!(normalize_url("https://user@example.com/f.iso").is_err());
+        assert!(normalize_url("user:pass@example.com/f.iso").is_err());
+    }
+
+    #[test]
+    fn rejects_relative_download_dir() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("relative-dir");
+        let settings = test_settings();
+        // Occupy the only slot so nothing spawns a real engine below.
+        settings.set_int("max-concurrent", 1).unwrap();
+        settings.set_string("download-dir", "relative/dir").unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(99, holder);
+        // Configured relative dir falls back to an absolute folder.
+        let dir = manager.effective_download_dir();
+        assert!(std::path::Path::new(&dir).is_absolute());
+        // Explicit relative destinations fall back the same way.
+        let item = manager
+            .enqueue("https://example.com/f.iso", Some("relative/dir"), None)
+            .unwrap();
+        assert!(item.dest_dir() == dir);
+        // Absolute destinations still pass through untouched.
+        let item2 = manager
+            .enqueue("https://example.com/g.iso", Some("/tmp"), None)
+            .unwrap();
+        assert!(item2.dest_dir() == "/tmp");
+        // Teardown BEFORE restoring keys: the max-concurrent watch fires
+        // start_next, and with no Queued row left it is a no-op. Restoring
+        // first would free slots while rows are still queued and spawn real
+        // engines whose pump futures outlive this test and abort later tests
+        // on glib thread-affinity.
+        manager.cancel_all();
+        // Restore: the memory backend is shared across tests.
+        settings.set_string("download-dir", "").unwrap();
+        settings.set_int("max-concurrent", 3).unwrap();
+        let _ = std::fs::remove_file(&_qf);
     }
 
     #[test]

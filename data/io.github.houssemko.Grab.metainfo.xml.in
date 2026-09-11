@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="1.3.3" date="2026-09-11">
+      <description>
+        <p>Security hardening: download folders must be absolute paths, URLs with embedded credentials are rejected, fresh downloads claim their destination atomically, and redirects are capped at five hops.</p>
+      </description>
+    </release>
     <release version="1.3.2" date="2026-09-11">
       <description>
         <p>Main thread never blocks on portal or file I/O (async bus lookups, worker-thread list imports), and diagnostics move to structured tracing logs.</p>
