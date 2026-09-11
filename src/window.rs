@@ -369,6 +369,11 @@ struct InhibitState {
     request: Option<String>,
     sub: Option<gio::SignalSubscription>,
     seq: u64,
+    /// An Inhibit round trip is in flight. `request` stays None until its
+    /// reply lands, so without this every sync during the round trip would
+    /// fire a duplicate request whose path gets overwritten and never
+    /// closed. Set synchronously when launching, cleared on every exit.
+    pending: bool,
 }
 
 /// Ask the portal to block suspend. Stores the request only if still wanted
@@ -382,7 +387,14 @@ async fn request_inhibit(
     const PORTAL: &str = "org.freedesktop.portal.Desktop";
     const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
     const SUSPEND: u32 = 4;
+    // Every exit below clears `pending`: a stuck true would silence all
+    // future inhibits, leaving the machine unblocked forever.
+    let clear_pending = |state: &Rc<RefCell<InhibitState>>| {
+        state.borrow_mut().pending = false;
+    };
     let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+        clear_pending(&state);
+        eprintln!("Grab: suspend block unavailable (no session bus)");
         return; // Headless/test: no session bus, nothing to block on.
     };
     let token = {
@@ -393,8 +405,9 @@ async fn request_inhibit(
     let options = glib::VariantDict::new(None);
     options.insert("handle_token", token);
     options.insert("reason", "Downloading files");
-    options.insert("flags", SUSPEND);
-    let params = glib::variant::ToVariant::to_variant(&(String::new(), options.end()));
+    // Flags ride positionally (sua{sv}), not in the options dict: the
+    // portal rejects the call otherwise.
+    let params = glib::variant::ToVariant::to_variant(&(String::new(), SUSPEND, options.end()));
     let Ok(reply) = conn
         .call_future(
             Some(PORTAL),
@@ -408,18 +421,23 @@ async fn request_inhibit(
         )
         .await
     else {
+        clear_pending(&state);
+        eprintln!("Grab: suspend block request failed");
         return;
     };
     let path = (reply.n_children() == 1)
         .then(|| reply.child_value(0))
         .and_then(|v| v.str().map(String::from));
     let Some(path) = path else {
+        clear_pending(&state);
+        eprintln!("Grab: suspend block reply had no request path");
         return;
     };
     // The queue may have idled during the round trip: close at once instead
     // of leaking a block nobody will release.
     if !(settings.boolean("inhibit-suspend") && manager.has_transferring()) {
         release_inhibit(conn, path).await;
+        clear_pending(&state);
         return;
     }
     let st2 = Rc::clone(&state);
@@ -443,8 +461,10 @@ async fn request_inhibit(
         },
     );
     let mut st = state.borrow_mut();
-    st.request = Some(path);
+    st.request = Some(path.clone());
     st.sub = Some(sub);
+    st.pending = false;
+    eprintln!("Grab: suspend block held ({path})");
 }
 
 /// Release a held portal block. Fire-and-forget: the lock dies with the
@@ -742,6 +762,7 @@ pub fn build_window(
         request: None,
         sub: None,
         seq: 0,
+        pending: false,
     }));
     let sync_inhibit: Rc<dyn Fn()> = {
         let m = Rc::clone(&manager);
@@ -749,7 +770,20 @@ pub fn build_window(
         let st = Rc::clone(&inhibit);
         Rc::new(move || {
             let want = s.boolean("inhibit-suspend") && m.has_transferring();
-            if want && st.borrow().request.is_none() {
+            // Claim the in-flight marker synchronously: without it, every
+            // sync during the D-Bus round trip (e.g. each row of a bulk
+            // import) would fire a duplicate request whose path the later
+            // reply overwrites and never closes.
+            let launch = {
+                let mut st = st.borrow_mut();
+                if want && st.request.is_none() && !st.pending {
+                    st.pending = true;
+                    true
+                } else {
+                    false
+                }
+            };
+            if launch {
                 let (st2, m2, s2) = (Rc::clone(&st), Rc::clone(&m), s.clone());
                 glib::spawn_future_local(async move {
                     request_inhibit(st2, m2, s2).await;
