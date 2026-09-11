@@ -24,19 +24,14 @@
   <screenshots>
     <screenshot type="default">
       <caption>Empty state with a New Download shortcut</caption>
-      <image>https://raw.githubusercontent.com/houssemko/Grab/v1.3.3/data/screenshots/empty-state.png</image>
+      <image>https://raw.githubusercontent.com/houssemko/Grab/main/data/screenshots/empty-state.png</image>
     </screenshot>
     <screenshot>
       <caption>Preferences: destination, connections, limits and notifications</caption>
-      <image>https://raw.githubusercontent.com/houssemko/Grab/v1.3.3/data/screenshots/preferences.png</image>
+      <image>https://raw.githubusercontent.com/houssemko/Grab/main/data/screenshots/preferences.png</image>
     </screenshot>
   </screenshots>
   <releases>
-    <release version="1.3.3" date="2026-09-11">
-      <description>
-        <p>Flathub readiness: AppStream developer identity, categories, and screenshots.</p>
-      </description>
-    </release>
     <release version="1.3.2" date="2026-09-11">
       <description>
         <p>Main thread never blocks on portal or file I/O (async bus lookups, worker-thread list imports), and diagnostics move to structured tracing logs.</p>
