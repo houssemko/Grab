@@ -1666,15 +1666,15 @@ impl DownloadManager {
 
     fn insert_history(self: &Rc<Self>, url: String, dir: String, name: String, progress: f64) {
         let Ok(url) = normalize_url(&url) else {
-            eprintln!("Grab: skipping history entry with bad URL");
+            tracing::warn!("skipping history entry with bad URL");
             return;
         };
         if !sane_filename(&name) {
-            eprintln!("Grab: skipping invalid history entry for {name}");
+            tracing::warn!("skipping invalid history entry for {name}");
             return;
         }
         if !std::path::Path::new(&dir).is_absolute() {
-            eprintln!("Grab: skipping history entry with relative destination");
+            tracing::warn!("skipping history entry with relative destination");
             return;
         }
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
@@ -2380,7 +2380,7 @@ impl DownloadManager {
     fn quarantine_queue() {
         let bak = Self::queue_file().with_extension("json.bak");
         if let Err(e) = std::fs::rename(Self::queue_file(), &bak) {
-            eprintln!("Grab: could not quarantine download queue: {e}");
+            tracing::error!("could not quarantine download queue: {e}");
         }
     }
 
@@ -2411,7 +2411,7 @@ impl DownloadManager {
         let text = match serde_json::to_string_pretty(&data) {
             Ok(text) => text,
             Err(e) => {
-                eprintln!("Grab: could not serialize download queue: {e}");
+                tracing::error!("could not serialize download queue: {e}");
                 return;
             }
         };
@@ -2426,7 +2426,7 @@ impl DownloadManager {
         match write_tmp() {
             Ok(()) => {
                 if let Err(e) = std::fs::rename(&tmp, Self::queue_file()) {
-                    eprintln!("Grab: could not replace download queue: {e}");
+                    tracing::error!("could not replace download queue: {e}");
                     return;
                 }
                 if let Some(parent) = Self::queue_file().parent() {
@@ -2435,7 +2435,7 @@ impl DownloadManager {
                     }
                 }
             }
-            Err(e) => eprintln!("Grab: could not persist download queue: {e}"),
+            Err(e) => tracing::error!("could not persist download queue: {e}"),
         }
     }
 
@@ -2450,23 +2450,20 @@ impl DownloadManager {
                 .map(|m| m.len() > MAX_QUEUE_BYTES)
                 .unwrap_or(true)
             {
-                eprintln!("Grab: quarantining oversized download queue");
+                tracing::warn!("quarantining oversized download queue");
                 Self::quarantine_queue();
                 return;
-            }
+            };
             let Ok(text) = std::fs::read_to_string(Self::queue_file()) else {
                 return;
             };
             let Ok(queue) = serde_json::from_str::<StoredQueue>(&text) else {
-                eprintln!("Grab: quarantining unreadable download queue");
+                tracing::warn!("quarantining unreadable download queue");
                 Self::quarantine_queue();
                 return;
             };
             if queue.version == 0 || queue.version > QUEUE_VERSION {
-                eprintln!(
-                    "Grab: quarantining download queue version {}",
-                    queue.version
-                );
+                tracing::warn!("quarantining download queue version {}", queue.version);
                 Self::quarantine_queue();
                 return;
             }
@@ -2474,8 +2471,8 @@ impl DownloadManager {
             // newest history: active rows are user intent, Done rows are not.
             let mut items = queue.items;
             if items.len() > MAX_QUEUE_ITEMS {
-                eprintln!(
-                    "Grab: truncating download queue ({} items, keeping active first)",
+                tracing::warn!(
+                    "truncating download queue ({} items, keeping active first)",
                     items.len()
                 );
                 let (mut active, done): (Vec<StoredItem>, Vec<StoredItem>) = items
@@ -2516,7 +2513,7 @@ impl DownloadManager {
                             status,
                             segments,
                         ) {
-                            eprintln!("Grab: skipping queue entry: {e}");
+                            tracing::warn!("skipping queue entry: {e}");
                         }
                     }
                 }

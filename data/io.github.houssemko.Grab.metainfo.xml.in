@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.2" date="2026-09-11">
+      <description>
+        <p>Main thread never blocks on portal or file I/O (async bus lookups, worker-thread list imports), and diagnostics move to structured tracing logs.</p>
+      </description>
+    </release>
     <release version="1.3.1" date="2026-09-11">
       <description>
         <p>Fixes the suspend block never engaging (portal flags are positional), plus duplicate-request fencing and diagnostic logging.</p>

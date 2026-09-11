@@ -21,6 +21,7 @@ fn ensure_schema_dir() {
 }
 
 fn main() -> glib::ExitCode {
+    tracing_subscriber::fmt::init();
     ensure_schema_dir();
     let app = adw::Application::builder()
         .application_id(APP_ID)

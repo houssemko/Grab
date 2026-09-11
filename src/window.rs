@@ -392,9 +392,9 @@ async fn request_inhibit(
     let clear_pending = |state: &Rc<RefCell<InhibitState>>| {
         state.borrow_mut().pending = false;
     };
-    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+    let Ok(conn) = gio::bus_get_future(gio::BusType::Session).await else {
         clear_pending(&state);
-        eprintln!("Grab: suspend block unavailable (no session bus)");
+        tracing::warn!("suspend block unavailable (no session bus)");
         return; // Headless/test: no session bus, nothing to block on.
     };
     let token = {
@@ -422,7 +422,7 @@ async fn request_inhibit(
         .await
     else {
         clear_pending(&state);
-        eprintln!("Grab: suspend block request failed");
+        tracing::warn!("suspend block request failed");
         return;
     };
     let path = (reply.n_children() == 1)
@@ -430,7 +430,7 @@ async fn request_inhibit(
         .and_then(|v| v.str().map(String::from));
     let Some(path) = path else {
         clear_pending(&state);
-        eprintln!("Grab: suspend block reply had no request path");
+        tracing::warn!("suspend block reply had no request path");
         return;
     };
     // The queue may have idled during the round trip: close at once instead
@@ -464,7 +464,7 @@ async fn request_inhibit(
     st.request = Some(path.clone());
     st.sub = Some(sub);
     st.pending = false;
-    eprintln!("Grab: suspend block held ({path})");
+    tracing::info!("suspend block held ({path})");
 }
 
 /// Release a held portal block. Fire-and-forget: the lock dies with the
@@ -492,7 +492,7 @@ async fn release_inhibit(conn: gio::DBusConnection, path: String) {
 /// choice.
 fn request_background() {
     glib::spawn_future_local(async move {
-        let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>) else {
+        let Ok(conn) = gio::bus_get_future(gio::BusType::Session).await else {
             return;
         };
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -794,13 +794,14 @@ pub fn build_window(
                 let path = st.borrow_mut().request.take();
                 drop(st.borrow_mut().sub.take());
                 if let Some(path) = path {
-                    if let Ok(conn) =
-                        gio::bus_get_sync(gio::BusType::Session, None::<&gio::Cancellable>)
-                    {
-                        glib::spawn_future_local(async move {
-                            release_inhibit(conn, path).await;
-                        });
-                    }
+                    glib::spawn_future_local(async move {
+                        // Bus lookup stays async: a stalled portal must never
+                        // stall the main loop from inside a change hook.
+                        let Ok(conn) = gio::bus_get_future(gio::BusType::Session).await else {
+                            return;
+                        };
+                        release_inhibit(conn, path).await;
+                    });
                 }
             }
         })

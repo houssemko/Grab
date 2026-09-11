@@ -6,6 +6,7 @@ use crate::window::{self, show_add_dialog};
 use crate::{preferences, APP_ID};
 use adw::prelude::*;
 use gtk4::gio;
+use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use std::cell::RefCell;
@@ -75,27 +76,34 @@ pub fn setup(app: &adw::Application) {
                 if let Some(path) = f.path() {
                     const MAX_LIST_BYTES: u64 = 1_000_000;
                     const MAX_LIST_LINES: usize = 1000;
-                    if std::fs::metadata(&path)
-                        .map(|m| m.len() > MAX_LIST_BYTES)
-                        .unwrap_or(true)
-                    {
-                        continue;
-                    }
-                    if let Ok(text) = std::fs::read_to_string(&path) {
+                    // The up-to-1MB read runs on a worker: file I/O never
+                    // blocks the main loop, even for local files.
+                    let (manager, toasts) = (s.manager.clone(), s.toasts.clone());
+                    glib::spawn_future_local(async move {
+                        let text = gio::spawn_blocking(move || {
+                            std::fs::metadata(&path)
+                                .ok()
+                                .filter(|m| m.len() <= MAX_LIST_BYTES)
+                                .and_then(|_| std::fs::read_to_string(&path).ok())
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        let Some(text) = text else { return };
                         // One persist for the whole import, not one per line.
-                        s.manager.begin_batch();
+                        manager.begin_batch();
                         for line in text
                             .lines()
                             .map(str::trim)
                             .filter(|l| !l.is_empty() && !l.starts_with('#'))
                             .take(MAX_LIST_LINES)
                         {
-                            if let Err(e) = s.manager.enqueue(line, None, None) {
-                                s.toasts.add_toast(adw::Toast::new(&e));
+                            if let Err(e) = manager.enqueue(line, None, None) {
+                                toasts.add_toast(adw::Toast::new(&e));
                             }
                         }
-                        s.manager.end_batch();
-                    }
+                        manager.end_batch();
+                    });
                 }
             }
             s.window.present();
