@@ -18,6 +18,11 @@
   <url type="homepage">https://github.com/houssemko/grab</url>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.3.0" date="2026-09-11">
+      <description>
+        <p>Release bundles now build clean in CI and attach automatically; test bundles build on demand and on packaging pull requests. Distribution is Flatpak-only.</p>
+      </description>
+    </release>
     <release version="1.2.0" date="2026-09-10">
       <description>
         <p>Adaptive piece sizing for huge files, stall hardening, cross-desktop sleep inhibit with toggle, background portal support, and Flatpak-only distribution.</p>
