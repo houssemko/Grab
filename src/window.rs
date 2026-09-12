@@ -1016,7 +1016,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     }
                     return;
                 }
-                show_torrent_files_dialog(m, dd, dialog, name, bytes, entries);
+                show_torrent_files_dialog(m, dd, Some(dialog), name, bytes, entries);
             });
         });
     }
@@ -1149,10 +1149,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
 /// Multi-file .torrent intake: one switch per file, all on by default.
 /// The selection feeds rqbit's `only_files` at add time (no live setter),
 /// so it must be chosen here, before the row exists.
-fn show_torrent_files_dialog(
+pub(crate) fn show_torrent_files_dialog(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
-    parent: glib::WeakRef<adw::Dialog>,
+    parent: Option<glib::WeakRef<adw::Dialog>>,
     file_name: String,
     bytes: Vec<u8>,
     entries: Vec<crate::torrent::TorrentFileEntry>,
@@ -1167,16 +1167,12 @@ fn show_torrent_files_dialog(
         .build();
     page.add(&group);
 
-    // Pre-check the last pick for this torrent (all-on for new ones): a
-    // retry then keeps the user's filter instead of reverting to full.
-    let remembered = crate::torrent::torrent_info_hash(&bytes)
-        .and_then(|h| crate::torrent::remembered_selection(&h));
     let mut switches = Vec::new();
-    for (i, e) in entries.iter().enumerate() {
+    for e in &entries {
         let row = adw::SwitchRow::builder()
             .title(&e.path)
             .subtitle(crate::download::fmt_bytes(e.length))
-            .active(remembered.as_ref().is_none_or(|s| s.contains(&i)))
+            .active(true)
             .build();
         switches.push(row.clone());
         group.add(&row);
@@ -1228,11 +1224,6 @@ fn show_torrent_files_dialog(
             }
             // All on means no filter: pass None, not every index.
             let only = (selected.len() < switches.len()).then_some(selected);
-            // Remember the pick (or its clearing) so the next open of this
-            // torrent starts where the user left off.
-            if let Some(h) = crate::torrent::torrent_info_hash(&bytes) {
-                crate::torrent::remember_selection(&h, only.as_deref());
-            }
             match manager.enqueue_torrent_file(
                 bytes.clone(),
                 &file_name,
@@ -1243,7 +1234,7 @@ fn show_torrent_files_dialog(
                     if let Some(d) = dialog_weak.upgrade() {
                         d.close();
                     }
-                    if let Some(p) = parent.upgrade() {
+                    if let Some(p) = parent.as_ref().and_then(|w| w.upgrade()) {
                         p.close();
                     }
                 }

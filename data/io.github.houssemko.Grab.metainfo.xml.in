@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.7" date="2026-09-12">
+      <description>
+        <p>Change: the torrent file picker no longer remembers past selections, opening a .torrent file shows the same file list as the picker, and downloading rows show how many files are selected.</p>
+      </description>
+    </release>
     <release version="2.0.6" date="2026-09-12">
       <description>
         <p>New: the torrent file picker remembers your per-file selection, so re-adding the same torrent pre-checks your last choice.</p>

@@ -1728,7 +1728,11 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let pseudo = crate::torrent::archive_torrent_file(file_name, &bytes)?;
         if let Some(sel) = only_files {
-            crate::torrent::stage_selection(&pseudo, sel);
+            // Total rides along for the "N of M files" row text.
+            let total = crate::torrent::torrent_file_list(&bytes)
+                .map(|(_, entries)| entries.len())
+                .unwrap_or(0);
+            crate::torrent::stage_selection(&pseudo, sel, total);
         }
         let stub = crate::torrent::stub_name_for_file(file_name);
         self.enqueue(&pseudo, dest_dir, Some(&stub))
@@ -1957,6 +1961,21 @@ impl DownloadManager {
                         let bps = downloaded.saturating_sub(d0) as f64
                             / Instant::now().duration_since(tb).as_secs_f64().max(0.001);
                         let speed = format!("{}/s", fmt_bytes(bps as u64));
+                        // Torrent rows with a file filter show it ("2 of 10
+                        // files"): the running engine's view, no guessing.
+                        let sel_suffix = {
+                            let url = item.url().to_string();
+                            match (
+                                crate::torrent::get_selection(&url),
+                                crate::torrent::selection_total(&url),
+                            ) {
+                                (Some(sel), Some(total)) => {
+                                    format!(" • {}/{} files", sel.len(), total)
+                                }
+                                (Some(sel), None) => format!(" • {} files", sel.len()),
+                                _ => String::new(),
+                            }
+                        };
                         match total {
                             Some(t) if t > 0 => {
                                 let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
@@ -1967,15 +1986,21 @@ impl DownloadManager {
                                     "—".to_string()
                                 };
                                 item.set_detail(format!(
-                                    "{}% ({}) • {} • ETA {}",
+                                    "{}% ({}) • {} • ETA {}{}",
                                     (frac * 100.0) as u64,
                                     format_amounts(downloaded, t),
                                     speed,
-                                    eta
+                                    eta,
+                                    sel_suffix
                                 ));
                             }
                             _ => {
-                                item.set_detail(format!("{} • {}", fmt_bytes(downloaded), speed));
+                                item.set_detail(format!(
+                                    "{} • {}{}",
+                                    fmt_bytes(downloaded),
+                                    speed,
+                                    sel_suffix
+                                ));
                             }
                         }
                     }
@@ -2744,7 +2769,17 @@ impl DownloadManager {
                                 // this a restart drops the filter and the
                                 // resume downloads every file.
                                 if let Some(sel) = item.selected_files {
-                                    crate::torrent::stage_selection(&restored.url(), sel);
+                                    let total = crate::torrent::archive_path_for_url(
+                                        &restored.url().to_string(),
+                                    )
+                                    .and_then(|p| std::fs::read(p).ok())
+                                    .and_then(|b| {
+                                        crate::torrent::torrent_file_list(&b)
+                                            .map(|(_, e)| e.len())
+                                            .ok()
+                                    })
+                                    .unwrap_or(0);
+                                    crate::torrent::stage_selection(&restored.url(), sel, total);
                                 }
                             }
                             Err(e) => tracing::warn!("skipping queue entry: {e}"),
@@ -3565,9 +3600,10 @@ mod tests {
         // (retry after cancel/fail), silently downloading everything.
         // Selections now peek until pruned with unreferenced archives.
         let url = "torrent:/tmp/grab-test-sel.torrent";
-        crate::torrent::stage_selection(url, vec![2]);
+        crate::torrent::stage_selection(url, vec![2], 3);
         assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
         assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
+        assert_eq!(crate::torrent::selection_total(url), Some(3));
         let mut referenced = std::collections::HashSet::new();
         referenced.insert(url.to_string());
         crate::torrent::prune_selections(&referenced);
@@ -3994,7 +4030,7 @@ mod tests {
         // Archive + stage a selection like the intake dialog does.
         let pseudo =
             crate::torrent::archive_torrent_file("keep.torrent", &single_torrent_bytes()).unwrap();
-        crate::torrent::stage_selection(&pseudo, vec![0]);
+        crate::torrent::stage_selection(&pseudo, vec![0], 1);
         let item = m1.enqueue(&pseudo, Some("/tmp/dl"), Some("keep")).unwrap();
         assert_eq!(item.status(), DownloadStatus::Queued);
         m1.persist_queue();

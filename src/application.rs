@@ -88,6 +88,10 @@ pub fn setup(app: &adw::Application) {
                             .file_stem()
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_else(|| "download".to_string());
+                        let file_name = path
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| format!("{stem}.torrent"));
                         glib::spawn_future_local(async move {
                             const MAX_TORRENT_BYTES: u64 = 10_000_000;
                             let bytes = gio::spawn_blocking(move || {
@@ -105,9 +109,27 @@ pub fn setup(app: &adw::Application) {
                                 ));
                                 return;
                             };
-                            // Opened files offer no selection UI: all files in.
-                            if let Err(e) = manager.enqueue_torrent_file(bytes, &stem, None, None) {
-                                toasts.add_toast(adw::Toast::new(&e));
+                            // Same file picker as the add dialog: multi-file
+                            // torrents offer per-file switches, singles go
+                            // straight in.
+                            match crate::torrent::torrent_file_list(&bytes) {
+                                Ok((_, entries)) if entries.len() > 1 => {
+                                    let dest =
+                                        Rc::new(RefCell::new(manager.effective_download_dir()));
+                                    window::show_torrent_files_dialog(
+                                        manager, dest, None, file_name, bytes, entries,
+                                    );
+                                }
+                                Ok(_) => {
+                                    if let Err(e) =
+                                        manager.enqueue_torrent_file(bytes, &stem, None, None)
+                                    {
+                                        toasts.add_toast(adw::Toast::new(&e));
+                                    }
+                                }
+                                Err(e) => {
+                                    toasts.add_toast(adw::Toast::new(&e));
+                                }
                             }
                         });
                         continue;

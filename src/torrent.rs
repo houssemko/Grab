@@ -43,15 +43,19 @@ static ACTIVE: std::sync::LazyLock<Mutex<HashMap<u64, Active>>> =
 /// Pre-chosen file indices for multi-file torrents, staged at intake
 /// (file-list dialog) and consumed once by the engine at spawn. Keyed by
 /// pseudo-URL: only archived files carry selections, magnets pass None.
-static PENDING_SELECTIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<usize>>>> =
+/// The total file count rides along so rows can show "N of M files".
+/// Staged file selection: chosen indices + total file count.
+type StagedSelection = (Vec<usize>, usize);
+
+static PENDING_SELECTIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, StagedSelection>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Stage a file selection for the next spawn of `pseudo_url`.
-pub fn stage_selection(pseudo_url: &str, only_files: Vec<usize>) {
+pub fn stage_selection(pseudo_url: &str, only_files: Vec<usize>, total_files: usize) {
     PENDING_SELECTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(pseudo_url.to_string(), only_files);
+        .insert(pseudo_url.to_string(), (only_files, total_files));
 }
 
 /// Read the staged selection for `pseudo_url`, if any. Peek, not take:
@@ -64,7 +68,16 @@ pub(crate) fn get_selection(pseudo_url: &str) -> Option<Vec<usize>> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(pseudo_url)
-        .cloned()
+        .map(|(sel, _)| sel.clone())
+}
+
+/// Total file count staged alongside the selection, if any (for row text).
+pub(crate) fn selection_total(pseudo_url: &str) -> Option<usize> {
+    PENDING_SELECTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(pseudo_url)
+        .map(|(_, total)| *total)
 }
 
 /// Drop staged selections no live row references (companion to
@@ -133,66 +146,6 @@ pub fn is_torrent_url(s: &str) -> bool {
 }
 
 /// Archive dir for .torrent files: alongside the session state.
-/// Remembered per-file picks by info-hash hex: when the file dialog opens
-/// for a known torrent it pre-checks the remembered files instead of
-/// all-on, so a retry never silently reverts to a full download.
-/// Stored as plain JSON beside the queue; best-effort, failures ignored.
-fn remembered_path() -> PathBuf {
-    glib::user_data_dir()
-        .join("grab")
-        .join("file-selections.json")
-}
-
-fn load_remembered(path: &Path) -> HashMap<String, Vec<usize>> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
-}
-
-fn save_remembered(path: &Path, map: &HashMap<String, Vec<usize>>) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Ok(text) = serde_json::to_string_pretty(map) {
-        let _ = std::fs::write(path, text);
-    }
-}
-
-static REMEMBERED: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<usize>>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(load_remembered(&remembered_path())));
-
-/// Record the user's file pick for this info-hash (`None` = everything,
-/// which clears any remembered entry).
-pub fn remember_selection(hash_hex: &str, only_files: Option<&[usize]>) {
-    let mut map = REMEMBERED.lock().unwrap_or_else(|e| e.into_inner());
-    match only_files {
-        Some(sel) => {
-            map.insert(hash_hex.to_string(), sel.to_vec());
-        }
-        None => {
-            map.remove(hash_hex);
-        }
-    }
-    save_remembered(&remembered_path(), &map);
-}
-
-/// Previously picked files for this info-hash, if any.
-pub fn remembered_selection(hash_hex: &str) -> Option<Vec<usize>> {
-    REMEMBERED
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(hash_hex)
-        .cloned()
-}
-
-/// Info-hash hex for raw .torrent bytes (intake dialog + remembered lookup).
-pub fn torrent_info_hash(bytes: &[u8]) -> Option<String> {
-    librqbit::torrent_from_bytes(bytes)
-        .ok()
-        .map(|meta| meta.info_hash.as_string())
-}
-
 fn torrents_dir() -> PathBuf {
     glib::user_data_dir().join("grab").join("torrents")
 }
@@ -736,32 +689,5 @@ mod tests {
             output_folder_for(&dest, None, true, "abc123"),
             std::path::PathBuf::from("/tmp/dl/abc123")
         );
-    }
-
-    #[test]
-    fn remembered_store_roundtrips_on_disk() {
-        let dir = std::env::temp_dir().join(format!("grab-remembered-{}", std::process::id()));
-        let path = dir.join("file-selections.json");
-        let _ = std::fs::remove_dir_all(&dir);
-        // Missing file reads as empty.
-        assert!(load_remembered(&path).is_empty());
-        let mut map = HashMap::new();
-        map.insert("abc123".to_string(), vec![1, 8]);
-        save_remembered(&path, &map);
-        assert_eq!(load_remembered(&path).get("abc123"), Some(&vec![1, 8]));
-        // Corrupt file reads as empty, never panics.
-        std::fs::write(&path, b"{nope").unwrap();
-        assert!(load_remembered(&path).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn torrent_info_hash_parses_handcrafted() {
-        let mut bytes = b"d8:announce31:http://tracker.example/announce4:infod6:lengthi1e4:name1:a12:piece lengthi16384e6:pieces20:".to_vec();
-        bytes.extend_from_slice(&[0u8; 20]);
-        bytes.extend_from_slice(b"ee");
-        let hash = torrent_info_hash(&bytes).expect("handcrafted torrent parses");
-        assert_eq!(hash.len(), 40);
-        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
