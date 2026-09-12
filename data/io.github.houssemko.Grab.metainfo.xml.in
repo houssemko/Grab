@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.5" date="2026-09-12">
+      <description>
+        <p>Maintenance: regression coverage for per-file torrent selection. No user-facing changes.</p>
+      </description>
+    </release>
     <release version="2.0.4" date="2026-09-12">
       <description>
         <p>Fix: re-adding an already-queued torrent with a different file selection now fails fast instead of silently adopting the wrong files. Grab no longer claims to be a web browser.</p>
