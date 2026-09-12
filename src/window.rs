@@ -1146,21 +1146,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     }
 }
 
-fn fmt_size(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
 /// Multi-file .torrent intake: one switch per file, all on by default.
 /// The selection feeds rqbit's `only_files` at add time (no live setter),
 /// so it must be chosen here, before the row exists.
@@ -1186,7 +1171,7 @@ fn show_torrent_files_dialog(
     for e in &entries {
         let row = adw::SwitchRow::builder()
             .title(&e.path)
-            .subtitle(fmt_size(e.length))
+            .subtitle(crate::download::fmt_bytes(e.length))
             .active(true)
             .build();
         switches.push(row.clone());

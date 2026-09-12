@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.2" date="2026-09-12">
+      <description>
+        <p>Code cleanup: removed dead code and merged duplicate helpers. No behavior changes.</p>
+      </description>
+    </release>
     <release version="2.0.1" date="2026-09-12">
       <description>
         <p>Torrent support: magnet links and .torrent files with a file picker, multi-file torrents in their own folder, a dedicated Torrent preferences page, and network settings on their own page. Removing a torrent keeps partial files so Undo resumes instead of restarting.</p>

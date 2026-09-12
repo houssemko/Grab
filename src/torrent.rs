@@ -23,7 +23,7 @@ use librqbit::{
 };
 use tokio::sync::{mpsc::UnboundedSender, Mutex, OnceCell};
 
-use crate::download::{sane_filename, shorten_filename, tokio_rt, EngineMsg};
+use crate::download::{dedupe_filename, sane_filename, shorten_filename, tokio_rt, EngineMsg};
 
 // rqbit keeps the handle alias private (`torrent_state` is not public API),
 // so name it locally: it is just a refcounted managed torrent.
@@ -163,15 +163,9 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
     let dir = torrents_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot store torrent file: {e}"))?;
     // Dedupe against existing archives the same way downloads do.
-    let mut candidate = dir.join(format!("{stem}.torrent"));
-    let mut n = 1;
-    while candidate.exists() {
-        n += 1;
-        candidate = dir.join(format!("{stem} ({n}).torrent"));
-        if n > 9999 {
-            return Err("Too many stored torrent files".to_string());
-        }
-    }
+    let candidate = dir.join(dedupe_filename(&format!("{stem}.torrent"), |n| {
+        dir.join(n).exists()
+    }));
     std::fs::write(&candidate, bytes).map_err(|e| format!("Cannot store torrent file: {e}"))?;
     Ok(format!("torrent:{}", candidate.to_string_lossy()))
 }

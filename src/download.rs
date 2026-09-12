@@ -101,10 +101,6 @@ mod imp {
         #[property(get, set)]
         pub progress: Cell<f64>,
         #[property(get, set)]
-        pub speed: RefCell<String>,
-        #[property(get, set)]
-        pub eta: RefCell<String>,
-        #[property(get, set)]
         pub detail: RefCell<String>,
     }
 
@@ -1042,7 +1038,7 @@ fn live_rate_limit() -> Option<u64> {
     }
 }
 
-fn fmt_bytes(n: u64) -> String {
+pub(crate) fn fmt_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
     let mut u = 0;
@@ -1959,13 +1955,11 @@ impl DownloadManager {
                             Some(t) if t > 0 => {
                                 let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
                                 item.set_progress(frac);
-                                item.set_speed(speed.clone());
                                 let eta = if bps > 0.0 {
                                     fmt_eta((t.saturating_sub(downloaded) as f64 / bps) as u64)
                                 } else {
                                     "—".to_string()
                                 };
-                                item.set_eta(eta.clone());
                                 item.set_detail(format!(
                                     "{}% ({}) • {} • ETA {}",
                                     (frac * 100.0) as u64,
@@ -2407,8 +2401,6 @@ impl DownloadManager {
                     if !self.segment_state.borrow().contains_key(&id) {
                         item.set_progress(0.0);
                     }
-                    item.set_speed(String::new());
-                    item.set_eta(String::new());
                     item.set_detail(String::new());
                     item.set_status(DownloadStatus::Queued);
                     self.persist_queue();
