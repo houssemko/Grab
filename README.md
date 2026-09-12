@@ -1,6 +1,6 @@
 # Grab
 
-A download manager for GNOME. Built with GTK 4 and libadwaita, downloads over HTTP(S).
+A download manager for GNOME. Built with GTK 4 and libadwaita.
 
 ## Install
 
