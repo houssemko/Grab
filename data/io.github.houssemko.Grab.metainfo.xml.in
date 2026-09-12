@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.9" date="2026-09-12">
+      <description>
+        <p>Fix: finished torrent downloads keep their .torrent file so deleting them moves the real download folder to Trash.</p>
+      </description>
+    </release>
     <release version="2.0.8" date="2026-09-12">
       <description>
         <p>Fix: deleting a torrent download now moves the real download folder to Trash, and re-adding a torrent right after deleting it no longer fails with a phantom already-in-queue error.</p>

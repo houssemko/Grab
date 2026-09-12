@@ -662,15 +662,12 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     if ACTIVE.lock().await.get(&id).is_some_and(|a| a.paused) {
         let _ = session.pause(&handle).await;
     }
-    let finished = poll_loop(session, handle, &stub, seed_finished, &tx).await;
+    poll_loop(session, handle, &stub, seed_finished, &tx).await;
     ACTIVE.lock().await.remove(&id);
-    // Finished rows no longer need their .torrent archive; Failed/Cancelled
-    // keep it so retry can re-add without the original file.
-    if finished {
-        if let TorrentSource::File(path) = &source {
-            let _ = std::fs::remove_file(path);
-        }
-    }
+    // Archives live as long as their rows: delete_download() drops them,
+    // remove() keeps them for Undo, sweep_archives() cleans orphans.
+    // (Deleting on finish would break trash for Done rows, which need the
+    // archive to locate a multi-file subfolder.)
 }
 
 #[cfg(test)]
