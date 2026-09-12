@@ -18,8 +18,8 @@ use std::{
 use gtk4::gio::prelude::SettingsExt;
 use gtk4::{gio, glib};
 use librqbit::{
-    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, ManagedTorrent, Session, SessionOptions,
-    TorrentStatsState,
+    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent,
+    Session, SessionOptions, TorrentStatsState,
 };
 use tokio::sync::{mpsc::UnboundedSender, Mutex, OnceCell};
 
@@ -544,6 +544,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         ACTIVE.lock().await.remove(&id);
         return;
     }
+    // Cloned before opts takes ownership (see the filter-match arm below).
+    let want_files = only_files.clone();
     let opts = AddTorrentOptions {
         output_folder: Some(folder.to_string_lossy().into_owned()),
         overwrite: true,
@@ -558,7 +560,16 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         Adder::File(bytes) => AddTorrent::from_bytes(bytes),
     };
     let handle = match session.add_torrent(add, Some(opts)).await {
-        Ok(resp) => resp.into_handle(),
+        Ok(resp) => match resp {
+            // The session outlives our registry: only adopt a stale handle
+            // on a file-filter match, else fail fast (delete the owner first).
+            AddTorrentResponse::AlreadyManaged(_, handle) if handle.only_files() != want_files => {
+                ACTIVE.lock().await.remove(&id);
+                fail("Torrent is already in the queue".to_string());
+                return;
+            }
+            _ => resp.into_handle(),
+        },
         Err(e) => {
             ACTIVE.lock().await.remove(&id);
             fail(format!("Cannot add torrent: {e}"));
