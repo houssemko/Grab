@@ -1,6 +1,7 @@
 mod application;
 mod download;
 mod preferences;
+mod torrent;
 mod window;
 
 use gtk4::gio::prelude::*;

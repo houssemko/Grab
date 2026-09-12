@@ -151,7 +151,7 @@ fn restored_status(stored: StoredStatus) -> DownloadStatus {
 /// Cap a filename to filesystem limits (NAME_MAX is 255 bytes on
 /// ext4/tmpfs), keeping the extension. Truncates the stem on a char
 /// boundary; reserves room for the ` (n)` dedupe suffix.
-fn shorten_filename(name: &str) -> String {
+pub(crate) fn shorten_filename(name: &str) -> String {
     const MAX_FILENAME_BYTES: usize = 240;
     if name.len() <= MAX_FILENAME_BYTES {
         return name.to_string();
@@ -198,7 +198,7 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     }
 }
 
-fn sane_filename(s: &str) -> bool {
+pub(crate) fn sane_filename(s: &str) -> bool {
     /// Explicit bidi controls (marks, embeddings/overrides, isolates).
     /// No std helper exists, so match the assigned ranges with escapes
     /// (never literal glyphs: they are invisible in source).
@@ -301,7 +301,32 @@ pub fn filename_from_url(url_str: &str) -> String {
 pub const MAX_URL_LEN: usize = 2048;
 
 pub fn normalize_url(input: &str) -> Result<String, String> {
-    let trimmed = input.trim();
+    // Strip a pasted BOM: trim() leaves U+FEFF, which would defeat the
+    // magnet classifier below and route magnets to the scheme branch.
+    let trimmed = input.trim().trim_start_matches('\u{feff}');
+    if crate::torrent::is_magnet(trimmed) {
+        // Magnet links skip URL parsing and the HTTP length cap entirely:
+        // parsed locally by the torrent engine, never sent as a request
+        // line. Still capped against abuse (Ubuntu magnets run ~2-4 KB).
+        const MAX_MAGNET_LEN: usize = 16384;
+        if trimmed.len() > MAX_MAGNET_LEN {
+            return Err(format!(
+                "Magnet link is too long (max {MAX_MAGNET_LEN} characters)"
+            ));
+        }
+        // Validated here so the row stores the trimmed link, re-parsed by
+        // the torrent engine.
+        return crate::torrent::parse_magnet(trimmed).map(|_| trimmed.to_string());
+    }
+    if crate::torrent::is_torrent_url(trimmed) {
+        // Archived .torrent pseudo-URLs skip URL parsing and the HTTP
+        // length cap like magnets: validated here so the row stores the
+        // trimmed pseudo-URL, resolved by the torrent engine. The archive
+        // must exist; a swept archive means the queue entry is stale.
+        return crate::torrent::archive_path_for_url(trimmed)
+            .map(|_| trimmed.to_string())
+            .ok_or_else(|| "Torrent file is missing from the archive".to_string());
+    }
     if trimmed.len() > MAX_URL_LEN {
         return Err(format!("URL is too long (max {MAX_URL_LEN} characters)"));
     }
@@ -356,7 +381,7 @@ impl DownloadOptions {
     }
 }
 
-fn tokio_rt() -> &'static tokio::runtime::Runtime {
+pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -381,7 +406,7 @@ fn http_client() -> &'static reqwest::Client {
     })
 }
 
-enum EngineMsg {
+pub(crate) enum EngineMsg {
     Progress {
         downloaded: u64,
         total: Option<u64>,
@@ -1590,6 +1615,7 @@ impl DownloadManager {
             .connect_changed(Some("speed-limit"), move |_, _| {
                 if let Some(s) = settings_weak.upgrade() {
                     publish_rate_limit(&s);
+                    crate::torrent::apply_live_limits(parse_rate(s.string("speed-limit").trim()));
                 }
             });
         this
@@ -1665,7 +1691,15 @@ impl DownloadManager {
         let name = filename
             .filter(|s| sane_filename(s))
             .map(|s| s.to_string())
-            .unwrap_or_else(|| filename_from_url(&url));
+            .unwrap_or_else(|| {
+                if crate::torrent::is_magnet(&url) {
+                    // The real name arrives with metadata; the info-hash stub
+                    // labels the row until SuggestName renames it.
+                    crate::torrent::stub_name(&url).unwrap_or_else(|| filename_from_url(&url))
+                } else {
+                    filename_from_url(&url)
+                }
+            });
         let name = shorten_filename(&name);
         let name = dedupe_filename(&name, |n| {
             std::path::Path::new(&dir).join(n).exists()
@@ -1675,6 +1709,27 @@ impl DownloadManager {
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         Ok(self.insert(item))
+    }
+
+    /// Intake for .torrent files: archive the bytes, then enqueue the
+    /// pseudo-URL like any other download (stub from the file stem, real
+    /// name arrives with metadata via SuggestName).
+    ///
+    /// # Errors
+    /// Returns a display-ready message when the bytes are not a valid torrent.
+    pub fn enqueue_torrent_file(
+        self: &Rc<Self>,
+        bytes: Vec<u8>,
+        file_name: &str,
+        dest_dir: Option<&str>,
+        only_files: Option<Vec<usize>>,
+    ) -> Result<DownloadItem, String> {
+        let pseudo = crate::torrent::archive_torrent_file(file_name, &bytes)?;
+        if let Some(sel) = only_files {
+            crate::torrent::stage_selection(&pseudo, sel);
+        }
+        let stub = crate::torrent::stub_name_for_file(file_name);
+        self.enqueue(&pseudo, dest_dir, Some(&stub))
     }
 
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
@@ -1797,6 +1852,9 @@ impl DownloadManager {
         }
         publish_rate_limit(&self.settings);
         let url = item.url().to_string();
+        if crate::torrent::is_torrent(&url) {
+            return self.spawn_torrent(item, url);
+        }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
         // A saved bitmap means this item wrote non-contiguous pieces: only a
@@ -1827,7 +1885,7 @@ impl DownloadManager {
         };
         let gen = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(item.id(), gen);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = FetchCtx {
             client: http_client(),
             url,
@@ -1850,8 +1908,21 @@ impl DownloadManager {
         });
         self.changed();
 
+        let item_id = item.id();
+        self.pump(item, item_id, gen, rx);
+    }
+
+    /// Drain one engine's message channel into its row. Shared by the HTTP
+    /// and torrent engines: every arm below is engine-generic, so arms the
+    /// other engine never sends simply never fire.
+    fn pump(
+        self: &Rc<Self>,
+        item: DownloadItem,
+        id: u64,
+        gen: u64,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineMsg>,
+    ) {
         let this = Rc::clone(self);
-        let id = item.id();
         // Speed baseline: deltas from here, not totals from zero. Resumes
         // seed `downloaded` with pre-existing bytes, which lifetime-average
         // math would otherwise report as fantasy GB/s on the first updates.
@@ -2111,6 +2182,53 @@ impl DownloadManager {
         });
     }
 
+    /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract
+    /// (epoch bump, running slot, Downloading status, shared pump) so pause,
+    /// cancel, retry, persist and the stale-pump guard keep working unchanged.
+    fn spawn_torrent(self: &Rc<Self>, item: DownloadItem, magnet: String) {
+        let dir = std::path::PathBuf::from(item.dest_dir().to_string());
+        let _ = std::fs::create_dir_all(&dir);
+        let settings = &self.settings;
+        let seed_finished = settings.boolean("torrent-seed-finished");
+        let dht = settings.boolean("torrent-dht");
+        let peer_limit = crate::torrent::peer_limit_of(settings);
+        let download_bps = parse_rate(settings.string("speed-limit").trim());
+        let id = item.id();
+        let gen = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, gen);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let source = if crate::torrent::is_torrent_url(&magnet) {
+            match crate::torrent::archive_path_for_url(&magnet) {
+                Some(path) => crate::torrent::TorrentSource::File(path),
+                None => {
+                    item.set_status(DownloadStatus::Failed);
+                    item.set_detail("Torrent file is missing from the archive".to_string());
+                    self.changed();
+                    return;
+                }
+            }
+        } else {
+            crate::torrent::TorrentSource::Magnet(magnet)
+        };
+        let only_files = crate::torrent::get_selection(&item.url().to_string());
+        let handle = tokio_rt().spawn(crate::torrent::run_torrent(crate::torrent::TorrentJob {
+            id,
+            source,
+            dest: dir,
+            seed_finished,
+            dht,
+            peer_limit,
+            download_bps,
+            only_files,
+            tx,
+        }));
+        self.running.borrow_mut().insert(id, handle);
+        item.set_status(DownloadStatus::Downloading);
+        item.set_detail("Starting torrent…".to_string());
+        self.changed();
+        self.pump(item, id, gen, rx);
+    }
+
     fn notify_finished(&self, item: &DownloadItem, ok: bool, hint: Option<String>) {
         if !self.notifications_enabled() {
             return;
@@ -2148,6 +2266,9 @@ impl DownloadManager {
         }
         self.running.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
+            if crate::torrent::is_torrent(&item.url()) {
+                crate::torrent::pause_download(id);
+            }
             if item.status() == DownloadStatus::Downloading {
                 item.set_status(DownloadStatus::Paused);
                 item.set_detail(format!("Paused • {}%", (item.progress() * 100.0) as u64));
@@ -2200,6 +2321,9 @@ impl DownloadManager {
         }
         self.running.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
+            if crate::torrent::is_torrent(&item.url()) {
+                crate::torrent::pause_download(id);
+            }
             if matches!(
                 item.status(),
                 DownloadStatus::Downloading | DownloadStatus::Paused
@@ -2261,6 +2385,11 @@ impl DownloadManager {
         if let Some(item) = self.find(id) {
             if had_segments {
                 let _ = std::fs::remove_file(item.file_path());
+            }
+            // Unfinished torrent rows drop their session entry and partial
+            // files; finished rows keep both (delete path passes false).
+            if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
+                crate::torrent::forget_download(id, true);
             }
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
@@ -2338,10 +2467,25 @@ impl DownloadManager {
         let item = self
             .find(id)
             .ok_or_else(|| "Download not found".to_string())?;
+        // Finished torrent rows keep their files: drop the session entry and
+        // the row, skipping the Trash step (the stub path was never written).
+        // Archived .torrent files are deleted too (unlike retries, a manual
+        // delete never needs the archive again).
+        if crate::torrent::is_torrent(&item.url()) && item.status() == DownloadStatus::Done {
+            crate::torrent::forget_download(id, false);
+            crate::torrent::delete_archive_for_url(&item.url());
+            self.remove(id);
+            return Ok(());
+        }
         match gio::File::for_path(item.file_path()).trash(gio::Cancellable::NONE) {
             Ok(()) => {}
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
             Err(e) => return Err(format!("Could not move {} to Trash: {e}", item.filename())),
+        }
+        // Explicit delete drops the archive too (unlike remove, no Undo
+        // re-add can need it afterwards).
+        if crate::torrent::is_torrent_url(&item.url()) {
+            crate::torrent::delete_archive_for_url(&item.url());
         }
         self.remove(id);
         Ok(())
@@ -2596,6 +2740,18 @@ impl DownloadManager {
                 }
             }
             self.batch.set(false);
+            // Drop archived .torrent files no row references anymore
+            // (removed rows keep theirs until now; explicit deletes drop
+            // theirs at once, Finished engines drop theirs on completion).
+            let referenced: std::collections::HashSet<String> = (0..self.store.n_items())
+                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                .map(|it| it.url().to_string())
+                .filter(|u| crate::torrent::is_torrent_url(u))
+                .collect();
+            crate::torrent::sweep_archives(&referenced);
+            // Same for staged file selections: rows that are gone need no
+            // filter on a future re-add (which stages fresh at intake).
+            crate::torrent::prune_selections(&referenced);
             self.persist_queue();
             self.changed();
         }
@@ -3268,6 +3424,173 @@ mod tests {
         assert!(normalize_url("https://user:pass@example.com/f.iso").is_err());
         assert!(normalize_url("https://user@example.com/f.iso").is_err());
         assert!(normalize_url("user:pass@example.com/f.iso").is_err());
+    }
+
+    #[test]
+    fn magnet_links() {
+        let good = "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&dn=test";
+        assert_eq!(normalize_url(good).as_deref(), Ok(good));
+        assert_eq!(
+            normalize_url("  MAGNET:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3  ")
+                .as_deref(),
+            Ok("MAGNET:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3")
+        );
+        // Tracker-heavy magnets (Ubuntu's run ~2-4 KB) bypass the 2048
+        // HTTP cap: parsed locally, never sent as a request line.
+        let big = format!(
+            "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3{}",
+            "&tr=udp://tracker.example.com:1337/announce".repeat(100)
+        );
+        assert!(big.len() > MAX_URL_LEN);
+        assert_eq!(normalize_url(&big).as_deref(), Ok(big.as_str()));
+        // Absurd magnets still rejected.
+        let huge = format!(
+            "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&x={}",
+            "a".repeat(16384)
+        );
+        assert!(normalize_url(&huge).is_err());
+        // Tracker params contain `://`: must never reach the http scheme
+        // branch (regression: "Unsupported scheme: magnet").
+        let tracked = "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&tr=http://tracker.example.com:80/announce&tr=udp://tracker.example.com:1337/announce";
+        assert_eq!(normalize_url(tracked).as_deref(), Ok(tracked));
+        // Pasted BOM must not defeat the magnet classifier.
+        let bom = format!("\u{feff}{good}");
+        assert_eq!(normalize_url(&bom).as_deref(), Ok(good));
+        // Magnet-shaped but unparseable: rejected by the parser, never by
+        // the scheme branch.
+        let bad_scheme =
+            normalize_url("magnet://xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3");
+        assert!(bad_scheme.is_err());
+        assert!(!bad_scheme.unwrap_err().contains("Unsupported scheme"));
+        // No BTv1 info-hash: unresolvable, reject at intake.
+        assert!(normalize_url("magnet:?dn=nameless").is_err());
+        assert!(normalize_url("magnet:?xt=urn:btih:xyz").is_err());
+        assert!(normalize_url("magnet:").is_err());
+    }
+
+    /// Minimal single-file .torrent: info{length: 1, name: "foo"}.
+    fn single_torrent_bytes() -> Vec<u8> {
+        format!(
+            "d8:announce12:http://t.co/4:infod6:lengthi1e4:name3:foo12:piece lengthi16384e6:pieces20:{}ee",
+            "A".repeat(20)
+        )
+        .into_bytes()
+    }
+
+    /// Minimal multi-file .torrent: bar/{a.txt: 2, sub/b.txt: 3}.
+    /// Info-dict keys must be sorted (files < name < piece length <
+    /// pieces): the parser enforces canonical order.
+    fn multi_torrent_bytes() -> Vec<u8> {
+        format!(
+            "d8:announce12:http://t.co/4:infod5:filesld6:lengthi2e4:pathl5:a.txteed6:lengthi3e4:pathl3:sub5:b.txteee4:name3:bar12:piece lengthi16384e6:pieces20:{}ee",
+            "A".repeat(20)
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn torrent_urls() {
+        // Nothing archived under that path: rejected at intake.
+        assert!(normalize_url("torrent:/nope/missing.torrent").is_err());
+        assert!(!crate::torrent::is_torrent_url(
+            "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3"
+        ));
+        // A real archived file round-trips through normalize.
+        let stem = format!("grab-test-{}", std::process::id());
+        let pseudo = crate::torrent::archive_torrent_file(
+            &format!("{stem}.torrent"),
+            &single_torrent_bytes(),
+        )
+        .unwrap();
+        assert!(crate::torrent::is_torrent_url(&pseudo));
+        assert!(crate::torrent::is_torrent(&pseudo));
+        assert_eq!(normalize_url(&pseudo).as_deref(), Ok(pseudo.as_str()));
+        crate::torrent::delete_archive_for_url(&pseudo);
+        assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
+    }
+
+    #[test]
+    fn torrent_file_list_parses() {
+        let (name, entries) = crate::torrent::torrent_file_list(&single_torrent_bytes()).unwrap();
+        assert_eq!(name, "foo");
+        assert!(entries.is_empty());
+        let (name, entries) = crate::torrent::torrent_file_list(&multi_torrent_bytes()).unwrap();
+        assert_eq!(name, "bar");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "a.txt");
+        assert_eq!(entries[0].length, 2);
+        assert_eq!(entries[1].path, "sub/b.txt");
+        assert_eq!(entries[1].length, 3);
+        assert!(crate::torrent::torrent_file_list(b"not a torrent").is_err());
+    }
+
+    #[test]
+    fn sweep_keeps_only_referenced_archives() {
+        let dir = std::env::temp_dir().join(format!("grab-sweep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let keep = dir.join("keep.torrent");
+        let drop = dir.join("drop.torrent");
+        let skip = dir.join("notes.txt");
+        std::fs::write(&keep, b"x").unwrap();
+        std::fs::write(&drop, b"x").unwrap();
+        std::fs::write(&skip, b"x").unwrap();
+        let mut referenced = std::collections::HashSet::new();
+        referenced.insert(format!("torrent:{}", keep.to_string_lossy()));
+        crate::torrent::sweep_archives_in(&dir, &referenced);
+        assert!(keep.exists());
+        assert!(!drop.exists());
+        assert!(skip.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn staged_selection_survives_respawn() {
+        // Regression: take-once lost the file filter on every re-spawn
+        // (retry after cancel/fail), silently downloading everything.
+        // Selections now peek until pruned with unreferenced archives.
+        let url = "torrent:/tmp/grab-test-sel.torrent";
+        crate::torrent::stage_selection(url, vec![2]);
+        assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
+        assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
+        let mut referenced = std::collections::HashSet::new();
+        referenced.insert(url.to_string());
+        crate::torrent::prune_selections(&referenced);
+        assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
+        crate::torrent::prune_selections(&std::collections::HashSet::new());
+        assert_eq!(crate::torrent::get_selection(url), None);
+    }
+
+    #[test]
+    fn torrent_file_enqueue_uses_stem_stub() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("torrent-enqueue");
+        let settings = test_settings();
+        // Occupy the only slot so nothing spawns a real engine below.
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(99, holder);
+        let stem = format!("grab-enqueue-{}", std::process::id());
+        let item = manager
+            .enqueue_torrent_file(
+                single_torrent_bytes(),
+                &format!("{stem}.torrent"),
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(item.status(), DownloadStatus::Queued);
+        assert!(crate::torrent::is_torrent_url(&item.url()));
+        assert!(sane_filename(&item.filename()));
+        assert!(!item.filename().is_empty());
+        // Leave no Queued row behind (a later restore could spawn it) and
+        // no archive behind; restore the shared memory-backend key.
+        manager.cancel_all();
+        crate::torrent::delete_archive_for_url(&item.url());
+        assert!(crate::torrent::archive_path_for_url(&item.url()).is_none());
+        settings.set_int("max-concurrent", 3).unwrap();
     }
 
     #[test]

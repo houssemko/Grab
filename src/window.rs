@@ -944,6 +944,83 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         });
     }
 
+    let torrent_btn = gtk4::Button::builder()
+        .label("Choose…")
+        .tooltip_text("Choose a .torrent file")
+        .valign(gtk4::Align::Center)
+        .build();
+    let torrent_row = adw::ActionRow::builder()
+        .title("Torrent file")
+        .subtitle("Pick a .torrent file instead of a link")
+        .activatable_widget(&torrent_btn)
+        .build();
+    torrent_row.add_suffix(&torrent_btn);
+    group.add(&torrent_row);
+    {
+        let m = manager.clone();
+        let dd = dest_dir.clone();
+        let dialog = dialog.downgrade();
+        let error_label = error_label.clone();
+        torrent_btn.connect_clicked(move |_| {
+            let m = m.clone();
+            let dd = dd.clone();
+            let dialog = dialog.clone();
+            let error_label = error_label.clone();
+            glib::spawn_future_local(async move {
+                let filter = gtk4::FileFilter::new();
+                filter.set_name(Some("Torrent files"));
+                filter.add_mime_type("application/x-bittorrent");
+                filter.add_pattern("*.torrent");
+                let filters = gio::ListStore::new::<gtk4::FileFilter>();
+                filters.append(&filter);
+                let picker = gtk4::FileDialog::builder().filters(&filters).build();
+                let Ok(file) = picker.open_future(None::<&gtk4::Window>).await else {
+                    return; // dismissed
+                };
+                let name = file
+                    .basename()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "download.torrent".to_string());
+                let bytes = match file.path().and_then(|p| {
+                    std::fs::metadata(&p)
+                        .ok()
+                        .filter(|md| md.len() <= 10_000_000)
+                        .and_then(|_| std::fs::read(&p).ok())
+                }) {
+                    Some(b) => b,
+                    None => {
+                        error_label.set_text("Could not read that .torrent file");
+                        error_label.set_visible(true);
+                        return;
+                    }
+                };
+                let (_tname, entries) = match crate::torrent::torrent_file_list(&bytes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error_label.set_text(&e);
+                        error_label.set_visible(true);
+                        return;
+                    }
+                };
+                if entries.len() <= 1 {
+                    match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
+                        Ok(_) => {
+                            if let Some(d) = dialog.upgrade() {
+                                d.close();
+                            }
+                        }
+                        Err(e) => {
+                            error_label.set_text(&e);
+                            error_label.set_visible(true);
+                        }
+                    }
+                    return;
+                }
+                show_torrent_files_dialog(m, dd, dialog, name, bytes, entries);
+            });
+        });
+    }
+
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
     hb.set_show_end_title_buttons(true);
@@ -1067,4 +1144,124 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             }
         });
     }
+}
+
+fn fmt_size(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
+}
+
+/// Multi-file .torrent intake: one switch per file, all on by default.
+/// The selection feeds rqbit's `only_files` at add time (no live setter),
+/// so it must be chosen here, before the row exists.
+fn show_torrent_files_dialog(
+    manager: Rc<DownloadManager>,
+    dest_dir: Rc<RefCell<String>>,
+    parent: glib::WeakRef<adw::Dialog>,
+    file_name: String,
+    bytes: Vec<u8>,
+    entries: Vec<crate::torrent::TorrentFileEntry>,
+) {
+    let dialog = adw::Dialog::builder().title(&file_name).build();
+    dialog.set_content_width(420);
+
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::builder()
+        .title("Files")
+        .description(format!("{} files", entries.len()))
+        .build();
+    page.add(&group);
+
+    let mut switches = Vec::new();
+    for e in &entries {
+        let row = adw::SwitchRow::builder()
+            .title(&e.path)
+            .subtitle(fmt_size(e.length))
+            .active(true)
+            .build();
+        switches.push(row.clone());
+        group.add(&row);
+    }
+    let error_label = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    group.add(&error_label);
+
+    let toolbar = adw::ToolbarView::new();
+    let hb = adw::HeaderBar::new();
+    hb.set_show_end_title_buttons(true);
+    hb.set_show_start_title_buttons(false);
+    let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+    let add_btn = gtk4::Button::builder()
+        .label("Add Files")
+        .css_classes(["suggested-action"])
+        .build();
+    hb.pack_start(&cancel_btn);
+    hb.pack_end(&add_btn);
+    toolbar.add_top_bar(&hb);
+    toolbar.set_content(Some(&page));
+    dialog.set_child(Some(&toolbar));
+
+    {
+        let dialog_weak = dialog.downgrade();
+        cancel_btn.connect_clicked(move |_| {
+            if let Some(d) = dialog_weak.upgrade() {
+                d.close();
+            }
+        });
+    }
+    {
+        let dialog_weak = dialog.downgrade();
+        add_btn.connect_clicked(move |_| {
+            let selected: Vec<usize> = switches
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| s.is_active())
+                .map(|(i, _)| i)
+                .collect();
+            if selected.is_empty() {
+                error_label.set_text("Select at least one file");
+                error_label.set_visible(true);
+                return;
+            }
+            // All on means no filter: pass None, not every index.
+            let only = (selected.len() < switches.len()).then_some(selected);
+            match manager.enqueue_torrent_file(
+                bytes.clone(),
+                &file_name,
+                Some(&dest_dir.borrow()),
+                only,
+            ) {
+                Ok(_) => {
+                    if let Some(d) = dialog_weak.upgrade() {
+                        d.close();
+                    }
+                    if let Some(p) = parent.upgrade() {
+                        p.close();
+                    }
+                }
+                Err(e) => {
+                    error_label.set_text(&e);
+                    error_label.set_visible(true);
+                }
+            }
+        });
+    }
+
+    // No gtk Window parent exists here (invoked from an adw::Dialog):
+    // present standalone like the no-window fallback above.
+    dialog.present(None::<&gtk4::Window>);
 }

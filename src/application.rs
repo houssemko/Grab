@@ -66,7 +66,10 @@ pub fn setup(app: &adw::Application) {
             };
             for f in files {
                 if let Ok(uri) = f.uri().parse::<url::Url>() {
-                    if matches!(uri.scheme(), "http" | "https") {
+                    // magnet: links arrive here when Grab is the system's
+                    // magnet handler (x-scheme-handler/magnet); enqueue
+                    // validates them the same way as pasted links.
+                    if matches!(uri.scheme(), "http" | "https" | "magnet") {
                         if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
                             s.toasts.add_toast(adw::Toast::new(&e));
                         }
@@ -74,6 +77,41 @@ pub fn setup(app: &adw::Application) {
                     }
                 }
                 if let Some(path) = f.path() {
+                    // .torrent files go to the torrent intake, not the
+                    // URL-list importer below (binary fails read_to_string).
+                    if path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
+                    {
+                        let (manager, toasts) = (s.manager.clone(), s.toasts.clone());
+                        let stem = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "download".to_string());
+                        glib::spawn_future_local(async move {
+                            const MAX_TORRENT_BYTES: u64 = 10_000_000;
+                            let bytes = gio::spawn_blocking(move || {
+                                std::fs::metadata(&path)
+                                    .ok()
+                                    .filter(|m| m.len() <= MAX_TORRENT_BYTES)
+                                    .and_then(|_| std::fs::read(&path).ok())
+                            })
+                            .await
+                            .ok()
+                            .flatten();
+                            let Some(bytes) = bytes else {
+                                toasts.add_toast(adw::Toast::new(
+                                    "Could not read that .torrent file",
+                                ));
+                                return;
+                            };
+                            // Opened files offer no selection UI: all files in.
+                            if let Err(e) = manager.enqueue_torrent_file(bytes, &stem, None, None) {
+                                toasts.add_toast(adw::Toast::new(&e));
+                            }
+                        });
+                        continue;
+                    }
                     const MAX_LIST_BYTES: u64 = 1_000_000;
                     const MAX_LIST_LINES: usize = 1000;
                     // The up-to-1MB read runs on a worker: file I/O never

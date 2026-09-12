@@ -55,6 +55,22 @@
       <summary>Prevent sleep during downloads</summary>
       <description>Block system suspend while downloads are queued or running.</description>
     </key>
+    <key name="torrent-seed-finished" type="b">
+      <default>false</default>
+      <summary>Seed finished torrents</summary>
+      <description>Keep uploading finished magnet downloads instead of pausing them.</description>
+    </key>
+    <key name="torrent-dht" type="b">
+      <default>true</default>
+      <summary>Use DHT for torrents</summary>
+      <description>Find torrent peers through the distributed hash table. Applies when the torrent engine first starts.</description>
+    </key>
+    <key name="torrent-peer-limit" type="i">
+      <default>50</default>
+      <range min="0" max="500"/>
+      <summary>Torrent peer limit</summary>
+      <description>Maximum torrent peers. 0 means unlimited.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>

@@ -78,6 +78,11 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         });
     }
 
+    let net_page = adw::PreferencesPage::builder()
+        .title("Network")
+        .icon_name("network-wired-symbolic")
+        .build();
+
     let net_group = adw::PreferencesGroup::builder()
         .title("Network and Queue")
         .build();
@@ -170,9 +175,45 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     power_group.add(&inhibit);
 
     page.add(&dest_group);
-    page.add(&net_group);
     page.add(&power_group);
     page.add(&notif_group);
     dialog.add(&page);
+
+    net_page.add(&net_group);
+    dialog.add(&net_page);
+
+    let torrent_page = adw::PreferencesPage::builder()
+        .title("Torrent")
+        .icon_name("emblem-shared-symbolic")
+        .build();
+
+    let share_group = adw::PreferencesGroup::builder().title("Sharing").build();
+    let seed = adw::SwitchRow::builder()
+        .title("Seed finished downloads")
+        .subtitle("Keep sharing files after they finish downloading")
+        .build();
+    settings
+        .bind("torrent-seed-finished", &seed, "active")
+        .build();
+    share_group.add(&seed);
+
+    let torrent_net_group = adw::PreferencesGroup::builder().title("Network").build();
+    let dht = adw::SwitchRow::builder()
+        .title("Use DHT")
+        .subtitle("Find peers through the distributed hash table")
+        .build();
+    settings.bind("torrent-dht", &dht, "active").build();
+    torrent_net_group.add(&dht);
+    let peers = adw::SpinRow::builder()
+        .title("Peer limit")
+        .subtitle("Maximum peers per download. 0 means unlimited. Applies when a download starts.")
+        .adjustment(&gtk4::Adjustment::new(50.0, 0.0, 500.0, 1.0, 10.0, 0.0))
+        .build();
+    settings.bind("torrent-peer-limit", &peers, "value").build();
+    torrent_net_group.add(&peers);
+
+    torrent_page.add(&share_group);
+    torrent_page.add(&torrent_net_group);
+    dialog.add(&torrent_page);
     dialog.present(Some(parent));
 }
