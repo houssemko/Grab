@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.8" date="2026-09-12">
+      <description>
+        <p>Fix: deleting a torrent download now moves the real download folder to Trash, and re-adding a torrent right after deleting it no longer fails with a phantom already-in-queue error.</p>
+      </description>
+    </release>
     <release version="2.0.7" date="2026-09-12">
       <description>
         <p>Change: the torrent file picker no longer remembers past selections, opening a .torrent file shows the same file list as the picker, and downloading rows show how many files are selected.</p>

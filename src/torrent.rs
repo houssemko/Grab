@@ -288,6 +288,33 @@ fn output_folder_for(
     dest.join(dir)
 }
 
+/// Real on-disk location of a torrent's files for deletion: recomputes the
+/// engine's output folder deterministically from the archived metadata, so
+/// Delete trashes what the engine actually wrote instead of the row's stub
+/// path (never written for multi-file torrents). Returns None for magnets
+/// and single-file torrents (caller falls back to the row's own file path).
+pub fn torrent_output_dir(dest: &std::path::Path, url: &str) -> Option<PathBuf> {
+    if !is_torrent_url(url) {
+        return None;
+    }
+    let path = archive_path_for_url(url)?;
+    let bytes = std::fs::read(path).ok()?;
+    let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
+    let multi = meta.info.data.files.as_ref().is_some_and(|f| f.len() >= 2);
+    if !multi {
+        return None;
+    }
+    let name = meta
+        .info
+        .data
+        .name
+        .as_ref()
+        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
+    // Same fallback the engine uses (info-hash hex): deterministic match.
+    let fallback = meta.info_hash.as_string();
+    Some(output_folder_for(dest, name, true, &fallback))
+}
+
 async fn ensure_session(
     dht: bool,
     peer_limit: Option<usize>,
@@ -461,14 +488,24 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         Magnet(String),
         File(Vec<u8>),
     }
-    let (hash_hex, stub, folder, adder) = match &source {
+    let (hash_hex, hash_id, stub, folder, adder) = match &source {
         TorrentSource::Magnet(magnet) => match parse_magnet(magnet) {
             Ok(m) => {
-                let hash_hex = m.as_id20().map(|hid| hid.as_string()).unwrap_or_default();
+                let Some(hash_id) = m.as_id20() else {
+                    fail("Only BitTorrent v1 magnets are supported".to_string());
+                    return;
+                };
+                let hash_hex = hash_id.as_string();
                 let stub = stub_name(magnet).unwrap_or_else(|| hash_hex.clone());
                 // Magnet file counts only arrive mid-download, so magnets
                 // always land flat (see output_folder_for).
-                (hash_hex, stub, dest.clone(), Adder::Magnet(magnet.clone()))
+                (
+                    hash_hex,
+                    hash_id,
+                    stub,
+                    dest.clone(),
+                    Adder::Magnet(magnet.clone()),
+                )
             }
             Err(e) => {
                 fail(e);
@@ -485,7 +522,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             };
             match librqbit::torrent_from_bytes(&bytes) {
                 Ok(meta) => {
-                    let hash_hex = meta.info_hash.as_string();
+                    let hash_id = meta.info_hash;
+                    let hash_hex = hash_id.as_string();
                     let raw_name = meta
                         .info
                         .data
@@ -499,7 +537,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                         .map(|n| shorten_filename(&n))
                         .unwrap_or_else(|| hash_hex.clone());
                     let folder = output_folder_for(&dest, raw_name, multi, &stub);
-                    (hash_hex, stub, folder, Adder::File(bytes))
+                    (hash_hex, hash_id, stub, folder, Adder::File(bytes))
                 }
                 Err(e) => {
                     fail(format!("Invalid torrent file: {e}"));
@@ -556,6 +594,16 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         }
         ACTIVE.lock().await.remove(&id);
         return;
+    }
+    // A just-forgotten session entry vanishes asynchronously (forget is
+    // fire-and-forget): wait for our hash to clear instead of tripping the
+    // duplicate guard on our own deletion. Skips at once when absent;
+    // genuine duplicates still fail below after ~3s.
+    for _ in 0..12 {
+        if session.get(TorrentIdOrHash::Hash(hash_id)).is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     // Cloned before opts takes ownership (see the filter-match arm below).
     let want_files = only_files.clone();

@@ -2492,12 +2492,17 @@ impl DownloadManager {
             .find(id)
             .ok_or_else(|| "Download not found".to_string())?;
         // Torrent rows (any status): drop the session entry and the
-        // archive, drop the row, then Trash the real files (single file or
-        // torrent subfolder — the stub path was never written, gio trash
-        // handles both; a missing path is fine when metadata never
-        // resolved). Matches the HTTP delete contract (Trash, recoverable).
+        // archive, drop the row, then Trash the real files. Multi-file
+        // torrents live in dest/<torrent-name>/ rather than the stub path
+        // (never written), so recompute the engine's output folder; a
+        // missing path is fine when metadata never resolved. Matches the
+        // HTTP delete contract (Trash, recoverable).
         if crate::torrent::is_torrent(&item.url()) {
-            let path = item.file_path();
+            let path = crate::torrent::torrent_output_dir(
+                &std::path::PathBuf::from(item.dest_dir().to_string()),
+                &item.url(),
+            )
+            .unwrap_or_else(|| item.file_path());
             crate::torrent::forget_download(id, false);
             crate::torrent::delete_archive_for_url(&item.url());
             self.remove(id);
@@ -3880,6 +3885,41 @@ mod tests {
         store.append(&item2);
         assert!(manager.delete_download(8).is_ok());
         assert_eq!(store.n_items(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_download_trashes_torrent_subfolder() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("del-subfolder");
+        let settings = test_settings();
+        // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+        let dir = glib::user_data_dir().join(format!("grab-delsub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.to_string_lossy().into_owned();
+        // Multi-file torrent whose meta name ("bar") differs from the
+        // archive stem: the engine folder is dest/<meta-name>/, never the
+        // row's stub path. Delete must trash the folder, not no-op.
+        let pseudo =
+            crate::torrent::archive_torrent_file("mymeta.torrent", &multi_torrent_bytes()).unwrap();
+        let folder = dir.join("bar");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), b"hi").unwrap();
+
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store.clone(), settings);
+        let item = DownloadItem::new(9, &pseudo, "mymeta", &dest);
+        item.set_status(DownloadStatus::Done);
+        store.append(&item);
+
+        assert!(manager.delete_download(9).is_ok());
+        assert!(!folder.exists());
+        assert!(crate::torrent::archive_path_for_url(&pseudo).is_none());
+        assert_eq!(store.n_items(), 0);
+        // Undo the test's own Trash litter.
+        let trash = glib::user_data_dir().join("Trash");
+        let _ = std::fs::remove_dir_all(trash.join("files/bar"));
+        let _ = std::fs::remove_file(trash.join("info/bar.trashinfo"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
