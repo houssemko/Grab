@@ -2386,10 +2386,11 @@ impl DownloadManager {
             if had_segments {
                 let _ = std::fs::remove_file(item.file_path());
             }
-            // Unfinished torrent rows drop their session entry and partial
-            // files; finished rows keep both (delete path passes false).
+            // Unfinished torrent rows drop their session entry but keep
+            // partial files, so cancel/retry and remove/Undo resume instead
+            // of restarting (explicit delete discards the files instead).
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
-                crate::torrent::forget_download(id, true);
+                crate::torrent::forget_download(id, false);
             }
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
@@ -2467,25 +2468,28 @@ impl DownloadManager {
         let item = self
             .find(id)
             .ok_or_else(|| "Download not found".to_string())?;
-        // Finished torrent rows keep their files: drop the session entry and
-        // the row, skipping the Trash step (the stub path was never written).
-        // Archived .torrent files are deleted too (unlike retries, a manual
-        // delete never needs the archive again).
-        if crate::torrent::is_torrent(&item.url()) && item.status() == DownloadStatus::Done {
+        // Torrent rows (any status): drop the session entry and the
+        // archive, drop the row, then Trash the real files (single file or
+        // torrent subfolder — the stub path was never written, gio trash
+        // handles both; a missing path is fine when metadata never
+        // resolved). Matches the HTTP delete contract (Trash, recoverable).
+        if crate::torrent::is_torrent(&item.url()) {
+            let path = item.file_path();
             crate::torrent::forget_download(id, false);
             crate::torrent::delete_archive_for_url(&item.url());
             self.remove(id);
-            return Ok(());
+            return match gio::File::for_path(path).trash(gio::Cancellable::NONE) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {
+                    Ok(())
+                }
+                Err(e) => Err(format!("Could not move {} to Trash: {e}", item.filename())),
+            };
         }
         match gio::File::for_path(item.file_path()).trash(gio::Cancellable::NONE) {
             Ok(()) => {}
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
             Err(e) => return Err(format!("Could not move {} to Trash: {e}", item.filename())),
-        }
-        // Explicit delete drops the archive too (unlike remove, no Undo
-        // re-add can need it afterwards).
-        if crate::torrent::is_torrent_url(&item.url()) {
-            crate::torrent::delete_archive_for_url(&item.url());
         }
         self.remove(id);
         Ok(())
@@ -3590,6 +3594,96 @@ mod tests {
         manager.cancel_all();
         crate::torrent::delete_archive_for_url(&item.url());
         assert!(crate::torrent::archive_path_for_url(&item.url()).is_none());
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
+    fn delete_download_trashes_torrent_files() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("torrent-del");
+        let settings = test_settings();
+        // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+        let dir = glib::user_data_dir().join(format!("grab-torrent-del-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gone.bin");
+        std::fs::write(&file, b"bye").unwrap();
+
+        let store = gio::ListStore::new::<DownloadItem>();
+        let manager = DownloadManager::new(store.clone(), settings);
+        let item = DownloadItem::new(
+            7,
+            "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&dn=gone",
+            "gone.bin",
+            &dir.to_string_lossy(),
+        );
+        item.set_status(DownloadStatus::Done);
+        store.append(&item);
+
+        // Explicit delete trashes the real files (not kept silently) and
+        // drops the row; the session entry was never created offline.
+        assert!(manager.delete_download(7).is_ok());
+        assert!(!file.exists());
+        assert_eq!(store.n_items(), 0);
+        // Undo the test's own Trash litter.
+        let trash = glib::user_data_dir().join("Trash");
+        let _ = std::fs::remove_file(trash.join("files/gone.bin"));
+        let _ = std::fs::remove_file(trash.join("info/gone.bin.trashinfo"));
+
+        // Multi-file torrents trash the whole subfolder.
+        let sub = dir.join("Some Torrent");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.mp4"), b"data").unwrap();
+        let item2 = DownloadItem::new(
+            8,
+            "magnet:?xt=urn:btih:b94a8fe5ccb19ba61c4c0873d391e987982fbbd4&dn=Some+Torrent",
+            "Some Torrent",
+            &dir.to_string_lossy(),
+        );
+        item2.set_status(DownloadStatus::Done);
+        store.append(&item2);
+        assert!(manager.delete_download(8).is_ok());
+        assert!(!sub.exists());
+        assert_eq!(store.n_items(), 0);
+        let _ = std::fs::remove_dir_all(trash.join("files/Some Torrent"));
+        let _ = std::fs::remove_file(trash.join("info/Some Torrent.trashinfo"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_keeps_torrent_archive_for_undo() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("torrent-remove");
+        let settings = test_settings();
+        // Occupy the only slot so nothing spawns a real engine below.
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(99, holder);
+        let stem = format!("grab-undo-{}", std::process::id());
+        let item = manager
+            .enqueue_torrent_file(
+                single_torrent_bytes(),
+                &format!("{stem}.torrent"),
+                None,
+                None,
+            )
+            .unwrap();
+        let id = item.id();
+        let url = item.url().to_string();
+        // Remove drops the row but keeps the archive, so Undo can re-add
+        // the same pseudo-URL and the engine resumes from kept partials.
+        manager.remove(id);
+        assert_eq!(manager.store().n_items(), 0);
+        assert!(
+            crate::torrent::archive_path_for_url(&url).is_some_and(|p| p.exists()),
+            "remove must keep the archive for Undo"
+        );
+        // Teardown BEFORE restoring keys (see rejects_relative_download_dir).
+        manager.cancel_all();
+        crate::torrent::delete_archive_for_url(&url);
+        assert!(crate::torrent::archive_path_for_url(&url).is_none());
         settings.set_int("max-concurrent", 3).unwrap();
     }
 

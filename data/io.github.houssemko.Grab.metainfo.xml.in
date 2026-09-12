@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.1" date="2026-09-12">
+      <description>
+        <p>Torrent support: magnet links and .torrent files with a file picker, multi-file torrents in their own folder, a dedicated Torrent preferences page, and network settings on their own page. Removing a torrent keeps partial files so Undo resumes instead of restarting.</p>
+      </description>
+    </release>
     <release version="1.3.3" date="2026-09-11">
       <description>
         <p>Security hardening: download folders must be absolute paths, URLs with embedded credentials are rejected, fresh downloads claim their destination atomically, and redirects are capped at five hops.</p>
