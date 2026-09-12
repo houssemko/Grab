@@ -1167,12 +1167,16 @@ fn show_torrent_files_dialog(
         .build();
     page.add(&group);
 
+    // Pre-check the last pick for this torrent (all-on for new ones): a
+    // retry then keeps the user's filter instead of reverting to full.
+    let remembered = crate::torrent::torrent_info_hash(&bytes)
+        .and_then(|h| crate::torrent::remembered_selection(&h));
     let mut switches = Vec::new();
-    for e in &entries {
+    for (i, e) in entries.iter().enumerate() {
         let row = adw::SwitchRow::builder()
             .title(&e.path)
             .subtitle(crate::download::fmt_bytes(e.length))
-            .active(true)
+            .active(remembered.as_ref().is_none_or(|s| s.contains(&i)))
             .build();
         switches.push(row.clone());
         group.add(&row);
@@ -1224,6 +1228,11 @@ fn show_torrent_files_dialog(
             }
             // All on means no filter: pass None, not every index.
             let only = (selected.len() < switches.len()).then_some(selected);
+            // Remember the pick (or its clearing) so the next open of this
+            // torrent starts where the user left off.
+            if let Some(h) = crate::torrent::torrent_info_hash(&bytes) {
+                crate::torrent::remember_selection(&h, only.as_deref());
+            }
             match manager.enqueue_torrent_file(
                 bytes.clone(),
                 &file_name,

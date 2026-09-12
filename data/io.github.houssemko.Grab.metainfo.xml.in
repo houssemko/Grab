@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.6" date="2026-09-12">
+      <description>
+        <p>New: the torrent file picker remembers your per-file selection, so re-adding the same torrent pre-checks your last choice.</p>
+      </description>
+    </release>
     <release version="2.0.5" date="2026-09-12">
       <description>
         <p>Maintenance: regression coverage for per-file torrent selection. No user-facing changes.</p>
