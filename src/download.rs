@@ -3610,6 +3610,41 @@ mod tests {
     }
 
     #[test]
+    fn staged_selection_reaches_spawn_take() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("torrent-take");
+        let settings = test_settings();
+        // Occupy the only slot so nothing spawns a real engine below.
+        settings.set_int("max-concurrent", 1).unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(99, holder);
+        let stem = format!("grab-take-{}", std::process::id());
+        let item = manager
+            .enqueue_torrent_file(
+                single_torrent_bytes(),
+                &format!("{stem}.torrent"),
+                None,
+                Some(vec![0]),
+            )
+            .unwrap();
+        // The exact key spawn_torrent takes with: a staged selection must
+        // survive the archive → normalize → store round-trip identically.
+        assert_eq!(
+            crate::torrent::get_selection(&item.url().to_string()),
+            Some(vec![0])
+        );
+        // Leave no Queued row behind (a later restore could spawn it) and
+        // no archive behind; restore the shared memory-backend key.
+        manager.cancel_all();
+        crate::torrent::delete_archive_for_url(&item.url());
+        assert!(crate::torrent::archive_path_for_url(&item.url()).is_none());
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
     fn delete_download_trashes_torrent_files() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("torrent-del");
