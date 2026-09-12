@@ -260,6 +260,27 @@ pub fn sweep_archives_in(dir: &std::path::Path, referenced: &std::collections::H
     }
 }
 
+/// Where a torrent's files go: multi-file torrents get a subfolder named
+/// after the torrent (mirroring rqbit's own default, which our explicit
+/// output_folder bypasses); single-file torrents sit flat in `dest`.
+/// Magnet file counts only arrive mid-download, so magnets always land
+/// flat. The fallback (info-hash hex) is always filesystem-safe.
+fn output_folder_for(
+    dest: &std::path::Path,
+    name: Option<String>,
+    multi: bool,
+    fallback: &str,
+) -> std::path::PathBuf {
+    if !multi {
+        return dest.to_path_buf();
+    }
+    let dir = name
+        .filter(|n| sane_filename(n))
+        .map(|n| shorten_filename(&n))
+        .unwrap_or_else(|| fallback.to_string());
+    dest.join(dir)
+}
+
 async fn ensure_session(
     dht: bool,
     peer_limit: Option<usize>,
@@ -433,12 +454,14 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         Magnet(String),
         File(Vec<u8>),
     }
-    let (hash_hex, stub, adder) = match &source {
+    let (hash_hex, stub, folder, adder) = match &source {
         TorrentSource::Magnet(magnet) => match parse_magnet(magnet) {
             Ok(m) => {
                 let hash_hex = m.as_id20().map(|hid| hid.as_string()).unwrap_or_default();
                 let stub = stub_name(magnet).unwrap_or_else(|| hash_hex.clone());
-                (hash_hex, stub, Adder::Magnet(magnet.clone()))
+                // Magnet file counts only arrive mid-download, so magnets
+                // always land flat (see output_folder_for).
+                (hash_hex, stub, dest.clone(), Adder::Magnet(magnet.clone()))
             }
             Err(e) => {
                 fail(e);
@@ -456,16 +479,20 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             match librqbit::torrent_from_bytes(&bytes) {
                 Ok(meta) => {
                     let hash_hex = meta.info_hash.as_string();
-                    let stub = meta
+                    let raw_name = meta
                         .info
                         .data
                         .name
                         .as_ref()
-                        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+                        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
+                    let multi = meta.info.data.files.as_ref().is_some_and(|f| f.len() >= 2);
+                    let stub = raw_name
+                        .clone()
                         .filter(|n| sane_filename(n))
                         .map(|n| shorten_filename(&n))
                         .unwrap_or_else(|| hash_hex.clone());
-                    (hash_hex, stub, Adder::File(bytes))
+                    let folder = output_folder_for(&dest, raw_name, multi, &stub);
+                    (hash_hex, stub, folder, Adder::File(bytes))
                 }
                 Err(e) => {
                     fail(format!("Invalid torrent file: {e}"));
@@ -524,7 +551,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         return;
     }
     let opts = AddTorrentOptions {
-        output_folder: Some(dest.to_string_lossy().into_owned()),
+        output_folder: Some(folder.to_string_lossy().into_owned()),
         overwrite: true,
         // Current preference at add time: running torrents keep theirs.
         peer_limit,
@@ -623,5 +650,26 @@ mod tests {
             Some("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3")
         );
         assert_eq!(stub_name("magnet:?xt=urn:btih:xyz"), None);
+    }
+
+    #[test]
+    fn multifile_torrents_get_name_subfolder() {
+        let dest = std::path::PathBuf::from("/tmp/dl");
+        // Multi-file torrents land in a subfolder named after the torrent…
+        let out = output_folder_for(&dest, Some("Cosmos Laundromat".to_string()), true, "abc123");
+        assert_eq!(out, std::path::PathBuf::from("/tmp/dl/Cosmos Laundromat"));
+        // …single-file torrents sit flat even when a name is known…
+        assert_eq!(
+            output_folder_for(&dest, Some("movie.mp4".to_string()), false, "abc123"),
+            dest
+        );
+        // …and hostile names fall back to the info-hash, never the parent.
+        let out = output_folder_for(&dest, Some("../evil".to_string()), true, "abc123");
+        assert_eq!(out, std::path::PathBuf::from("/tmp/dl/abc123"));
+        assert!(out.starts_with(&dest));
+        assert_eq!(
+            output_folder_for(&dest, None, true, "abc123"),
+            std::path::PathBuf::from("/tmp/dl/abc123")
+        );
     }
 }
