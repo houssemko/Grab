@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.0.3" date="2026-09-12">
+      <description>
+        <p>Fix: per-file torrent selection now survives app restarts instead of silently downloading everything.</p>
+      </description>
+    </release>
     <release version="2.0.2" date="2026-09-12">
       <description>
         <p>Code cleanup: removed dead code and merged duplicate helpers. No behavior changes.</p>

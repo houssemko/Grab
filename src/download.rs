@@ -73,6 +73,12 @@ struct StoredItem {
     /// Absent on v1 files and for items that need no resume.
     #[serde(default)]
     segments: Option<SegmentState>,
+    /// Intake file selection for multi-file torrents (v2+). The live map
+    /// is in-memory only, so the selection is persisted here and
+    /// re-staged on restore — otherwise a restart drops the filter and
+    /// the resume downloads every file.
+    #[serde(default)]
+    selected_files: Option<Vec<usize>>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -2610,6 +2616,7 @@ impl DownloadManager {
             if let Some(it) = self.store.item(i).and_downcast::<DownloadItem>() {
                 if let Some(status) = StoredStatus::from_item(it.status()) {
                     let segments = self.segment_state.borrow().get(&it.id()).cloned();
+                    let selected_files = crate::torrent::get_selection(&it.url().to_string());
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
@@ -2617,6 +2624,7 @@ impl DownloadManager {
                         status,
                         progress: it.progress(),
                         segments,
+                        selected_files,
                     });
                 }
             }
@@ -2723,14 +2731,23 @@ impl DownloadManager {
                             }
                             _ => None,
                         };
-                        if let Err(e) = self.restore_existing(
+                        match self.restore_existing(
                             &item.url,
                             &item.dest_dir,
                             &item.filename,
                             status,
                             segments,
                         ) {
-                            tracing::warn!("skipping queue entry: {e}");
+                            Ok(restored) => {
+                                // Re-stage the intake file selection: the
+                                // live map is in-memory only, so without
+                                // this a restart drops the filter and the
+                                // resume downloads every file.
+                                if let Some(sel) = item.selected_files {
+                                    crate::torrent::stage_selection(&restored.url(), sel);
+                                }
+                            }
+                            Err(e) => tracing::warn!("skipping queue entry: {e}"),
                         }
                     }
                 }
@@ -3120,6 +3137,7 @@ mod tests {
                 status: StoredStatus::Queued,
                 progress: 0.0,
                 segments: None,
+                selected_files: None,
             },
             StoredItem {
                 url: "https://example.com/paused.iso".to_string(),
@@ -3128,6 +3146,7 @@ mod tests {
                 status: StoredStatus::Paused,
                 progress: 0.5,
                 segments: None,
+                selected_files: None,
             },
         ];
         for i in 0..1000 {
@@ -3138,6 +3157,7 @@ mod tests {
                 status: StoredStatus::Done,
                 progress: 1.0,
                 segments: None,
+                selected_files: None,
             });
         }
         let queue = StoredQueue {
@@ -3875,6 +3895,7 @@ mod tests {
                     status: StoredStatus::Queued,
                     progress: 0.0,
                     segments: None,
+                    selected_files: None,
                 },
                 StoredItem {
                     url: "https://example.com/b.iso".to_string(),
@@ -3883,6 +3904,7 @@ mod tests {
                     status: StoredStatus::Done,
                     progress: 1.0,
                     segments: None,
+                    selected_files: None,
                 },
             ],
         };
@@ -3919,6 +3941,51 @@ mod tests {
         assert!((it.progress() - 1.0).abs() < f64::EPSILON);
         // Atomic persist leaves no tmp debris behind.
         assert!(!qf.with_extension("json.tmp").exists());
+        let _ = std::fs::remove_file(&qf);
+    }
+
+    #[test]
+    fn selection_survives_persist_restore() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let qf = test_queue_file("selection-roundtrip");
+        let settings = test_settings();
+        settings.set_int("max-concurrent", 1).unwrap();
+        let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        // Occupy the only slot so nothing spawns a real engine below.
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        m1.running.borrow_mut().insert(99, holder);
+        // Archive + stage a selection like the intake dialog does.
+        let pseudo =
+            crate::torrent::archive_torrent_file("keep.torrent", &single_torrent_bytes()).unwrap();
+        crate::torrent::stage_selection(&pseudo, vec![0]);
+        let item = m1.enqueue(&pseudo, Some("/tmp/dl"), Some("keep")).unwrap();
+        assert_eq!(item.status(), DownloadStatus::Queued);
+        m1.persist_queue();
+        // The queue file carries the selection...
+        let text = std::fs::read_to_string(&qf).unwrap();
+        let queue: StoredQueue = serde_json::from_str(&text).unwrap();
+        assert_eq!(queue.items.len(), 1);
+        assert_eq!(queue.items[0].selected_files, Some(vec![0]));
+        // ...and restore re-stages it. Prune first to simulate the
+        // restart that wipes the in-memory map: without the re-stage,
+        // the spawn would take None and download every file.
+        crate::torrent::prune_selections(&std::collections::HashSet::new());
+        let m2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let holder2 = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        m2.running.borrow_mut().insert(99, holder2);
+        m2.restore_queue();
+        assert_eq!(m2.store().n_items(), 1);
+        assert_eq!(crate::torrent::get_selection(&pseudo), Some(vec![0]));
+        // Teardown: leave no Queued row behind (a later backend restore
+        // would spawn a real engine for it) and restore shared keys.
+        m1.cancel_all();
+        m2.cancel_all();
+        crate::torrent::delete_archive_for_url(&pseudo);
+        settings.set_int("max-concurrent", 3).unwrap();
         let _ = std::fs::remove_file(&qf);
     }
 
@@ -3983,6 +4050,7 @@ mod tests {
                 status: StoredStatus::Done,
                 progress: 1.0,
                 segments: None,
+                selected_files: None,
             })
             .collect();
         let queue = StoredQueue {
@@ -4192,6 +4260,7 @@ mod tests {
             status,
             progress: 0.5,
             segments: None,
+            selected_files: None,
         })
         .collect();
         let queue = StoredQueue {
@@ -4889,6 +4958,7 @@ mod tests {
                     status: StoredStatus::Queued,
                     progress: 0.0,
                     segments: None,
+                    selected_files: None,
                 }],
             })
             .unwrap(),
