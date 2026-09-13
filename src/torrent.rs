@@ -315,6 +315,57 @@ pub fn torrent_output_dir(dest: &std::path::Path, url: &str) -> Option<PathBuf> 
     Some(output_folder_for(dest, name, true, &fallback))
 }
 
+/// Delete untoggled files after a filtered torrent finishes. librqbit
+/// creates every file upfront and only gates piece requests, so untoggled
+/// files linger as 0-byte placeholders (or shared-piece bytes) unless
+/// removed here. Only listed files go; parents are pruned while empty,
+/// stopping at `folder`. Skipped silently when nothing was staged, the
+/// archive is gone, or an entry path looks hostile.
+pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
+    let Some(selected) = get_selection(url) else {
+        return;
+    };
+    if selected.is_empty() {
+        return;
+    }
+    let Some(bytes) = archive_path_for_url(url).and_then(|p| std::fs::read(p).ok()) else {
+        return;
+    };
+    let Ok((_, entries)) = torrent_file_list(&bytes) else {
+        return;
+    };
+    if entries.len() < 2 {
+        return;
+    }
+    let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
+    for (i, entry) in entries.iter().enumerate() {
+        if keep.contains(&i) {
+            continue;
+        }
+        // Never let a hostile entry escape the folder (join would follow
+        // `..` or an absolute path); the file simply stays behind.
+        if entry
+            .path
+            .split('/')
+            .any(|c| c.is_empty() || c == "." || c == "..")
+        {
+            continue;
+        }
+        let path = folder.join(&entry.path);
+        let _ = std::fs::remove_file(&path);
+        let mut parent = path.parent();
+        while let Some(dir) = parent {
+            if dir == folder {
+                break;
+            }
+            match std::fs::remove_dir(dir) {
+                Ok(()) => parent = dir.parent(),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 async fn ensure_session(
     dht: bool,
     peer_limit: Option<usize>,
