@@ -36,6 +36,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.2.1" date="2026-09-13">
+      <description>
+        <p>Full interface translation support (gettext); typed settings access throughout.</p>
+      </description>
+    </release>
     <release version="2.2.0" date="2026-09-13">
       <description>
         <p>Fix: finished torrents are evicted from the session, stopping RAM growth; leaner per-tick updates; refreshed screenshots.</p>
