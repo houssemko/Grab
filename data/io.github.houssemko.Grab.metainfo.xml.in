@@ -16,6 +16,7 @@
     <name>Grab Contributors</name>
   </developer>
   <url type="homepage">https://github.com/houssemko/Grab</url>
+  <url type="bugtracker">https://github.com/houssemko/Grab/issues</url>
   <categories>
     <category>Network</category>
     <category>Utility</category>

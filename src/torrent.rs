@@ -18,12 +18,12 @@ use std::{
 use gettextrs::gettext;
 use gtk4::glib;
 use librqbit::{
-    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ManagedTorrent,
-    Session, SessionOptions, TorrentStatsState,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ManagedTorrent, Session,
+    SessionOptions, TorrentStatsState, api::TorrentIdOrHash,
 };
-use tokio::sync::{mpsc::UnboundedSender, Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
-use crate::download::{dedupe_filename, sane_filename, shorten_filename, tokio_rt, EngineMsg};
+use crate::download::{EngineMsg, dedupe_filename, sane_filename, shorten_filename, tokio_rt};
 
 // rqbit keeps the handle alias private (`torrent_state` is not public API),
 // so name it locally: it is just a refcounted managed torrent.
@@ -436,10 +436,10 @@ pub(crate) fn pause_download(id: u64) {
 pub(crate) fn forget_download(id: u64) {
     tokio_rt().spawn(async move {
         let active = ACTIVE.lock().await.remove(&id);
-        if let (Some(a), Some(s)) = (active, SESSION.get()) {
-            if let Some(h) = a.handle {
-                let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
-            }
+        if let (Some(a), Some(s)) = (active, SESSION.get())
+            && let Some(h) = a.handle
+        {
+            let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
         }
     });
 }

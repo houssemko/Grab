@@ -46,6 +46,11 @@ fn ensure_schema_dir() {
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt::init();
     ensure_schema_dir();
+    // Metainfo for the About dialog (from_appdata reads GResource paths).
+    // A missing/broken bundle only loses release notes; literals below stay.
+    if let Ok(res) = gio::Resource::load(env!("GRAB_GRESOURCE")) {
+        gio::resources_register(&res);
+    }
     init_locale();
     let app = adw::Application::builder()
         .application_id(APP_ID)

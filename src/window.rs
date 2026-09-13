@@ -1,4 +1,4 @@
-use crate::download::{aggregate, DownloadManager, DownloadStatus, BLOCK_CELLS};
+use crate::download::{BLOCK_CELLS, DownloadManager, DownloadStatus, aggregate};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -837,10 +837,10 @@ pub fn build_window(
                 .cloned()
                 .collect();
             for id in stale {
-                if let Some(row) = r.borrow_mut().remove(&id) {
-                    if let Some(old) = row.parent().and_downcast::<gtk4::ListBox>() {
-                        old.remove(&row);
-                    }
+                if let Some(row) = r.borrow_mut().remove(&id)
+                    && let Some(old) = row.parent().and_downcast::<gtk4::ListBox>()
+                {
+                    old.remove(&row);
                 }
             }
             sec_active.set_visible(n_active > 0);
@@ -864,14 +864,13 @@ pub fn build_window(
             if m.has_transferring() {
                 win.set_visible(false);
                 request_background();
-                if m.background_notifications_enabled() {
-                    if let Some(app) = gio::Application::default() {
-                        let n = gio::Notification::new(&gettext(
-                            "Downloads continue in the background",
-                        ));
-                        n.set_default_action_and_target_value("app.present", None);
-                        app.send_notification(Some(BACKGROUND_NOTIF_ID), &n);
-                    }
+                if m.background_notifications_enabled()
+                    && let Some(app) = gio::Application::default()
+                {
+                    let n =
+                        gio::Notification::new(&gettext("Downloads continue in the background"));
+                    n.set_default_action_and_target_value("app.present", None);
+                    app.send_notification(Some(BACKGROUND_NOTIF_ID), &n);
                 }
                 glib::Propagation::Stop
             } else {
@@ -989,11 +988,9 @@ pub fn build_window(
             let idle_hidden = armed.get()
                 && !m.has_transferring()
                 && w.upgrade().is_some_and(|win| !win.is_visible());
-            if idle_hidden {
-                if let Some(app) = app_weak.upgrade() {
-                    app.withdraw_notification(BACKGROUND_NOTIF_ID);
-                    app.quit();
-                }
+            if idle_hidden && let Some(app) = app_weak.upgrade() {
+                app.withdraw_notification(BACKGROUND_NOTIF_ID);
+                app.quit();
             }
         });
         manager.set_on_change({
@@ -1066,17 +1063,18 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         dest_btn.connect_clicked(move |b| {
             let chooser = gtk4::FileDialog::builder()
                 .title(gettext("Choose download folder"))
+                .accept_label(gettext("Select Folder"))
                 .build();
             let root = b.root().and_downcast::<gtk4::Window>();
             let dd2 = Rc::clone(&dd);
             let dl2 = dl.clone();
             chooser.select_folder(root.as_ref(), gio::Cancellable::NONE, move |res| {
-                if let Ok(f) = res {
-                    if let Some(p) = f.path() {
-                        let s = p.to_string_lossy().into_owned();
-                        dl2.set_text(&s);
-                        *dd2.borrow_mut() = s;
-                    }
+                if let Ok(f) = res
+                    && let Some(p) = f.path()
+                {
+                    let s = p.to_string_lossy().into_owned();
+                    dl2.set_text(&s);
+                    *dd2.borrow_mut() = s;
                 }
             });
         });
@@ -1115,7 +1113,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 filter.add_pattern("*.torrent");
                 let filters = gio::ListStore::new::<gtk4::FileFilter>();
                 filters.append(&filter);
-                let picker = gtk4::FileDialog::builder().filters(&filters).build();
+                let picker = gtk4::FileDialog::builder()
+                    .title(gettext("Choose torrent file"))
+                    .accept_label(gettext("Add Torrent"))
+                    .filters(&filters)
+                    .build();
                 let Ok(file) = picker.open_future(None::<&gtk4::Window>).await else {
                     return; // dismissed
                 };
@@ -1167,9 +1169,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let hb = adw::HeaderBar::new();
     hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder().label(gettext("Cancel")).build();
+    let cancel_btn = gtk4::Button::builder()
+        .label(gettext("_Cancel"))
+        .use_underline(true)
+        .build();
     let add_btn = gtk4::Button::builder()
-        .label(gettext("Add Download"))
+        .label(gettext("_Add Download"))
+        .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
     hb.pack_start(&cancel_btn);
@@ -1340,9 +1346,13 @@ pub(crate) fn show_torrent_files_dialog(
     let hb = adw::HeaderBar::new();
     hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder().label(gettext("Cancel")).build();
+    let cancel_btn = gtk4::Button::builder()
+        .label(gettext("_Cancel"))
+        .use_underline(true)
+        .build();
     let add_btn = gtk4::Button::builder()
-        .label(gettext("Add Files"))
+        .label(gettext("_Add Files"))
+        .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
     hb.pack_start(&cancel_btn);

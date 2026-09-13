@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/houssemko/Grab">
+    <file alias="metainfo.xml">data/io.github.houssemko.Grab.metainfo.xml.in</file>
+  </gresource>
+</gresources>

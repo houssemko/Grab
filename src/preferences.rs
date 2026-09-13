@@ -61,16 +61,17 @@ pub fn show(
         dest_btn.connect_clicked(move |_| {
             let chooser = gtk4::FileDialog::builder()
                 .title(gettext("Choose download folder"))
+                .accept_label(gettext("Select Folder"))
                 .build();
             let s2 = s.clone();
             let l2 = l.clone();
             chooser.select_folder(root.as_ref(), gio::Cancellable::NONE, move |res| {
-                if let Ok(f) = res {
-                    if let Some(p) = f.path() {
-                        let dir = p.to_string_lossy().into_owned();
-                        if s2.set_string("download-dir", &dir).is_ok() {
-                            l2.set_text(&dir);
-                        }
+                if let Ok(f) = res
+                    && let Some(p) = f.path()
+                {
+                    let dir = p.to_string_lossy().into_owned();
+                    if s2.set_string("download-dir", &dir).is_ok() {
+                        l2.set_text(&dir);
                     }
                 }
             });

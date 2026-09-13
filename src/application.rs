@@ -4,7 +4,7 @@
 use crate::download::DownloadManager;
 use crate::settings::AppSettings;
 use crate::window::{self, show_add_dialog};
-use crate::{preferences, APP_ID};
+use crate::{APP_ID, preferences};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::gio;
@@ -279,16 +279,14 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("about")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        let about = adw::AboutDialog::builder()
-                            .application_name("Grab")
-                            .application_icon(APP_ID)
-                            .version(env!("GRAB_VERSION"))
-                            .developer_name("Grab Contributors")
-                            .license_type(gtk4::License::MitX11)
-                            .website("https://github.com/houssemko/grab")
-                            .issue_url("https://github.com/houssemko/grab/issues")
-                            .comments(gettext("A GNOME download manager"))
-                            .build();
+                        // Name/version/notes come from the metainfo catalog;
+                        // the icon and license can't, so they stay literal.
+                        let about = adw::AboutDialog::from_appdata(
+                            "/io/github/houssemko/Grab/metainfo.xml",
+                            Some(env!("GRAB_VERSION")),
+                        );
+                        about.set_application_icon(APP_ID);
+                        about.set_license_type(gtk4::License::MitX11);
                         about.present(Some(&s.window));
                     }
                 })

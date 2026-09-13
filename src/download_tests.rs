@@ -27,13 +27,17 @@ fn test_queue_file(tag: &str) -> std::path::PathBuf {
         std::thread::current().id()
     ));
     let _ = std::fs::remove_file(&p);
-    std::env::set_var("GRAB_QUEUE_FILE", &p);
+    // SAFETY: test setup runs before any test thread spawns.
+    unsafe { std::env::set_var("GRAB_QUEUE_FILE", &p) };
     p
 }
 
 fn test_settings() -> crate::settings::AppSettings {
-    std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
-    std::env::set_var("GSETTINGS_BACKEND", "memory");
+    // SAFETY: single-threaded setup phase (cargo runs with --test-threads=1).
+    unsafe {
+        std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
+        std::env::set_var("GSETTINGS_BACKEND", "memory");
+    }
     crate::settings::AppSettings::new()
 }
 
@@ -1348,25 +1352,29 @@ fn restore_rejects_bad_filenames() {
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     for bad in ["/etc/passwd", "..", ".", "a/b", ""] {
-        assert!(manager
+        assert!(
+            manager
+                .restore_existing(
+                    "https://example.com/f.iso",
+                    "/tmp/dl",
+                    bad,
+                    DownloadStatus::Queued,
+                    None,
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        manager
             .restore_existing(
                 "https://example.com/f.iso",
-                "/tmp/dl",
-                bad,
+                "relative/dir",
+                "f.iso",
                 DownloadStatus::Queued,
                 None,
             )
-            .is_err());
-    }
-    assert!(manager
-        .restore_existing(
-            "https://example.com/f.iso",
-            "relative/dir",
-            "f.iso",
-            DownloadStatus::Queued,
-            None,
-        )
-        .is_err());
+            .is_err()
+    );
     assert_eq!(manager.store().n_items(), 0);
 }
 

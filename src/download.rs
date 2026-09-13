@@ -6,8 +6,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -220,12 +220,11 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         let mut decoded = None;
-        if bytes[i] == b'%' {
-            if let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2)) {
-                if let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16)) {
-                    decoded = Some((h << 4 | l) as u8);
-                }
-            }
+        if bytes[i] == b'%'
+            && let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2))
+            && let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16))
+        {
+            decoded = Some((h << 4 | l) as u8);
         }
         if let Some(b) = decoded {
             out.push(b);
@@ -346,10 +345,11 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
         !trimmed.contains(' ') && (trimmed.contains('.') || trimmed.starts_with("localhost"));
     if bare {
         let with_scheme = format!("https://{trimmed}");
-        if let Ok(u) = url::Url::parse(&with_scheme) {
-            if u.username().is_empty() && u.password().is_none() {
-                return Ok(u.to_string());
-            }
+        if let Ok(u) = url::Url::parse(&with_scheme)
+            && u.username().is_empty()
+            && u.password().is_none()
+        {
+            return Ok(u.to_string());
         }
     }
     Err(gettext("Invalid URL: {url}").replace("{url}", trimmed))
@@ -854,17 +854,14 @@ async fn attempt_once(
                 if !ctx.opts.user_agent.trim().is_empty() {
                     hreq = hreq.header("User-Agent", ctx.opts.user_agent.trim());
                 }
-                if let Ok(built) = hreq.build() {
-                    if let Ok(Ok(hresp)) =
+                if let Ok(built) = hreq.build()
+                    && let Ok(Ok(hresp)) =
                         tokio::time::timeout(ctx.timeout, ctx.client.execute(built)).await
-                    {
-                        if hresp.status().is_success()
-                            && hresp.content_length() == Some(start)
-                            && !has_holes(&ctx.dest)
-                        {
-                            return Ok(());
-                        }
-                    }
+                    && hresp.status().is_success()
+                    && hresp.content_length() == Some(start)
+                    && !has_holes(&ctx.dest)
+                {
+                    return Ok(());
                 }
             }
             if restarted {
@@ -902,12 +899,12 @@ async fn attempt_once(
         // than what we hold: a different file (login wall, throttle page),
         // not our download. Fail loudly and keep the partial bytes instead
         // of truncating them away for it.
-        if !partial && start > 0 {
-            if let Some(l) = resp.content_length() {
-                if l < start {
-                    return Err(gettext("Server restarted the download with a smaller file"));
-                }
-            }
+        if !partial
+            && start > 0
+            && let Some(l) = resp.content_length()
+            && l < start
+        {
+            return Err(gettext("Server restarted the download with a smaller file"));
         }
         let mut file = if partial {
             tokio::fs::OpenOptions::new()
@@ -938,15 +935,14 @@ async fn attempt_once(
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?
         };
-        if !partial {
-            if let Some(name) = resp
+        if !partial
+            && let Some(name) = resp
                 .headers()
                 .get(reqwest::header::CONTENT_DISPOSITION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(filename_from_content_disposition)
-            {
-                ctx.tx.send(EngineMsg::SuggestName(name)).ok();
-            }
+        {
+            ctx.tx.send(EngineMsg::SuggestName(name)).ok();
         }
         let mut downloaded = if partial { start } else { 0 };
         ctx.tx.send(EngineMsg::Progress { downloaded, total }).ok();
@@ -1228,12 +1224,11 @@ impl SegmentState {
 /// correct on a contiguous prefix. Only ever shrinks.
 fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
     let prefix = st.prefix_len();
-    if let Ok(md) = std::fs::metadata(path) {
-        if md.len() > prefix {
-            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(path) {
-                let _ = f.set_len(prefix);
-            }
-        }
+    if let Ok(md) = std::fs::metadata(path)
+        && md.len() > prefix
+        && let Ok(f) = std::fs::OpenOptions::new().write(true).open(path)
+    {
+        let _ = f.set_len(prefix);
     }
 }
 
@@ -1249,19 +1244,19 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
         .open(dest)
         .await
         .map_err(|e| AttemptFail::Retryable(format!("Cannot write file: {e}")))?;
-    if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total {
-        if let Err(e) = file.set_len(total).await {
-            use std::io::ErrorKind::{FileTooLarge, StorageFull};
-            // No room (or no sparse support) for full-size staging: the
-            // single-stream path preallocates nothing, so downgrade to it.
-            let msg = format!("Cannot write file: {e}");
-            let storage = matches!(e.kind(), StorageFull | FileTooLarge);
-            return Err(if storage {
-                AttemptFail::Throttled(msg)
-            } else {
-                AttemptFail::Retryable(msg)
-            });
-        }
+    if file.metadata().await.map(|m| m.len()).unwrap_or(u64::MAX) != total
+        && let Err(e) = file.set_len(total).await
+    {
+        use std::io::ErrorKind::{FileTooLarge, StorageFull};
+        // No room (or no sparse support) for full-size staging: the
+        // single-stream path preallocates nothing, so downgrade to it.
+        let msg = format!("Cannot write file: {e}");
+        let storage = matches!(e.kind(), StorageFull | FileTooLarge);
+        return Err(if storage {
+            AttemptFail::Throttled(msg)
+        } else {
+            AttemptFail::Retryable(msg)
+        });
     }
     Ok(())
 }
@@ -1291,7 +1286,7 @@ fn rename_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Re
 #[cfg(target_os = "linux")]
 fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
-    extern "C" {
+    unsafe extern "C" {
         fn renameat2(
             olddirfd: std::os::raw::c_int,
             oldpath: *const std::os::raw::c_char,
@@ -1302,8 +1297,8 @@ fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io
     }
     const AT_FDCWD: std::os::raw::c_int = -100;
     const RENAME_NOREPLACE: std::os::raw::c_uint = 1; // renameat2(2)
-                                                      // Queue/dedupe names never contain NUL (sane_filename), but fail
-                                                      // visibly instead of truncating if one ever slips through.
+    // Queue/dedupe names never contain NUL (sane_filename), but fail
+    // visibly instead of truncating if one ever slips through.
     let cvt = |p: &std::path::Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
@@ -1937,8 +1932,8 @@ impl DownloadManager {
                 _ => StartMode::Single,
             },
         };
-        let gen = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
-        self.epoch.borrow_mut().insert(item.id(), gen);
+        let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(item.id(), generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = FetchCtx {
             client: http_client(),
@@ -1963,7 +1958,7 @@ impl DownloadManager {
         self.changed();
 
         let item_id = item.id();
-        self.pump(item, item_id, gen, rx);
+        self.pump(item, item_id, generation, rx);
     }
 
     /// Drain one engine's message channel into its row. Shared by the HTTP
@@ -1973,7 +1968,7 @@ impl DownloadManager {
         self: &Rc<Self>,
         item: DownloadItem,
         id: u64,
-        gen: u64,
+        generation: u64,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineMsg>,
     ) {
         let this = Rc::clone(self);
@@ -1998,7 +1993,7 @@ impl DownloadManager {
                 // Superseded by a newer spawn for this row: its progress
                 // reports would drag the bar backwards, and its tail would
                 // fail the row or steal the new engine's handle.
-                if !this.is_current(id, gen) {
+                if !this.is_current(id, generation) {
                     break;
                 }
                 match msg {
@@ -2255,7 +2250,7 @@ impl DownloadManager {
             }
             // Superseded pump future: touch nothing, especially not the
             // new engine's handle in `running`.
-            if !this.is_current(id, gen) {
+            if !this.is_current(id, generation) {
                 return;
             }
             this.running.borrow_mut().remove(&id);
@@ -2296,8 +2291,8 @@ impl DownloadManager {
         let peer_limit = crate::torrent::peer_limit_of(settings);
         let download_bps = parse_rate(settings.speed_limit().trim());
         let id = item.id();
-        let gen = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
-        self.epoch.borrow_mut().insert(id, gen);
+        let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let source = if crate::torrent::is_torrent_url(&magnet) {
             match crate::torrent::archive_path_for_url(&magnet) {
@@ -2328,7 +2323,7 @@ impl DownloadManager {
         item.set_status(DownloadStatus::Downloading);
         item.set_detail(gettext("Starting torrent…"));
         self.changed();
-        self.pump(item, id, gen, rx);
+        self.pump(item, id, generation, rx);
     }
 
     fn notify_finished(&self, item: &DownloadItem, result: Result<(), String>) {
@@ -2386,13 +2381,13 @@ impl DownloadManager {
 
     /// Re-queue a paused download.
     pub fn resume(self: &Rc<Self>, id: u64) {
-        if let Some(item) = self.find(id) {
-            if item.status() == DownloadStatus::Paused {
-                item.set_status(DownloadStatus::Queued);
-                self.persist_queue();
-                self.changed();
-                self.start_next();
-            }
+        if let Some(item) = self.find(id)
+            && item.status() == DownloadStatus::Paused
+        {
+            item.set_status(DownloadStatus::Queued);
+            self.persist_queue();
+            self.changed();
+            self.start_next();
         }
     }
 
@@ -2446,11 +2441,11 @@ impl DownloadManager {
                 .map(|it| it.id() == id)
                 .unwrap_or(false)
         });
-        if let Some(pos) = pos {
-            if let Some(obj) = self.store.item(pos) {
-                self.store.remove(pos);
-                self.store.append(&obj);
-            }
+        if let Some(pos) = pos
+            && let Some(obj) = self.store.item(pos)
+        {
+            self.store.remove(pos);
+            self.store.append(&obj);
         }
     }
 
@@ -2674,8 +2669,8 @@ impl DownloadManager {
     }
 
     /// Whether `gen` is still the row's latest engine spawn.
-    fn is_current(&self, id: u64, gen: u64) -> bool {
-        self.epoch.borrow().get(&id).cloned().unwrap_or(0) == gen
+    fn is_current(&self, id: u64, generation: u64) -> bool {
+        self.epoch.borrow().get(&id).cloned().unwrap_or(0) == generation
     }
 
     /// Rows waiting queued (cached; see `queued`).
@@ -2798,10 +2793,10 @@ impl DownloadManager {
                     tracing::error!("could not replace download queue: {e}");
                     return;
                 }
-                if let Some(parent) = Self::queue_file().parent() {
-                    if let Ok(dir) = std::fs::File::open(parent) {
-                        let _ = dir.sync_all();
-                    }
+                if let Some(parent) = Self::queue_file().parent()
+                    && let Ok(dir) = std::fs::File::open(parent)
+                {
+                    let _ = dir.sync_all();
                 }
             }
             Err(e) => tracing::error!("could not persist download queue: {e}"),
@@ -2950,11 +2945,11 @@ impl DownloadManager {
         });
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();
         for id in ids {
-            if let Some(item) = self.find(id) {
-                if let Some(st) = self.segment_state.borrow_mut().get_mut(&id) {
-                    truncate_to_prefix(&item.file_path(), st);
-                    st.forget_beyond_prefix();
-                }
+            if let Some(item) = self.find(id)
+                && let Some(st) = self.segment_state.borrow_mut().get_mut(&id)
+            {
+                truncate_to_prefix(&item.file_path(), st);
+                st.forget_beyond_prefix();
             }
         }
         // Persist BEFORE returning: the bitmaps are what let the next launch
