@@ -36,6 +36,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.2.2" date="2026-09-13">
+      <description>
+        <p>Fix: URL apply tick returns after failed validation so over-long URLs can be corrected and retried.</p>
+      </description>
+    </release>
     <release version="2.2.1" date="2026-09-13">
       <description>
         <p>Full interface translation support (gettext); typed settings access throughout.</p>
