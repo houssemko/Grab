@@ -1,0 +1,563 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) YEAR THE PACKAGE'S COPYRIGHT HOLDER
+# This file is distributed under the same license as the grab package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: grab\n"
+"Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
+"POT-Creation-Date: 2026-09-13 12:40+0100\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: \n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
+
+#: src/application.rs:110 src/window.rs:1143
+msgid "Could not read that .torrent file"
+msgstr ""
+
+#: src/application.rs:209
+msgid "This will cancel the active download."
+msgid_plural "This will cancel {n} active downloads."
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/application.rs:215
+msgid "Cancel All Downloads?"
+msgstr ""
+
+#: src/application.rs:218 src/window.rs:167 src/window.rs:1180
+#: src/window.rs:1349
+msgid "Cancel"
+msgstr ""
+
+#: src/application.rs:219 src/application.rs:312 src/window.rs:688
+msgid "Cancel All"
+msgstr ""
+
+#: src/application.rs:233
+msgid "Cancelled download"
+msgid_plural "Cancelled {n} downloads"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/application.rs:290
+msgid "A GNOME download manager"
+msgstr ""
+
+#: src/application.rs:304 src/preferences.rs:16
+msgid "Downloads"
+msgstr ""
+
+#: src/application.rs:306 src/window.rs:686 src/window.rs:719 src/window.rs:734
+#: src/window.rs:1018
+msgid "New Download"
+msgstr ""
+
+#: src/application.rs:313 src/window.rs:689 src/window.rs:895
+msgid "Retry Failed"
+msgstr ""
+
+#: src/application.rs:316
+msgid "General"
+msgstr ""
+
+#: src/application.rs:318 src/preferences.rs:12 src/window.rs:696
+msgid "Preferences"
+msgstr ""
+
+#: src/application.rs:321
+msgid "Quit"
+msgstr ""
+
+#: src/download.rs:33 src/window.rs:761
+msgid "Queued"
+msgstr ""
+
+#: src/download.rs:34
+msgid "Downloading"
+msgstr ""
+
+#: src/download.rs:35
+msgid "Paused"
+msgstr ""
+
+#: src/download.rs:36
+msgid "Done"
+msgstr ""
+
+#: src/download.rs:37
+msgid "Failed"
+msgstr ""
+
+#: src/download.rs:38
+msgid "Cancelled"
+msgstr ""
+
+#: src/download.rs:307
+msgid "Magnet link is too long (max {n} characters)"
+msgstr ""
+
+#: src/download.rs:321 src/download.rs:2305
+msgid "Torrent file is missing from the archive"
+msgstr ""
+
+#: src/download.rs:324
+msgid "URL is too long (max {n} characters)"
+msgstr ""
+
+#: src/download.rs:333 src/download.rs:353
+msgid "Invalid URL: {url}"
+msgstr ""
+
+#: src/download.rs:335
+msgid "URLs with a username/password are not supported"
+msgstr ""
+
+#: src/download.rs:339
+msgid "FTP is not supported (use http/https)"
+msgstr ""
+
+#: src/download.rs:340
+msgid "Unsupported scheme: {s} (use http/https)"
+msgstr ""
+
+#: src/download.rs:591 src/download.rs:1499
+msgid "File changed on server"
+msgstr ""
+
+#: src/download.rs:751 src/download.rs:759 src/download.rs:767
+#: src/download.rs:2265 src/download.rs:2266
+msgid "Download interrupted"
+msgstr ""
+
+#: src/download.rs:771 src/download.rs:997
+msgid "Incomplete download"
+msgstr ""
+
+#: src/download.rs:825 src/download.rs:1359 src/download.rs:1473
+msgid "Connection timed out"
+msgstr ""
+
+#: src/download.rs:870
+msgid "Server rejects range requests"
+msgstr ""
+
+#: src/download.rs:897
+msgid "Server returned an unexpected file size"
+msgstr ""
+
+#: src/download.rs:906
+msgid "Server restarted the download with a smaller file"
+msgstr ""
+
+#: src/download.rs:966 src/download.rs:971 src/download.rs:1541
+msgid "Stalled connection timed out"
+msgstr ""
+
+#: src/download.rs:1362
+msgid "Range requests not supported"
+msgstr ""
+
+#: src/download.rs:1373
+msgid "Bad Content-Range"
+msgstr ""
+
+#: src/download.rs:1450
+msgid "Empty response"
+msgstr ""
+
+#: src/download.rs:1504
+msgid "Server ignored range request"
+msgstr ""
+
+#: src/download.rs:1516 src/download.rs:1522
+msgid "Piece stalled"
+msgstr ""
+
+#: src/download.rs:1527
+msgid "Server sent too much data"
+msgstr ""
+
+#: src/download.rs:1553
+msgid "Incomplete piece"
+msgstr ""
+
+#: src/download.rs:1844 src/download.rs:2103
+msgid "Finished • {size}"
+msgstr ""
+
+#: src/download.rs:1846 src/download.rs:2105
+msgid "Finished"
+msgstr ""
+
+#: src/download.rs:1901
+msgid "Invalid speed limit: {limit}"
+msgstr ""
+
+#: src/download.rs:1957
+msgid "Starting…"
+msgstr ""
+
+#: src/download.rs:1959
+msgid "Connecting to {host}…"
+msgstr ""
+
+#: src/download.rs:2030
+msgid "{pct}% ({amounts}) • {speed} • ETA {eta}{filter}"
+msgstr ""
+
+#: src/download.rs:2040
+msgid "{done} • {speed}{filter}"
+msgstr ""
+
+#: src/download.rs:2327
+msgid "Starting torrent…"
+msgstr ""
+
+#: src/download.rs:2339
+msgid "Download finished"
+msgstr ""
+
+#: src/download.rs:2341
+msgid "Download failed"
+msgstr ""
+
+#: src/download.rs:2374
+msgid "Paused • {pct}%"
+msgstr ""
+
+#: src/download.rs:2604
+msgid "Download not found"
+msgstr ""
+
+#: src/preferences.rs:21
+msgid "Destination"
+msgstr ""
+
+#: src/preferences.rs:25 src/preferences.rs:84
+msgid "(System Downloads folder)"
+msgstr ""
+
+#: src/preferences.rs:37 src/window.rs:1041 src/window.rs:1060
+msgid "Choose…"
+msgstr ""
+
+#: src/preferences.rs:38 src/preferences.rs:63 src/window.rs:1061
+#: src/window.rs:1077
+msgid "Choose download folder"
+msgstr ""
+
+#: src/preferences.rs:44 src/preferences.rs:48
+msgid "Use system default"
+msgstr ""
+
+#: src/preferences.rs:51
+msgid "Download folder"
+msgstr ""
+
+#: src/preferences.rs:90 src/preferences.rs:235
+msgid "Network"
+msgstr ""
+
+#: src/preferences.rs:95
+msgid "Network and Queue"
+msgstr ""
+
+#: src/preferences.rs:99
+msgid "Simultaneous downloads"
+msgstr ""
+
+#: src/preferences.rs:108
+msgid "Connections per download"
+msgstr ""
+
+#: src/preferences.rs:110
+msgid "Parallel connections for large files (1 = single stream)"
+msgstr ""
+
+#: src/preferences.rs:115
+msgid "Files under ~16 MB always use one connection"
+msgstr ""
+
+#: src/preferences.rs:123
+msgid "Speed limit"
+msgstr ""
+
+#: src/preferences.rs:126
+msgid "Per download, e.g. 500K, 2M; empty means unlimited"
+msgstr ""
+
+#: src/preferences.rs:151
+msgid "Retries"
+msgstr ""
+
+#: src/preferences.rs:160
+msgid "Timeout (seconds)"
+msgstr ""
+
+#: src/preferences.rs:169
+msgid "User agent (optional)"
+msgstr ""
+
+#: src/preferences.rs:177
+msgid "Notifications"
+msgstr ""
+
+#: src/preferences.rs:180
+msgid "Notify when downloads finish"
+msgstr ""
+
+#: src/preferences.rs:187
+msgid "Notify for background downloads"
+msgstr ""
+
+#: src/preferences.rs:188
+msgid "When closing with downloads still running"
+msgstr ""
+
+#: src/preferences.rs:196
+msgid "Power"
+msgstr ""
+
+#: src/preferences.rs:199
+msgid "Prevent sleep during downloads"
+msgstr ""
+
+#: src/preferences.rs:201
+msgid "Block suspend while downloads are queued or running"
+msgstr ""
+
+#: src/preferences.rs:218
+msgid "Torrent"
+msgstr ""
+
+#: src/preferences.rs:223
+msgid "Sharing"
+msgstr ""
+
+#: src/preferences.rs:226
+msgid "Seed finished downloads"
+msgstr ""
+
+#: src/preferences.rs:227
+msgid "Keep sharing files after they finish downloading"
+msgstr ""
+
+#: src/preferences.rs:238
+msgid "Use DHT"
+msgstr ""
+
+#: src/preferences.rs:239
+msgid "Find peers through the distributed hash table"
+msgstr ""
+
+#: src/preferences.rs:246
+msgid "Peer limit"
+msgstr ""
+
+#: src/preferences.rs:248
+msgid ""
+"Maximum peers per download. 0 means unlimited. Applies when a download "
+"starts."
+msgstr ""
+
+#: src/torrent.rs:113
+msgid "Only BitTorrent v1 magnets are supported"
+msgstr ""
+
+#: src/torrent.rs:167
+msgid "Torrent file is too large (max 10 MB)"
+msgstr ""
+
+#: src/torrent.rs:496
+msgid "Torrent failed"
+msgstr ""
+
+#: src/torrent.rs:626 src/torrent.rs:695
+msgid "Torrent is already in the queue"
+msgstr ""
+
+#: src/torrent.rs:659
+msgid "Torrent is no longer managed"
+msgstr ""
+
+#: src/torrent.rs:708
+msgid "Torrent produced no files"
+msgstr ""
+
+#: src/window.rs:40
+msgid "show"
+msgstr ""
+
+#: src/window.rs:42
+msgid "open"
+msgstr ""
+
+#: src/window.rs:45
+msgid "Could not {verb} {what} in the file manager: {e}"
+msgstr ""
+
+#: src/window.rs:112 src/window.rs:114
+msgid "Resume"
+msgstr ""
+
+#: src/window.rs:117 src/window.rs:119 src/window.rs:166
+msgid "Pause"
+msgstr ""
+
+#: src/window.rs:168
+msgid "Queue for later"
+msgstr ""
+
+#: src/window.rs:169
+msgid "Retry"
+msgstr ""
+
+#: src/window.rs:170
+msgid "Show in Folder"
+msgstr ""
+
+#: src/window.rs:171
+msgid "Move to Trash"
+msgstr ""
+
+#: src/window.rs:172
+msgid "Remove from list"
+msgstr ""
+
+#: src/window.rs:204
+msgid "Downloaded blocks"
+msgstr ""
+
+#: src/window.rs:436
+msgid "Queued for later"
+msgstr ""
+
+#: src/window.rs:438
+msgid "No other downloads waiting"
+msgstr ""
+
+#: src/window.rs:458
+msgid "Moved to Trash"
+msgstr ""
+
+#: src/window.rs:478
+msgid "Removed {name}"
+msgstr ""
+
+#: src/window.rs:479
+msgid "Undo"
+msgstr ""
+
+#: src/window.rs:535
+msgid "Downloading files"
+msgstr ""
+
+#: src/window.rs:635
+msgid "Downloads continue in the background after the window is closed"
+msgstr ""
+
+#: src/window.rs:681
+msgid "Grab"
+msgstr ""
+
+#: src/window.rs:682
+msgid "Download Manager"
+msgstr ""
+
+#: src/window.rs:691
+msgid "Open Download Folder"
+msgstr ""
+
+#: src/window.rs:698
+msgid "Keyboard Shortcuts"
+msgstr ""
+
+#: src/window.rs:701
+msgid "About"
+msgstr ""
+
+#: src/window.rs:706 src/window.rs:709
+msgid "Main Menu"
+msgstr ""
+
+#: src/window.rs:716
+msgid "New Download (Ctrl+N)"
+msgstr ""
+
+#: src/window.rs:730
+msgid "No Downloads Yet"
+msgstr ""
+
+#: src/window.rs:731
+msgid "Add a download to get started."
+msgstr ""
+
+#: src/window.rs:760
+msgid "Active"
+msgstr ""
+
+#: src/window.rs:762
+msgid "Downloaded"
+msgstr ""
+
+#: src/window.rs:877
+msgid "Downloads continue in the background"
+msgstr ""
+
+#: src/window.rs:894
+msgid "Some downloads failed"
+msgstr ""
+
+#: src/window.rs:1027
+msgid "URL"
+msgstr ""
+
+#: src/window.rs:1035
+msgid "File name (optional)"
+msgstr ""
+
+#: src/window.rs:1042
+msgid "Choose a .torrent file"
+msgstr ""
+
+#: src/window.rs:1046
+msgid "Torrent file"
+msgstr ""
+
+#: src/window.rs:1065
+msgid "Save to"
+msgstr ""
+
+#: src/window.rs:1122
+msgid "Torrent files"
+msgstr ""
+
+#: src/window.rs:1183
+msgid "Add Download"
+msgstr ""
+
+#: src/window.rs:1318
+msgid "Files"
+msgstr ""
+
+#: src/window.rs:1320
+msgid "{} file"
+msgid_plural "{} files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:1352
+msgid "Add Files"
+msgstr ""
+
+#: src/window.rs:1379
+msgid "Select at least one file"
+msgstr ""

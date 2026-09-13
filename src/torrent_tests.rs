@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 const MAGNET: &str = "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&dn=test+file";
 const BARE_HASH: &str = "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3";

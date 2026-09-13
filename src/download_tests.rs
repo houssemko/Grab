@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Serializes every test that iterates the shared glib default
@@ -30,10 +31,10 @@ fn test_queue_file(tag: &str) -> std::path::PathBuf {
     p
 }
 
-fn test_settings() -> gio::Settings {
+fn test_settings() -> crate::settings::AppSettings {
     std::env::set_var("GSETTINGS_SCHEMA_DIR", env!("GRAB_SCHEMA_DIR"));
     std::env::set_var("GSETTINGS_BACKEND", "memory");
-    gio::Settings::new("io.github.houssemko.Grab")
+    crate::settings::AppSettings::new()
 }
 
 /// Fresh loopback port per call. Parallel tests share one process (and

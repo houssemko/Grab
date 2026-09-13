@@ -1,24 +1,28 @@
 use adw::prelude::*;
+use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio::Settings) {
+pub fn show(
+    parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
+    settings: &crate::settings::AppSettings,
+) {
     let dialog = adw::PreferencesDialog::builder()
-        .title("Preferences")
+        .title(gettext("Preferences"))
         .build();
 
     let page = adw::PreferencesPage::builder()
-        .title("Downloads")
+        .title(gettext("Downloads"))
         .icon_name("folder-download-symbolic")
         .build();
 
     let dest_group = adw::PreferencesGroup::builder()
-        .title("Destination")
+        .title(gettext("Destination"))
         .build();
-    let current = settings.string("download-dir").to_string();
+    let current = settings.download_dir();
     let shown = if current.is_empty() {
-        "(System Downloads folder)".to_string()
+        gettext("(System Downloads folder)")
     } else {
         current
     };
@@ -30,18 +34,22 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         .halign(gtk4::Align::Start)
         .build();
     let dest_btn = gtk4::Button::builder()
-        .label("Choose…")
-        .tooltip_text("Choose download folder")
+        .label(gettext("Choose…"))
+        .tooltip_text(gettext("Choose download folder"))
         .valign(gtk4::Align::Center)
         .build();
     let reset_btn = gtk4::Button::builder()
         .icon_name("edit-clear-symbolic")
         .css_classes(["flat"])
-        .tooltip_text("Use system default")
+        .tooltip_text(gettext("Use system default"))
         .valign(gtk4::Align::Center)
         .build();
-    reset_btn.update_property(&[gtk4::accessible::Property::Label("Use system default")]);
-    let dest_row = adw::ActionRow::builder().title("Download folder").build();
+    reset_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Use system default",
+    ))]);
+    let dest_row = adw::ActionRow::builder()
+        .title(gettext("Download folder"))
+        .build();
     dest_row.add_suffix(&dest_label);
     dest_row.add_suffix(&reset_btn);
     dest_row.add_suffix(&dest_btn);
@@ -52,7 +60,7 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         let root = parent.root().and_downcast::<gtk4::Window>();
         dest_btn.connect_clicked(move |_| {
             let chooser = gtk4::FileDialog::builder()
-                .title("Choose download folder")
+                .title(gettext("Choose download folder"))
                 .build();
             let s2 = s.clone();
             let l2 = l.clone();
@@ -73,42 +81,54 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
         let l = dest_label.clone();
         reset_btn.connect_clicked(move |_| {
             if s.set_string("download-dir", "").is_ok() {
-                l.set_text("(System Downloads folder)");
+                l.set_text(&gettext("(System Downloads folder)"));
             }
         });
     }
 
     let net_page = adw::PreferencesPage::builder()
-        .title("Network")
+        .title(gettext("Network"))
         .icon_name("network-wired-symbolic")
         .build();
 
     let net_group = adw::PreferencesGroup::builder()
-        .title("Network and Queue")
+        .title(gettext("Network and Queue"))
         .build();
 
     let concurrent = adw::SpinRow::builder()
-        .title("Simultaneous downloads")
+        .title(gettext("Simultaneous downloads"))
         .adjustment(&gtk4::Adjustment::new(3.0, 1.0, 10.0, 1.0, 1.0, 0.0))
         .build();
     settings
-        .bind("max-concurrent", &concurrent, "value")
+        .bind(crate::settings::key::MAX_CONCURRENT, &concurrent, "value")
         .build();
     net_group.add(&concurrent);
 
     let connections = adw::SpinRow::builder()
-        .title("Connections per download")
-        .subtitle("Parallel connections for large files (1 = single stream)")
+        .title(gettext("Connections per download"))
+        .subtitle(gettext(
+            "Parallel connections for large files (1 = single stream)",
+        ))
         .adjustment(&gtk4::Adjustment::new(4.0, 1.0, 16.0, 1.0, 1.0, 0.0))
         .build();
-    connections.set_tooltip_text(Some("Files under ~16 MB always use one connection"));
-    settings.bind("connections", &connections, "value").build();
+    connections.set_tooltip_text(Some(&gettext(
+        "Files under ~16 MB always use one connection",
+    )));
+    settings
+        .bind(crate::settings::key::CONNECTIONS, &connections, "value")
+        .build();
     net_group.add(&connections);
 
-    let limit = adw::EntryRow::builder().title("Speed limit").build();
-    limit.set_tooltip_text(Some("Per download, e.g. 500K, 2M; empty means unlimited"));
+    let limit = adw::EntryRow::builder()
+        .title(gettext("Speed limit"))
+        .build();
+    limit.set_tooltip_text(Some(&gettext(
+        "Per download, e.g. 500K, 2M; empty means unlimited",
+    )));
     limit.set_input_purpose(gtk4::InputPurpose::FreeForm);
-    settings.bind("speed-limit", &limit, "text").build();
+    settings
+        .bind(crate::settings::key::SPEED_LIMIT, &limit, "text")
+        .build();
     // Flag junk immediately instead of failing rows at spawn time.
     {
         let l = limit.clone();
@@ -128,50 +148,62 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     net_group.add(&limit);
 
     let retries = adw::SpinRow::builder()
-        .title("Retries")
+        .title(gettext("Retries"))
         .adjustment(&gtk4::Adjustment::new(3.0, 1.0, 99.0, 1.0, 5.0, 0.0))
         .build();
-    settings.bind("retries", &retries, "value").build();
+    settings
+        .bind(crate::settings::key::RETRIES, &retries, "value")
+        .build();
     net_group.add(&retries);
 
     let timeout = adw::SpinRow::builder()
-        .title("Timeout (seconds)")
+        .title(gettext("Timeout (seconds)"))
         .adjustment(&gtk4::Adjustment::new(30.0, 5.0, 300.0, 5.0, 30.0, 0.0))
         .build();
-    settings.bind("timeout", &timeout, "value").build();
+    settings
+        .bind(crate::settings::key::TIMEOUT, &timeout, "value")
+        .build();
     net_group.add(&timeout);
 
     let ua = adw::EntryRow::builder()
-        .title("User agent (optional)")
+        .title(gettext("User agent (optional)"))
         .build();
-    settings.bind("user-agent", &ua, "text").build();
+    settings
+        .bind(crate::settings::key::USER_AGENT, &ua, "text")
+        .build();
     net_group.add(&ua);
 
     let notif_group = adw::PreferencesGroup::builder()
-        .title("Notifications")
+        .title(gettext("Notifications"))
         .build();
     let notif = adw::SwitchRow::builder()
-        .title("Notify when downloads finish")
+        .title(gettext("Notify when downloads finish"))
         .build();
     settings
-        .bind("show-notifications", &notif, "active")
+        .bind(crate::settings::key::SHOW_NOTIFICATIONS, &notif, "active")
         .build();
     notif_group.add(&notif);
     let bg_notif = adw::SwitchRow::builder()
-        .title("Notify for background downloads")
-        .subtitle("When closing with downloads still running")
+        .title(gettext("Notify for background downloads"))
+        .subtitle(gettext("When closing with downloads still running"))
         .build();
     settings
-        .bind("notify-background", &bg_notif, "active")
+        .bind(crate::settings::key::NOTIFY_BACKGROUND, &bg_notif, "active")
         .build();
     notif_group.add(&bg_notif);
 
-    let power_group = adw::PreferencesGroup::builder().title("Power").build();
-    let inhibit = adw::SwitchRow::builder()
-        .title("Prevent sleep during downloads")
-        .subtitle("Block suspend while downloads are queued or running")
+    let power_group = adw::PreferencesGroup::builder()
+        .title(gettext("Power"))
         .build();
-    settings.bind("inhibit-suspend", &inhibit, "active").build();
+    let inhibit = adw::SwitchRow::builder()
+        .title(gettext("Prevent sleep during downloads"))
+        .subtitle(gettext(
+            "Block suspend while downloads are queued or running",
+        ))
+        .build();
+    settings
+        .bind(crate::settings::key::INHIBIT_SUSPEND, &inhibit, "active")
+        .build();
     power_group.add(&inhibit);
 
     page.add(&dest_group);
@@ -183,33 +215,43 @@ pub fn show(parent: &impl gtk4::glib::object::IsA<gtk4::Widget>, settings: &gio:
     dialog.add(&net_page);
 
     let torrent_page = adw::PreferencesPage::builder()
-        .title("Torrent")
+        .title(gettext("Torrent"))
         .icon_name("emblem-shared-symbolic")
         .build();
 
-    let share_group = adw::PreferencesGroup::builder().title("Sharing").build();
+    let share_group = adw::PreferencesGroup::builder()
+        .title(gettext("Sharing"))
+        .build();
     let seed = adw::SwitchRow::builder()
-        .title("Seed finished downloads")
-        .subtitle("Keep sharing files after they finish downloading")
+        .title(gettext("Seed finished downloads"))
+        .subtitle(gettext("Keep sharing files after they finish downloading"))
         .build();
     settings
-        .bind("torrent-seed-finished", &seed, "active")
+        .bind(crate::settings::key::TORRENT_SEED_FINISHED, &seed, "active")
         .build();
     share_group.add(&seed);
 
-    let torrent_net_group = adw::PreferencesGroup::builder().title("Network").build();
-    let dht = adw::SwitchRow::builder()
-        .title("Use DHT")
-        .subtitle("Find peers through the distributed hash table")
+    let torrent_net_group = adw::PreferencesGroup::builder()
+        .title(gettext("Network"))
         .build();
-    settings.bind("torrent-dht", &dht, "active").build();
+    let dht = adw::SwitchRow::builder()
+        .title(gettext("Use DHT"))
+        .subtitle(gettext("Find peers through the distributed hash table"))
+        .build();
+    settings
+        .bind(crate::settings::key::TORRENT_DHT, &dht, "active")
+        .build();
     torrent_net_group.add(&dht);
     let peers = adw::SpinRow::builder()
-        .title("Peer limit")
-        .subtitle("Maximum peers per download. 0 means unlimited. Applies when a download starts.")
+        .title(gettext("Peer limit"))
+        .subtitle(gettext(
+            "Maximum peers per download. 0 means unlimited. Applies when a download starts.",
+        ))
         .adjustment(&gtk4::Adjustment::new(50.0, 0.0, 500.0, 1.0, 10.0, 0.0))
         .build();
-    settings.bind("torrent-peer-limit", &peers, "value").build();
+    settings
+        .bind(crate::settings::key::TORRENT_PEER_LIMIT, &peers, "value")
+        .build();
     torrent_net_group.add(&peers);
 
     torrent_page.add(&share_group);

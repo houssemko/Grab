@@ -15,8 +15,8 @@ use std::{
     sync::Arc,
 };
 
-use gtk4::gio::prelude::SettingsExt;
-use gtk4::{gio, glib};
+use gettextrs::gettext;
+use gtk4::glib;
 use librqbit::{
     api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ManagedTorrent,
     Session, SessionOptions, TorrentStatsState,
@@ -110,7 +110,7 @@ pub fn is_magnet(s: &str) -> bool {
 pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, String> {
     let m = librqbit::Magnet::parse(s.trim()).map_err(|e| format!("Invalid magnet link: {e}"))?;
     if m.as_id20().is_none() {
-        return Err("Only BitTorrent v1 magnets are supported".to_string());
+        return Err(gettext("Only BitTorrent v1 magnets are supported"));
     }
     Ok(m)
 }
@@ -164,7 +164,7 @@ pub fn archive_path_for_url(url: &str) -> Option<PathBuf> {
 pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, String> {
     const MAX_TORRENT_BYTES: usize = 10_000_000;
     if bytes.len() > MAX_TORRENT_BYTES {
-        return Err("Torrent file is too large (max 10 MB)".to_string());
+        return Err(gettext("Torrent file is too large (max 10 MB)"));
     }
     // Parse first: never archive bytes rqbit itself would reject.
     librqbit::torrent_from_bytes(bytes).map_err(|e| format!("Invalid torrent file: {e}"))?;
@@ -394,8 +394,8 @@ async fn ensure_session(
 
 /// Map the peer-limit preference to rqbit's shape: 0 means unlimited, so
 /// the default limit applies when no limit is set.
-pub(crate) fn peer_limit_of(settings: &gio::Settings) -> Option<usize> {
-    match settings.int("torrent-peer-limit") {
+pub(crate) fn peer_limit_of(settings: &crate::settings::AppSettings) -> Option<usize> {
+    match settings.torrent_peer_limit() {
         0 => None,
         n => Some(n.max(0) as usize),
     }
@@ -493,7 +493,7 @@ async fn poll_loop(
         }
         if matches!(stats.state, TorrentStatsState::Error) {
             let _ = tx.send(EngineMsg::Failed(
-                stats.error.unwrap_or_else(|| "Torrent failed".to_string()),
+                stats.error.unwrap_or_else(|| gettext("Torrent failed")),
             ));
             break;
         }
@@ -623,7 +623,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         } else {
             if active.values().any(|a| a.hash_hex == hash_hex) {
                 drop(active);
-                fail("Torrent is already in the queue".to_string());
+                fail(gettext("Torrent is already in the queue"));
                 return;
             }
             active.insert(
@@ -656,7 +656,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                 let _ = session.delete(TorrentIdOrHash::Hash(hash_id), false).await;
             }
         } else {
-            fail("Torrent is no longer managed".to_string());
+            fail(gettext("Torrent is no longer managed"));
         }
         ACTIVE.lock().await.remove(&id);
         return;
@@ -692,7 +692,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             // on a file-filter match, else fail fast (delete the owner first).
             AddTorrentResponse::AlreadyManaged(_, handle) if handle.only_files() != want_files => {
                 ACTIVE.lock().await.remove(&id);
-                fail("Torrent is already in the queue".to_string());
+                fail(gettext("Torrent is already in the queue"));
                 return;
             }
             _ => resp.into_handle(),
@@ -705,7 +705,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     };
     let Some(handle) = handle else {
         ACTIVE.lock().await.remove(&id);
-        fail("Torrent produced no files".to_string());
+        fail(gettext("Torrent produced no files"));
         return;
     };
     // Cancelled while adding: the pump is gone, so clean up the orphan.

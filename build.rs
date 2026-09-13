@@ -18,4 +18,12 @@ fn main() {
         }
     }
     println!("cargo:rustc-env=GRAB_SCHEMA_DIR={}", schema_dir.display());
+    // Installed message catalogs live under $prefix/share/locale; the
+    // meson build passes it as GRAB_PREFIX, dev/test builds fall back to
+    // the source po/ dir at runtime (no .mo there, so gettext is a no-op).
+    let prefix = std::env::var("GRAB_PREFIX").unwrap_or_else(|_| "/usr".to_string());
+    println!(
+        "cargo:rustc-env=GRAB_LOCALEDIR={}/share/locale",
+        prefix.trim_end_matches('/')
+    );
 }

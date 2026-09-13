@@ -2,9 +2,11 @@
 //! open (URLs/files), shutdown (stop downloads, persist queue).
 
 use crate::download::DownloadManager;
+use crate::settings::AppSettings;
 use crate::window::{self, show_add_dialog};
 use crate::{preferences, APP_ID};
 use adw::prelude::*;
+use gettextrs::{gettext, ngettext};
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -14,7 +16,7 @@ use std::rc::Rc;
 
 struct State {
     manager: Rc<DownloadManager>,
-    settings: gio::Settings,
+    settings: AppSettings,
     toasts: Rc<adw::ToastOverlay>,
     window: adw::ApplicationWindow,
 }
@@ -25,7 +27,7 @@ pub fn setup(app: &adw::Application) {
     {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
-            let settings = gio::Settings::new(APP_ID);
+            let settings = AppSettings::new();
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();
@@ -104,9 +106,9 @@ pub fn setup(app: &adw::Application) {
                             .ok()
                             .flatten();
                             let Some(bytes) = bytes else {
-                                toasts.add_toast(adw::Toast::new(
+                                toasts.add_toast(adw::Toast::new(&gettext(
                                     "Could not read that .torrent file",
-                                ));
+                                )));
                                 return;
                             };
                             // Same file picker as the add dialog: multi-file
@@ -203,17 +205,18 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     if n == 0 {
                         return;
                     }
-                    let body = if n == 1 {
-                        "This will cancel the active download.".to_string()
-                    } else {
-                        format!("This will cancel {n} active downloads.")
-                    };
+                    let body = ngettext(
+                        "This will cancel the active download.",
+                        "This will cancel {n} active downloads.",
+                        n as u32,
+                    )
+                    .replace("{n}", &n.to_string());
                     let dialog = adw::AlertDialog::builder()
-                        .heading("Cancel All Downloads?")
+                        .heading(gettext("Cancel All Downloads?"))
                         .body(&body)
                         .build();
-                    dialog.add_response("cancel", "Cancel");
-                    dialog.add_response("confirm", "Cancel All");
+                    dialog.add_response("cancel", &gettext("Cancel"));
+                    dialog.add_response("confirm", &gettext("Cancel All"));
                     dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
                     dialog.set_default_response(Some("cancel"));
                     dialog.set_close_response("cancel");
@@ -225,11 +228,14 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             // the queue may have changed while it sat open.
                             let n = manager.active_count();
                             manager.cancel_all();
-                            let toast = if n == 1 {
-                                adw::Toast::new("Cancelled download")
-                            } else {
-                                adw::Toast::new(&format!("Cancelled {n} downloads"))
-                            };
+                            let toast = adw::Toast::new(
+                                &ngettext(
+                                    "Cancelled download",
+                                    "Cancelled {n} downloads",
+                                    n as u32,
+                                )
+                                .replace("{n}", &n.to_string()),
+                            );
                             toasts.add_toast(toast);
                         }
                     });
@@ -281,7 +287,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             .license_type(gtk4::License::MitX11)
                             .website("https://github.com/houssemko/grab")
                             .issue_url("https://github.com/houssemko/grab/issues")
-                            .comments("A GNOME download manager")
+                            .comments(gettext("A GNOME download manager"))
                             .build();
                         about.present(Some(&s.window));
                     }
@@ -294,20 +300,25 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         let dialog = adw::ShortcutsDialog::new();
-                        let section = adw::ShortcutsSection::new(Some("Downloads"));
-                        section.add(adw::ShortcutsItem::new("New Download", "<Control>n"));
+                        let section =
+                            adw::ShortcutsSection::new(Some(&gettext("Downloads") as &str));
+                        section.add(adw::ShortcutsItem::new(
+                            &gettext("New Download"),
+                            "<Control>n",
+                        ));
                         // Plain items: these actions have no accelerators,
                         // and from_action would render an empty shortcut cell
                         // implying a keybinding that doesn't exist.
-                        section.add(adw::ShortcutsItem::new("Cancel All", ""));
-                        section.add(adw::ShortcutsItem::new("Retry Failed", ""));
+                        section.add(adw::ShortcutsItem::new(&gettext("Cancel All"), ""));
+                        section.add(adw::ShortcutsItem::new(&gettext("Retry Failed"), ""));
                         dialog.add(section);
-                        let section2 = adw::ShortcutsSection::new(Some("General"));
+                        let section2 =
+                            adw::ShortcutsSection::new(Some(&gettext("General") as &str));
                         section2.add(adw::ShortcutsItem::from_action(
-                            "Preferences",
+                            &gettext("Preferences"),
                             "app.preferences",
                         ));
-                        section2.add(adw::ShortcutsItem::new("Quit", "<Control>q"));
+                        section2.add(adw::ShortcutsItem::new(&gettext("Quit"), "<Control>q"));
                         dialog.add(section2);
                         dialog.present(Some(&s.window));
                     }

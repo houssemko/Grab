@@ -1,4 +1,5 @@
 use futures_util::StreamExt as _;
+use gettextrs::gettext;
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
@@ -27,14 +28,16 @@ pub enum DownloadStatus {
 
 impl DownloadStatus {
     /// Short human-readable label for the status, for list rows and toasts.
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
+        // gettext() wraps each literal here (not at the call sites) so
+        // xgettext can statically extract every status msgid.
         match self {
-            DownloadStatus::Queued => "Queued",
-            DownloadStatus::Downloading => "Downloading",
-            DownloadStatus::Paused => "Paused",
-            DownloadStatus::Done => "Done",
-            DownloadStatus::Failed => "Failed",
-            DownloadStatus::Cancelled => "Cancelled",
+            DownloadStatus::Queued => gettext("Queued"),
+            DownloadStatus::Downloading => gettext("Downloading"),
+            DownloadStatus::Paused => gettext("Paused"),
+            DownloadStatus::Done => gettext("Done"),
+            DownloadStatus::Failed => gettext("Failed"),
+            DownloadStatus::Cancelled => gettext("Cancelled"),
         }
     }
 }
@@ -303,9 +306,8 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
         // line. Still capped against abuse (Ubuntu magnets run ~2-4 KB).
         const MAX_MAGNET_LEN: usize = 16384;
         if trimmed.len() > MAX_MAGNET_LEN {
-            return Err(format!(
-                "Magnet link is too long (max {MAX_MAGNET_LEN} characters)"
-            ));
+            return Err(gettext("Magnet link is too long (max {n} characters)")
+                .replace("{n}", &MAX_MAGNET_LEN.to_string()));
         }
         // Validated here so the row stores the trimmed link, re-parsed by
         // the torrent engine.
@@ -318,24 +320,26 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
         // must exist; a swept archive means the queue entry is stale.
         return crate::torrent::archive_path_for_url(trimmed)
             .map(|_| trimmed.to_string())
-            .ok_or_else(|| "Torrent file is missing from the archive".to_string());
+            .ok_or_else(|| gettext("Torrent file is missing from the archive"));
     }
     if trimmed.len() > MAX_URL_LEN {
-        return Err(format!("URL is too long (max {MAX_URL_LEN} characters)"));
+        return Err(gettext("URL is too long (max {n} characters)")
+            .replace("{n}", &MAX_URL_LEN.to_string()));
     }
     // An explicit scheme is authoritative: only http(s) passes, so the
     // separate validate pass is unnecessary. (Bare `host:port` inputs must
     // not take this branch: `localhost:8080/f` parses with scheme
     // "localhost" and still needs `https://` prepended below.)
     if trimmed.contains("://") {
-        let u = url::Url::parse(trimmed).map_err(|_| format!("Invalid URL: {trimmed}"))?;
+        let u = url::Url::parse(trimmed)
+            .map_err(|_| gettext("Invalid URL: {url}").replace("{url}", trimmed))?;
         if !u.username().is_empty() || u.password().is_some() {
-            return Err("URLs with a username/password are not supported".to_string());
+            return Err(gettext("URLs with a username/password are not supported"));
         }
         return match u.scheme() {
             "http" | "https" => Ok(u.to_string()),
-            "ftp" => Err("FTP is not supported (use http/https)".to_string()),
-            s => Err(format!("Unsupported scheme: {s} (use http/https)")),
+            "ftp" => Err(gettext("FTP is not supported (use http/https)")),
+            s => Err(gettext("Unsupported scheme: {s} (use http/https)").replace("{s}", s)),
         };
     }
     let bare =
@@ -348,7 +352,7 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
             }
         }
     }
-    Err(format!("Invalid URL: {trimmed}"))
+    Err(gettext("Invalid URL: {url}").replace("{url}", trimmed))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -363,13 +367,13 @@ pub struct DownloadOptions {
 
 impl DownloadOptions {
     /// Snapshot the network-related GSettings keys.
-    pub fn from_settings(s: &gio::Settings) -> Self {
+    pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
         Self {
-            tries: s.int("retries"),
-            timeout: s.int("timeout"),
-            limit_rate: s.string("speed-limit").to_string(),
-            user_agent: s.string("user-agent").to_string(),
-            connections: s.int("connections"),
+            tries: s.retries(),
+            timeout: s.timeout(),
+            limit_rate: s.speed_limit(),
+            user_agent: s.user_agent(),
+            connections: s.connections(),
         }
     }
 }
@@ -586,7 +590,7 @@ async fn attempt_multi(
     max_workers: usize,
 ) -> Result<(), AttemptFail> {
     if st.total != total {
-        return Err(AttemptFail::Retryable("File changed on server".to_string()));
+        return Err(AttemptFail::Retryable(gettext("File changed on server")));
     }
     let missing: Vec<(u64, u64, u64)> = st.missing();
     if missing.is_empty() {
@@ -746,7 +750,7 @@ async fn attempt_multi(
             .lock()
             .expect("Grab: error slot poisoned (bug)")
             .take()
-            .unwrap_or_else(|| "Download interrupted".to_string());
+            .unwrap_or_else(|| gettext("Download interrupted"));
         return Err(AttemptFail::Changed(msg));
     }
     if throttled.load(Ordering::SeqCst) {
@@ -754,7 +758,7 @@ async fn attempt_multi(
             .lock()
             .expect("Grab: error slot poisoned (bug)")
             .take()
-            .unwrap_or_else(|| "Download interrupted".to_string());
+            .unwrap_or_else(|| gettext("Download interrupted"));
         return Err(AttemptFail::Throttled(msg));
     }
     if failed.load(Ordering::SeqCst) {
@@ -762,11 +766,11 @@ async fn attempt_multi(
             .lock()
             .expect("Grab: error slot poisoned (bug)")
             .take()
-            .unwrap_or_else(|| "Download interrupted".to_string());
+            .unwrap_or_else(|| gettext("Download interrupted"));
         return Err(AttemptFail::Retryable(msg));
     }
     if written != expect_bytes {
-        return Err(AttemptFail::Retryable("Incomplete download".to_string()));
+        return Err(AttemptFail::Retryable(gettext("Incomplete download")));
     }
     Ok(())
 }
@@ -820,7 +824,7 @@ async fn attempt_once(
         {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => return Err("Connection timed out".to_string()),
+            Err(_) => return Err(gettext("Connection timed out")),
         };
         let status = resp.status();
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
@@ -865,7 +869,7 @@ async fn attempt_once(
             }
             if restarted {
                 // Even a plain GET gets 416: pathological server, stop looping.
-                return Err("Server rejects range requests".to_string());
+                return Err(gettext("Server rejects range requests"));
             }
             let _ = std::fs::remove_file(&ctx.dest);
             restarted = true;
@@ -892,7 +896,7 @@ async fn attempt_once(
             start,
         );
         if rejects_unexpected_restart(partial, start, expected_total, resp.content_length()) {
-            return Err("Server returned an unexpected file size".to_string());
+            return Err(gettext("Server returned an unexpected file size"));
         }
         // Unprobed resume the server answers from zero with a SMALLER object
         // than what we hold: a different file (login wall, throttle page),
@@ -901,7 +905,7 @@ async fn attempt_once(
         if !partial && start > 0 {
             if let Some(l) = resp.content_length() {
                 if l < start {
-                    return Err("Server restarted the download with a smaller file".to_string());
+                    return Err(gettext("Server restarted the download with a smaller file"));
                 }
             }
         }
@@ -961,12 +965,12 @@ async fn attempt_once(
                 Ok(Some(Ok(c))) => c,
                 Ok(Some(Err(e))) => return Err(format!("Download interrupted: {e}")),
                 Ok(None) => break,
-                Err(_) => return Err("Stalled connection timed out".to_string()),
+                Err(_) => return Err(gettext("Stalled connection timed out")),
             };
             if chunk.is_empty() {
                 empty_streak += 1;
                 if empty_streak > 32 {
-                    return Err("Stalled connection timed out".to_string());
+                    return Err(gettext("Stalled connection timed out"));
                 }
                 continue;
             }
@@ -992,7 +996,7 @@ async fn attempt_once(
             .await
             .map_err(|e| format!("Cannot write file: {e}"))?;
         return match total {
-            Some(t) if downloaded != t => Err("Incomplete download".to_string()),
+            Some(t) if downloaded != t => Err(gettext("Incomplete download")),
             _ => Ok(()),
         };
     }
@@ -1025,9 +1029,9 @@ pub(crate) fn parse_rate(s: &str) -> Option<u64> {
 /// each tick. `gio::Settings` is main-thread-only (`!Send`), hence the hop.
 static LIVE_RATE_LIMIT: AtomicU64 = AtomicU64::new(0);
 
-fn publish_rate_limit(settings: &gio::Settings) {
+fn publish_rate_limit(settings: &crate::settings::AppSettings) {
     LIVE_RATE_LIMIT.store(
-        parse_rate(settings.string("speed-limit").as_str()).unwrap_or(0),
+        parse_rate(settings.speed_limit().as_str()).unwrap_or(0),
         Ordering::Relaxed,
     );
 }
@@ -1354,10 +1358,10 @@ async fn probe_ranges(
     {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => return Err(e.to_string()),
-        Err(_) => return Err("Connection timed out".to_string()),
+        Err(_) => return Err(gettext("Connection timed out")),
     };
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        return Err("Range requests not supported".to_string());
+        return Err(gettext("Range requests not supported"));
     }
     let value = resp
         .headers()
@@ -1368,7 +1372,7 @@ async fn probe_ranges(
     parse_content_range(&value)
         .filter(|(s, _, _)| *s == 0)
         .map(|(_, _, t)| t)
-        .ok_or_else(|| "Bad Content-Range".to_string())
+        .ok_or_else(|| gettext("Bad Content-Range"))
 }
 
 /// Parse `Content-Range: bytes <start>-<end>/<total>`. Callers pin the
@@ -1445,7 +1449,7 @@ async fn fetch_piece(
 ) -> Result<Vec<u8>, AttemptFail> {
     let timeout = ctx.timeout;
     use AttemptFail::{Changed, Retryable, Throttled};
-    let mut last_err = Retryable("Empty response".to_string());
+    let mut last_err = Retryable(gettext("Empty response"));
     for _ in 0..PIECE_TRIES {
         let mut req = ctx
             .client
@@ -1468,7 +1472,7 @@ async fn fetch_piece(
                 continue;
             }
             Err(_) => {
-                last_err = Retryable("Connection timed out".to_string());
+                last_err = Retryable(gettext("Connection timed out"));
                 continue;
             }
         };
@@ -1494,12 +1498,12 @@ async fn fetch_piece(
             Some((_, _, t)) if t != total => {
                 // Different object than probed: retrying these ranges can
                 // never succeed, so fail terminally right away.
-                return Err(Changed("File changed on server".to_string()));
+                return Err(Changed(gettext("File changed on server")));
             }
             // Unparseable or wrong range: the host ignores ranges, so
             // downgrade to single-stream instead of retrying to Failed.
             _ => {
-                return Err(Throttled("Server ignored range request".to_string()));
+                return Err(Throttled(gettext("Server ignored range request")));
             }
         }
         let mut body = Vec::with_capacity((end - start + 1).min(2 * piece_len(total)) as usize);
@@ -1511,18 +1515,18 @@ async fn fetch_piece(
         let mut last_progress = Instant::now();
         let failed: Option<AttemptFail> = loop {
             if last_progress.elapsed() >= quiet_limit {
-                break Some(Retryable("Piece stalled".to_string()));
+                break Some(Retryable(gettext("Piece stalled")));
             }
             let idle = tokio::time::sleep(quiet_limit.saturating_sub(last_progress.elapsed()));
             tokio::pin!(idle);
             tokio::select! {
                 _ = &mut idle => {
-                    break Some(Retryable("Piece stalled".to_string()))
+                    break Some(Retryable(gettext("Piece stalled")))
                 }
                 next = tokio::time::timeout(timeout, stream.next()) => match next {
                     Ok(Some(Ok(c))) => {
                         if body.len() + c.len() > (end - start + 1) as usize {
-                            break Some(Retryable("Server sent too much data".to_string()));
+                            break Some(Retryable(gettext("Server sent too much data")));
                         }
                         body.extend_from_slice(&c);
                         // Empty chunks carry no bytes: only real data resets
@@ -1536,7 +1540,7 @@ async fn fetch_piece(
                     }
                     Ok(None) => break None,
                     Err(_) => {
-                        break Some(Retryable("Stalled connection timed out".to_string()))
+                        break Some(Retryable(gettext("Stalled connection timed out")))
                     }
                 },
             }
@@ -1548,7 +1552,7 @@ async fn fetch_piece(
         // A truncated stream would otherwise be recorded as a done piece
         // (zeros on disk) and skipped on every later resume.
         if body.len() as u64 != end - start + 1 {
-            last_err = Retryable("Incomplete piece".to_string());
+            last_err = Retryable(gettext("Incomplete piece"));
             continue;
         }
         return Ok(body);
@@ -1558,7 +1562,7 @@ async fn fetch_piece(
 
 pub struct DownloadManager {
     store: gio::ListStore,
-    settings: gio::Settings,
+    settings: crate::settings::AppSettings,
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
@@ -1590,7 +1594,7 @@ pub struct DownloadManager {
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
-    pub fn new(store: gio::ListStore, settings: gio::Settings) -> Rc<Self> {
+    pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
         let this = Rc::new(Self {
             store,
             settings,
@@ -1622,7 +1626,7 @@ impl DownloadManager {
         let owner = std::thread::current().id();
         let weak = Rc::downgrade(&this);
         this.settings
-            .connect_changed(Some("max-concurrent"), move |_, _| {
+            .connect_changed(Some(crate::settings::key::MAX_CONCURRENT), move |_, _| {
                 if std::thread::current().id() != owner {
                     return;
                 }
@@ -1634,10 +1638,11 @@ impl DownloadManager {
             });
         let settings_weak = this.settings.downgrade();
         this.settings
-            .connect_changed(Some("speed-limit"), move |_, _| {
+            .connect_changed(Some(crate::settings::key::SPEED_LIMIT), move |_, _| {
                 if let Some(s) = settings_weak.upgrade() {
+                    let s = crate::settings::AppSettings::from(s);
                     publish_rate_limit(&s);
-                    crate::torrent::apply_live_limits(parse_rate(s.string("speed-limit").trim()));
+                    crate::torrent::apply_live_limits(parse_rate(s.speed_limit().trim()));
                 }
             });
         this
@@ -1838,27 +1843,27 @@ impl DownloadManager {
             .map(|m| m.len())
             .unwrap_or(0);
         item.set_detail(if size > 0 {
-            format!("Finished • {}", fmt_bytes(size))
+            gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
         } else {
-            "Finished".to_string()
+            gettext("Finished")
         });
         self.insert(item);
     }
 
     /// Whether finish/fail desktop notifications are enabled.
     pub fn notifications_enabled(&self) -> bool {
-        self.settings.boolean("show-notifications")
+        self.settings.show_notifications()
     }
 
     /// Whether closing over active downloads notifies.
     pub fn background_notifications_enabled(&self) -> bool {
-        self.settings.boolean("notify-background")
+        self.settings.notify_background()
     }
 
     /// Configured folder, or the system Downloads folder when empty or
     /// relative (a relative dir would resolve against the launcher CWD).
     pub fn effective_download_dir(&self) -> String {
-        let configured = self.settings.string("download-dir").to_string();
+        let configured = self.settings.download_dir();
         if !configured.is_empty() && std::path::Path::new(&configured).is_absolute() {
             return configured;
         }
@@ -1869,7 +1874,7 @@ impl DownloadManager {
 
     /// Simultaneous-download limit (at least 1).
     pub fn max_concurrent(&self) -> usize {
-        self.settings.int("max-concurrent").max(1) as usize
+        self.settings.max_concurrent().max(1) as usize
     }
 
     fn start_next(self: &Rc<Self>) {
@@ -1895,7 +1900,7 @@ impl DownloadManager {
         let limit = opts.limit_rate.trim();
         if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
             item.set_status(DownloadStatus::Failed);
-            item.set_detail(format!("Invalid speed limit: {limit}"));
+            item.set_detail(gettext("Invalid speed limit: {limit}").replace("{limit}", limit));
             self.changed();
             return;
         }
@@ -1951,9 +1956,9 @@ impl DownloadManager {
             .and_then(|u| u.host_str().map(|h| h.to_string()))
             .unwrap_or_default();
         item.set_detail(if host.is_empty() {
-            "Starting…".to_string()
+            gettext("Starting…")
         } else {
-            format!("Connecting to {host}…")
+            gettext("Connecting to {host}…").replace("{host}", &host)
         });
         self.changed();
 
@@ -2023,22 +2028,22 @@ impl DownloadManager {
                                 } else {
                                     "—".to_string()
                                 };
-                                item.set_detail(format!(
-                                    "{}% ({}) • {} • ETA {}{}",
-                                    (frac * 100.0) as u64,
-                                    format_amounts(downloaded, t),
-                                    speed,
-                                    eta,
-                                    sel_suffix
-                                ));
+                                item.set_detail(
+                                    gettext("{pct}% ({amounts}) • {speed} • ETA {eta}{filter}")
+                                        .replace("{pct}", &((frac * 100.0) as u64).to_string())
+                                        .replace("{amounts}", &format_amounts(downloaded, t))
+                                        .replace("{speed}", &speed)
+                                        .replace("{eta}", &eta)
+                                        .replace("{filter}", &sel_suffix),
+                                );
                             }
                             _ => {
-                                item.set_detail(format!(
-                                    "{} • {}{}",
-                                    fmt_bytes(downloaded),
-                                    speed,
-                                    sel_suffix
-                                ));
+                                item.set_detail(
+                                    gettext("{done} • {speed}{filter}")
+                                        .replace("{done}", &fmt_bytes(downloaded))
+                                        .replace("{speed}", &speed)
+                                        .replace("{filter}", &sel_suffix),
+                                );
                             }
                         }
                     }
@@ -2097,9 +2102,9 @@ impl DownloadManager {
                             item.set_progress(1.0);
                             item.set_status(DownloadStatus::Done);
                             item.set_detail(if size > 0 {
-                                format!("Finished • {}", fmt_bytes(size))
+                                gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
                             } else {
-                                "Finished".to_string()
+                                gettext("Finished")
                             });
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
@@ -2110,7 +2115,7 @@ impl DownloadManager {
                             // those spans, and deleting them would corrupt
                             // shared pieces for peers.
                             if crate::torrent::is_torrent(&url)
-                                && !this.settings.boolean("torrent-seed-finished")
+                                && !this.settings.torrent_seed_finished()
                             {
                                 let folder = Self::torrent_folder(&item);
                                 if folder.is_dir() {
@@ -2259,8 +2264,8 @@ impl DownloadManager {
             }
             if !done && item.status() == DownloadStatus::Downloading {
                 item.set_status(DownloadStatus::Failed);
-                item.set_detail("Download interrupted".to_string());
-                this.notify_finished(&item, Err("Download interrupted".to_string()));
+                item.set_detail(gettext("Download interrupted"));
+                this.notify_finished(&item, Err(gettext("Download interrupted")));
             }
             this.persist_queue();
             this.changed();
@@ -2286,10 +2291,10 @@ impl DownloadManager {
         };
         let _ = std::fs::create_dir_all(&dest);
         let settings = &self.settings;
-        let seed_finished = settings.boolean("torrent-seed-finished");
-        let dht = settings.boolean("torrent-dht");
+        let seed_finished = settings.torrent_seed_finished();
+        let dht = settings.torrent_dht();
         let peer_limit = crate::torrent::peer_limit_of(settings);
-        let download_bps = parse_rate(settings.string("speed-limit").trim());
+        let download_bps = parse_rate(settings.speed_limit().trim());
         let id = item.id();
         let gen = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, gen);
@@ -2299,7 +2304,7 @@ impl DownloadManager {
                 Some(path) => crate::torrent::TorrentSource::File(path),
                 None => {
                     item.set_status(DownloadStatus::Failed);
-                    item.set_detail("Torrent file is missing from the archive".to_string());
+                    item.set_detail(gettext("Torrent file is missing from the archive"));
                     self.changed();
                     return;
                 }
@@ -2321,7 +2326,7 @@ impl DownloadManager {
         }));
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
-        item.set_detail("Starting torrent…".to_string());
+        item.set_detail(gettext("Starting torrent…"));
         self.changed();
         self.pump(item, id, gen, rx);
     }
@@ -2332,10 +2337,10 @@ impl DownloadManager {
         }
         if let Some(app) = gio::Application::default() {
             let ok = result.is_ok();
-            let n = gio::Notification::new(if ok {
-                "Download finished"
+            let n = gio::Notification::new(&if ok {
+                gettext("Download finished")
             } else {
-                "Download failed"
+                gettext("Download failed")
             });
             let mut body = if ok {
                 item.filename().to_string()
@@ -2367,7 +2372,10 @@ impl DownloadManager {
             }
             if item.status() == DownloadStatus::Downloading {
                 item.set_status(DownloadStatus::Paused);
-                item.set_detail(format!("Paused • {}%", (item.progress() * 100.0) as u64));
+                item.set_detail(
+                    gettext("Paused • {pct}%")
+                        .replace("{pct}", &((item.progress() * 100.0) as u64).to_string()),
+                );
             }
         }
         // Persist the bitmap too: a kill while paused must resume segmented.
@@ -2425,7 +2433,7 @@ impl DownloadManager {
                 DownloadStatus::Downloading | DownloadStatus::Paused
             ) {
                 item.set_status(DownloadStatus::Queued);
-                item.set_detail("Queued".to_string());
+                item.set_detail(item.status().label());
             }
         }
     }
@@ -2490,7 +2498,7 @@ impl DownloadManager {
                 crate::torrent::forget_download(id);
             }
             item.set_status(DownloadStatus::Cancelled);
-            item.set_detail("Cancelled".to_string());
+            item.set_detail(item.status().label());
         }
     }
 
@@ -2593,9 +2601,7 @@ impl DownloadManager {
     /// # Errors
     /// Returns a display-ready message when trashing fails.
     pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
-        let item = self
-            .find(id)
-            .ok_or_else(|| "Download not found".to_string())?;
+        let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
         // Torrent rows (any status): drop the session entry and the
         // archive, drop the row, then Trash the real files. Multi-file
         // torrents live in dest/<torrent-name>/ rather than the stub path

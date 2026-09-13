@@ -1,5 +1,6 @@
 use crate::download::{aggregate, DownloadManager, DownloadStatus, BLOCK_CELLS};
 use adw::prelude::*;
+use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
@@ -35,10 +36,17 @@ pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: b
             launcher.launch_future(None::<&gtk4::Window>).await
         };
         if let Err(e) = res {
-            let verb = if reveal { "show" } else { "open" };
-            t.add_toast(adw::Toast::new(&format!(
-                "Could not {verb} {what} in the file manager: {e}"
-            )));
+            let verb = if reveal {
+                gettext("show")
+            } else {
+                gettext("open")
+            };
+            t.add_toast(adw::Toast::new(
+                &gettext("Could not {verb} {what} in the file manager: {e}")
+                    .replace("{verb}", &verb)
+                    .replace("{what}", &what)
+                    .replace("{e}", &e.to_string()),
+            ));
         }
     });
 }
@@ -101,14 +109,14 @@ fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_avail
 
     if item.status() == DownloadStatus::Paused {
         w.toggle_btn.set_icon_name("media-playback-start-symbolic");
-        w.toggle_btn.set_tooltip_text(Some("Resume"));
+        w.toggle_btn.set_tooltip_text(Some(&gettext("Resume")));
         w.toggle_btn
-            .update_property(&[gtk4::accessible::Property::Label("Resume")]);
+            .update_property(&[gtk4::accessible::Property::Label(&gettext("Resume"))]);
     } else {
         w.toggle_btn.set_icon_name("media-playback-pause-symbolic");
-        w.toggle_btn.set_tooltip_text(Some("Pause"));
+        w.toggle_btn.set_tooltip_text(Some(&gettext("Pause")));
         w.toggle_btn
-            .update_property(&[gtk4::accessible::Property::Label("Pause")]);
+            .update_property(&[gtk4::accessible::Property::Label(&gettext("Pause"))]);
     }
 
     // Block map: only while pieces are still landing. Other states
@@ -155,13 +163,13 @@ fn build_row(
     let spinner = adw::Spinner::new();
     spinner.set_visible(false);
 
-    let toggle_btn = icon_button("media-playback-pause-symbolic", "Pause");
-    let stop_btn = icon_button("process-stop-symbolic", "Cancel");
-    let queue_btn = icon_button("go-down-symbolic", "Queue for later");
-    let retry_btn = icon_button("view-refresh-symbolic", "Retry");
-    let reveal_btn = icon_button("folder-open-symbolic", "Show in Folder");
-    let delete_btn = icon_button("user-trash-symbolic", "Move to Trash");
-    let remove_btn = icon_button("list-remove-symbolic", "Remove from list");
+    let toggle_btn = icon_button("media-playback-pause-symbolic", &gettext("Pause"));
+    let stop_btn = icon_button("process-stop-symbolic", &gettext("Cancel"));
+    let queue_btn = icon_button("go-down-symbolic", &gettext("Queue for later"));
+    let retry_btn = icon_button("view-refresh-symbolic", &gettext("Retry"));
+    let reveal_btn = icon_button("folder-open-symbolic", &gettext("Show in Folder"));
+    let delete_btn = icon_button("user-trash-symbolic", &gettext("Move to Trash"));
+    let remove_btn = icon_button("list-remove-symbolic", &gettext("Remove from list"));
 
     top.append(&name);
     top.append(&status);
@@ -192,7 +200,9 @@ fn build_row(
     let blocks = gtk4::DrawingArea::new();
     blocks.set_content_height(48);
     blocks.set_hexpand(true);
-    blocks.update_property(&[gtk4::accessible::Property::Label("Downloaded blocks")]);
+    blocks.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Downloaded blocks",
+    ))]);
     {
         let m = Rc::clone(manager);
         blocks.set_draw_func(move |_area, cr, width, height| {
@@ -338,7 +348,7 @@ fn build_row(
             let st: gtk4::Label = st.downcast().expect("Grab: status widget is a Label (bug)");
             let n: gtk4::Label = n.downcast().expect("Grab: name widget is a Label (bug)");
             n.set_text(&it.filename());
-            st.set_text(it.status().label());
+            st.set_text(&it.status().label());
             refresh_row(
                 it,
                 &RowWidgets {
@@ -423,9 +433,9 @@ fn build_row(
             };
             if another_queued(&m, &it) {
                 m.defer(id);
-                t.add_toast(adw::Toast::new("Queued for later"));
+                t.add_toast(adw::Toast::new(&gettext("Queued for later")));
             } else {
-                t.add_toast(adw::Toast::new("No other downloads waiting"));
+                t.add_toast(adw::Toast::new(&gettext("No other downloads waiting")));
             }
         });
     }
@@ -445,7 +455,7 @@ fn build_row(
             if let Err(e) = m.delete_download(id) {
                 t.add_toast(adw::Toast::new(&e));
             } else {
-                t.add_toast(adw::Toast::new("Moved to Trash"));
+                t.add_toast(adw::Toast::new(&gettext("Moved to Trash")));
             }
         });
     }
@@ -465,8 +475,8 @@ fn build_row(
             );
             let name = snapshot.2.clone();
             m.remove(id);
-            let toast = adw::Toast::new(&format!("Removed {name}"));
-            toast.set_button_label(Some("Undo"));
+            let toast = adw::Toast::new(&gettext("Removed {name}").replace("{name}", &name));
+            toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
             toast.connect_button_clicked(move |_| {
                 let (url, dir, fname, status, prog, detail, output_dir) = snapshot.clone();
@@ -500,7 +510,7 @@ struct InhibitState {
 async fn request_inhibit(
     state: Rc<RefCell<InhibitState>>,
     manager: Rc<DownloadManager>,
-    settings: gio::Settings,
+    settings: crate::settings::AppSettings,
 ) {
     const PORTAL: &str = "org.freedesktop.portal.Desktop";
     const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
@@ -522,7 +532,7 @@ async fn request_inhibit(
     };
     let options = glib::VariantDict::new(None);
     options.insert("handle_token", token);
-    options.insert("reason", "Downloading files");
+    options.insert("reason", gettext("Downloading files"));
     // Flags ride positionally (sua{sv}), not in the options dict: the
     // portal rejects the call otherwise.
     let params = glib::variant::ToVariant::to_variant(&(String::new(), SUSPEND, options.end()));
@@ -553,7 +563,7 @@ async fn request_inhibit(
     };
     // The queue may have idled during the round trip: close at once instead
     // of leaking a block nobody will release.
-    if !(settings.boolean("inhibit-suspend") && manager.has_transferring()) {
+    if !(settings.inhibit_suspend() && manager.has_transferring()) {
         release_inhibit(conn, path).await;
         clear_pending(&state);
         return;
@@ -622,7 +632,7 @@ fn request_background() {
         options.insert("handle_token", token);
         options.insert(
             "reason",
-            "Downloads continue in the background after the window is closed",
+            gettext("Downloads continue in the background after the window is closed"),
         );
         options.insert("autostart", false);
         options.insert("background", true);
@@ -645,52 +655,62 @@ fn request_background() {
 pub fn build_window(
     app: &adw::Application,
     manager: Rc<DownloadManager>,
-    settings: gio::Settings,
+    settings: crate::settings::AppSettings,
     toasts: Rc<adw::ToastOverlay>,
 ) -> adw::ApplicationWindow {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Grab")
-        .default_width(settings.int("window-width").max(400))
-        .default_height(settings.int("window-height").max(300))
+        .default_width(settings.window_width().max(400))
+        .default_height(settings.window_height().max(300))
         .build();
 
     settings
-        .bind("window-width", &window, "default-width")
+        .bind(crate::settings::key::WINDOW_WIDTH, &window, "default-width")
         .build();
     settings
-        .bind("window-height", &window, "default-height")
+        .bind(
+            crate::settings::key::WINDOW_HEIGHT,
+            &window,
+            "default-height",
+        )
         .build();
 
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&adw::WindowTitle::new("Grab", "Download Manager")));
+    header.set_title_widget(Some(&adw::WindowTitle::new(
+        &gettext("Grab"),
+        &gettext("Download Manager"),
+    )));
 
     let menu = gio::Menu::new();
-    menu.append(Some("New Download"), Some("app.add-download"));
+    menu.append(Some(&gettext("New Download")), Some("app.add-download"));
     let section = gio::Menu::new();
-    section.append(Some("Cancel All"), Some("app.cancel-all"));
-    section.append(Some("Retry Failed"), Some("app.retry-failed"));
-    section.append(Some("Open Download Folder"), Some("app.open-folder"));
+    section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
+    section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
+    section.append(
+        Some(&gettext("Open Download Folder")),
+        Some("app.open-folder"),
+    );
     menu.append_section(None, &section);
     let section2 = gio::Menu::new();
-    section2.append(Some("Preferences"), Some("app.preferences"));
-    section2.append(Some("Keyboard Shortcuts"), Some("app.shortcuts"));
-    section2.append(Some("About"), Some("app.about"));
+    section2.append(Some(&gettext("Preferences")), Some("app.preferences"));
+    section2.append(Some(&gettext("Keyboard Shortcuts")), Some("app.shortcuts"));
+    section2.append(Some(&gettext("About")), Some("app.about"));
     menu.append_section(None, &section2);
     let menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
-        .tooltip_text("Main Menu")
+        .tooltip_text(gettext("Main Menu"))
         .build();
-    menu_btn.update_property(&[gtk4::accessible::Property::Label("Main Menu")]);
+    menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
     header.pack_start(&menu_btn);
 
     let add_btn = gtk4::Button::builder()
         .icon_name("list-add-symbolic")
         .css_classes(["suggested-action"])
-        .tooltip_text("New Download (Ctrl+N)")
+        .tooltip_text(gettext("New Download (Ctrl+N)"))
         .build();
-    add_btn.update_property(&[gtk4::accessible::Property::Label("New Download")]);
+    add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
         let m = Rc::clone(&manager);
         add_btn.connect_clicked(move |_| show_add_dialog(m.clone()));
@@ -700,11 +720,11 @@ pub fn build_window(
     let stack = adw::ViewStack::new();
     let empty = adw::StatusPage::builder()
         .icon_name("folder-download-symbolic")
-        .title("No Downloads Yet")
-        .description("Add a download to get started.")
+        .title(gettext("No Downloads Yet"))
+        .description(gettext("Add a download to get started."))
         .build();
     let empty_add = gtk4::Button::builder()
-        .label("New Download")
+        .label(gettext("New Download"))
         .css_classes(["pill", "suggested-action"])
         .halign(gtk4::Align::Center)
         .build();
@@ -730,9 +750,9 @@ pub fn build_window(
         section.append(&list);
         (section, list)
     }
-    let (active_section, active_list) = section_list("Active");
-    let (queued_section, queued_list) = section_list("Queued");
-    let (downloaded_section, downloaded_list) = section_list("Downloaded");
+    let (active_section, active_list) = section_list(&gettext("Active"));
+    let (queued_section, queued_list) = section_list(&gettext("Queued"));
+    let (downloaded_section, downloaded_list) = section_list(&gettext("Downloaded"));
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
@@ -846,7 +866,9 @@ pub fn build_window(
                 request_background();
                 if m.background_notifications_enabled() {
                     if let Some(app) = gio::Application::default() {
-                        let n = gio::Notification::new("Downloads continue in the background");
+                        let n = gio::Notification::new(&gettext(
+                            "Downloads continue in the background",
+                        ));
                         n.set_default_action_and_target_value("app.present", None);
                         app.send_notification(Some(BACKGROUND_NOTIF_ID), &n);
                     }
@@ -862,8 +884,8 @@ pub fn build_window(
         window.connect_map(move |_| armed.set(true));
     }
 
-    let banner = adw::Banner::new("Some downloads failed");
-    banner.set_button_label(Some("Retry Failed"));
+    let banner = adw::Banner::new(&gettext("Some downloads failed"));
+    banner.set_button_label(Some(&gettext("Retry Failed")));
     {
         let m = Rc::clone(&manager);
         banner.connect_button_clicked(move |_| m.retry_failed());
@@ -985,7 +1007,9 @@ pub fn build_window(
 }
 
 pub fn show_add_dialog(manager: Rc<DownloadManager>) {
-    let dialog = adw::Dialog::builder().title("New Download").build();
+    let dialog = adw::Dialog::builder()
+        .title(gettext("New Download"))
+        .build();
     dialog.set_content_width(420);
 
     let page = adw::PreferencesPage::new();
@@ -993,7 +1017,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     page.add(&group);
 
     let url_row = adw::EntryRow::builder()
-        .title("URL")
+        .title(gettext("URL"))
         .text("")
         .show_apply_button(true)
         .build();
@@ -1001,18 +1025,18 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     group.add(&url_row);
 
     let file_row = adw::EntryRow::builder()
-        .title("File name (optional)")
+        .title(gettext("File name (optional)"))
         .text("")
         .build();
     group.add(&file_row);
 
     let torrent_btn = gtk4::Button::builder()
-        .label("Choose…")
-        .tooltip_text("Choose a .torrent file")
+        .label(gettext("Choose…"))
+        .tooltip_text(gettext("Choose a .torrent file"))
         .valign(gtk4::Align::Center)
         .build();
     let torrent_row = adw::ActionRow::builder()
-        .title("Torrent file")
+        .title(gettext("Torrent file"))
         .activatable_widget(&torrent_btn)
         .build();
     torrent_row.add_suffix(&torrent_btn);
@@ -1026,11 +1050,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .hexpand(true)
         .build();
     let dest_btn = gtk4::Button::builder()
-        .label("Choose…")
-        .tooltip_text("Choose download folder")
+        .label(gettext("Choose…"))
+        .tooltip_text(gettext("Choose download folder"))
         .valign(gtk4::Align::Center)
         .build();
-    let dest_row = adw::ActionRow::builder().title("Save to").build();
+    let dest_row = adw::ActionRow::builder().title(gettext("Save to")).build();
     dest_row.add_suffix(&dest_label);
     dest_row.add_suffix(&dest_btn);
     group.add(&dest_row);
@@ -1041,7 +1065,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let dl = dest_label.clone();
         dest_btn.connect_clicked(move |b| {
             let chooser = gtk4::FileDialog::builder()
-                .title("Choose download folder")
+                .title(gettext("Choose download folder"))
                 .build();
             let root = b.root().and_downcast::<gtk4::Window>();
             let dd2 = Rc::clone(&dd);
@@ -1086,7 +1110,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             let error_label = error_label.clone();
             glib::spawn_future_local(async move {
                 let filter = gtk4::FileFilter::new();
-                filter.set_name(Some("Torrent files"));
+                filter.set_name(Some(&gettext("Torrent files")));
                 filter.add_mime_type("application/x-bittorrent");
                 filter.add_pattern("*.torrent");
                 let filters = gio::ListStore::new::<gtk4::FileFilter>();
@@ -1107,7 +1131,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 }) {
                     Some(b) => b,
                     None => {
-                        error_label.set_text("Could not read that .torrent file");
+                        error_label.set_text(&gettext("Could not read that .torrent file"));
                         error_label.set_visible(true);
                         return;
                     }
@@ -1143,9 +1167,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let hb = adw::HeaderBar::new();
     hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+    let cancel_btn = gtk4::Button::builder().label(gettext("Cancel")).build();
     let add_btn = gtk4::Button::builder()
-        .label("Add Download")
+        .label(gettext("Add Download"))
         .css_classes(["suggested-action"])
         .build();
     hb.pack_start(&cancel_btn);
@@ -1280,8 +1304,11 @@ pub(crate) fn show_torrent_files_dialog(
 
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::builder()
-        .title("Files")
-        .description(format!("{} files", entries.len()))
+        .title(gettext("Files"))
+        .description(
+            ngettext("{} file", "{} files", entries.len() as u32)
+                .replace("{}", &entries.len().to_string()),
+        )
         .build();
     page.add(&group);
 
@@ -1307,9 +1334,9 @@ pub(crate) fn show_torrent_files_dialog(
     let hb = adw::HeaderBar::new();
     hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder().label("Cancel").build();
+    let cancel_btn = gtk4::Button::builder().label(gettext("Cancel")).build();
     let add_btn = gtk4::Button::builder()
-        .label("Add Files")
+        .label(gettext("Add Files"))
         .css_classes(["suggested-action"])
         .build();
     hb.pack_start(&cancel_btn);
@@ -1336,7 +1363,7 @@ pub(crate) fn show_torrent_files_dialog(
                 .map(|(i, _)| i)
                 .collect();
             if selected.is_empty() {
-                error_label.set_text("Select at least one file");
+                error_label.set_text(&gettext("Select at least one file"));
                 error_label.set_visible(true);
                 return;
             }
