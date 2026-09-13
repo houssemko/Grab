@@ -1249,6 +1249,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     error_label.set_text(&e);
                     error_label.set_visible(true);
                     row.add_css_class("error");
+                    // ponytail: libadwaita hides its apply tick before emitting
+                    // `apply`; touch the text while focused to re-arm it.
+                    let current = row.text().to_string();
+                    row.grab_focus();
+                    row.set_text("");
+                    row.set_text(&current);
                 }
             }
         });
