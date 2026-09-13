@@ -18,7 +18,7 @@ use std::{
 use gtk4::gio::prelude::SettingsExt;
 use gtk4::{gio, glib};
 use librqbit::{
-    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent,
+    api::TorrentIdOrHash, AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ManagedTorrent,
     Session, SessionOptions, TorrentStatsState,
 };
 use tokio::sync::{mpsc::UnboundedSender, Mutex, OnceCell};
@@ -446,6 +446,10 @@ async fn poll_loop(
 ) -> bool {
     let mut suggested = false;
     let mut finished = false;
+    // Per-piece haves for the block map. Built once: it only borrows the
+    // session, and polls on the same 500ms tick as progress (no extra
+    // wakeups; a failed poll just skips a frame).
+    let api = Api::new(session.clone(), None);
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let stats = handle.stats();
@@ -470,6 +474,12 @@ async fn poll_loop(
             .is_err()
         {
             break;
+        }
+        if let Ok((have, _)) = api.api_dump_haves(TorrentIdOrHash::Hash(handle.info_hash())) {
+            let have: Vec<bool> = have.iter().map(|b| *b).collect();
+            if tx.send(EngineMsg::TorrentPieces { have }).is_err() {
+                break;
+            }
         }
         if matches!(stats.state, TorrentStatsState::Error) {
             let _ = tx.send(EngineMsg::Failed(

@@ -2655,3 +2655,66 @@ fn restart_with_smaller_file_keeps_partial() {
     }
     cleanup(&server, &dir);
 }
+
+#[test]
+fn aggregate_downsamples_by_half() {
+    assert!(aggregate(&[], 8).is_empty());
+    assert!(aggregate(&[true, false], 0).is_empty());
+    assert_eq!(aggregate(&[true, true, true, false], 2), vec![true, true]);
+    assert_eq!(
+        aggregate(&[true, false, false, false], 2),
+        vec![true, false]
+    );
+    // Fewer pieces than cells: one true piece lights its own cells.
+    let cells = aggregate(&[false, false, true, false], 8);
+    assert_eq!(cells.len(), 8);
+    assert!(cells[4] && cells[5]);
+    assert_eq!(cells.iter().filter(|b| **b).count(), 2);
+    assert_eq!(
+        aggregate(&[true; 4096], BLOCK_CELLS),
+        vec![true; BLOCK_CELLS]
+    );
+}
+
+#[test]
+fn piece_bitmap_prefers_segment_then_torrent_then_bytes() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("piece-bitmap");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    assert!(manager.piece_bitmap(7).is_empty());
+
+    let item = DownloadItem::new(7, "https://example.com/big.bin", "big.bin", "/tmp/dl");
+    manager.store().append(&item);
+    // No bytes yet: nothing known.
+    assert!(manager.piece_bitmap(7).is_empty());
+    // Single-stream fallback fills a byte-progress prefix at BLOCK_CELLS.
+    item.set_progress(0.5);
+    let prefix = manager.piece_bitmap(7);
+    assert_eq!(prefix.len(), BLOCK_CELLS);
+    assert!(prefix[..128].iter().all(|b| *b));
+    assert!(prefix[128..].iter().all(|b| !b));
+    // A live segmented bitmap wins over the byte fill.
+    let mut st = SegmentState::new(4 * PIECE_MIN);
+    st.mark(1);
+    manager.segment_state.borrow_mut().insert(7, st);
+    assert_eq!(
+        manager.piece_bitmap(7),
+        manager.segment_state.borrow().get(&7).unwrap().done
+    );
+
+    // Torrent haves win over bytes but lose nothing: no segment entry here.
+    let torrent = DownloadItem::new(
+        8,
+        "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&dn=t",
+        "t",
+        "/tmp/dl",
+    );
+    manager.store().append(&torrent);
+    // Magnets never byte-fill: no session haves yet, so empty.
+    torrent.set_progress(0.5);
+    assert!(manager.piece_bitmap(8).is_empty());
+    let haves = vec![true, false, true];
+    manager.torrent_pieces.borrow_mut().insert(8, haves.clone());
+    assert_eq!(manager.piece_bitmap(8), haves);
+}

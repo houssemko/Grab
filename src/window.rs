@@ -1,4 +1,4 @@
-use crate::download::{DownloadManager, DownloadStatus};
+use crate::download::{aggregate, DownloadManager, DownloadStatus, BLOCK_CELLS};
 use adw::prelude::*;
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
@@ -53,6 +53,9 @@ struct RowWidgets {
     retry_btn: gtk4::Button,
     reveal_btn: gtk4::Button,
     delete_btn: gtk4::Button,
+    map_revealer: gtk4::Revealer,
+    blocks: gtk4::DrawingArea,
+    expanded: Rc<Cell<bool>>,
 }
 
 /// Whether deferring `item` could hand its slot to someone: another row is
@@ -106,6 +109,21 @@ fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_avail
         w.toggle_btn.set_tooltip_text(Some("Pause"));
         w.toggle_btn
             .update_property(&[gtk4::accessible::Property::Label("Pause")]);
+    }
+
+    // Block map: only while pieces are still landing. Other states
+    // collapse it so finished rows stay compact.
+    let expandable = matches!(
+        item.status(),
+        DownloadStatus::Downloading | DownloadStatus::Paused
+    );
+    if !expandable {
+        w.expanded.set(false);
+    }
+    w.map_revealer
+        .set_reveal_child(w.expanded.get() && expandable);
+    if w.map_revealer.reveals_child() {
+        w.blocks.queue_draw();
     }
 }
 
@@ -165,12 +183,88 @@ fn build_row(
     let progress = gtk4::ProgressBar::new();
     progress.set_show_text(false);
 
+    // Block map: per-piece completion strip under the progress bar,
+    // revealed by clicking the row. A DrawingArea (not hundreds of
+    // widgets) keeps thousands of pieces cheap; the textual percent in
+    // `detail` stays the screen-reader path.
+    let id = item.id();
+    let expanded = Rc::new(Cell::new(false));
+    let blocks = gtk4::DrawingArea::new();
+    blocks.set_content_height(48);
+    blocks.set_hexpand(true);
+    blocks.update_property(&[gtk4::accessible::Property::Label("Downloaded blocks")]);
+    {
+        let m = Rc::clone(manager);
+        blocks.set_draw_func(move |_area, cr, width, height| {
+            let cells = aggregate(&m.piece_bitmap(id), BLOCK_CELLS);
+            if cells.is_empty() {
+                return;
+            }
+            // Accent for done, washed accent for pending: follows the theme.
+            let accent = adw::StyleManager::default().accent_color().to_rgba();
+            let (r, g, b) = (
+                f64::from(accent.red()),
+                f64::from(accent.green()),
+                f64::from(accent.blue()),
+            );
+            let (cols, rows) = (64_usize, 4_usize);
+            let (cw, ch) = (width as f64 / cols as f64, height as f64 / rows as f64);
+            for (i, done) in cells.iter().enumerate().take(cols * rows) {
+                let (col, row) = ((i % cols) as f64, (i / cols) as f64);
+                cr.set_source_rgba(r, g, b, if *done { 1.0 } else { 0.18 });
+                cr.rectangle(col * cw + 0.5, row * ch + 0.5, cw - 1.0, ch - 1.0);
+                let _ = cr.fill();
+            }
+        });
+    }
+    let map_revealer = gtk4::Revealer::new();
+    map_revealer.set_transition_type(gtk4::RevealerTransitionType::SlideDown);
+    map_revealer.set_child(Some(&blocks));
+
     outer.append(&top);
     outer.append(&detail);
     outer.append(&progress);
+    outer.append(&map_revealer);
 
     let row = gtk4::ListBoxRow::new();
     row.set_child(Some(&outer));
+
+    // Click the row body to reveal the block map. Clicks landing on a
+    // button belong to the button: walk up from the pick target and
+    // ignore those. Only live rows expand (finished ones have no map).
+    {
+        let click = gtk4::GestureClick::new();
+        let m = Rc::clone(manager);
+        let rev = map_revealer.clone();
+        let exp = Rc::clone(&expanded);
+        click.connect_pressed(move |gesture, _n_press, x, y| {
+            let pick = gesture
+                .widget()
+                .and_downcast::<gtk4::ListBoxRow>()
+                .and_then(|r| r.pick(x, y, gtk4::PickFlags::DEFAULT));
+            let mut w = pick;
+            while let Some(widget) = w {
+                if widget.is::<gtk4::Button>() {
+                    return;
+                }
+                w = widget.parent();
+            }
+            let live = m.find(id).is_some_and(|it| {
+                matches!(
+                    it.status(),
+                    DownloadStatus::Downloading | DownloadStatus::Paused
+                )
+            });
+            if live {
+                exp.set(!exp.get());
+                rev.set_reveal_child(exp.get());
+                if let Some(a) = rev.child().and_downcast::<gtk4::DrawingArea>() {
+                    a.queue_draw();
+                }
+            }
+        });
+        row.add_controller(click);
+    }
 
     let w = |w: &gtk4::Widget| w.downgrade();
     let weaks = (
@@ -183,10 +277,13 @@ fn build_row(
         w(retry_btn.upcast_ref()),
         w(reveal_btn.upcast_ref()),
         w(delete_btn.upcast_ref()),
+        w(map_revealer.upcast_ref()),
+        w(blocks.upcast_ref()),
         w(status.upcast_ref()),
         w(name.upcast_ref()),
     );
     let m_sync = Rc::clone(manager);
+    let exp_sync = Rc::clone(&expanded);
     let updater = move |it: &crate::download::DownloadItem| {
         let (
             w_detail,
@@ -198,6 +295,8 @@ fn build_row(
             w_retry,
             w_reveal,
             w_del,
+            w_rev,
+            w_map,
             w_status,
             w_name,
         ) = &weaks;
@@ -211,6 +310,8 @@ fn build_row(
             Some(r),
             Some(o),
             Some(y),
+            Some(rv),
+            Some(mp),
             Some(st),
             Some(n),
         ) = (
@@ -223,6 +324,8 @@ fn build_row(
             w_retry.upgrade(),
             w_reveal.upgrade(),
             w_del.upgrade(),
+            w_rev.upgrade(),
+            w_map.upgrade(),
             w_status.upgrade(),
             w_name.upgrade(),
         ) {
@@ -246,6 +349,11 @@ fn build_row(
                     retry_btn: r.downcast().expect("Grab: retry widget is a Button (bug)"),
                     reveal_btn: o.downcast().expect("Grab: reveal widget is a Button (bug)"),
                     delete_btn: y.downcast().expect("Grab: delete widget is a Button (bug)"),
+                    map_revealer: rv.downcast().expect("Grab: map widget is a Revealer (bug)"),
+                    blocks: mp
+                        .downcast()
+                        .expect("Grab: blocks widget is a DrawingArea (bug)"),
+                    expanded: Rc::clone(&exp_sync),
                 },
                 another_queued(&m_sync, it),
             );
@@ -271,11 +379,13 @@ fn build_row(
             retry_btn: retry_btn.clone(),
             reveal_btn: reveal_btn.clone(),
             delete_btn: delete_btn.clone(),
+            map_revealer: map_revealer.clone(),
+            blocks: blocks.clone(),
+            expanded: Rc::clone(&expanded),
         },
         another_queued(manager, item),
     );
 
-    let id = item.id();
     {
         let m = Rc::clone(manager);
         toggle_btn.connect_clicked(move |_| {
@@ -890,6 +1000,18 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .build();
     group.add(&file_row);
 
+    let torrent_btn = gtk4::Button::builder()
+        .label("Choose…")
+        .tooltip_text("Choose a .torrent file")
+        .valign(gtk4::Align::Center)
+        .build();
+    let torrent_row = adw::ActionRow::builder()
+        .title("Torrent file")
+        .activatable_widget(&torrent_btn)
+        .build();
+    torrent_row.add_suffix(&torrent_btn);
+    group.add(&torrent_row);
+
     let dest_label = gtk4::Label::builder()
         .label(manager.effective_download_dir())
         .halign(gtk4::Align::Start)
@@ -946,17 +1068,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         });
     }
 
-    let torrent_btn = gtk4::Button::builder()
-        .label("Choose…")
-        .tooltip_text("Choose a .torrent file")
-        .valign(gtk4::Align::Center)
-        .build();
-    let torrent_row = adw::ActionRow::builder()
-        .title("Torrent file")
-        .activatable_widget(&torrent_btn)
-        .build();
-    torrent_row.add_suffix(&torrent_btn);
-    group.add(&torrent_row);
     {
         let m = manager.clone();
         let dd = dest_dir.clone();

@@ -431,6 +431,12 @@ pub(crate) enum EngineMsg {
     /// UI thread drops the resume bitmap so a later retry starts fresh
     /// instead of failing on the dead file version forever.
     FailedVersion(String),
+    /// Torrent per-piece haves polled from the session (500ms tick).
+    /// Replaces the stored bitfield; the block map redraws off progress
+    /// ticks arriving on the same tick, so this needs no extra signal.
+    TorrentPieces {
+        have: Vec<bool>,
+    },
 }
 
 /// Shared inputs for one download's engine task. Groups the params every
@@ -1094,11 +1100,32 @@ const MIN_SEGMENT: u64 = 4 * 1024 * 1024;
 const MAX_SEGMENTED_TOTAL: u64 = 1 << 40;
 /// Per-piece fetch attempts before a worker gives up on it.
 const PIECE_TRIES: u32 = 3;
+/// Block-map cells the piece bitmap downsamples to for display. Native
+/// piece counts vary (up to 4096); the widget aggregates to this width so
+/// every row renders the same compact strip.
+pub(crate) const BLOCK_CELLS: usize = 256;
 
 /// How many connections a download may use: at least 2 to bother splitting,
 /// at most 16, and never more than one per MIN_SEGMENT of file.
 fn split_count(total: u64, connections: usize) -> usize {
     (connections.max(1) as u64).min(total / MIN_SEGMENT).min(16) as usize
+}
+
+/// Downsample a piece bitmap to `n` display cells: cell `i` covers
+/// `bits[i*len/n..(i+1)*len/n)` and reads done when at least half its
+/// pieces are. Empty in, empty out.
+pub(crate) fn aggregate(bits: &[bool], n: usize) -> Vec<bool> {
+    if bits.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    (0..n)
+        .map(|i| {
+            let (lo, hi) = (i * bits.len() / n, (i + 1) * bits.len() / n);
+            let span = hi.saturating_sub(lo).max(1) as f64;
+            let done = bits[lo..hi.max(lo + 1)].iter().filter(|b| **b).count() as f64;
+            done / span >= 0.5
+        })
+        .collect()
 }
 
 /// Split `total` bytes into `piece_len` `(start, end)` pieces (inclusive
@@ -1554,6 +1581,9 @@ pub struct DownloadManager {
     epoch: RefCell<HashMap<u64, u64>>,
     /// Resume bitmaps for segmented downloads (session-only, main thread).
     segment_state: RefCell<HashMap<u64, SegmentState>>,
+    /// Torrent per-piece haves by row (session-only, main thread, never
+    /// persisted: re-polled from the session on every spawn).
+    torrent_pieces: RefCell<HashMap<u64, Vec<bool>>>,
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
@@ -1574,6 +1604,7 @@ impl DownloadManager {
             queued: Cell::new(0),
             epoch: RefCell::new(HashMap::new()),
             segment_state: RefCell::new(HashMap::new()),
+            torrent_pieces: RefCell::new(HashMap::new()),
             draining: Cell::new(false),
         });
         // Live preferences: raising the download limit must wake queued
@@ -2069,6 +2100,7 @@ impl DownloadManager {
                                 "Finished".to_string()
                             });
                             this.segment_state.borrow_mut().remove(&id);
+                            this.torrent_pieces.borrow_mut().remove(&id);
                             // Filtered torrents: drop the untoggled files
                             // (0-byte placeholders and shared-piece bytes)
                             // now that every selected byte is on disk.
@@ -2122,6 +2154,7 @@ impl DownloadManager {
                         {
                             item.set_status(DownloadStatus::Failed);
                             item.set_detail(e.clone());
+                            this.torrent_pieces.borrow_mut().remove(&id);
                             this.notify_finished(&item, Err(e));
                         }
                         done = true;
@@ -2153,6 +2186,9 @@ impl DownloadManager {
                         if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
                             st.mark(idx);
                         }
+                    }
+                    EngineMsg::TorrentPieces { have } => {
+                        this.torrent_pieces.borrow_mut().insert(id, have);
                     }
                     EngineMsg::TruncatePrefix => {
                         if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
@@ -2436,6 +2472,7 @@ impl DownloadManager {
         self.running.borrow_mut().remove(&id);
         self.pending_names.borrow_mut().remove(&id);
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
+        self.torrent_pieces.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             if had_segments {
                 let _ = std::fs::remove_file(item.file_path());
@@ -2522,6 +2559,27 @@ impl DownloadManager {
         }
         let dest = std::path::PathBuf::from(item.dest_dir().to_string());
         crate::torrent::torrent_output_dir(&dest, &item.url()).unwrap_or_else(|| item.file_path())
+    }
+
+    /// Per-piece completion for the block map, native resolution:
+    /// segmented HTTP bitmap, torrent session haves, or a prefix fill
+    /// from byte progress for plain single-stream rows. Empty when the
+    /// row is unknown or nothing is known yet.
+    pub fn piece_bitmap(&self, id: u64) -> Vec<bool> {
+        if let Some(st) = self.segment_state.borrow().get(&id) {
+            return st.done.clone();
+        }
+        if let Some(have) = self.torrent_pieces.borrow().get(&id) {
+            return have.clone();
+        }
+        let Some(item) = self.find(id) else {
+            return Vec::new();
+        };
+        if crate::torrent::is_torrent(&item.url()) || item.progress() <= 0.0 {
+            return Vec::new();
+        }
+        let filled = (item.progress().clamp(0.0, 1.0) * BLOCK_CELLS as f64) as usize;
+        (0..BLOCK_CELLS).map(|i| i < filled).collect()
     }
 
     /// Move the downloaded file to Trash, then remove the row.
