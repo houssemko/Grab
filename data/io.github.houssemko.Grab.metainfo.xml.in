@@ -37,6 +37,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.2.4" date="2026-09-13">
+      <description>
+        <p>Fix: About dialog no longer crashes; release notes are embedded in the app.</p>
+      </description>
+    </release>
     <release version="2.2.3" date="2026-09-13">
       <description>
         <p>Dialog improvements: access keys on action buttons, clearer file-chooser labels, About page with release notes, Enter key confirms dialogs. Dependency updates.</p>
