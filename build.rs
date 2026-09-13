@@ -23,8 +23,9 @@ fn main() {
     }
     println!("cargo:rustc-env=GRAB_SCHEMA_DIR={}", schema_dir.display());
     // About dialog reads name/version/notes from the metainfo via
-    // from_appdata, which needs a GResource path: compile it here so the
-    // catalog rides inside the binary (no install-prefix dependency).
+    // from_appdata, which needs a GResource path. The bundle is embedded
+    // into the binary with include_bytes!, so a failure here must fail the
+    // build loudly instead of shipping an About dialog that aborts on open.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
     let gresource = out_dir.join("grab.gresource");
     let res_status = std::process::Command::new("glib-compile-resources")
@@ -34,11 +35,8 @@ fn main() {
         .current_dir(&manifest_dir)
         .status();
     if !matches!(res_status, Ok(s) if s.success()) {
-        eprintln!(
-            "cargo:warning=glib-compile-resources failed; About dialog falls back to compiled-in literals"
-        );
+        panic!("glib-compile-resources failed; cannot embed About dialog metainfo");
     }
-    println!("cargo:rustc-env=GRAB_GRESOURCE={}", gresource.display());
     // Installed message catalogs live under $prefix/share/locale; the
     // meson build passes it as GRAB_PREFIX, dev/test builds fall back to
     // the source po/ dir at runtime (no .mo there, so gettext is a no-op).

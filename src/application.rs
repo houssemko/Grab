@@ -279,14 +279,28 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("about")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        // Name/version/notes come from the metainfo catalog;
-                        // the icon and license can't, so they stay literal.
-                        let about = adw::AboutDialog::from_appdata(
-                            "/io/github/houssemko/Grab/metainfo.xml",
-                            Some(env!("GRAB_VERSION")),
-                        );
-                        about.set_application_icon(APP_ID);
-                        about.set_license_type(gtk4::License::MitX11);
+                        // from_appdata aborts on a missing resource, so only
+                        // use it when the embedded catalog is registered;
+                        // About must never crash the app.
+                        const METAINFO: &str = "/io/github/houssemko/Grab/metainfo.xml";
+                        let registered =
+                            gio::resources_lookup_data(METAINFO, gio::ResourceLookupFlags::NONE)
+                                .is_ok();
+                        let about = if registered {
+                            // Name/version/notes come from the metainfo catalog;
+                            // the icon and license can't, so they stay literal.
+                            let about = adw::AboutDialog::from_appdata(
+                                METAINFO,
+                                Some(env!("GRAB_VERSION")),
+                            );
+                            about.set_application_icon(APP_ID);
+                            about.set_license_type(gtk4::License::MitX11);
+                            about
+                        } else {
+                            let about = adw::AboutDialog::new();
+                            about.set_application_name("Grab");
+                            about
+                        };
                         about.present(Some(&s.window));
                     }
                 })

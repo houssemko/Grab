@@ -11,6 +11,12 @@ use libadwaita as adw;
 
 pub const APP_ID: &str = "io.github.houssemko.Grab";
 
+/// Metainfo catalog for the About dialog, embedded at compile time.
+/// from_appdata reads only GResource paths, and the cargo OUT_DIR the
+/// bundle used to be loaded from does not exist at runtime (Flatpak
+/// included), which crashed About — so the bytes ride inside the binary.
+static GRESOURCE_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grab.gresource"));
+
 /// Locale for translated UI strings: compiled .mo catalogs under the
 /// install prefix (or GRAB_LOCALEDIR override). Without catalogs gettext
 /// returns the English msgids unchanged (dev/test).
@@ -46,9 +52,9 @@ fn ensure_schema_dir() {
 fn main() -> glib::ExitCode {
     tracing_subscriber::fmt::init();
     ensure_schema_dir();
-    // Metainfo for the About dialog (from_appdata reads GResource paths).
-    // A missing/broken bundle only loses release notes; literals below stay.
-    if let Ok(res) = gio::Resource::load(env!("GRAB_GRESOURCE")) {
+    // Registered before any dialog can open; a corrupt bundle only loses
+    // release notes, the About action itself guards the missing case.
+    if let Ok(res) = gio::Resource::from_data(&glib::Bytes::from_static(GRESOURCE_DATA)) {
         gio::resources_register(&res);
     }
     init_locale();
