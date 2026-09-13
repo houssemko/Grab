@@ -32,6 +32,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.1.0" date="2026-09-13">
+      <description>
+        <p>Torrent delete moves the real download folder to Trash; magnets download into their own subfolder; file-picker leftovers are cleaned at finish; peer limit defaults to unlimited.</p>
+      </description>
+    </release>
     <release version="2.0.9" date="2026-09-12">
       <description>
         <p>Fix: finished torrent downloads keep their .torrent file so deleting them moves the real download folder to Trash.</p>

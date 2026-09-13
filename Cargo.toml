@@ -1,6 +1,6 @@
 [package]
 name = "grab"
-version = "2.0.9"
+version = "2.1.0"
 edition = "2021"
 rust-version = "1.92"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
@@ -15,7 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "sync", "time", "fs", "io-util", "macros"] }
 futures-util = "0.3.34"
-reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "stream"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 # Torrent engine (magnet links). No default features: default-tls would pull

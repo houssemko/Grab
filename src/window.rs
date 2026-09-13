@@ -953,7 +953,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .build();
     let torrent_row = adw::ActionRow::builder()
         .title("Torrent file")
-        .subtitle("Pick a .torrent file instead of a link")
         .activatable_widget(&torrent_btn)
         .build();
     torrent_row.add_suffix(&torrent_btn);
