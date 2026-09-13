@@ -318,7 +318,7 @@ fn build_row(
         let t = Rc::clone(toasts);
         reveal_btn.connect_clicked(move |_| {
             if let Some(it) = m.find(id) {
-                launch_path(&it.file_path(), &t, true);
+                launch_path(&it.display_path(), &t, true);
             }
         });
     }
@@ -345,6 +345,7 @@ fn build_row(
                 it.status(),
                 it.progress(),
                 it.detail().to_string(),
+                it.output_dir().to_string(),
             );
             let name = snapshot.2.clone();
             m.remove(id);
@@ -352,8 +353,9 @@ fn build_row(
             toast.set_button_label(Some("Undo"));
             let m2 = Rc::clone(&m);
             toast.connect_button_clicked(move |_| {
-                let (url, dir, fname, status, prog, detail) = snapshot.clone();
-                m2.unremove(url, dir, fname, status, prog, detail);
+                let (url, dir, fname, status, prog, detail, output_dir) = snapshot.clone();
+                let restored = m2.unremove(url, dir, fname, status, prog, detail);
+                restored.set_output_dir(output_dir);
             });
             t.add_toast(toast);
         });

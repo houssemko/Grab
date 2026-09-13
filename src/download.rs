@@ -79,6 +79,10 @@ struct StoredItem {
     /// the resume downloads every file.
     #[serde(default)]
     selected_files: Option<Vec<usize>>,
+    /// Recorded engine output folder for torrents (v2+). Absent on old
+    /// files and for items that need no folder tracking.
+    #[serde(default)]
+    output_dir: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -108,6 +112,11 @@ mod imp {
         pub progress: Cell<f64>,
         #[property(get, set)]
         pub detail: RefCell<String>,
+        /// Engine's real output folder for torrents (magnets land in
+        /// `dest/<stub>/`; empty means unknown, use `file_path()`).
+        /// Recorded at enqueue, persisted in the queue, trashed on delete.
+        #[property(get, set)]
+        pub output_dir: RefCell<String>,
     }
 
     #[glib::object_subclass]
@@ -138,6 +147,17 @@ impl DownloadItem {
     /// Full destination path (`dest_dir` joined with `filename`).
     pub fn file_path(&self) -> std::path::PathBuf {
         std::path::Path::new(&self.dest_dir()).join(self.filename())
+    }
+
+    /// Best on-disk guess for reveal: inside the recorded engine folder
+    /// when one exists, else the plain destination path.
+    pub fn display_path(&self) -> std::path::PathBuf {
+        let output_dir = self.output_dir();
+        if output_dir.is_empty() {
+            self.file_path()
+        } else {
+            std::path::Path::new(&output_dir).join(self.filename())
+        }
     }
 }
 
@@ -1710,6 +1730,18 @@ impl DownloadManager {
                     .any(|it| it.dest_dir() == dir && it.filename() == n)
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
+        if crate::torrent::is_magnet(&url) {
+            // Magnets carry no archive to recompute the output folder
+            // from at delete time, so record their subfolder now: the
+            // engine is spawned with this folder as its destination.
+            // The deduped stub above is filesystem-safe by construction.
+            item.set_output_dir(
+                std::path::Path::new(&dir)
+                    .join(&name)
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
         Ok(self.insert(item))
     }
 
@@ -1775,7 +1807,14 @@ impl DownloadManager {
         item
     }
 
-    fn insert_history(self: &Rc<Self>, url: String, dir: String, name: String, progress: f64) {
+    fn insert_history(
+        self: &Rc<Self>,
+        url: String,
+        dir: String,
+        name: String,
+        progress: f64,
+        output_dir: Option<String>,
+    ) {
         let Ok(url) = normalize_url(&url) else {
             tracing::warn!("skipping history entry with bad URL");
             return;
@@ -1791,6 +1830,10 @@ impl DownloadManager {
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         item.set_progress(progress.clamp(0.0, 1.0));
         item.set_status(DownloadStatus::Done);
+        // Already trust-checked by the caller (must sit inside `dir`).
+        if let Some(folder) = output_dir {
+            item.set_output_dir(folder);
+        }
         let size = std::fs::metadata(item.file_path())
             .map(|m| m.len())
             .unwrap_or(0);
@@ -2212,7 +2255,18 @@ impl DownloadManager {
     /// cancel, retry, persist and the stale-pump guard keep working unchanged.
     fn spawn_torrent(self: &Rc<Self>, item: DownloadItem, magnet: String) {
         let dir = std::path::PathBuf::from(item.dest_dir().to_string());
-        let _ = std::fs::create_dir_all(&dir);
+        // Magnets recorded their subfolder at enqueue (no archive exists
+        // to recompute it from later); archived torrents recompute theirs
+        // from metadata, so plain dest stays correct for them.
+        let dest = {
+            let recorded = item.output_dir().to_string();
+            if recorded.is_empty() {
+                dir.clone()
+            } else {
+                std::path::PathBuf::from(recorded)
+            }
+        };
+        let _ = std::fs::create_dir_all(&dest);
         let settings = &self.settings;
         let seed_finished = settings.boolean("torrent-seed-finished");
         let dht = settings.boolean("torrent-dht");
@@ -2239,7 +2293,7 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(crate::torrent::run_torrent(crate::torrent::TorrentJob {
             id,
             source,
-            dest: dir,
+            dest,
             seed_finished,
             dht,
             peer_limit,
@@ -2494,15 +2548,22 @@ impl DownloadManager {
         // Torrent rows (any status): drop the session entry and the
         // archive, drop the row, then Trash the real files. Multi-file
         // torrents live in dest/<torrent-name>/ rather than the stub path
-        // (never written), so recompute the engine's output folder; a
-        // missing path is fine when metadata never resolved. Matches the
-        // HTTP delete contract (Trash, recoverable).
+        // (never written), so trash the folder recorded at enqueue
+        // (magnets) or recomputed from the archived .torrent; a missing
+        // path is fine when metadata never resolved. Matches the HTTP
+        // delete contract (Trash, recoverable).
         if crate::torrent::is_torrent(&item.url()) {
-            let path = crate::torrent::torrent_output_dir(
-                &std::path::PathBuf::from(item.dest_dir().to_string()),
-                &item.url(),
-            )
-            .unwrap_or_else(|| item.file_path());
+            let dest = std::path::PathBuf::from(item.dest_dir().to_string());
+            // Trash the engine's real folder: the one recorded at enqueue
+            // (magnets), else recomputed from the archived .torrent, else
+            // the row's own path as a last resort.
+            let recorded = item.output_dir().to_string();
+            let path = if recorded.is_empty() {
+                crate::torrent::torrent_output_dir(&dest, &item.url())
+                    .unwrap_or_else(|| item.file_path())
+            } else {
+                std::path::PathBuf::from(recorded)
+            };
             crate::torrent::forget_download(id, false);
             crate::torrent::delete_archive_for_url(&item.url());
             self.remove(id);
@@ -2647,6 +2708,10 @@ impl DownloadManager {
                 if let Some(status) = StoredStatus::from_item(it.status()) {
                     let segments = self.segment_state.borrow().get(&it.id()).cloned();
                     let selected_files = crate::torrent::get_selection(&it.url().to_string());
+                    // Empty means "no folder tracked": omit it so old files
+                    // stay clean and old app versions keep reading new ones.
+                    let output_dir = it.output_dir().to_string();
+                    let output_dir = (!output_dir.is_empty()).then_some(output_dir);
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
@@ -2655,6 +2720,7 @@ impl DownloadManager {
                         progress: it.progress(),
                         segments,
                         selected_files,
+                        output_dir,
                     });
                 }
             }
@@ -2742,9 +2808,25 @@ impl DownloadManager {
             }
             self.batch.set(true);
             for item in items {
+                // The recorded engine folder is only trusted when it sits
+                // directly inside the row's own dest; otherwise it stays
+                // unknown and delete falls back to the recomputed path.
+                let output_dir = item.output_dir.clone().filter(|dir| {
+                    let folder = std::path::PathBuf::from(dir);
+                    folder.is_absolute()
+                        && folder
+                            .parent()
+                            .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
+                });
                 match item.status {
                     StoredStatus::Done => {
-                        self.insert_history(item.url, item.dest_dir, item.filename, item.progress);
+                        self.insert_history(
+                            item.url,
+                            item.dest_dir,
+                            item.filename,
+                            item.progress,
+                            output_dir,
+                        );
                     }
                     status => {
                         // A stored bitmap resumes segmented; anything
@@ -2769,6 +2851,10 @@ impl DownloadManager {
                             segments,
                         ) {
                             Ok(restored) => {
+                                // Re-attach the recorded engine folder.
+                                if let Some(dir) = output_dir.clone() {
+                                    restored.set_output_dir(dir);
+                                }
                                 // Re-stage the intake file selection: the
                                 // live map is in-memory only, so without
                                 // this a restart drops the filter and the
@@ -3178,6 +3264,7 @@ mod tests {
                 progress: 0.0,
                 segments: None,
                 selected_files: None,
+                output_dir: None,
             },
             StoredItem {
                 url: "https://example.com/paused.iso".to_string(),
@@ -3187,6 +3274,7 @@ mod tests {
                 progress: 0.5,
                 segments: None,
                 selected_files: None,
+                output_dir: None,
             },
         ];
         for i in 0..1000 {
@@ -3198,6 +3286,7 @@ mod tests {
                 progress: 1.0,
                 segments: None,
                 selected_files: None,
+                output_dir: None,
             });
         }
         let queue = StoredQueue {
@@ -3889,6 +3978,57 @@ mod tests {
     }
 
     #[test]
+    fn magnet_delete_trashes_recorded_subfolder() {
+        let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+        let _qf = test_queue_file("magnet-subfolder");
+        let settings = test_settings();
+        // Occupy the only slot so nothing spawns a real engine below.
+        settings.set_int("max-concurrent", 1).unwrap();
+        // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+        let dir = glib::user_data_dir().join(format!("grab-magnet-sub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        settings
+            .set_string("download-dir", &dir.to_string_lossy())
+            .unwrap();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+        let holder = tokio_rt().spawn(async {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+        });
+        manager.running.borrow_mut().insert(99, holder);
+        let item = manager
+            .enqueue(
+                "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&dn=gone",
+                None,
+                None,
+            )
+            .unwrap();
+        // Enqueue records the engine subfolder: no archive exists to
+        // recompute it from at delete time.
+        let folder = dir.join("gone");
+        assert_eq!(
+            std::path::PathBuf::from(item.output_dir().to_string()),
+            folder
+        );
+        // Simulate engine output: the finished row is renamed while the
+        // real payload sits inside the recorded subfolder.
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("real-name.bin"), b"data").unwrap();
+        item.set_filename("real-name.bin");
+        item.set_status(DownloadStatus::Done);
+        assert!(manager.delete_download(item.id()).is_ok());
+        assert!(!folder.exists());
+        assert_eq!(manager.store().n_items(), 0);
+        // Undo the test's own Trash litter.
+        let trash = glib::user_data_dir().join("Trash");
+        let _ = std::fs::remove_dir_all(trash.join("files/gone"));
+        let _ = std::fs::remove_file(trash.join("info/gone.trashinfo"));
+        // Teardown BEFORE restoring keys (see rejects_relative_download_dir).
+        manager.cancel_all();
+        let _ = std::fs::remove_dir_all(&dir);
+        settings.set_int("max-concurrent", 3).unwrap();
+    }
+
+    #[test]
     fn delete_download_trashes_torrent_subfolder() {
         let _lock = QUEUE_FILE_LOCK.lock().unwrap();
         let _qf = test_queue_file("del-subfolder");
@@ -4007,6 +4147,7 @@ mod tests {
                     progress: 0.0,
                     segments: None,
                     selected_files: None,
+                    output_dir: None,
                 },
                 StoredItem {
                     url: "https://example.com/b.iso".to_string(),
@@ -4016,6 +4157,7 @@ mod tests {
                     progress: 1.0,
                     segments: None,
                     selected_files: None,
+                    output_dir: None,
                 },
             ],
         };
@@ -4162,6 +4304,7 @@ mod tests {
                 progress: 1.0,
                 segments: None,
                 selected_files: None,
+                output_dir: None,
             })
             .collect();
         let queue = StoredQueue {
@@ -4372,6 +4515,7 @@ mod tests {
             progress: 0.5,
             segments: None,
             selected_files: None,
+            output_dir: None,
         })
         .collect();
         let queue = StoredQueue {
@@ -5070,6 +5214,7 @@ mod tests {
                     progress: 0.0,
                     segments: None,
                     selected_files: None,
+                    output_dir: None,
                 }],
             })
             .unwrap(),

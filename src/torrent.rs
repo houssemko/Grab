@@ -497,8 +497,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                 };
                 let hash_hex = hash_id.as_string();
                 let stub = stub_name(magnet).unwrap_or_else(|| hash_hex.clone());
-                // Magnet file counts only arrive mid-download, so magnets
-                // always land flat (see output_folder_for).
+                // `dest` already points at the row's subfolder (recorded at
+                // enqueue), so magnets land grouped instead of flat.
                 (
                     hash_hex,
                     hash_id,
