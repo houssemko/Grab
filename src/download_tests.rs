@@ -330,7 +330,7 @@ fn overcap_queue_keeps_active_first() {
             url: "https://example.com/active.iso".to_string(),
             dest_dir: "/tmp/dl".to_string(),
             filename: "active.iso".to_string(),
-            status: StoredStatus::Queued,
+            status: DownloadStatus::Queued,
             progress: 0.0,
             segments: None,
             selected_files: None,
@@ -340,7 +340,7 @@ fn overcap_queue_keeps_active_first() {
             url: "https://example.com/paused.iso".to_string(),
             dest_dir: "/tmp/dl".to_string(),
             filename: "paused.iso".to_string(),
-            status: StoredStatus::Paused,
+            status: DownloadStatus::Paused,
             progress: 0.5,
             segments: None,
             selected_files: None,
@@ -352,7 +352,7 @@ fn overcap_queue_keeps_active_first() {
             url: format!("https://example.com/f{i}.iso"),
             dest_dir: "/tmp/dl".to_string(),
             filename: format!("f{i}.iso"),
-            status: StoredStatus::Done,
+            status: DownloadStatus::Done,
             progress: 1.0,
             segments: None,
             selected_files: None,
@@ -760,10 +760,9 @@ fn staged_selection_survives_respawn() {
     // (retry after cancel/fail), silently downloading everything.
     // Selections now peek until pruned with unreferenced archives.
     let url = "torrent:/tmp/grab-test-sel.torrent";
-    crate::torrent::stage_selection(url, vec![2], 3);
+    crate::torrent::stage_selection(url, vec![2]);
     assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
     assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
-    assert_eq!(crate::torrent::selection_total(url), Some(3));
     let mut referenced = std::collections::HashSet::new();
     referenced.insert(url.to_string());
     crate::torrent::prune_selections(&referenced);
@@ -1101,7 +1100,7 @@ fn finish_cleans_untoggled_placeholders() {
     let pseudo =
         crate::torrent::archive_torrent_file(&format!("{stem}.torrent"), &multi_torrent_bytes())
             .unwrap();
-    crate::torrent::stage_selection(&pseudo, vec![0], 2);
+    crate::torrent::stage_selection(&pseudo, vec![0]);
     // Fake engine output: kept file plus untoggled leftovers.
     let folder = std::env::temp_dir().join(format!("grab-cleanup-{stem}"));
     std::fs::create_dir_all(folder.join("sub")).unwrap();
@@ -1199,7 +1198,7 @@ fn restore_keeps_exact_filename() {
             "https://example.com/ubuntu.iso",
             &dir_s,
             "ubuntu.iso",
-            StoredStatus::Downloading,
+            DownloadStatus::Downloading,
             None,
         )
         .unwrap();
@@ -1210,19 +1209,12 @@ fn restore_keeps_exact_filename() {
 
 #[test]
 fn queue_roundtrip_and_mapping() {
-    assert_eq!(
-        StoredStatus::from_item(DownloadStatus::Done),
-        Some(StoredStatus::Done)
-    );
-    assert!(StoredStatus::from_item(DownloadStatus::Cancelled).is_none());
-    for s in [
-        DownloadStatus::Queued,
-        DownloadStatus::Paused,
-        DownloadStatus::Downloading,
-        DownloadStatus::Failed,
-    ] {
-        assert!(StoredStatus::from_item(s).is_some());
-    }
+    // Old queue files use the same lowercase status words.
+    let legacy: StoredQueue = serde_json::from_str(
+        r#"{"version":2,"items":[{"url":"https://example.com/c.iso","dest_dir":"/tmp","filename":"c.iso","status":"done"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy.items[0].status, DownloadStatus::Done);
     let q = StoredQueue {
         version: QUEUE_VERSION,
         items: vec![
@@ -1230,7 +1222,7 @@ fn queue_roundtrip_and_mapping() {
                 url: "https://example.com/a.iso".to_string(),
                 dest_dir: "/tmp/dl".to_string(),
                 filename: "a.iso".to_string(),
-                status: StoredStatus::Queued,
+                status: DownloadStatus::Queued,
                 progress: 0.0,
                 segments: None,
                 selected_files: None,
@@ -1240,7 +1232,7 @@ fn queue_roundtrip_and_mapping() {
                 url: "https://example.com/b.iso".to_string(),
                 dest_dir: "/tmp/dl".to_string(),
                 filename: "b.iso".to_string(),
-                status: StoredStatus::Done,
+                status: DownloadStatus::Done,
                 progress: 1.0,
                 segments: None,
                 selected_files: None,
@@ -1299,7 +1291,7 @@ fn selection_survives_persist_restore() {
     // Archive + stage a selection like the intake dialog does.
     let pseudo =
         crate::torrent::archive_torrent_file("keep.torrent", &single_torrent_bytes()).unwrap();
-    crate::torrent::stage_selection(&pseudo, vec![0], 1);
+    crate::torrent::stage_selection(&pseudo, vec![0]);
     let item = m1.enqueue(&pseudo, Some("/tmp/dl"), Some("keep")).unwrap();
     assert_eq!(item.status(), DownloadStatus::Queued);
     m1.persist_queue();
@@ -1360,7 +1352,7 @@ fn restore_rejects_bad_filenames() {
                 "https://example.com/f.iso",
                 "/tmp/dl",
                 bad,
-                StoredStatus::Queued,
+                DownloadStatus::Queued,
                 None,
             )
             .is_err());
@@ -1370,7 +1362,7 @@ fn restore_rejects_bad_filenames() {
             "https://example.com/f.iso",
             "relative/dir",
             "f.iso",
-            StoredStatus::Queued,
+            DownloadStatus::Queued,
             None,
         )
         .is_err());
@@ -1387,7 +1379,7 @@ fn batch_restore_hundred_done() {
             url: format!("https://example.com/f{i}.iso"),
             dest_dir: "/tmp/dl".to_string(),
             filename: format!("f{i}.iso"),
-            status: StoredStatus::Done,
+            status: DownloadStatus::Done,
             progress: 1.0,
             segments: None,
             selected_files: None,
@@ -1589,9 +1581,9 @@ fn restore_preserves_intent() {
     let qf = test_queue_file("intent");
     let settings = test_settings();
     let items: Vec<StoredItem> = [
-        ("p.iso", StoredStatus::Paused),
-        ("f.iso", StoredStatus::Failed),
-        ("d.iso", StoredStatus::Done),
+        ("p.iso", DownloadStatus::Paused),
+        ("f.iso", DownloadStatus::Failed),
+        ("d.iso", DownloadStatus::Done),
     ]
     .into_iter()
     .map(|(f, status)| StoredItem {
@@ -1628,22 +1620,37 @@ fn restore_preserves_intent() {
 
 #[test]
 fn restored_status_mapping() {
-    assert_eq!(
-        restored_status(StoredStatus::Paused),
-        DownloadStatus::Paused
-    );
-    assert_eq!(
-        restored_status(StoredStatus::Failed),
-        DownloadStatus::Failed
-    );
-    assert_eq!(
-        restored_status(StoredStatus::Queued),
-        DownloadStatus::Queued
-    );
-    assert_eq!(
-        restored_status(StoredStatus::Downloading),
-        DownloadStatus::Queued
-    );
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("restored-mapping");
+    let settings = test_settings();
+    // Occupy the only slot so restored rows never spawn an engine.
+    settings.set_int("max-concurrent", 1).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let holder = tokio_rt().spawn(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    manager.running.borrow_mut().insert(99, holder);
+    // Settled rows keep their status; anything resumable requeues.
+    for (stored, expected) in [
+        (DownloadStatus::Paused, DownloadStatus::Paused),
+        (DownloadStatus::Failed, DownloadStatus::Failed),
+        (DownloadStatus::Done, DownloadStatus::Done),
+        (DownloadStatus::Queued, DownloadStatus::Queued),
+        (DownloadStatus::Downloading, DownloadStatus::Queued),
+    ] {
+        let item = manager
+            .restore_existing(
+                "https://example.com/m.iso",
+                "/tmp/dl",
+                "m.iso",
+                stored,
+                None,
+            )
+            .unwrap();
+        assert_eq!(item.status(), expected);
+        manager.remove(item.id());
+    }
+    manager.cancel_all();
 }
 
 #[test]
@@ -1667,7 +1674,7 @@ fn retry_persists_immediately() {
     let queue: StoredQueue = serde_json::from_str(&text).unwrap();
     assert_eq!(queue.items.len(), 1);
     assert_eq!(queue.items[0].filename, "r.bin");
-    assert_eq!(queue.items[0].status, StoredStatus::Queued);
+    assert_eq!(queue.items[0].status, DownloadStatus::Queued);
     let _ = std::fs::remove_file(&qf);
 }
 
@@ -2297,7 +2304,7 @@ fn killed_segmented_resume_starts_over() {
                 url: format!("http://127.0.0.1:{port}/big.bin"),
                 dest_dir: dl.to_string_lossy().into_owned(),
                 filename: "big.bin".to_string(),
-                status: StoredStatus::Queued,
+                status: DownloadStatus::Queued,
                 progress: 0.0,
                 segments: None,
                 selected_files: None,
@@ -2620,7 +2627,7 @@ fn restart_with_smaller_file_keeps_partial() {
     // pre-written partial, and the restore path is synchronous, so no
     // race with the engine's first metadata read.
     let item = manager
-        .restore_existing(&url, &dest, "t.bin", StoredStatus::Downloading, None)
+        .restore_existing(&url, &dest, "t.bin", DownloadStatus::Downloading, None)
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
     // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).

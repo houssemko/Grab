@@ -1,0 +1,84 @@
+name: Flatpak build
+
+# Shared build chain for release bundles and PR test bundles. Release mode
+# (--force-clean + attach to the release) vs test mode (SDK cache + upload
+# artifact) is picked by the inputs below.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Ref to check out"
+        required: true
+        type: string
+      force-clean:
+        description: "Pristine release build"
+        default: false
+        type: boolean
+      release-tag:
+        description: "Attach the bundle here; empty uploads an artifact instead"
+        default: ""
+        type: string
+      cache-sdk:
+        description: "Cache the SDK between runs"
+        default: false
+        type: boolean
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Flatpak tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq flatpak flatpak-builder python3
+
+      - name: Restore SDK cache
+        if: inputs.cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/flatpak
+          key: flatpak-sdk-${{ hashFiles('build-aux/io.github.houssemko.Grab.json') }}
+          restore-keys: |
+            flatpak-sdk-
+
+      - name: Install GNOME SDK and Platform
+        run: |
+          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])")
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub "org.gnome.Platform//$RUNTIME" "org.gnome.Sdk//$RUNTIME"
+
+      - name: Regenerate vendored cargo sources
+        run: python3 build-aux/gen-cargo-sources.py
+
+      # --user: the flathub remote above is user-scoped, so dependency
+      # resolution must run in user scope too (system scope can't see it).
+      - name: Flatpak build
+        run: >
+          flatpak-builder ${{ inputs.force-clean && '--force-clean' || '' }} --user
+          --repo=flatpak-repo --install-deps-from=flathub build
+          build-aux/io.github.houssemko.Grab.json
+
+      - name: Bundle
+        run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.houssemko.Grab
+
+      - name: Attach to the release
+        if: inputs.release-tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release-tag }}
+        run: |
+          ls -lh Grab.flatpak
+          gh release upload "$TAG" Grab.flatpak --clobber
+
+      - name: Upload test bundle
+        if: inputs.release-tag == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Grab.flatpak
+          path: Grab.flatpak
+          retention-days: 14

@@ -10,8 +10,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum)]
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum, serde::Serialize, serde::Deserialize,
+)]
 #[enum_type(name = "GrabDownloadStatus")]
+#[serde(rename_all = "lowercase")]
 pub enum DownloadStatus {
     #[default]
     Queued,
@@ -38,35 +41,12 @@ impl DownloadStatus {
 
 const QUEUE_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum StoredStatus {
-    Queued,
-    Paused,
-    Downloading,
-    Failed,
-    Done,
-}
-
-impl StoredStatus {
-    fn from_item(status: DownloadStatus) -> Option<Self> {
-        match status {
-            DownloadStatus::Queued => Some(StoredStatus::Queued),
-            DownloadStatus::Paused => Some(StoredStatus::Paused),
-            DownloadStatus::Downloading => Some(StoredStatus::Downloading),
-            DownloadStatus::Failed => Some(StoredStatus::Failed),
-            DownloadStatus::Done => Some(StoredStatus::Done),
-            DownloadStatus::Cancelled => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct StoredItem {
     url: String,
     dest_dir: String,
     filename: String,
-    status: StoredStatus,
+    status: DownloadStatus,
     #[serde(default)]
     progress: f64,
     /// Completed 1 MB pieces for segmented resume across restarts (v2+).
@@ -158,15 +138,6 @@ impl DownloadItem {
         } else {
             std::path::Path::new(&output_dir).join(self.filename())
         }
-    }
-}
-
-fn restored_status(stored: StoredStatus) -> DownloadStatus {
-    match stored {
-        StoredStatus::Paused => DownloadStatus::Paused,
-        StoredStatus::Failed => DownloadStatus::Failed,
-        StoredStatus::Done => DownloadStatus::Done,
-        _ => DownloadStatus::Queued,
     }
 }
 
@@ -1760,11 +1731,7 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let pseudo = crate::torrent::archive_torrent_file(file_name, &bytes)?;
         if let Some(sel) = only_files {
-            // Total rides along for the "N of M files" row text.
-            let total = crate::torrent::torrent_file_list(&bytes)
-                .map(|(_, entries)| entries.len())
-                .unwrap_or(0);
-            crate::torrent::stage_selection(&pseudo, sel, total);
+            crate::torrent::stage_selection(&pseudo, sel);
         }
         let stub = crate::torrent::stub_name_for_file(file_name);
         self.enqueue(&pseudo, dest_dir, Some(&stub))
@@ -1780,7 +1747,7 @@ impl DownloadManager {
         url: &str,
         dest_dir: &str,
         filename: &str,
-        status: StoredStatus,
+        status: DownloadStatus,
         segments: Option<SegmentState>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
@@ -1792,7 +1759,11 @@ impl DownloadManager {
         }
         let filename = shorten_filename(filename);
         let item = DownloadItem::new(self.alloc_id(), &url, &filename, dest_dir);
-        item.set_status(restored_status(status));
+        // Resumed rows requeue; only settled rows keep their status.
+        item.set_status(match status {
+            DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => status,
+            _ => DownloadStatus::Queued,
+        });
         if let Some(st) = segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
@@ -2004,21 +1975,12 @@ impl DownloadManager {
                         let bps = downloaded.saturating_sub(d0) as f64
                             / Instant::now().duration_since(tb).as_secs_f64().max(0.001);
                         let speed = format!("{}/s", fmt_bytes(bps as u64));
-                        // Torrent rows with a file filter show it ("2 of 10
-                        // files"): the running engine's view, no guessing.
-                        let sel_suffix = {
-                            let url = item.url().to_string();
-                            match (
-                                crate::torrent::get_selection(&url),
-                                crate::torrent::selection_total(&url),
-                            ) {
-                                (Some(sel), Some(total)) => {
-                                    format!(" • {}/{} files", sel.len(), total)
-                                }
-                                (Some(sel), None) => format!(" • {} files", sel.len()),
-                                _ => String::new(),
-                            }
-                        };
+                        // Torrent rows with a file filter show the count.
+                        let sel_suffix =
+                            match crate::torrent::get_selection(&item.url().to_string()) {
+                                Some(sel) => format!(" • {} files", sel.len()),
+                                None => String::new(),
+                            };
                         match total {
                             Some(t) if t > 0 => {
                                 let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
@@ -2121,7 +2083,7 @@ impl DownloadManager {
                                     crate::torrent::cleanup_unselected(&folder, &item.url());
                                 }
                             }
-                            this.notify_finished(&item, true, None);
+                            this.notify_finished(&item, Ok(()));
                         }
                         done = true;
                         break;
@@ -2160,7 +2122,7 @@ impl DownloadManager {
                         {
                             item.set_status(DownloadStatus::Failed);
                             item.set_detail(e.clone());
-                            this.notify_finished(&item, false, Some(e));
+                            this.notify_finished(&item, Err(e));
                         }
                         done = true;
                         break;
@@ -2177,7 +2139,7 @@ impl DownloadManager {
                         {
                             item.set_status(DownloadStatus::Failed);
                             item.set_detail(e.clone());
-                            this.notify_finished(&item, false, Some(e));
+                            this.notify_finished(&item, Err(e));
                         }
                         done = true;
                         break;
@@ -2256,7 +2218,7 @@ impl DownloadManager {
             if !done && item.status() == DownloadStatus::Downloading {
                 item.set_status(DownloadStatus::Failed);
                 item.set_detail("Download interrupted".to_string());
-                this.notify_finished(&item, false, Some("Download interrupted".to_string()));
+                this.notify_finished(&item, Err("Download interrupted".to_string()));
             }
             this.persist_queue();
             this.changed();
@@ -2322,11 +2284,12 @@ impl DownloadManager {
         self.pump(item, id, gen, rx);
     }
 
-    fn notify_finished(&self, item: &DownloadItem, ok: bool, hint: Option<String>) {
+    fn notify_finished(&self, item: &DownloadItem, result: Result<(), String>) {
         if !self.notifications_enabled() {
             return;
         }
         if let Some(app) = gio::Application::default() {
+            let ok = result.is_ok();
             let n = gio::Notification::new(if ok {
                 "Download finished"
             } else {
@@ -2341,10 +2304,8 @@ impl DownloadManager {
                     item.file_path().to_string_lossy()
                 )
             };
-            if !ok {
-                if let Some(h) = hint {
-                    body.push_str(&format!("\n{h}"));
-                }
+            if let Err(h) = result {
+                body.push_str(&format!("\n{h}"));
             }
             n.set_body(Some(&body));
             n.set_default_action_and_target_value("app.present", None);
@@ -2483,7 +2444,7 @@ impl DownloadManager {
             // partial files, so cancel/retry and remove/Undo resume instead
             // of restarting (explicit delete discards the files instead).
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
-                crate::torrent::forget_download(id, false);
+                crate::torrent::forget_download(id);
             }
             item.set_status(DownloadStatus::Cancelled);
             item.set_detail("Cancelled".to_string());
@@ -2580,7 +2541,7 @@ impl DownloadManager {
         // delete contract (Trash, recoverable).
         if crate::torrent::is_torrent(&item.url()) {
             let path = Self::torrent_folder(&item);
-            crate::torrent::forget_download(id, false);
+            crate::torrent::forget_download(id);
             crate::torrent::delete_archive_for_url(&item.url());
             self.remove(id);
             return match gio::File::for_path(path).trash(gio::Cancellable::NONE) {
@@ -2721,7 +2682,8 @@ impl DownloadManager {
         let mut items = Vec::new();
         for i in 0..self.store.n_items() {
             if let Some(it) = self.store.item(i).and_downcast::<DownloadItem>() {
-                if let Some(status) = StoredStatus::from_item(it.status()) {
+                // Cancelled rows carry no intent: never persisted.
+                if it.status() != DownloadStatus::Cancelled {
                     let segments = self.segment_state.borrow().get(&it.id()).cloned();
                     let selected_files = crate::torrent::get_selection(&it.url().to_string());
                     // Empty means "no folder tracked": omit it so old files
@@ -2732,7 +2694,7 @@ impl DownloadManager {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
                         filename: it.filename().to_string(),
-                        status,
+                        status: it.status(),
                         progress: it.progress(),
                         segments,
                         selected_files,
@@ -2814,7 +2776,7 @@ impl DownloadManager {
                 );
                 let (mut active, done): (Vec<StoredItem>, Vec<StoredItem>) = items
                     .into_iter()
-                    .partition(|it| !matches!(it.status, StoredStatus::Done));
+                    .partition(|it| !matches!(it.status, DownloadStatus::Done));
                 active.truncate(MAX_QUEUE_ITEMS);
                 let skip = done.len().saturating_sub(MAX_QUEUE_ITEMS - active.len());
                 items = active
@@ -2835,7 +2797,7 @@ impl DownloadManager {
                             .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
                 });
                 match item.status {
-                    StoredStatus::Done => {
+                    DownloadStatus::Done => {
                         self.insert_history(
                             item.url,
                             item.dest_dir,
@@ -2876,17 +2838,7 @@ impl DownloadManager {
                                 // this a restart drops the filter and the
                                 // resume downloads every file.
                                 if let Some(sel) = item.selected_files {
-                                    let total = crate::torrent::archive_path_for_url(
-                                        &restored.url().to_string(),
-                                    )
-                                    .and_then(|p| std::fs::read(p).ok())
-                                    .and_then(|b| {
-                                        crate::torrent::torrent_file_list(&b)
-                                            .map(|(_, e)| e.len())
-                                            .ok()
-                                    })
-                                    .unwrap_or(0);
-                                    crate::torrent::stage_selection(&restored.url(), sel, total);
+                                    crate::torrent::stage_selection(&restored.url(), sel);
                                 }
                             }
                             Err(e) => tracing::warn!("skipping queue entry: {e}"),

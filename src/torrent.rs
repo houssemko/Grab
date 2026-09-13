@@ -43,19 +43,18 @@ static ACTIVE: std::sync::LazyLock<Mutex<HashMap<u64, Active>>> =
 /// Pre-chosen file indices for multi-file torrents, staged at intake
 /// (file-list dialog) and consumed once by the engine at spawn. Keyed by
 /// pseudo-URL: only archived files carry selections, magnets pass None.
-/// The total file count rides along so rows can show "N of M files".
-/// Staged file selection: chosen indices + total file count.
-type StagedSelection = (Vec<usize>, usize);
+/// Staged file selection: chosen indices.
+type StagedSelection = Vec<usize>;
 
 static PENDING_SELECTIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, StagedSelection>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Stage a file selection for the next spawn of `pseudo_url`.
-pub fn stage_selection(pseudo_url: &str, only_files: Vec<usize>, total_files: usize) {
+pub fn stage_selection(pseudo_url: &str, only_files: Vec<usize>) {
     PENDING_SELECTIONS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(pseudo_url.to_string(), (only_files, total_files));
+        .insert(pseudo_url.to_string(), only_files);
 }
 
 /// Read the staged selection for `pseudo_url`, if any. Peek, not take:
@@ -68,16 +67,7 @@ pub(crate) fn get_selection(pseudo_url: &str) -> Option<Vec<usize>> {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(pseudo_url)
-        .map(|(sel, _)| sel.clone())
-}
-
-/// Total file count staged alongside the selection, if any (for row text).
-pub(crate) fn selection_total(pseudo_url: &str) -> Option<usize> {
-    PENDING_SELECTIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(pseudo_url)
-        .map(|(_, total)| *total)
+        .cloned()
 }
 
 /// Drop staged selections no live row references (companion to
@@ -430,16 +420,15 @@ pub(crate) fn pause_download(id: u64) {
     });
 }
 
-/// Drop a torrent row from the session. `delete_files` removes partial
-/// files (cancel); finished rows keep their files (delete path passes false).
-pub(crate) fn forget_download(id: u64, delete_files: bool) {
+/// Drop a torrent row from the session, keeping partial files on disk
+/// (cancel/retry and remove/Undo resume instead of restarting; explicit
+/// delete discards the files instead).
+pub(crate) fn forget_download(id: u64) {
     tokio_rt().spawn(async move {
         let active = ACTIVE.lock().await.remove(&id);
         if let (Some(a), Some(s)) = (active, SESSION.get()) {
             if let Some(h) = a.handle {
-                let _ = s
-                    .delete(TorrentIdOrHash::Hash(h.info_hash()), delete_files)
-                    .await;
+                let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
             }
         }
     });
