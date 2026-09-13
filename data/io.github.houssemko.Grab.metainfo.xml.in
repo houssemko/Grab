@@ -44,6 +44,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.1.2" date="2026-09-13">
+      <description>
+        <p>Refreshed AppData screenshots: block maps and the new preferences pages.</p>
+      </description>
+    </release>
     <release version="2.1.1" date="2026-09-13">
       <description>
         <p>Per-block download map: click a downloading row to reveal downloaded blocks; HIG separator between progress bar and blocks.</p>
