@@ -1980,6 +1980,14 @@ impl DownloadManager {
         // task died without reporting (panic): fail the row instead of
         // stranding it as "Downloading" forever.
         let mut done = false;
+        // The row URL never changes and its file filter is fixed at
+        // intake: hoist both out of the per-tick path (no String alloc,
+        // Vec clone or map lock on every progress message).
+        let url = item.url().to_string();
+        let sel_suffix = match crate::torrent::get_selection(&url) {
+            Some(sel) => format!(" • {} files", sel.len()),
+            None => String::new(),
+        };
         glib::spawn_future_local(async move {
             while let Some(msg) = rx.recv().await {
                 // Superseded by a newer spawn for this row: its progress
@@ -2004,12 +2012,8 @@ impl DownloadManager {
                         let bps = downloaded.saturating_sub(d0) as f64
                             / Instant::now().duration_since(tb).as_secs_f64().max(0.001);
                         let speed = format!("{}/s", fmt_bytes(bps as u64));
-                        // Torrent rows with a file filter show the count.
-                        let sel_suffix =
-                            match crate::torrent::get_selection(&item.url().to_string()) {
-                                Some(sel) => format!(" • {} files", sel.len()),
-                                None => String::new(),
-                            };
+                        // Torrent rows with a file filter show the count
+                        // (hoisted above: fixed for the row's lifetime).
                         match total {
                             Some(t) if t > 0 => {
                                 let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
@@ -2105,13 +2109,17 @@ impl DownloadManager {
                             // Skipped while seeding: serving still reads
                             // those spans, and deleting them would corrupt
                             // shared pieces for peers.
-                            if crate::torrent::is_torrent(&item.url())
+                            if crate::torrent::is_torrent(&url)
                                 && !this.settings.boolean("torrent-seed-finished")
                             {
                                 let folder = Self::torrent_folder(&item);
                                 if folder.is_dir() {
-                                    crate::torrent::cleanup_unselected(&folder, &item.url());
+                                    crate::torrent::cleanup_unselected(&folder, &url);
                                 }
+                                // The intake filter is spent: keeping it
+                                // would pin the index list (and confuse a
+                                // re-add) for a row that is done.
+                                crate::torrent::drop_selection(&url);
                             }
                             this.notify_finished(&item, Ok(()));
                         }

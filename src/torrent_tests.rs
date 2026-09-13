@@ -41,6 +41,17 @@ fn stub_prefers_name_then_hash() {
 }
 
 #[test]
+fn drop_selection_clears_finished_filter() {
+    let url = "torrent:/tmp/grab-drop-test.torrent";
+    stage_selection(url, vec![0, 2]);
+    assert_eq!(get_selection(url), Some(vec![0, 2]));
+    drop_selection(url);
+    assert_eq!(get_selection(url), None);
+    // Dropping a missing key is a no-op, never a panic.
+    drop_selection(url);
+}
+
+#[test]
 fn multifile_torrents_get_name_subfolder() {
     let dest = std::path::PathBuf::from("/tmp/dl");
     // Multi-file torrents land in a subfolder named after the torrent…

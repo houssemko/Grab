@@ -79,6 +79,16 @@ pub fn prune_selections(referenced: &std::collections::HashSet<String>) {
         .retain(|k, _| referenced.contains(k));
 }
 
+/// Drop the staged selection for `pseudo_url` (companion to
+/// `prune_selections`): a finished row never re-spawns, so keeping its
+/// filter would pin the entry until the next sweep.
+pub(crate) fn drop_selection(pseudo_url: &str) {
+    PENDING_SELECTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(pseudo_url);
+}
+
 /// True for either torrent source: magnet links and archived .torrent
 /// pseudo-URLs. Lifecycle paths (pause/park/cancel/delete) are id-based
 /// and source-agnostic, so they key off this.
@@ -638,7 +648,13 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     if resumed {
         if let Some(h) = ACTIVE.lock().await.get(&id).and_then(|a| a.handle.clone()) {
             let _ = session.clone().unpause(&h).await;
-            poll_loop(session, h, &stub, seed_finished, &tx).await;
+            let finished = poll_loop(session.clone(), h, &stub, seed_finished, &tx).await;
+            // Finished rows leave the session unless still seeding: every
+            // managed torrent pins its chunk-tracker, storage and peer
+            // state, so completed rows would leak RAM one torrent at a time.
+            if finished && !seed_finished {
+                let _ = session.delete(TorrentIdOrHash::Hash(hash_id), false).await;
+            }
         } else {
             fail("Torrent is no longer managed".to_string());
         }
@@ -712,7 +728,13 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     if ACTIVE.lock().await.get(&id).is_some_and(|a| a.paused) {
         let _ = session.pause(&handle).await;
     }
-    poll_loop(session, handle, &stub, seed_finished, &tx).await;
+    let finished = poll_loop(session.clone(), handle, &stub, seed_finished, &tx).await;
+    // Finished rows leave the session unless still seeding: every managed
+    // torrent pins its chunk-tracker, storage and peer state, so completed
+    // rows would leak RAM one torrent at a time. Files stay on disk.
+    if finished && !seed_finished {
+        let _ = session.delete(TorrentIdOrHash::Hash(hash_id), false).await;
+    }
     ACTIVE.lock().await.remove(&id);
     // Archives live as long as their rows: delete_download() drops them,
     // remove() keeps them for Undo, sweep_archives() cleans orphans.
