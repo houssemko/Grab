@@ -434,9 +434,7 @@ pub(crate) enum EngineMsg {
     /// Torrent per-piece haves polled from the session (500ms tick).
     /// Replaces the stored bitfield; the block map redraws off progress
     /// ticks arriving on the same tick, so this needs no extra signal.
-    TorrentPieces {
-        have: Vec<bool>,
-    },
+    TorrentPieces(Vec<bool>),
 }
 
 /// Shared inputs for one download's engine task. Groups the params every
@@ -1121,9 +1119,9 @@ pub(crate) fn aggregate(bits: &[bool], n: usize) -> Vec<bool> {
     (0..n)
         .map(|i| {
             let (lo, hi) = (i * bits.len() / n, (i + 1) * bits.len() / n);
-            let span = hi.saturating_sub(lo).max(1) as f64;
-            let done = bits[lo..hi.max(lo + 1)].iter().filter(|b| **b).count() as f64;
-            done / span >= 0.5
+            let span = hi.saturating_sub(lo).max(1);
+            let done = bits[lo..hi.max(lo + 1)].iter().filter(|b| **b).count();
+            2 * done >= span
         })
         .collect()
 }
@@ -2187,7 +2185,7 @@ impl DownloadManager {
                             st.mark(idx);
                         }
                     }
-                    EngineMsg::TorrentPieces { have } => {
+                    EngineMsg::TorrentPieces(have) => {
                         this.torrent_pieces.borrow_mut().insert(id, have);
                     }
                     EngineMsg::TruncatePrefix => {

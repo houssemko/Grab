@@ -236,6 +236,7 @@ fn build_row(
         let click = gtk4::GestureClick::new();
         let m = Rc::clone(manager);
         let rev = map_revealer.clone();
+        let blk = blocks.clone();
         let exp = Rc::clone(&expanded);
         click.connect_pressed(move |gesture, _n_press, x, y| {
             let pick = gesture
@@ -258,9 +259,7 @@ fn build_row(
             if live {
                 exp.set(!exp.get());
                 rev.set_reveal_child(exp.get());
-                if let Some(a) = rev.child().and_downcast::<gtk4::DrawingArea>() {
-                    a.queue_draw();
-                }
+                blk.queue_draw();
             }
         });
         row.add_controller(click);

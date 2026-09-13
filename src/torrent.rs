@@ -476,8 +476,8 @@ async fn poll_loop(
             break;
         }
         if let Ok((have, _)) = api.api_dump_haves(TorrentIdOrHash::Hash(handle.info_hash())) {
-            let have: Vec<bool> = have.iter().map(|b| *b).collect();
-            if tx.send(EngineMsg::TorrentPieces { have }).is_err() {
+            let have: Vec<bool> = have.iter().by_vals().collect();
+            if tx.send(EngineMsg::TorrentPieces(have)).is_err() {
                 break;
             }
         }
