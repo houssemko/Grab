@@ -1017,6 +1017,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .title(gettext("URL"))
         .text("")
         .show_apply_button(true)
+        .activates_default(true)
         .build();
     url_row.set_input_purpose(gtk4::InputPurpose::Url);
     group.add(&url_row);
@@ -1024,6 +1025,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let file_row = adw::EntryRow::builder()
         .title(gettext("File name (optional)"))
         .text("")
+        .activates_default(true)
         .build();
     group.add(&file_row);
 
@@ -1184,6 +1186,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     toolbar.set_content(Some(&page));
 
     dialog.set_child(Some(&toolbar));
+    dialog.set_default_widget(Some(&add_btn));
 
     {
         let d = dialog.downgrade();
@@ -1360,6 +1363,7 @@ pub(crate) fn show_torrent_files_dialog(
     toolbar.add_top_bar(&hb);
     toolbar.set_content(Some(&page));
     dialog.set_child(Some(&toolbar));
+    dialog.set_default_widget(Some(&add_btn));
 
     {
         let dialog_weak = dialog.downgrade();
