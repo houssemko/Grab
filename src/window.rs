@@ -219,7 +219,14 @@ fn build_row(
     }
     let map_revealer = gtk4::Revealer::new();
     map_revealer.set_transition_type(gtk4::RevealerTransitionType::SlideDown);
-    map_revealer.set_child(Some(&blocks));
+    // HIG separation: a horizontal separator between the progress bar and
+    // the blocks, 6px from each (related elements). Inside the revealer
+    // so nothing shows while collapsed.
+    let map_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    map_box.set_margin_top(6);
+    map_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
+    map_box.append(&blocks);
+    map_revealer.set_child(Some(&map_box));
 
     outer.append(&top);
     outer.append(&detail);
