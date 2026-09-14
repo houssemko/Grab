@@ -872,6 +872,7 @@ pub fn build_window(
         let t = Rc::clone(&toasts);
         let r = Rc::clone(&rows);
         let add = add_btn.clone();
+        let search_btn = search_toggle.clone();
         let s = stack.clone();
         let l_active = active_list.clone();
         let l_queued = queued_list.clone();
@@ -952,6 +953,12 @@ pub fn build_window(
             let has_items = store.n_items() > 0;
             // Header + duplicates the empty-state pill, so show it only with the list.
             add.set_visible(has_items);
+            search_btn.set_visible(has_items);
+            if !has_items {
+                // List is gone, so nothing to search: hide the toggle and
+                // collapse the bar through the bidirectional binding.
+                search_btn.set_active(false);
+            }
             s.set_visible_child_name(if has_items { "list" } else { "empty" });
         })
     };
