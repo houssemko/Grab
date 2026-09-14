@@ -71,6 +71,29 @@
       <summary>Torrent peer limit</summary>
       <description>Maximum torrent peers. 0 means unlimited.</description>
     </key>
+    <key name="torrent-trackers" type="s">
+      <default>""</default>
+      <summary>Extra torrent trackers</summary>
+      <description>Comma-separated tracker URLs added to every torrent. Applies when a download starts.</description>
+    </key>
+    <key name="torrent-seed-ratio" type="d">
+      <default>0.0</default>
+      <range min="0.0" max="100.0"/>
+      <summary>Seed ratio limit</summary>
+      <description>Stop seeding after uploading this multiple of the download size. 0 means unlimited.</description>
+    </key>
+    <key name="torrent-seed-time" type="i">
+      <default>0</default>
+      <range min="0" max="43200"/>
+      <summary>Seed time limit in minutes</summary>
+      <description>Stop seeding this many minutes after finishing. 0 means unlimited.</description>
+    </key>
+    <key name="torrent-listen-port" type="i">
+      <default>0</default>
+      <range min="0" max="65535"/>
+      <summary>Torrent listen port</summary>
+      <description>Port for incoming torrent connections. 0 means disabled. Applies when the torrent engine first starts.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>

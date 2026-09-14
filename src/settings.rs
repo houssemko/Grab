@@ -20,6 +20,10 @@ pub mod key {
     pub const TORRENT_SEED_FINISHED: &str = "torrent-seed-finished";
     pub const TORRENT_DHT: &str = "torrent-dht";
     pub const TORRENT_PEER_LIMIT: &str = "torrent-peer-limit";
+    pub const TORRENT_TRACKERS: &str = "torrent-trackers";
+    pub const TORRENT_SEED_RATIO: &str = "torrent-seed-ratio";
+    pub const TORRENT_SEED_TIME: &str = "torrent-seed-time";
+    pub const TORRENT_LISTEN_PORT: &str = "torrent-listen-port";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
 }
@@ -70,6 +74,18 @@ impl AppSettings {
     }
     pub fn torrent_peer_limit(&self) -> i32 {
         self.0.int(key::TORRENT_PEER_LIMIT)
+    }
+    pub fn torrent_trackers(&self) -> String {
+        self.0.string(key::TORRENT_TRACKERS).to_string()
+    }
+    pub fn torrent_seed_ratio(&self) -> f64 {
+        self.0.double(key::TORRENT_SEED_RATIO)
+    }
+    pub fn torrent_seed_time(&self) -> i32 {
+        self.0.int(key::TORRENT_SEED_TIME)
+    }
+    pub fn torrent_listen_port(&self) -> i32 {
+        self.0.int(key::TORRENT_LISTEN_PORT)
     }
     pub fn window_width(&self) -> i32 {
         self.0.int(key::WINDOW_WIDTH)

@@ -18,8 +18,8 @@ use std::{
 use gettextrs::gettext;
 use gtk4::glib;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ManagedTorrent, Session,
-    SessionOptions, TorrentStatsState, api::TorrentIdOrHash,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ListenerOptions, ManagedTorrent,
+    Session, SessionOptions, TorrentStatsState, api::TorrentIdOrHash,
 };
 use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
@@ -376,6 +376,7 @@ async fn ensure_session(
     dht: bool,
     peer_limit: Option<usize>,
     download_bps: Option<u64>,
+    listen_port: i32,
 ) -> Result<Arc<Session>, String> {
     SESSION
         .get_or_try_init(|| async {
@@ -388,6 +389,14 @@ async fn ensure_session(
             // The session struct carries no live setter for this: it applies
             // here and per add below, so new downloads pick up edits.
             opts.peer_limit = peer_limit;
+            // 0 means disabled (status quo: no listener). Positive ports
+            // bind dual-stack; the session only reads this at creation.
+            if listen_port > 0 {
+                opts.listen = Some(ListenerOptions {
+                    listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, listen_port as u16).into(),
+                    ..Default::default()
+                });
+            }
             let session = Session::new_with_opts(dir, opts)
                 .await
                 .map_err(|e| format!("Cannot start torrent engine: {e}"))?;
@@ -405,6 +414,19 @@ pub(crate) fn peer_limit_of(settings: &crate::settings::AppSettings) -> Option<u
         0 => None,
         n => Some(n as usize),
     }
+}
+
+/// Split the trackers preference (comma/space/newline separated) into clean
+/// URLs. Entries without a scheme are dropped so a typo can never fail a
+/// whole download at add time.
+pub(crate) fn parse_trackers(raw: &str) -> Option<Vec<String>> {
+    let list: Vec<String> = raw
+        .split([',', ' ', '\n', '\t'])
+        .map(str::trim)
+        .filter(|s| s.contains("://"))
+        .map(str::to_string)
+        .collect();
+    (!list.is_empty()).then_some(list)
 }
 
 /// Live-apply the download cap (speed-limit watcher, any thread): the rate
@@ -458,10 +480,14 @@ async fn poll_loop(
     handle: ManagedTorrentHandle,
     stub: &str,
     seed_finished: bool,
+    seed_ratio: f64,
+    seed_time_min: i32,
     tx: &UnboundedSender<EngineMsg>,
 ) -> bool {
     let mut suggested = false;
     let mut finished = false;
+    // First tick the engine reported done: seed-time limits count from here.
+    let mut finished_at: Option<std::time::Instant> = None;
     // Per-piece haves for the block map. Built once: it only borrows the
     // session, and polls on the same 500ms tick as progress (no extra
     // wakeups; a failed poll just skips a frame).
@@ -486,6 +512,12 @@ async fn poll_loop(
             .send(EngineMsg::Progress {
                 downloaded: stats.progress_bytes,
                 total,
+                uploaded: stats.uploaded_bytes,
+                upload_bps: stats
+                    .live
+                    .as_ref()
+                    .map(|l| l.upload_speed.as_bytes())
+                    .unwrap_or(0),
             })
             .is_err()
         {
@@ -504,14 +536,40 @@ async fn poll_loop(
             break;
         }
         if stats.finished {
-            if !seed_finished {
-                let _ = session.pause(&handle).await;
+            // No seeding, or seeding without a stop rule: same as before.
+            if !seed_finished || (seed_ratio <= 0.0 && seed_time_min <= 0) {
+                if !seed_finished {
+                    let _ = session.pause(&handle).await;
+                }
+                let _ = tx.send(EngineMsg::Finished {
+                    size: stats.total_bytes,
+                });
+                finished = true;
+                break;
             }
-            let _ = tx.send(EngineMsg::Finished {
-                size: stats.total_bytes,
-            });
-            finished = true;
-            break;
+            // Seeding toward a limit: stay on the loop (progress ticks keep
+            // the row's upload counters live) until a rule fires.
+            if finished_at.is_none() {
+                finished_at = Some(std::time::Instant::now());
+            }
+            let ratio_hit = seed_ratio > 0.0
+                && stats.total_bytes > 0
+                && stats.uploaded_bytes as f64 >= seed_ratio * stats.total_bytes as f64;
+            let time_hit = seed_time_min > 0
+                && finished_at.is_some_and(|t| {
+                    t.elapsed() >= std::time::Duration::from_secs(seed_time_min as u64 * 60)
+                });
+            if ratio_hit || time_hit {
+                let _ = session.pause(&handle).await;
+                let _ = session
+                    .delete(TorrentIdOrHash::Hash(handle.info_hash()), false)
+                    .await;
+                let _ = tx.send(EngineMsg::Finished {
+                    size: stats.total_bytes,
+                });
+                finished = true;
+                break;
+            }
         }
     }
     finished
@@ -525,9 +583,15 @@ pub(crate) struct TorrentJob {
     pub source: TorrentSource,
     pub dest: PathBuf,
     pub seed_finished: bool,
+    pub seed_ratio: f64,
+    pub seed_time_min: i32,
     pub dht: bool,
     pub peer_limit: Option<usize>,
     pub download_bps: Option<u64>,
+    pub listen_port: i32,
+    /// Extra tracker URLs from preferences (per-add, so edits apply to new
+    /// downloads without restarting the engine).
+    pub trackers: Option<Vec<String>>,
     /// Pre-chosen file indices for multi-file torrents (intake dialog).
     pub only_files: Option<Vec<usize>>,
     pub tx: UnboundedSender<EngineMsg>,
@@ -539,9 +603,13 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         source,
         dest,
         seed_finished,
+        seed_ratio,
+        seed_time_min,
         dht,
         peer_limit,
         download_bps,
+        listen_port,
+        trackers,
         only_files,
         tx,
     } = job;
@@ -643,7 +711,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             false
         }
     };
-    let session = match ensure_session(dht, peer_limit, download_bps).await {
+    let session = match ensure_session(dht, peer_limit, download_bps, listen_port).await {
         Ok(s) => s,
         Err(e) => {
             ACTIVE.lock().await.remove(&id);
@@ -654,7 +722,16 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     if resumed {
         if let Some(h) = ACTIVE.lock().await.get(&id).and_then(|a| a.handle.clone()) {
             let _ = session.clone().unpause(&h).await;
-            let finished = poll_loop(session.clone(), h, &stub, seed_finished, &tx).await;
+            let finished = poll_loop(
+                session.clone(),
+                h,
+                &stub,
+                seed_finished,
+                seed_ratio,
+                seed_time_min,
+                &tx,
+            )
+            .await;
             // Finished rows leave the session unless still seeding: every
             // managed torrent pins its chunk-tracker, storage and peer
             // state, so completed rows would leak RAM one torrent at a time.
@@ -684,6 +761,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         overwrite: true,
         // Current preference at add time: running torrents keep theirs.
         peer_limit,
+        // Extra trackers from preferences (same live-at-add rule).
+        trackers,
         // Multi-file selection chosen at intake (no live setter exists).
         only_files,
         ..Default::default()
@@ -734,7 +813,16 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     if ACTIVE.lock().await.get(&id).is_some_and(|a| a.paused) {
         let _ = session.pause(&handle).await;
     }
-    let finished = poll_loop(session.clone(), handle, &stub, seed_finished, &tx).await;
+    let finished = poll_loop(
+        session.clone(),
+        handle,
+        &stub,
+        seed_finished,
+        seed_ratio,
+        seed_time_min,
+        &tx,
+    )
+    .await;
     // Finished rows leave the session unless still seeding: every managed
     // torrent pins its chunk-tracker, storage and peer state, so completed
     // rows would leak RAM one torrent at a time. Files stay on disk.

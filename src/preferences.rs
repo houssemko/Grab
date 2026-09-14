@@ -234,6 +234,39 @@ pub fn show(
         .bind(crate::settings::key::TORRENT_SEED_FINISHED, &seed, "active")
         .build();
     share_group.add(&seed);
+    let seed_ratio = adw::SpinRow::builder()
+        .title(gettext("Seed to ratio"))
+        .subtitle(gettext(
+            "Stop seeding after uploading this multiple of the download size. 0 means unlimited.",
+        ))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 100.0, 0.1, 1.0, 0.0))
+        .digits(1)
+        .build();
+    settings
+        .bind(
+            crate::settings::key::TORRENT_SEED_RATIO,
+            &seed_ratio,
+            "value",
+        )
+        .build();
+    seed.bind_property("active", &seed_ratio, "sensitive")
+        .sync_create()
+        .build();
+    share_group.add(&seed_ratio);
+    let seed_time = adw::SpinRow::builder()
+        .title(gettext("Seed for (minutes)"))
+        .subtitle(gettext(
+            "Stop seeding this many minutes after finishing. 0 means unlimited.",
+        ))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 43200.0, 5.0, 60.0, 0.0))
+        .build();
+    settings
+        .bind(crate::settings::key::TORRENT_SEED_TIME, &seed_time, "value")
+        .build();
+    seed.bind_property("active", &seed_time, "sensitive")
+        .sync_create()
+        .build();
+    share_group.add(&seed_time);
 
     let torrent_net_group = adw::PreferencesGroup::builder()
         .title(gettext("Network"))
@@ -257,6 +290,31 @@ pub fn show(
         .bind(crate::settings::key::TORRENT_PEER_LIMIT, &peers, "value")
         .build();
     torrent_net_group.add(&peers);
+    let trackers = adw::EntryRow::builder()
+        .title(gettext("Extra trackers"))
+        .subtitle(gettext(
+            "Comma-separated tracker URLs added to every download",
+        ))
+        .build();
+    settings
+        .bind(crate::settings::key::TORRENT_TRACKERS, &trackers, "text")
+        .build();
+    torrent_net_group.add(&trackers);
+    let listen_port = adw::SpinRow::builder()
+        .title(gettext("Listen port"))
+        .subtitle(gettext(
+            "Port for incoming connections. 0 means disabled. Applies when the torrent engine first starts.",
+        ))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 65535.0, 1.0, 100.0, 0.0))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::TORRENT_LISTEN_PORT,
+            &listen_port,
+            "value",
+        )
+        .build();
+    torrent_net_group.add(&listen_port);
 
     torrent_page.add(&share_group);
     torrent_page.add(&torrent_net_group);

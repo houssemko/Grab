@@ -407,6 +407,10 @@ pub(crate) enum EngineMsg {
     Progress {
         downloaded: u64,
         total: Option<u64>,
+        /// Torrent upload counters (HTTP sends zeros): shown on the row
+        /// while downloading and while seeding toward a seed limit.
+        uploaded: u64,
+        upload_bps: u64,
     },
     Finished {
         size: u64,
@@ -694,6 +698,8 @@ async fn attempt_multi(
                 .send(EngineMsg::Progress {
                     downloaded,
                     total: Some(total),
+                    uploaded: 0,
+                    upload_bps: 0,
                 })
                 .ok();
             let pace_start = Instant::now();
@@ -738,6 +744,8 @@ async fn attempt_multi(
                 .send(EngineMsg::Progress {
                     downloaded,
                     total: Some(total),
+                    uploaded: 0,
+                    upload_bps: 0,
                 })
                 .ok();
             Ok::<u64, String>(written)
@@ -945,7 +953,14 @@ async fn attempt_once(
             ctx.tx.send(EngineMsg::SuggestName(name)).ok();
         }
         let mut downloaded = if partial { start } else { 0 };
-        ctx.tx.send(EngineMsg::Progress { downloaded, total }).ok();
+        ctx.tx
+            .send(EngineMsg::Progress {
+                downloaded,
+                total,
+                uploaded: 0,
+                upload_bps: 0,
+            })
+            .ok();
         let mut stream = resp.bytes_stream();
         let pace_start = Instant::now();
         let mut paced: u64 = 0;
@@ -984,7 +999,14 @@ async fn attempt_once(
             }
             if last_sent.elapsed() >= Duration::from_millis(100) {
                 rate = live_rate_limit();
-                ctx.tx.send(EngineMsg::Progress { downloaded, total }).ok();
+                ctx.tx
+                    .send(EngineMsg::Progress {
+                        downloaded,
+                        total,
+                        uploaded: 0,
+                        upload_bps: 0,
+                    })
+                    .ok();
                 last_sent = Instant::now();
             }
         }
@@ -1997,7 +2019,12 @@ impl DownloadManager {
                     break;
                 }
                 match msg {
-                    EngineMsg::Progress { downloaded, total } => {
+                    EngineMsg::Progress {
+                        downloaded,
+                        total,
+                        uploaded,
+                        upload_bps,
+                    } => {
                         if item.status() != DownloadStatus::Downloading {
                             continue;
                         }
@@ -2012,6 +2039,22 @@ impl DownloadManager {
                         let bps = downloaded.saturating_sub(d0) as f64
                             / Instant::now().duration_since(tb).as_secs_f64().max(0.001);
                         let speed = format!("{}/s", fmt_bytes(bps as u64));
+                        // Torrent upload counters (HTTP rows send zeros, so
+                        // their labels stay exactly as before).
+                        let up_suffix = if uploaded > 0 || upload_bps > 0 {
+                            let ratio = match total {
+                                Some(t) if t > 0 => {
+                                    format!(" · ratio {:.1}", uploaded as f64 / t as f64)
+                                }
+                                _ => String::new(),
+                            };
+                            gettext(" • ↑ {upspeed}/s · {up} up{ratio}")
+                                .replace("{upspeed}", &fmt_bytes(upload_bps))
+                                .replace("{up}", &fmt_bytes(uploaded))
+                                .replace("{ratio}", &ratio)
+                        } else {
+                            String::new()
+                        };
                         // Torrent rows with a file filter show the count
                         // (hoisted above: fixed for the row's lifetime).
                         match total {
@@ -2024,20 +2067,22 @@ impl DownloadManager {
                                     "—".to_string()
                                 };
                                 item.set_detail(
-                                    gettext("{pct}% ({amounts}) • {speed} • ETA {eta}{filter}")
+                                    gettext("{pct}% ({amounts}) • {speed} • ETA {eta}{filter}{up}")
                                         .replace("{pct}", &((frac * 100.0) as u64).to_string())
                                         .replace("{amounts}", &format_amounts(downloaded, t))
                                         .replace("{speed}", &speed)
                                         .replace("{eta}", &eta)
-                                        .replace("{filter}", &sel_suffix),
+                                        .replace("{filter}", &sel_suffix)
+                                        .replace("{up}", &up_suffix),
                                 );
                             }
                             _ => {
                                 item.set_detail(
-                                    gettext("{done} • {speed}{filter}")
+                                    gettext("{done} • {speed}{filter}{up}")
                                         .replace("{done}", &fmt_bytes(downloaded))
                                         .replace("{speed}", &speed)
-                                        .replace("{filter}", &sel_suffix),
+                                        .replace("{filter}", &sel_suffix)
+                                        .replace("{up}", &up_suffix),
                                 );
                             }
                         }
@@ -2290,6 +2335,7 @@ impl DownloadManager {
         let dht = settings.torrent_dht();
         let peer_limit = crate::torrent::peer_limit_of(settings);
         let download_bps = parse_rate(settings.speed_limit().trim());
+        let trackers = crate::torrent::parse_trackers(&settings.torrent_trackers());
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
@@ -2313,9 +2359,13 @@ impl DownloadManager {
             source,
             dest,
             seed_finished,
+            seed_ratio: settings.torrent_seed_ratio(),
+            seed_time_min: settings.torrent_seed_time(),
             dht,
             peer_limit,
             download_bps,
+            listen_port: settings.torrent_listen_port(),
+            trackers,
             only_files,
             tx,
         }));
