@@ -37,6 +37,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.2.6" date="2026-09-14">
+      <description>
+        <p>New: task search and status filter, multi-URL batch add, task rename. Torrent: upload stats on rows, custom trackers, seed ratio and time limits, listen port. Downloads: per-download custom headers, keep-server-file-date option, command-line URL enqueue.</p>
+      </description>
+    </release>
     <release version="2.2.5" date="2026-09-14">
       <description>
         <p>Hardening: torrent archive handling is confined to the app data dir, duplicate settings key removed, peer-limit edge case fixed.</p>
