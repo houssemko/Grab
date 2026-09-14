@@ -19,6 +19,7 @@ struct State {
     settings: AppSettings,
     toasts: Rc<adw::ToastOverlay>,
     window: adw::ApplicationWindow,
+    search_bar: gtk4::SearchBar,
 }
 
 pub fn setup(app: &adw::Application) {
@@ -39,11 +40,13 @@ pub fn setup(app: &adw::Application) {
                 manager: manager.clone(),
                 settings,
                 toasts,
-                window: win,
+                window: win.0,
+                search_bar: win.1,
             }));
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
             app.set_accels_for_action("app.add-batch", &["<Control><Shift>n"]);
+            app.set_accels_for_action("app.search", &["<Control>f"]);
             app.set_accels_for_action("app.quit", &["<Control>q"]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
             app.set_accels_for_action("app.shortcuts", &["<Control>question"]);
@@ -201,6 +204,17 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         show_batch_dialog(s.manager.clone());
+                    }
+                })
+                .build()
+        },
+        {
+            let st = Rc::clone(st);
+            gio::ActionEntry::builder("search")
+                .activate(move |_, _, _| {
+                    if let Some(s) = st.borrow().as_ref() {
+                        let on = !s.search_bar.is_search_mode();
+                        s.search_bar.set_search_mode(on);
                     }
                 })
                 .build()

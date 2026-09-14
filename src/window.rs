@@ -684,7 +684,7 @@ pub fn build_window(
     manager: Rc<DownloadManager>,
     settings: crate::settings::AppSettings,
     toasts: Rc<adw::ToastOverlay>,
-) -> adw::ApplicationWindow {
+) -> (adw::ApplicationWindow, gtk4::SearchBar) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Grab")
@@ -732,6 +732,13 @@ pub fn build_window(
         .build();
     menu_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("Main Menu"))]);
     header.pack_start(&menu_btn);
+
+    let search_toggle = gtk4::ToggleButton::builder()
+        .icon_name("system-search-symbolic")
+        .tooltip_text(gettext("Search (Ctrl+F)"))
+        .build();
+    search_toggle.update_property(&[gtk4::accessible::Property::Label(&gettext("Search"))]);
+    header.pack_end(&search_toggle);
 
     let add_btn = gtk4::Button::builder()
         .icon_name("list-add-symbolic")
@@ -841,10 +848,20 @@ pub fn build_window(
     status_drop.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Filter by status",
     ))]);
-    let filter_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    filter_bar.append(&search);
-    filter_bar.append(&status_drop);
-    content.append(&filter_bar);
+    // HIG search pattern: a header toggle reveals a GtkSearchBar beneath
+    // the header; it may also hold extra widgets like the status filter.
+    let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();
+    let filter_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    filter_box.append(&search);
+    filter_box.append(&status_drop);
+    search_bar.set_child(Some(&filter_box));
+    search_bar.connect_entry(&search);
+    search_bar.set_key_capture_widget(Some(&window));
+    search_toggle
+        .bind_property("active", &search_bar, "search-mode-enabled")
+        .bidirectional()
+        .sync_create()
+        .build();
     content.append(&active_section);
     content.append(&queued_section);
     content.append(&downloaded_section);
@@ -1055,6 +1072,7 @@ pub fn build_window(
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&search_bar);
     toolbar.add_top_bar(&banner);
     toolbar.set_content(Some(&stack));
     toasts.set_child(Some(&toolbar));
@@ -1103,7 +1121,7 @@ pub fn build_window(
         hook();
     }
 
-    window
+    (window, search_bar)
 }
 
 /// Rename a completed or queued row. The manager enforces what can be
