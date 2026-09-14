@@ -37,6 +37,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.2.5" date="2026-09-14">
+      <description>
+        <p>Hardening: torrent archive handling is confined to the app data dir, duplicate settings key removed, peer-limit edge case fixed.</p>
+      </description>
+    </release>
     <release version="2.2.4" date="2026-09-13">
       <description>
         <p>Fix: About dialog no longer crashes; release notes are embedded in the app.</p>
