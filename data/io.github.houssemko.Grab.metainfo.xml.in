@@ -42,6 +42,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.3.4" date="2026-09-14">
+      <description>
+        <p>Fix: torrent output folders are deduplicated at intake so existing files are never overwritten; batch import skips comment lines; cancelling a torrent mid-add keeps partial files for resume; DHT toggle notes it applies after restart. Security: the download engine no longer follows HTTPS-to-HTTP redirect downgrades, and worker state recovers from lock poisoning instead of panicking.</p>
+      </description>
+    </release>
     <release version="2.3.3" date="2026-09-14">
       <description>
         <p>Fix: a preset GSettings schema path that lacks this app's schema no longer aborts startup — it is ignored in favor of the app's own install tree.</p>
