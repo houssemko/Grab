@@ -294,6 +294,26 @@ fn output_folder_for(
     dest.join(dir)
 }
 
+/// What the engine will download into for archived `.torrent` bytes:
+/// the folder base plus whether it is multi-file. Mirrors `run_torrent`'s
+/// File branch exactly, so intake can detect on-disk collisions upfront
+/// instead of letting `overwrite: true` clobber existing files.
+pub(crate) fn intake_plan(bytes: &[u8]) -> Option<(String, bool)> {
+    let meta = librqbit::torrent_from_bytes(bytes).ok()?;
+    let raw = meta
+        .info
+        .data
+        .name
+        .as_ref()
+        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
+    let multi = meta.info.data.files.as_ref().is_some_and(|f| f.len() >= 2);
+    let base = raw
+        .filter(|n| sane_filename(n))
+        .map(|n| shorten_filename(&n))
+        .unwrap_or_else(|| meta.info_hash.as_string());
+    Some((base, multi))
+}
+
 /// Real on-disk location of a torrent's files for deletion: recomputes the
 /// engine's output folder deterministically from the archived metadata, so
 /// Delete trashes what the engine actually wrote instead of the row's stub
@@ -590,6 +610,9 @@ pub(crate) struct TorrentJob {
     pub trackers: Option<Vec<String>>,
     /// Pre-chosen file indices for multi-file torrents (intake dialog).
     pub only_files: Option<Vec<usize>>,
+    /// Intake recorded a collision-proof subfolder as dest: use it
+    /// directly instead of recomputing from metadata.
+    pub dest_is_final: bool,
     pub tx: UnboundedSender<EngineMsg>,
 }
 
@@ -607,6 +630,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         listen_port,
         trackers,
         only_files,
+        dest_is_final,
         tx,
     } = job;
     let fail = |msg: String| {
@@ -666,7 +690,12 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                         .filter(|n| sane_filename(n))
                         .map(|n| shorten_filename(&n))
                         .unwrap_or_else(|| hash_hex.clone());
-                    let folder = output_folder_for(&dest, raw_name, multi, &stub);
+                    // Collision-recorded subfolder from intake: already final.
+                    let folder = if dest_is_final {
+                        dest
+                    } else {
+                        output_folder_for(&dest, raw_name, multi, &stub)
+                    };
                     (hash_hex, hash_id, stub, folder, Adder::File(bytes))
                 }
                 Err(e) => {
@@ -800,9 +829,11 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             None => false,
         }
     };
+    // Cancelled while adding: the pump is gone, so drop the session
+    // entry; partial files stay for resume like any other cancel.
     if !keep {
         let _ = session
-            .delete(TorrentIdOrHash::Hash(handle.info_hash()), true)
+            .delete(TorrentIdOrHash::Hash(handle.info_hash()), false)
             .await;
         return;
     }

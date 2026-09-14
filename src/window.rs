@@ -1590,7 +1590,7 @@ pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
             let lines: Vec<&str> = text
                 .lines()
                 .map(str::trim)
-                .filter(|l| !l.is_empty())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .take(MAX_BATCH_LINES)
                 .collect();
             if lines.is_empty() {

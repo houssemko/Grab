@@ -1744,6 +1744,18 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
+    /// Explicit absolute dest, else the effective download dir. Shared by
+    /// enqueue and the torrent collision check so both agree on the folder.
+    fn resolve_dir(&self, dest_dir: Option<&str>) -> String {
+        // An explicit destination must be absolute: a relative dir would
+        // resolve against the launcher CWD (and fail the sandbox). Restore
+        // already rejects these; live input gets the same gate.
+        dest_dir
+            .filter(|s| !s.is_empty() && std::path::Path::new(s).is_absolute())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| self.effective_download_dir())
+    }
+
     pub fn enqueue(
         self: &Rc<Self>,
         url: &str,
@@ -1751,13 +1763,7 @@ impl DownloadManager {
         filename: Option<&str>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
-        // An explicit destination must be absolute: a relative dir would
-        // resolve against the launcher CWD (and fail the sandbox). Restore
-        // already rejects these; live input gets the same gate.
-        let dir = dest_dir
-            .filter(|s| !s.is_empty() && std::path::Path::new(s).is_absolute())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.effective_download_dir());
+        let dir = self.resolve_dir(dest_dir);
         let name = filename
             .filter(|s| sane_filename(s))
             .map(|s| s.to_string())
@@ -1771,11 +1777,18 @@ impl DownloadManager {
                 }
             });
         let name = shorten_filename(&name);
+        // Torrents record engine subfolders as output_dir, so the taken
+        // check covers those too: a magnet stub must never equal a recorded
+        // file-torrent folder (or vice versa).
         let name = dedupe_filename(&name, |n| {
-            std::path::Path::new(&dir).join(n).exists()
+            let p = std::path::Path::new(&dir).join(n);
+            p.exists()
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-                    .any(|it| it.dest_dir() == dir && it.filename() == n)
+                    .any(|it| {
+                        (it.dest_dir() == dir && it.filename() == n)
+                            || it.output_dir() == p.to_string_lossy()
+                    })
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         if crate::torrent::is_magnet(&url) {
@@ -1811,7 +1824,30 @@ impl DownloadManager {
             crate::torrent::stage_selection(&pseudo, sel);
         }
         let stub = crate::torrent::stub_name_for_file(file_name);
-        self.enqueue(&pseudo, dest_dir, Some(&stub))
+        let item = self.enqueue(&pseudo, dest_dir, Some(&stub))?;
+        // The engine writes with overwrite:true, so a pre-existing
+        // dest/<torrent-name> would be clobbered: record a deduped
+        // subfolder the engine then uses as-is (delete/reveal follow the
+        // recorded dir, and restore re-attaches it).
+        if let Some((base, _)) = crate::torrent::intake_plan(&bytes) {
+            let dir = self.resolve_dir(dest_dir);
+            if std::path::Path::new(&dir).join(&base).exists() {
+                let name = dedupe_filename(&base, |n| {
+                    let p = std::path::Path::new(&dir).join(n);
+                    p.exists()
+                        || (0..self.store.n_items())
+                            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                            .any(|it| it.output_dir() == p.to_string_lossy())
+                });
+                item.set_output_dir(
+                    std::path::Path::new(&dir)
+                        .join(&name)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        Ok(item)
     }
 
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
@@ -2363,13 +2399,11 @@ impl DownloadManager {
         // Magnets recorded their subfolder at enqueue (no archive exists
         // to recompute it from later); archived torrents recompute theirs
         // from metadata, so plain dest stays correct for them.
-        let dest = {
-            let recorded = item.output_dir().to_string();
-            if recorded.is_empty() {
-                dir.clone()
-            } else {
-                std::path::PathBuf::from(recorded)
-            }
+        let recorded = item.output_dir().to_string();
+        let dest = if recorded.is_empty() {
+            dir.clone()
+        } else {
+            std::path::PathBuf::from(&recorded)
         };
         let _ = std::fs::create_dir_all(&dest);
         let settings = &self.settings;
@@ -2382,7 +2416,8 @@ impl DownloadManager {
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let source = if crate::torrent::is_torrent_url(&magnet) {
+        let is_file = crate::torrent::is_torrent_url(&magnet);
+        let source = if is_file {
             match crate::torrent::archive_path_for_url(&magnet) {
                 Some(path) => crate::torrent::TorrentSource::File(path),
                 None => {
@@ -2396,6 +2431,9 @@ impl DownloadManager {
             crate::torrent::TorrentSource::Magnet(magnet)
         };
         let only_files = crate::torrent::get_selection(&item.url().to_string());
+        // Intake-recorded collision subfolders (file torrents only) are
+        // already final; magnets use their recorded dir by construction.
+        let dest_is_final = !recorded.is_empty() && is_file;
         let handle = tokio_rt().spawn(crate::torrent::run_torrent(crate::torrent::TorrentJob {
             id,
             source,
@@ -2409,6 +2447,7 @@ impl DownloadManager {
             listen_port: settings.torrent_listen_port(),
             trackers,
             only_files,
+            dest_is_final,
             tx,
         }));
         self.running.borrow_mut().insert(id, handle);

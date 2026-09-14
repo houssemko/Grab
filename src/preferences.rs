@@ -282,7 +282,9 @@ pub fn show(
         .build();
     let dht = adw::SwitchRow::builder()
         .title(gettext("Use DHT"))
-        .subtitle(gettext("Find peers through the distributed hash table"))
+        .subtitle(gettext(
+            "Find peers through the distributed hash table. Applies after restart.",
+        ))
         .build();
     settings
         .bind(crate::settings::key::TORRENT_DHT, &dht, "active")

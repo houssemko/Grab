@@ -74,6 +74,33 @@ fn multifile_torrents_get_name_subfolder() {
 }
 
 #[test]
+fn intake_plan_mirrors_engine_layout() {
+    fn torrent_bytes(info: &str) -> Vec<u8> {
+        // `info` leaves both dicts open; the two `e` close info then outer.
+        format!("d8:announce32:https://tracker.example.com:80/a4:info{info}ee").into_bytes()
+    }
+    // Single file, sane name: flat layout.
+    let single = torrent_bytes(
+        "d6:lengthi5e4:name9:movie.mp412:piece lengthi16384e6:pieces20:01234567890123456789",
+    );
+    assert_eq!(intake_plan(&single), Some(("movie.mp4".to_string(), false)));
+    // Multi-file: folder base is the torrent name.
+    let multi = torrent_bytes(
+        "d5:filesld6:lengthi5e4:pathl5:a.txteed6:lengthi5e4:pathl5:b.txteee4:name4:pack12:piece lengthi16384e6:pieces20:01234567890123456789",
+    );
+    assert_eq!(intake_plan(&multi), Some(("pack".to_string(), true)));
+    // Hostile name: info-hash hex fallback, never a path.
+    let evil = torrent_bytes("d6:lengthi0e4:name7:../evil12:piece lengthi16384e6:pieces0:");
+    let (base, multi) = intake_plan(&evil).expect("parses");
+    assert!(!multi);
+    assert_eq!(base.len(), 40);
+    assert!(base.chars().all(|c| c.is_ascii_hexdigit()));
+    assert!(!base.contains('/'));
+    // Garbage is not a torrent.
+    assert_eq!(intake_plan(b"not a torrent"), None);
+}
+
+#[test]
 fn trackers_split_and_schemeless_dropped() {
     assert_eq!(parse_trackers(""), None);
     assert_eq!(parse_trackers("  ,  "), None);
