@@ -66,10 +66,6 @@ struct StoredItem {
     /// files and for items that need no folder tracking.
     #[serde(default)]
     output_dir: Option<String>,
-    /// Per-download custom request headers (v2+). Validated at intake
-    /// (engine-owned headers rejected), absent on old files.
-    #[serde(default)]
-    headers: Vec<(String, String)>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -367,9 +363,6 @@ pub struct DownloadOptions {
     pub user_agent: String,
     /// Parallel range connections for large downloads (1 = single stream).
     pub connections: i32,
-    /// Per-download request headers (validated at intake). Sent before the
-    /// global User-Agent, which is skipped when overridden here.
-    pub headers: Vec<(String, String)>,
 }
 
 impl DownloadOptions {
@@ -381,74 +374,8 @@ impl DownloadOptions {
             limit_rate: s.speed_limit(),
             user_agent: s.user_agent(),
             connections: s.connections(),
-            headers: Vec::new(),
         }
     }
-}
-
-/// Engine-owned headers a per-download custom header must never shadow:
-/// overriding these would corrupt resume (Range), routing (Host), or the
-/// request framing the engine builds itself.
-const BLOCKED_HEADERS: [&str; 8] = [
-    "range",
-    "host",
-    "content-length",
-    "transfer-encoding",
-    "connection",
-    "upgrade",
-    "expect",
-    "keep-alive",
-];
-
-/// Maximum custom headers per download (the dialog offers 3 rows; the cap
-/// only bounds programmatic/restore intake).
-pub const MAX_CUSTOM_HEADERS: usize = 32;
-
-/// Validate raw key/value header pairs from the add dialog.
-///
-/// # Errors
-/// Returns a display-ready message naming the first bad pair.
-pub fn parse_custom_headers(pairs: Vec<(String, String)>) -> Result<Vec<(String, String)>, String> {
-    if pairs.len() > MAX_CUSTOM_HEADERS {
-        return Err(
-            gettext("Too many headers (max {n})").replace("{n}", &MAX_CUSTOM_HEADERS.to_string())
-        );
-    }
-    let mut out = Vec::with_capacity(pairs.len());
-    for (i, (name, value)) in pairs.into_iter().enumerate() {
-        let name = name.trim();
-        let value = value.trim();
-        if BLOCKED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
-            return Err(gettext("Header not allowed: {name}").replace("{name}", name));
-        }
-        name.parse::<reqwest::header::HeaderName>().map_err(|_| {
-            gettext("Invalid header name in row {n}").replace("{n}", &(i + 1).to_string())
-        })?;
-        value.parse::<reqwest::header::HeaderValue>().map_err(|_| {
-            gettext("Invalid header value in row {n}").replace("{n}", &(i + 1).to_string())
-        })?;
-        out.push((name.to_string(), value.to_string()));
-    }
-    Ok(out)
-}
-
-/// Custom headers first (validated at intake), then the engine's own.
-/// reqwest appends duplicates instead of replacing, so an engine header a
-/// custom one shadows must be skipped at its own site (see User-Agent).
-fn apply_custom_headers(
-    mut req: reqwest::RequestBuilder,
-    opts: &DownloadOptions,
-) -> reqwest::RequestBuilder {
-    for (name, value) in &opts.headers {
-        req = req.header(name.as_str(), value.as_str());
-    }
-    req
-}
-
-fn opts_has_header(opts: &DownloadOptions, name: &str) -> bool {
-    opts.headers
-        .iter()
-        .any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
 
 /// Forward a parseable Last-Modified response header to the pump. Torrent
@@ -911,11 +838,10 @@ async fn attempt_once(
             .map(|m| m.len())
             .unwrap_or(0);
         let mut req = ctx.client.get(&ctx.url);
-        req = apply_custom_headers(req, &ctx.opts);
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
         }
-        if !ctx.opts.user_agent.trim().is_empty() && !opts_has_header(&ctx.opts, "user-agent") {
+        if !ctx.opts.user_agent.trim().is_empty() {
             req = req.header("User-Agent", ctx.opts.user_agent.trim());
         }
         let resp = match tokio::time::timeout(
@@ -953,10 +879,7 @@ async fn attempt_once(
                 // Bare 416 (no usable Content-Range): ask for the length
                 // directly before deleting anything that might be complete.
                 let mut hreq = ctx.client.head(&ctx.url);
-                hreq = apply_custom_headers(hreq, &ctx.opts);
-                if !ctx.opts.user_agent.trim().is_empty()
-                    && !opts_has_header(&ctx.opts, "user-agent")
-                {
+                if !ctx.opts.user_agent.trim().is_empty() {
                     hreq = hreq.header("User-Agent", ctx.opts.user_agent.trim());
                 }
                 if let Ok(built) = hreq.build()
@@ -1462,8 +1385,7 @@ async fn probe_ranges(
     timeout: Duration,
 ) -> Result<u64, String> {
     let mut req = client.get(url).header("Range", "bytes=0-0");
-    req = apply_custom_headers(req, opts);
-    if !opts.user_agent.trim().is_empty() && !opts_has_header(opts, "user-agent") {
+    if !opts.user_agent.trim().is_empty() {
         req = req.header("User-Agent", opts.user_agent.trim());
     }
     let resp = match tokio::time::timeout(
@@ -1571,8 +1493,7 @@ async fn fetch_piece(
             .client
             .get(&ctx.url)
             .header("Range", format!("bytes={start}-{end}"));
-        req = apply_custom_headers(req, &ctx.opts);
-        if !ctx.opts.user_agent.trim().is_empty() && !opts_has_header(&ctx.opts, "user-agent") {
+        if !ctx.opts.user_agent.trim().is_empty() {
             req = req.header("User-Agent", ctx.opts.user_agent.trim());
         }
         let built = match req.build() {
@@ -1704,9 +1625,6 @@ pub struct DownloadManager {
     /// Torrent per-piece haves by row (session-only, main thread, never
     /// persisted: re-polled from the session on every spawn).
     torrent_pieces: RefCell<HashMap<u64, Vec<bool>>>,
-    /// Per-download custom request headers by row. Session-only like
-    /// pending_names: persisted in the queue, re-attached on restore.
-    custom_headers: RefCell<HashMap<u64, Vec<(String, String)>>>,
     /// Server-advertised Last-Modified by row, applied at Finished when
     /// the keep-server-date setting is on. Best-effort only.
     server_mtime: RefCell<HashMap<u64, SystemTime>>,
@@ -1731,7 +1649,6 @@ impl DownloadManager {
             epoch: RefCell::new(HashMap::new()),
             segment_state: RefCell::new(HashMap::new()),
             torrent_pieces: RefCell::new(HashMap::new()),
-            custom_headers: RefCell::new(HashMap::new()),
             server_mtime: RefCell::new(HashMap::new()),
             draining: Cell::new(false),
         });
@@ -1833,22 +1750,6 @@ impl DownloadManager {
         dest_dir: Option<&str>,
         filename: Option<&str>,
     ) -> Result<DownloadItem, String> {
-        self.enqueue_with_headers(url, dest_dir, filename, Vec::new())
-    }
-
-    /// Intake with per-download custom request headers. Callers validate
-    /// with [`parse_custom_headers`] first (engine-owned headers rejected).
-    ///
-    /// # Errors
-    /// Returns a display-ready message when the URL, destination, or name
-    /// is invalid.
-    pub fn enqueue_with_headers(
-        self: &Rc<Self>,
-        url: &str,
-        dest_dir: Option<&str>,
-        filename: Option<&str>,
-        headers: Vec<(String, String)>,
-    ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         // An explicit destination must be absolute: a relative dir would
         // resolve against the launcher CWD (and fail the sandbox). Restore
@@ -1888,11 +1789,6 @@ impl DownloadManager {
                     .to_string_lossy()
                     .into_owned(),
             );
-        }
-        // Stash before insert: insert persists (headers included) and may
-        // start the engine, which reads them via spawn.
-        if !headers.is_empty() {
-            self.custom_headers.borrow_mut().insert(item.id(), headers);
         }
         Ok(self.insert(item))
     }
@@ -2037,13 +1933,10 @@ impl DownloadManager {
     }
 
     fn spawn(self: &Rc<Self>, item: DownloadItem) {
-        let mut opts = DownloadOptions::from_settings(&self.settings);
+        let opts = DownloadOptions::from_settings(&self.settings);
         // Re-stash per attempt: a stale Last-Modified from a previous run
         // must never apply when the new run's server sends none.
         self.server_mtime.borrow_mut().remove(&item.id());
-        if let Some(h) = self.custom_headers.borrow().get(&item.id()) {
-            opts.headers = h.clone();
-        }
         let dest = item.file_path();
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -3004,12 +2897,6 @@ impl DownloadManager {
                     // stay clean and old app versions keep reading new ones.
                     let output_dir = it.output_dir().to_string();
                     let output_dir = (!output_dir.is_empty()).then_some(output_dir);
-                    let headers = self
-                        .custom_headers
-                        .borrow()
-                        .get(&it.id())
-                        .cloned()
-                        .unwrap_or_default();
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
@@ -3019,7 +2906,6 @@ impl DownloadManager {
                         segments,
                         selected_files,
                         output_dir,
-                        headers,
                     });
                 }
             }
@@ -3153,14 +3039,6 @@ impl DownloadManager {
                                 // Re-attach the recorded engine folder.
                                 if let Some(dir) = output_dir.clone() {
                                     restored.set_output_dir(dir);
-                                }
-                                // Re-attach custom headers: the live map is
-                                // in-memory only, so without this a restart
-                                // drops them and the resume sends none.
-                                if !item.headers.is_empty() {
-                                    self.custom_headers
-                                        .borrow_mut()
-                                        .insert(restored.id(), item.headers.clone());
                                 }
                                 // Re-stage the intake file selection: the
                                 // live map is in-memory only, so without
