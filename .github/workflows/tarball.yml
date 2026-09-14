@@ -56,6 +56,9 @@ jobs:
             meson setup build --prefix=/usr --buildtype=release
             meson compile -C build
             DESTDIR=\"$PWD/staging\" meson install -C build
+            # gnome.post_install skips DESTDIR staging, so compile here: without
+            # gschemas.compiled the binary aborts on startup outside Flatpak.
+            glib-compile-schemas \"$PWD/staging/usr/share/glib-2.0/schemas\"
             "
 
       - name: Pack and attach to the release

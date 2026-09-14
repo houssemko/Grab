@@ -42,8 +42,25 @@ fn ensure_schema_dir() {
     if std::env::var_os("GSETTINGS_SCHEMA_DIR").is_some() {
         return;
     }
-    let dir = env!("GRAB_SCHEMA_DIR");
-    if std::path::Path::new(&format!("{dir}/gschemas.compiled")).exists() {
+    // Compile-time dir (cargo OUT_DIR): only exists for `cargo run`. Portable
+    // fallback: the install tree this binary lives in (<prefix>/bin/grab ->
+    // <prefix>/share/glib-2.0/schemas), so a tarball extracted anywhere works
+    // instead of aborting with "Settings schema is not installed".
+    let mut candidates = vec![env!("GRAB_SCHEMA_DIR").to_string()];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(prefix) = exe.parent().and_then(|b| b.parent())
+    {
+        candidates.push(
+            prefix
+                .join("share/glib-2.0/schemas")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    if let Some(dir) = candidates
+        .into_iter()
+        .find(|d| std::path::Path::new(&format!("{d}/gschemas.compiled")).exists())
+    {
         // SAFETY: single-threaded startup, before any GSettings use.
         unsafe { std::env::set_var("GSETTINGS_SCHEMA_DIR", dir) };
     }
