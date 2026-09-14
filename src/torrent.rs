@@ -151,12 +151,18 @@ fn torrents_dir() -> PathBuf {
 }
 
 /// Absolute archive path for a `torrent:{abs-path}` pseudo-URL.
+/// Constrained to the app's own archive dir (plus a `.torrent` suffix) so
+/// queue rows can only ever resolve to — and delete — files Grab archived.
 pub fn archive_path_for_url(url: &str) -> Option<PathBuf> {
     let path = url.trim_start().get(8..)?;
     let path = PathBuf::from(path);
     // Existence is part of validity: intake rejects doodled pseudo-URLs
     // fast, and restore only ever sees swept-kept archives.
-    (path.is_absolute() && path.exists()).then_some(path)
+    (path.is_absolute()
+        && path.starts_with(torrents_dir())
+        && path.extension().is_some_and(|e| e == "torrent")
+        && path.exists())
+    .then_some(path)
 }
 
 /// Copy `.torrent` bytes into the archive, named after the sanitized file
@@ -397,7 +403,7 @@ async fn ensure_session(
 pub(crate) fn peer_limit_of(settings: &crate::settings::AppSettings) -> Option<usize> {
     match settings.torrent_peer_limit() {
         0 => None,
-        n => Some(n.max(0) as usize),
+        n => Some(n as usize),
     }
 }
 

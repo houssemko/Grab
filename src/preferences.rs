@@ -70,7 +70,10 @@ pub fn show(
                     && let Some(p) = f.path()
                 {
                     let dir = p.to_string_lossy().into_owned();
-                    if s2.set_string("download-dir", &dir).is_ok() {
+                    if s2
+                        .set_string(crate::settings::key::DOWNLOAD_DIR, &dir)
+                        .is_ok()
+                    {
                         l2.set_text(&dir);
                     }
                 }
@@ -81,7 +84,7 @@ pub fn show(
         let s = settings.clone();
         let l = dest_label.clone();
         reset_btn.connect_clicked(move |_| {
-            if s.set_string("download-dir", "").is_ok() {
+            if s.set_string(crate::settings::key::DOWNLOAD_DIR, "").is_ok() {
                 l.set_text(&gettext("(System Downloads folder)"));
             }
         });
