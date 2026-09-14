@@ -34,7 +34,7 @@ jobs:
 
       - name: Install GNOME SDK and Rust
         run: |
-          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])"
+          RUNTIME=$(python3 -c "import json; print(json.load(open('build-aux/io.github.houssemko.Grab.json'))['runtime-version'])")
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub "org.gnome.Sdk//$RUNTIME" "org.freedesktop.Sdk.Extension.rust-stable//25.08"
