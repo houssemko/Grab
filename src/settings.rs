@@ -14,6 +14,7 @@ pub mod key {
     pub const RETRIES: &str = "retries";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
+    pub const KEEP_SERVER_DATE: &str = "keep-server-date";
     pub const SHOW_NOTIFICATIONS: &str = "show-notifications";
     pub const NOTIFY_BACKGROUND: &str = "notify-background";
     pub const INHIBIT_SUSPEND: &str = "inhibit-suspend";
@@ -56,6 +57,9 @@ impl AppSettings {
     }
     pub fn user_agent(&self) -> String {
         self.0.string(key::USER_AGENT).to_string()
+    }
+    pub fn keep_server_date(&self) -> bool {
+        self.0.boolean(key::KEEP_SERVER_DATE)
     }
     pub fn show_notifications(&self) -> bool {
         self.0.boolean(key::SHOW_NOTIFICATIONS)

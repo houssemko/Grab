@@ -40,6 +40,11 @@
       <summary>User agent</summary>
       <description>Custom User-Agent header. Empty means the default.</description>
     </key>
+    <key name="keep-server-date" type="b">
+      <default>false</default>
+      <summary>Keep server file date</summary>
+      <description>Set each finished file's modification time from the server's Last-Modified header when present.</description>
+    </key>
     <key name="show-notifications" type="b">
       <default>true</default>
       <summary>Notify on completion</summary>

@@ -1091,6 +1091,7 @@ dependencies = [
  "futures-util",
  "gettext-rs",
  "gtk4",
+ "httpdate",
  "libadwaita",
  "librqbit",
  "pretty_assertions",

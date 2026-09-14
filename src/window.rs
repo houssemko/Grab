@@ -1189,6 +1189,24 @@ fn show_rename_dialog(
     dialog.present(anchor.root().as_ref());
 }
 
+/// Collect the custom-header rows of the add dialog: non-empty rows as
+/// raw pairs, split on the first colon (`Name: Value`; a bare name sends
+/// an empty value). Validation (blocklist, syntax) is the engine's job.
+fn header_rows_text(rows: &[adw::EntryRow]) -> Vec<(String, String)> {
+    rows.iter()
+        .filter_map(|r| {
+            let t = r.text().trim().to_string();
+            if t.is_empty() {
+                return None;
+            }
+            match t.split_once(':') {
+                Some((k, v)) => Some((k.to_string(), v.to_string())),
+                None => Some((t, String::new())),
+            }
+        })
+        .collect()
+}
+
 pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("New Download"))
@@ -1214,6 +1232,20 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .activates_default(true)
         .build();
     group.add(&file_row);
+
+    let header_expander = adw::ExpanderRow::builder()
+        .title(gettext("Custom headers"))
+        .subtitle(gettext("Optional, one per row as Name: Value"))
+        .build();
+    let mut header_rows = Vec::new();
+    for i in 1..=3 {
+        let row = adw::EntryRow::builder()
+            .title(gettext("Header {n}").replace("{n}", &i.to_string()))
+            .build();
+        header_expander.add_row(&row);
+        header_rows.push(row);
+    }
+    group.add(&header_expander);
 
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
@@ -1387,12 +1419,22 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let dd = dest_dir.clone();
         let url_row = url_row.clone();
         let file_row = file_row.clone();
+        let header_rows = header_rows.clone();
         let error_label = error_label.clone();
         let dialog = dialog.downgrade();
         add_btn.connect_clicked(move |_| {
             let url = url_row.text().trim().to_string();
             let fname = file_row.text().trim().to_string();
-            match m.enqueue(
+            let headers =
+                match crate::download::parse_custom_headers(header_rows_text(&header_rows)) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        error_label.set_text(&e);
+                        error_label.set_visible(true);
+                        return;
+                    }
+                };
+            match m.enqueue_with_headers(
                 &url,
                 Some(&dd.borrow()),
                 if fname.is_empty() {
@@ -1400,6 +1442,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 } else {
                     Some(fname.as_str())
                 },
+                headers,
             ) {
                 Ok(_) => {
                     if let Some(dialog) = dialog.upgrade() {
@@ -1418,6 +1461,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let m = manager.clone();
         let dd = dest_dir.clone();
         let file_row = file_row.clone();
+        let header_rows = header_rows.clone();
         let dialog = dialog.downgrade();
         let error_label = error_label.clone();
         url_row.connect_apply(move |row| {
@@ -1426,7 +1470,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 return;
             }
             let fname = file_row.text().trim().to_string();
-            match m.enqueue(
+            let headers =
+                match crate::download::parse_custom_headers(header_rows_text(&header_rows)) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        error_label.set_text(&e);
+                        error_label.set_visible(true);
+                        return;
+                    }
+                };
+            match m.enqueue_with_headers(
                 &url,
                 Some(&dd.borrow()),
                 if fname.is_empty() {
@@ -1434,6 +1487,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 } else {
                     Some(fname.as_str())
                 },
+                headers,
             ) {
                 Ok(_) => {
                     if let Some(dialog) = dialog.upgrade() {

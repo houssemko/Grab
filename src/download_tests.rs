@@ -240,6 +240,35 @@ fn parses_range_totals() {
 }
 
 #[test]
+fn validates_custom_headers() {
+    // Valid pairs pass through trimmed (values may contain colons).
+    let ok = parse_custom_headers(vec![
+        ("X-Token".to_string(), " abc ".to_string()),
+        ("Referer".to_string(), "https://example.com/a:b".to_string()),
+    ])
+    .expect("valid headers");
+    assert_eq!(
+        ok,
+        vec![
+            ("X-Token".to_string(), "abc".to_string()),
+            ("Referer".to_string(), "https://example.com/a:b".to_string()),
+        ]
+    );
+    // Engine-owned headers are rejected (case-insensitive).
+    assert!(parse_custom_headers(vec![("Range".to_string(), "bytes=0-".to_string())]).is_err());
+    assert!(parse_custom_headers(vec![("HOST".to_string(), "x".to_string())]).is_err());
+    // Garbage names/values rejected.
+    assert!(parse_custom_headers(vec![("not a header".to_string(), "x".to_string())]).is_err());
+    assert!(parse_custom_headers(vec![("X-Ok".to_string(), "a\nb".to_string())]).is_err());
+    assert!(parse_custom_headers(vec![("".to_string(), "x".to_string())]).is_err());
+    // Cap enforced.
+    let many = (0..MAX_CUSTOM_HEADERS + 1)
+        .map(|i| (format!("X-H{i}"), "v".to_string()))
+        .collect();
+    assert!(parse_custom_headers(many).is_err());
+}
+
+#[test]
 fn resolves_response_totals() {
     assert_eq!(response_total(Some(100), None, false, 0), Some(100));
     assert_eq!(response_total(Some(60), None, true, 40), Some(100));
@@ -340,6 +369,7 @@ fn overcap_queue_keeps_active_first() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            headers: Vec::new(),
         },
         StoredItem {
             url: "https://example.com/paused.iso".to_string(),
@@ -350,6 +380,7 @@ fn overcap_queue_keeps_active_first() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            headers: Vec::new(),
         },
     ];
     for i in 0..1000 {
@@ -362,6 +393,7 @@ fn overcap_queue_keeps_active_first() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            headers: Vec::new(),
         });
     }
     let queue = StoredQueue {
@@ -1232,6 +1264,7 @@ fn queue_roundtrip_and_mapping() {
                 segments: None,
                 selected_files: None,
                 output_dir: None,
+                headers: Vec::new(),
             },
             StoredItem {
                 url: "https://example.com/b.iso".to_string(),
@@ -1242,6 +1275,7 @@ fn queue_roundtrip_and_mapping() {
                 segments: None,
                 selected_files: None,
                 output_dir: None,
+                headers: Vec::new(),
             },
         ],
     };
@@ -1393,6 +1427,7 @@ fn batch_restore_hundred_done() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            headers: Vec::new(),
         })
         .collect();
     let queue = StoredQueue {
@@ -1604,6 +1639,7 @@ fn restore_preserves_intent() {
         segments: None,
         selected_files: None,
         output_dir: None,
+        headers: Vec::new(),
     })
     .collect();
     let queue = StoredQueue {
@@ -2318,6 +2354,7 @@ fn killed_segmented_resume_starts_over() {
                 segments: None,
                 selected_files: None,
                 output_dir: None,
+                headers: Vec::new(),
             }],
         })
         .unwrap(),

@@ -177,6 +177,15 @@ pub fn show(
         .build();
     net_group.add(&ua);
 
+    let keep_date = adw::SwitchRow::builder()
+        .title(gettext("Keep server file date"))
+        .subtitle(gettext("Use the Last-Modified header for finished files"))
+        .build();
+    settings
+        .bind(crate::settings::key::KEEP_SERVER_DATE, &keep_date, "active")
+        .build();
+    net_group.add(&keep_date);
+
     let notif_group = adw::PreferencesGroup::builder()
         .title(gettext("Notifications"))
         .build();
