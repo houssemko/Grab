@@ -549,16 +549,12 @@ async fn poll_loop(
             }
             // Seeding toward a limit: stay on the loop (progress ticks keep
             // the row's upload counters live) until a rule fires.
-            if finished_at.is_none() {
-                finished_at = Some(std::time::Instant::now());
-            }
+            let t0 = *finished_at.get_or_insert_with(std::time::Instant::now);
             let ratio_hit = seed_ratio > 0.0
                 && stats.total_bytes > 0
                 && stats.uploaded_bytes as f64 >= seed_ratio * stats.total_bytes as f64;
             let time_hit = seed_time_min > 0
-                && finished_at.is_some_and(|t| {
-                    t.elapsed() >= std::time::Duration::from_secs(seed_time_min as u64 * 60)
-                });
+                && t0.elapsed() >= std::time::Duration::from_secs(seed_time_min as u64 * 60);
             if ratio_hit || time_hit {
                 let _ = session.pause(&handle).await;
                 let _ = session

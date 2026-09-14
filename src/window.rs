@@ -1189,6 +1189,15 @@ fn show_rename_dialog(
     dialog.present(anchor.root().as_ref());
 }
 
+/// Present a dialog on the active window when there is one, standalone
+/// otherwise (e.g. action fired while hidden).
+fn present_dialog(dialog: &adw::Dialog) {
+    let win = gio::Application::default()
+        .and_downcast::<adw::Application>()
+        .and_then(|app| app.active_window());
+    dialog.present(win.as_ref());
+}
+
 pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("New Download"))
@@ -1455,15 +1464,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         });
     }
 
-    if let Some(app) = gio::Application::default().and_downcast::<adw::Application>() {
-        if let Some(win) = app.active_window() {
-            dialog.present(Some(&win));
-        } else {
-            // No window (e.g. action fired while hidden): present standalone
-            // rather than silently dropping the dialog.
-            dialog.present(None::<&gtk4::Window>);
-        }
-    }
+    present_dialog(&dialog);
 
     // ponytail: single clipboard read per dialog open; no watch, no polling.
     {
@@ -1574,15 +1575,13 @@ pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
             }
             m.begin_batch();
             let mut added = 0;
-            let mut skipped = 0;
             for line in &lines {
-                match m.enqueue(line, None, None) {
-                    Ok(_) => added += 1,
-                    Err(_) => skipped += 1,
+                if m.enqueue(line, None, None).is_ok() {
+                    added += 1;
                 }
             }
             m.end_batch();
-            if skipped == 0 {
+            if added == lines.len() {
                 if let Some(dialog) = dialog.upgrade() {
                     dialog.close();
                 }
@@ -1591,20 +1590,14 @@ pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
                     &gettext("Added {added} of {total} URLs ({skipped} invalid lines skipped)")
                         .replace("{added}", &added.to_string())
                         .replace("{total}", &lines.len().to_string())
-                        .replace("{skipped}", &skipped.to_string()),
+                        .replace("{skipped}", &(lines.len() - added).to_string()),
                 );
                 error_label.set_visible(true);
             }
         });
     }
 
-    if let Some(app) = gio::Application::default().and_downcast::<adw::Application>() {
-        if let Some(win) = app.active_window() {
-            dialog.present(Some(&win));
-        } else {
-            dialog.present(None::<&gtk4::Window>);
-        }
-    }
+    present_dialog(&dialog);
 }
 
 /// Multi-file .torrent intake: one switch per file, all on by default.

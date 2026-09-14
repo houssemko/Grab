@@ -2071,12 +2071,9 @@ impl DownloadManager {
                         // Torrent upload counters (HTTP rows send zeros, so
                         // their labels stay exactly as before).
                         let up_suffix = if uploaded > 0 || upload_bps > 0 {
-                            let ratio = match total {
-                                Some(t) if t > 0 => {
-                                    format!(" · ratio {:.1}", uploaded as f64 / t as f64)
-                                }
-                                _ => String::new(),
-                            };
+                            let ratio = total.filter(|&t| t > 0).map_or_else(String::new, |t| {
+                                format!(" · ratio {:.1}", uploaded as f64 / t as f64)
+                            });
                             gettext(" • ↑ {upspeed}/s · {up} up{ratio}")
                                 .replace("{upspeed}", &fmt_bytes(upload_bps))
                                 .replace("{up}", &fmt_bytes(uploaded))
