@@ -196,7 +196,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .build()
         },
         {
-            let st = Rc::clone(&state);
+            let st = Rc::clone(st);
             gio::ActionEntry::builder("add-batch")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {

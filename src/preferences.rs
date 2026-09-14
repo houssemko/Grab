@@ -292,7 +292,7 @@ pub fn show(
     torrent_net_group.add(&peers);
     let trackers = adw::EntryRow::builder()
         .title(gettext("Extra trackers"))
-        .subtitle(gettext(
+        .tooltip_text(gettext(
             "Comma-separated tracker URLs added to every download",
         ))
         .build();

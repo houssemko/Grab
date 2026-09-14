@@ -786,10 +786,6 @@ pub fn build_window(
     content.set_margin_bottom(12);
     content.set_margin_start(12);
     content.set_margin_end(12);
-    content.append(&filter_bar);
-    content.append(&active_section);
-    content.append(&queued_section);
-    content.append(&downloaded_section);
     let scroll = gtk4::ScrolledWindow::builder()
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .vexpand(true)
@@ -848,6 +844,10 @@ pub fn build_window(
     let filter_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     filter_bar.append(&search);
     filter_bar.append(&status_drop);
+    content.append(&filter_bar);
+    content.append(&active_section);
+    content.append(&queued_section);
+    content.append(&downloaded_section);
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
@@ -1170,6 +1170,7 @@ fn show_rename_dialog(
         let m = manager.clone();
         let dialog = dialog.downgrade();
         let error_label = error_label.clone();
+        let name_row = name_row.clone();
         rename_btn.connect_clicked(move |_| match m.rename_download(id, &name_row.text()) {
             Ok(()) => {
                 if let Some(dialog) = dialog.upgrade() {
