@@ -1346,6 +1346,15 @@ fn sane_filenames() {
 }
 
 #[test]
+fn user_agent_sanitized_to_header_safe() {
+    assert_eq!(sanitize_user_agent("Grab/2.3.4"), "Grab/2.3.4");
+    assert_eq!(sanitize_user_agent("  a b  "), "a b");
+    assert_eq!(sanitize_user_agent("a\nb\rc"), "abc");
+    assert_eq!(sanitize_user_agent("é💾"), "");
+    assert_eq!(sanitize_user_agent("   "), "");
+}
+
+#[test]
 fn restore_rejects_bad_filenames() {
     let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("restore-bad");

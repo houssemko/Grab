@@ -783,7 +783,10 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     let want_files = only_files.clone();
     let opts = AddTorrentOptions {
         output_folder: Some(folder.to_string_lossy().into_owned()),
-        overwrite: true,
+        // The intake collision-dedup path guarantees a fresh folder, so
+        // nothing existing can be clobbered; computed folders and magnets
+        // keep overwrite:true (partially-written resume data must open).
+        overwrite: !dest_is_final,
         // Current preference at add time: running torrents keep theirs.
         peer_limit,
         // Extra trackers from preferences (same live-at-add rule).

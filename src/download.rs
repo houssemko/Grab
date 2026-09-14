@@ -211,6 +211,19 @@ pub(crate) fn sane_filename(s: &str) -> bool {
         && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
+/// Header-safe User-Agent from the free-text setting: keep visible ASCII
+/// plus spaces, drop the rest. An invalid byte would make reqwest fail the
+/// request (or worse, per version), and the value is dconf-writable — so
+/// sanitize at the single choke point instead of trusting all call sites.
+pub(crate) fn sanitize_user_agent(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Best-effort filename from a URL path, falling back to `index.html`.
 /// Decode `%XX` escapes (RFC 5987 `filename*=`); leaves everything else
 /// (including `+`) untouched. No new dependency for ten lines.
@@ -372,7 +385,7 @@ impl DownloadOptions {
             tries: s.retries(),
             timeout: s.timeout(),
             limit_rate: s.speed_limit(),
-            user_agent: s.user_agent(),
+            user_agent: sanitize_user_agent(&s.user_agent()),
             connections: s.connections(),
         }
     }
