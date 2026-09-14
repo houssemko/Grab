@@ -37,6 +37,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.3.0" date="2026-09-14">
+      <description>
+        <p>New: GNOME HIG search pattern — a header-bar toggle reveals a search bar with the status filter alongside. Open it with the button, by typing, or with Ctrl+F.</p>
+      </description>
+    </release>
     <release version="2.2.7" date="2026-09-14">
       <description>
         <p>Stability: removed per-download custom headers in favor of automatic headers. Internal code cleanups.</p>
