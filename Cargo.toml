@@ -1,6 +1,6 @@
 [package]
 name = "grab"
-version = "2.3.1"
+version = "2.3.2"
 edition = "2024"
 rust-version = "1.92"
 description = "A GNOME download manager (GTK 4 / libadwaita, reqwest backend)"
