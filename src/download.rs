@@ -392,6 +392,13 @@ fn send_last_modified(
     }
 }
 
+/// Lock a worker-shared mutex, recovering the guarded value when a
+/// previous worker panic poisoned it. The item then fails with an error
+/// instead of the panic cascading through every worker into the app.
+fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
@@ -408,10 +415,23 @@ fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         // Bounded hops: a malicious server must not bounce the client
-        // around (or downgrade https→http) without limit. No cookie or
-        // auth store is enabled, so only the URL + UA cross origins.
+        // around without limit. Downgrades are refused outright: no
+        // cookie or auth store is enabled, but a https→http bounce would
+        // still let a network attacker substitute the downloaded bytes.
+        // Only the URL + UA cross origins.
         reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                let downgrade = attempt
+                    .previous()
+                    .last()
+                    .is_some_and(|u| u.scheme() == "https")
+                    && attempt.url().scheme() == "http";
+                if attempt.previous().len() > 5 || downgrade {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .expect("http client")
     })
@@ -635,9 +655,7 @@ async fn attempt_multi(
     let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(depth);
     // Never exceed the configured connections: extra range requests are
     // what throttling hosts punish.
-    let n_workers = queue
-        .lock()
-        .expect("Grab: piece queue poisoned (bug)")
+    let n_workers = lock_recover(&queue)
         .len()
         .min(max_workers.max(1))
         .clamp(1, 16);
@@ -657,10 +675,7 @@ async fn attempt_multi(
                 if failed.load(Ordering::SeqCst) {
                     break;
                 }
-                let piece = queue
-                    .lock()
-                    .expect("Grab: piece queue poisoned (bug)")
-                    .pop_front();
+                let piece = lock_recover(&queue).pop_front();
                 let Some((idx, s, e)) = piece else { break };
                 match fetch_piece(ctx, s, e, total).await {
                     Ok(bytes) => {
@@ -669,28 +684,19 @@ async fn attempt_multi(
                         }
                     }
                     Err(AttemptFail::Throttled(msg)) => {
-                        first_err
-                            .lock()
-                            .expect("Grab: error slot poisoned (bug)")
-                            .get_or_insert(msg);
+                        lock_recover(&first_err).get_or_insert(msg);
                         throttled.store(true, Ordering::SeqCst);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
                     Err(AttemptFail::Changed(msg)) => {
-                        first_err
-                            .lock()
-                            .expect("Grab: error slot poisoned (bug)")
-                            .get_or_insert(msg);
+                        lock_recover(&first_err).get_or_insert(msg);
                         changed.store(true, Ordering::SeqCst);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
                     Err(AttemptFail::Retryable(msg)) => {
-                        first_err
-                            .lock()
-                            .expect("Grab: error slot poisoned (bug)")
-                            .get_or_insert(msg);
+                        lock_recover(&first_err).get_or_insert(msg);
                         failed.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -774,25 +780,19 @@ async fn attempt_multi(
     let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
     let written = wres.map_err(AttemptFail::Retryable)?;
     if changed.load(Ordering::SeqCst) {
-        let msg = first_err
-            .lock()
-            .expect("Grab: error slot poisoned (bug)")
+        let msg = lock_recover(&first_err)
             .take()
             .unwrap_or_else(|| gettext("Download interrupted"));
         return Err(AttemptFail::Changed(msg));
     }
     if throttled.load(Ordering::SeqCst) {
-        let msg = first_err
-            .lock()
-            .expect("Grab: error slot poisoned (bug)")
+        let msg = lock_recover(&first_err)
             .take()
             .unwrap_or_else(|| gettext("Download interrupted"));
         return Err(AttemptFail::Throttled(msg));
     }
     if failed.load(Ordering::SeqCst) {
-        let msg = first_err
-            .lock()
-            .expect("Grab: error slot poisoned (bug)")
+        let msg = lock_recover(&first_err)
             .take()
             .unwrap_or_else(|| gettext("Download interrupted"));
         return Err(AttemptFail::Retryable(msg));
@@ -2323,7 +2323,7 @@ impl DownloadManager {
                             continue;
                         }
                         let name = shorten_filename(&name);
-                        if name == current {
+                        if name == current || !sane_filename(&name) {
                             continue;
                         }
                         this.pending_names.borrow_mut().insert(id, name);
