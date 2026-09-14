@@ -38,8 +38,25 @@ fn init_locale() {
     gettextrs::textdomain("grab").ok();
 }
 
+/// Whether `dir` compiles to a schema source providing our schema.
+/// Uses an explicit source (never the default one): the default source is
+/// cached process-wide, so merely querying it before fixing the environment
+/// would freeze a useless preset in place.
+fn schema_in_dir(dir: &str) -> bool {
+    gio::SettingsSchemaSource::from_directory(dir, None::<&gio::SettingsSchemaSource>, true)
+        .ok()
+        .and_then(|source| source.lookup(APP_ID, false))
+        .is_some()
+}
+
 fn ensure_schema_dir() {
-    if std::env::var_os("GSETTINGS_SCHEMA_DIR").is_some() {
+    // A preset GSETTINGS_SCHEMA_DIR (flatpak override, distro packaging) is
+    // only honored if it actually provides our schema — otherwise fall
+    // through to our own install tree instead of aborting later with
+    // "Settings schema is not installed".
+    if let Some(preset) = std::env::var_os("GSETTINGS_SCHEMA_DIR")
+        && preset.to_string_lossy().split(':').any(schema_in_dir)
+    {
         return;
     }
     // Compile-time dir (cargo OUT_DIR): only exists for `cargo run`. Portable
