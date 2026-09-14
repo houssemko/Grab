@@ -2389,6 +2389,53 @@ impl DownloadManager {
             self.changed();
             self.start_next();
         }
+
+        /// Rename a download: the list label plus the file on disk when it is
+        /// already fetched. Only completed rows (a real file to move) and
+        /// queued rows (nothing on disk yet) qualify: mid-transfer the engine
+        /// owns the path, and torrent rows map to session outputs, not files.
+        ///
+        /// # Errors
+        /// Returns a display-ready message when the row cannot be renamed.
+        pub fn rename_download(self: &Rc<Self>, id: u64, new_name: &str) -> Result<(), String> {
+            let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
+            if crate::torrent::is_torrent(&item.url()) {
+                return Err(gettext("Renaming torrent downloads isn't supported"));
+            }
+            match item.status() {
+                DownloadStatus::Done | DownloadStatus::Queued => {}
+                DownloadStatus::Downloading => {
+                    return Err(gettext("Pause or wait for the download to finish first"));
+                }
+                _ => {
+                    return Err(gettext(
+                        "Only completed or not-yet-started downloads can be renamed",
+                    ));
+                }
+            }
+            let name = new_name.trim();
+            if name == item.filename() {
+                return Ok(());
+            }
+            if name.is_empty() || !sane_filename(name) {
+                return Err(gettext("That isn't a valid file name"));
+            }
+            if item.status() == DownloadStatus::Done {
+                let new_path = std::path::PathBuf::from(item.dest_dir().to_string()).join(name);
+                match rename_noreplace(&item.file_path(), &new_path) {
+                    Ok(()) => {}
+                    // Deleted behind our back: the label update below still applies.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(format!("Could not rename {}: {e}", item.filename()));
+                    }
+                }
+            }
+            item.set_filename(name);
+            self.persist_queue();
+            self.changed();
+            Ok(())
+        }
     }
 
     /// Send a downloading/paused row to the back of the queue, keeping its

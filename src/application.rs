@@ -3,7 +3,7 @@
 
 use crate::download::DownloadManager;
 use crate::settings::AppSettings;
-use crate::window::{self, show_add_dialog};
+use crate::window::{self, show_add_dialog, show_batch_dialog};
 use crate::{APP_ID, preferences};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
@@ -43,6 +43,7 @@ pub fn setup(app: &adw::Application) {
             }));
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
+            app.set_accels_for_action("app.add-batch", &["<Control><Shift>n"]);
             app.set_accels_for_action("app.quit", &["<Control>q"]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
             app.set_accels_for_action("app.shortcuts", &["<Control>question"]);
@@ -190,6 +191,16 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         show_add_dialog(s.manager.clone());
+                    }
+                })
+                .build()
+        },
+        {
+            let st = Rc::clone(&state);
+            gio::ActionEntry::builder("add-batch")
+                .activate(move |_, _, _| {
+                    if let Some(s) = st.borrow().as_ref() {
+                        show_batch_dialog(s.manager.clone());
                     }
                 })
                 .build()

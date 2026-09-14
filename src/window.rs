@@ -246,6 +246,26 @@ fn build_row(
     let row = gtk4::ListBoxRow::new();
     row.set_child(Some(&outer));
 
+    // Right-click menu (rename only): a per-row action group keeps the
+    // global menu untouched.
+    let rename_menu = gio::Menu::new();
+    rename_menu.append(Some(&gettext("Rename…")), Some("row.rename"));
+    let pop = gtk4::PopoverMenu::from_model(Some(&rename_menu));
+    pop.set_parent(&row);
+    {
+        let m = Rc::clone(manager);
+        let anchor = row.clone();
+        let actions = gio::SimpleActionGroup::new();
+        let act = gio::SimpleAction::new("rename", None);
+        act.connect_activate(move |_, _| {
+            if let Some(it) = m.find(id) {
+                show_rename_dialog(m.clone(), id, it.filename(), &anchor);
+            }
+        });
+        actions.add_action(&act);
+        row.insert_action_group("row", Some(&actions));
+    }
+
     // Click the row body to reveal the block map. Clicks landing on a
     // button belong to the button: walk up from the pick target and
     // ignore those. Only live rows expand (finished ones have no map).
@@ -255,7 +275,14 @@ fn build_row(
         let rev = map_revealer.clone();
         let blk = blocks.clone();
         let exp = Rc::clone(&expanded);
+        let pop_menu = pop.clone();
         click.connect_pressed(move |gesture, _n_press, x, y| {
+            if gesture.current_button() == gtk4::gdk::BUTTON_SECONDARY {
+                pop_menu
+                    .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                pop_menu.popup();
+                return;
+            }
             let pick = gesture
                 .widget()
                 .and_downcast::<gtk4::ListBoxRow>()
@@ -684,6 +711,7 @@ pub fn build_window(
 
     let menu = gio::Menu::new();
     menu.append(Some(&gettext("New Download")), Some("app.add-download"));
+    menu.append(Some(&gettext("Add Multiple URLs")), Some("app.add-batch"));
     let section = gio::Menu::new();
     section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
     section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
@@ -758,6 +786,7 @@ pub fn build_window(
     content.set_margin_bottom(12);
     content.set_margin_start(12);
     content.set_margin_end(12);
+    content.append(&filter_bar);
     content.append(&active_section);
     content.append(&queued_section);
     content.append(&downloaded_section);
@@ -774,6 +803,51 @@ pub fn build_window(
     fn is_queued(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Queued
     }
+    /// DropDown position for a status (0 = All). Order must match the
+    /// model built below.
+    fn status_filter_index(s: crate::download::DownloadStatus) -> u32 {
+        use crate::download::DownloadStatus::*;
+        match s {
+            Downloading => 1,
+            Paused => 2,
+            Queued => 3,
+            Done => 4,
+            Failed => 5,
+            Cancelled => 6,
+        }
+    }
+
+    // Search + status filter above the sections: rows that don't match
+    // are hidden in sync(), and empty sections collapse as usual.
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
+    let search = gtk4::SearchEntry::builder()
+        .placeholder_text(gettext("Search downloads"))
+        .hexpand(true)
+        .build();
+    let status_names = gtk4::StringList::new(&[]);
+    for name in [
+        gettext("All"),
+        gettext("Downloading"),
+        gettext("Paused"),
+        gettext("Queued"),
+        gettext("Done"),
+        gettext("Failed"),
+        gettext("Cancelled"),
+    ] {
+        status_names.append(&name);
+    }
+    let status_drop = gtk4::DropDown::builder()
+        .model(&status_names)
+        .selected(0)
+        .valign(gtk4::Align::Center)
+        .build();
+    status_drop.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Filter by status",
+    ))]);
+    let filter_bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    filter_bar.append(&search);
+    filter_bar.append(&status_drop);
 
     let rows: Rc<RefCell<HashMap<u64, gtk4::ListBoxRow>>> = Rc::new(RefCell::new(HashMap::new()));
     let sync: Rc<dyn Fn()> = {
@@ -788,8 +862,12 @@ pub fn build_window(
         let sec_active = active_section.clone();
         let sec_queued = queued_section.clone();
         let sec_downloaded = downloaded_section.clone();
+        let query = Rc::clone(&query);
+        let status_sel = Rc::clone(&status_sel);
         Rc::new(move || {
             let store = m.store();
+            let q = query.borrow();
+            let sel = status_sel.get();
             let mut present = std::collections::HashSet::new();
             let mut n_active = 0;
             let mut n_queued = 0;
@@ -800,12 +878,19 @@ pub fn build_window(
                     .and_downcast::<crate::download::DownloadItem>()
                 {
                     present.insert(it.id());
-                    if is_done(&it) {
-                        n_downloaded += 1;
-                    } else if is_queued(&it) {
-                        n_queued += 1;
-                    } else {
-                        n_active += 1;
+                    let mut shown = sel == 0 || status_filter_index(it.status()) == sel;
+                    if shown && !q.is_empty() && !it.filename().to_lowercase().contains(q.as_str())
+                    {
+                        shown = false;
+                    }
+                    if shown {
+                        if is_done(&it) {
+                            n_downloaded += 1;
+                        } else if is_queued(&it) {
+                            n_queued += 1;
+                        } else {
+                            n_active += 1;
+                        }
                     }
                     let existing = r.borrow().get(&it.id()).cloned();
                     let row = if let Some(row) = existing {
@@ -828,6 +913,7 @@ pub fn build_window(
                         }
                         target.append(&row);
                     }
+                    row.set_visible(shown);
                 }
             }
             let stale: Vec<u64> = r
@@ -852,6 +938,23 @@ pub fn build_window(
             s.set_visible_child_name(if has_items { "list" } else { "empty" });
         })
     };
+
+    {
+        let sync = Rc::clone(&sync);
+        let q = Rc::clone(&query);
+        search.connect_search_changed(move |s| {
+            *q.borrow_mut() = s.text().to_lowercase();
+            sync();
+        });
+    }
+    {
+        let sync = Rc::clone(&sync);
+        let sel = Rc::clone(&status_sel);
+        status_drop.connect_selected_notify(move |d| {
+            sel.set(d.selected());
+            sync();
+        });
+    }
 
     // ponytail: hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));
@@ -1001,6 +1104,88 @@ pub fn build_window(
     }
 
     window
+}
+
+/// Rename a completed or queued row. The manager enforces what can be
+/// renamed; failures (mid-transfer, torrent, bad name) show inline.
+fn show_rename_dialog(
+    manager: Rc<DownloadManager>,
+    id: u64,
+    current: String,
+    anchor: &gtk4::ListBoxRow,
+) {
+    let dialog = adw::Dialog::builder()
+        .title(gettext("Rename Download"))
+        .build();
+    dialog.set_content_width(380);
+
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::new();
+    page.add(&group);
+
+    let name_row = adw::EntryRow::builder()
+        .title(gettext("File name"))
+        .text(current)
+        .activates_default(true)
+        .build();
+    group.add(&name_row);
+
+    let error_label = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    group.add(&error_label);
+
+    let toolbar = adw::ToolbarView::new();
+    let hb = adw::HeaderBar::new();
+    hb.set_show_end_title_buttons(true);
+    hb.set_show_start_title_buttons(false);
+    let cancel_btn = gtk4::Button::builder()
+        .label(gettext("_Cancel"))
+        .use_underline(true)
+        .build();
+    let rename_btn = gtk4::Button::builder()
+        .label(gettext("_Rename"))
+        .use_underline(true)
+        .css_classes(["suggested-action"])
+        .build();
+    hb.pack_start(&cancel_btn);
+    hb.pack_end(&rename_btn);
+    toolbar.add_top_bar(&hb);
+    toolbar.set_content(Some(&page));
+    dialog.set_child(Some(&toolbar));
+    dialog.set_default_widget(Some(&rename_btn));
+
+    {
+        let d = dialog.downgrade();
+        cancel_btn.connect_clicked(move |_| {
+            if let Some(d) = d.upgrade() {
+                d.close();
+            }
+        });
+    }
+    {
+        let m = manager.clone();
+        let dialog = dialog.downgrade();
+        let error_label = error_label.clone();
+        rename_btn.connect_clicked(move |_| match m.rename_download(id, &name_row.text()) {
+            Ok(()) => {
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.close();
+                }
+            }
+            Err(e) => {
+                error_label.set_text(&e);
+                error_label.set_visible(true);
+                name_row.add_css_class("error");
+            }
+        });
+    }
+
+    name_row.grab_focus();
+    dialog.present(anchor.root().as_ref());
 }
 
 pub fn show_add_dialog(manager: Rc<DownloadManager>) {
@@ -1300,6 +1485,124 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 url_row.set_text(&normalized);
             }
         });
+    }
+}
+
+/// Multi-URL intake: one URL per line, pasted from a list. Same 1000-line
+/// cap as file import; one persist for the whole batch.
+pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
+    const MAX_BATCH_LINES: usize = 1000;
+    let dialog = adw::Dialog::builder()
+        .title(gettext("Add Multiple URLs"))
+        .build();
+    dialog.set_content_width(480);
+
+    let page = adw::PreferencesPage::new();
+    let group = adw::PreferencesGroup::builder()
+        .description(gettext("One URL per line"))
+        .build();
+    page.add(&group);
+
+    let view = gtk4::TextView::builder()
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .accepts_tab(false)
+        .vexpand(true)
+        .build();
+    let scroll = gtk4::ScrolledWindow::builder()
+        .min_content_height(200)
+        .vexpand(true)
+        .child(&view)
+        .build();
+    group.add(&scroll);
+
+    let error_label = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    group.add(&error_label);
+
+    let toolbar = adw::ToolbarView::new();
+    let hb = adw::HeaderBar::new();
+    hb.set_show_end_title_buttons(true);
+    hb.set_show_start_title_buttons(false);
+    let cancel_btn = gtk4::Button::builder()
+        .label(gettext("_Cancel"))
+        .use_underline(true)
+        .build();
+    let add_btn = gtk4::Button::builder()
+        .label(gettext("_Add Downloads"))
+        .use_underline(true)
+        .css_classes(["suggested-action"])
+        .build();
+    hb.pack_start(&cancel_btn);
+    hb.pack_end(&add_btn);
+    toolbar.add_top_bar(&hb);
+    toolbar.set_content(Some(&page));
+    dialog.set_child(Some(&toolbar));
+    dialog.set_default_widget(Some(&add_btn));
+
+    {
+        let d = dialog.downgrade();
+        cancel_btn.connect_clicked(move |_| {
+            if let Some(d) = d.upgrade() {
+                d.close();
+            }
+        });
+    }
+    {
+        let m = manager.clone();
+        let dialog = dialog.downgrade();
+        let error_label = error_label.clone();
+        add_btn.connect_clicked(move |_| {
+            let buffer = view.buffer();
+            let text = buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string();
+            let lines: Vec<&str> = text
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .take(MAX_BATCH_LINES)
+                .collect();
+            if lines.is_empty() {
+                error_label.set_text(&gettext("Enter at least one URL"));
+                error_label.set_visible(true);
+                return;
+            }
+            m.begin_batch();
+            let mut added = 0;
+            let mut skipped = 0;
+            for line in &lines {
+                match m.enqueue(line, None, None) {
+                    Ok(_) => added += 1,
+                    Err(_) => skipped += 1,
+                }
+            }
+            m.end_batch();
+            if skipped == 0 {
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.close();
+                }
+            } else {
+                error_label.set_text(
+                    &gettext("Added {added} of {total} URLs ({skipped} invalid lines skipped)")
+                        .replace("{added}", &added.to_string())
+                        .replace("{total}", &lines.len().to_string())
+                        .replace("{skipped}", &skipped.to_string()),
+                );
+                error_label.set_visible(true);
+            }
+        });
+    }
+
+    if let Some(app) = gio::Application::default().and_downcast::<adw::Application>() {
+        if let Some(win) = app.active_window() {
+            dialog.present(Some(&win));
+        } else {
+            dialog.present(None::<&gtk4::Window>);
+        }
     }
 }
 
