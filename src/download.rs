@@ -1340,7 +1340,7 @@ fn rename_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Re
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) if matches!(e.raw_os_error(), Some(18 | 1 | 95 | 38)) => {
-                return std::fs::rename(old, new)
+                return std::fs::rename(old, new);
             }
             Err(e) => return Err(e),
         }
@@ -3097,7 +3097,10 @@ impl DownloadManager {
                     continue;
                 }
                 if !sane_filename(&item.filename) {
-                    tracing::warn!("skipping queue entry: Invalid filename in queue: {}", item.filename);
+                    tracing::warn!(
+                        "skipping queue entry: Invalid filename in queue: {}",
+                        item.filename
+                    );
                     continue;
                 }
                 if !std::path::Path::new(&item.dest_dir).is_absolute() {
@@ -3114,8 +3117,7 @@ impl DownloadManager {
                     Some(s)
                         if s.total > 0
                             && s.total <= MAX_SEGMENTED_TOTAL
-                            && s.done.len()
-                                == s.total.div_ceil(piece_len(s.total)) as usize =>
+                            && s.done.len() == s.total.div_ceil(piece_len(s.total)) as usize =>
                     {
                         Some(s.clone())
                     }
