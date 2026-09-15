@@ -91,40 +91,52 @@ fn spawn_fixture(
     std::fs::create_dir_all(&dl).unwrap();
     let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
     std::fs::write(srv.join(served_name), &payload).unwrap();
-    let port = test_port(port_offset);
-    let mut cmd = std::process::Command::new("python3");
-    cmd.arg(format!(
-        "{}/tests/throttled_server.py",
-        env!("CARGO_MANIFEST_DIR")
-    ))
-    .arg(port.to_string())
-    .arg(srv.join(served_name))
-    .arg(dir.join("ranges.log"))
-    .arg(sleep_secs);
-    for a in extra_args {
-        cmd.arg(a);
-    }
-    let server = cmd
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("python3 range server");
-    let mut ready = false;
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-            ready = true;
-            break;
+    // CI runners sometimes fail to bring the fixture server up on the
+    // first port (slow spawn, stale listener). Retry on fresh ports
+    // instead of failing the test: a panic here poisons the shared test
+    // locks and cascades into every later test.
+    let mut last_port = 0;
+    for _ in 0..3 {
+        let port = test_port(port_offset);
+        last_port = port;
+        let mut cmd = std::process::Command::new("python3");
+        cmd.arg(format!(
+            "{}/tests/throttled_server.py",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .arg(port.to_string())
+        .arg(srv.join(served_name))
+        .arg(dir.join("ranges.log"))
+        .arg(sleep_secs);
+        for a in extra_args {
+            cmd.arg(a);
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let server = Rc::new(RefCell::new(
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("python3 range server"),
+        ));
+        let mut ready = false;
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if ready {
+            return Fixture {
+                dir,
+                dl,
+                payload,
+                port,
+                server,
+            };
+        }
+        let _ = server.borrow_mut().kill();
     }
-    assert!(ready, "test HTTP server did not listen on port {port}");
-    Fixture {
-        dir,
-        dl,
-        payload,
-        port,
-        server: Rc::new(RefCell::new(server)),
-    }
+    panic!("test HTTP server did not listen on port {last_port}");
 }
 
 /// Fail the current test, killing its server first (dirs stay for logs).
