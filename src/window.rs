@@ -372,30 +372,57 @@ fn build_row(
             w_status.upgrade(),
             w_name.upgrade(),
         ) {
-            let st: gtk4::Label = st.downcast().expect("Grab: status widget is a Label (bug)");
-            let n: gtk4::Label = n.downcast().expect("Grab: name widget is a Label (bug)");
+            // A mismatched widget type means the UI definition drifted:
+            // warn and skip this row's refresh instead of panicking.
+            let (
+                Ok(st),
+                Ok(n),
+                Ok(detail),
+                Ok(progress),
+                Ok(spinner),
+                Ok(toggle),
+                Ok(stop),
+                Ok(queue),
+                Ok(retry),
+                Ok(reveal),
+                Ok(delete),
+                Ok(map),
+                Ok(blocks),
+            ) = (
+                st.downcast::<gtk4::Label>(),
+                n.downcast::<gtk4::Label>(),
+                d.downcast::<gtk4::Label>(),
+                p.downcast::<gtk4::ProgressBar>(),
+                s.downcast::<adw::Spinner>(),
+                t.downcast::<gtk4::Button>(),
+                x.downcast::<gtk4::Button>(),
+                q.downcast::<gtk4::Button>(),
+                r.downcast::<gtk4::Button>(),
+                o.downcast::<gtk4::Button>(),
+                y.downcast::<gtk4::Button>(),
+                rv.downcast::<gtk4::Revealer>(),
+                mp.downcast::<gtk4::DrawingArea>(),
+            )
+            else {
+                tracing::warn!("Grab: unexpected row widget types; skipping row refresh");
+                return;
+            };
             n.set_text(&it.filename());
             st.set_text(&it.status().label());
             refresh_row(
                 it,
                 &RowWidgets {
-                    detail: d.downcast().expect("Grab: detail widget is a Label (bug)"),
-                    progress: p
-                        .downcast()
-                        .expect("Grab: progress widget is a ProgressBar (bug)"),
-                    spinner: s
-                        .downcast()
-                        .expect("Grab: spinner widget is a Spinner (bug)"),
-                    toggle_btn: t.downcast().expect("Grab: toggle widget is a Button (bug)"),
-                    stop_btn: x.downcast().expect("Grab: stop widget is a Button (bug)"),
-                    queue_btn: q.downcast().expect("Grab: queue widget is a Button (bug)"),
-                    retry_btn: r.downcast().expect("Grab: retry widget is a Button (bug)"),
-                    reveal_btn: o.downcast().expect("Grab: reveal widget is a Button (bug)"),
-                    delete_btn: y.downcast().expect("Grab: delete widget is a Button (bug)"),
-                    map_revealer: rv.downcast().expect("Grab: map widget is a Revealer (bug)"),
-                    blocks: mp
-                        .downcast()
-                        .expect("Grab: blocks widget is a DrawingArea (bug)"),
+                    detail,
+                    progress,
+                    spinner,
+                    toggle_btn: toggle,
+                    stop_btn: stop,
+                    queue_btn: queue,
+                    retry_btn: retry,
+                    reveal_btn: reveal,
+                    delete_btn: delete,
+                    map_revealer: map,
+                    blocks,
                     expanded: Rc::clone(&exp_sync),
                 },
                 another_queued(&m_sync, it),
@@ -499,6 +526,7 @@ fn build_row(
                 it.progress(),
                 it.detail().to_string(),
                 it.output_dir().to_string(),
+                m.segments_of(id),
             );
             let name = snapshot.2.clone();
             m.remove(id);
@@ -506,8 +534,9 @@ fn build_row(
             toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
             toast.connect_button_clicked(move |_| {
-                let (url, dir, fname, status, prog, detail, output_dir) = snapshot.clone();
-                let restored = m2.unremove(url, dir, fname, status, prog, detail);
+                let (url, dir, fname, status, prog, detail, output_dir, segments) =
+                    snapshot.clone();
+                let restored = m2.unremove(url, dir, fname, status, prog, detail, segments);
                 restored.set_output_dir(output_dir);
             });
             t.add_toast(toast);

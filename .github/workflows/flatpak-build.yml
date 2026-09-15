@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.ref }}
 
@@ -39,7 +39,7 @@ jobs:
 
       - name: Restore SDK cache
         if: inputs.cache-sdk
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.local/share/flatpak
           key: flatpak-sdk-${{ hashFiles('build-aux/io.github.houssemko.Grab.json') }}
@@ -77,7 +77,7 @@ jobs:
 
       - name: Upload test bundle
         if: inputs.release-tag == ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Grab.flatpak
           path: Grab.flatpak

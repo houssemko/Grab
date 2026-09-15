@@ -45,7 +45,7 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
 From FlatPark (recommended, gets updates via `flatpak update`):
 
 ```bash
-flatpak remote-add --if-not-exists flatpark https://flatpark.org/repo/flatpark.flatpakrepo
+flatpak remote-add --if-not-exists flatpark https://dl.flatpark.org/flatpark.flatpakrepo
 flatpak install flatpark io.github.houssemko.Grab
 ```
 

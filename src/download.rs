@@ -1320,7 +1320,7 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
 /// Rename without clobbering: `std::fs::rename` silently replaces the
 /// destination. Prefers `renameat2(RENAME_NOREPLACE)` (atomic on any
 /// filesystem, FAT included); falls back to claiming `new` with a hard
-/// link, and to a checked plain rename only where neither exists.
+/// link, and to a plain rename only where hard links are unsupported.
 fn rename_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     match rename_noreplace_sys(old, new) {
@@ -1329,11 +1329,21 @@ fn rename_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Re
         Err(e) if e.raw_os_error() == Some(38) => {}
         r => return r,
     }
-    match std::fs::hard_link(old, new) {
-        Ok(()) => std::fs::remove_file(old),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
-        Err(_) if !new.exists() => std::fs::rename(old, new),
-        Err(e) => Err(e),
+    // Claim `new` atomically via the link: an `exists()` pre-check followed
+    // by a plain rename is a TOCTOU — a rival rename can slip in between
+    // and get clobbered. Retry the link on transient errors; fall back to
+    // plain rename only where hard links cannot work at all (Linux UAPI
+    // numbers: EXDEV 18, EPERM 1, EOPNOTSUPP 95, ENOSYS 38).
+    loop {
+        match std::fs::hard_link(old, new) {
+            Ok(()) => return std::fs::remove_file(old),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.raw_os_error(), Some(18 | 1 | 95 | 38)) => {
+                return std::fs::rename(old, new)
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -2660,13 +2670,13 @@ impl DownloadManager {
 
     /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id);
+        self.cancel_inner(id, false);
         self.persist_queue();
         self.changed();
         self.start_next();
     }
 
-    fn cancel_inner(&self, id: u64) {
+    fn cancel_inner(&self, id: u64, keep_partial: bool) {
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -2675,7 +2685,10 @@ impl DownloadManager {
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         self.torrent_pieces.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
-            if had_segments {
+            // Segmented partials have holes: without the bitmap they can
+            // never be appended to, so cancel drops the file — unless the
+            // row may come back via Undo, which restores the bitmap.
+            if had_segments && !keep_partial {
                 let _ = std::fs::remove_file(item.file_path());
             }
             // Unfinished torrent rows drop their session entry but keep
@@ -2711,8 +2724,10 @@ impl DownloadManager {
     }
 
     /// Cancel and drop a row; restore with [`DownloadManager::unremove`].
+    /// The partial file is kept so Undo can resume segmented rows instead
+    /// of restarting them (plain cancel still discards it).
     pub fn remove(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id);
+        self.cancel_inner(id, true);
         self.epoch.borrow_mut().remove(&id);
         if let Some(pos) = (0..self.store.n_items()).find(|&i| {
             self.store
@@ -2728,8 +2743,16 @@ impl DownloadManager {
         self.start_next();
     }
 
+    /// Segment bitmap snapshot for Undo: clone before [`DownloadManager::remove`]
+    /// drops the row's live bitmap so [`DownloadManager::unremove`] can resume it.
+    pub fn segments_of(&self, id: u64) -> Option<SegmentState> {
+        self.segment_state.borrow().get(&id).cloned()
+    }
+
     /// Re-insert a previously removed download (Undo). Restores the prior
-    /// status except `Downloading`, which restarts as `Queued`.
+    /// status except `Downloading`, which restarts as `Queued`. A restored
+    /// segment bitmap resumes instead of restarting; a stale one (partial
+    /// file gone) is dropped by the spawn-time file checks.
     pub fn unremove(
         self: &Rc<Self>,
         url: String,
@@ -2738,6 +2761,7 @@ impl DownloadManager {
         status: DownloadStatus,
         progress: f64,
         detail: String,
+        segments: Option<SegmentState>,
     ) -> DownloadItem {
         let item = DownloadItem::new(self.alloc_id(), &url, &filename, &dest_dir);
         item.set_progress(progress.clamp(0.0, 1.0));
@@ -2746,6 +2770,9 @@ impl DownloadManager {
             DownloadStatus::Downloading => DownloadStatus::Queued,
             s => s,
         });
+        if let Some(st) = segments {
+            self.segment_state.borrow_mut().insert(item.id(), st);
+        }
         self.insert(item.clone());
         item
     }
@@ -2830,7 +2857,7 @@ impl DownloadManager {
                     DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
                 )
             },
-            |m, id| m.cancel_inner(id),
+            |m, id| m.cancel_inner(id, false),
         );
         self.persist_queue();
         self.changed();
@@ -3042,6 +3069,16 @@ impl DownloadManager {
                     .collect();
             }
             self.batch.set(self.batch.get() + 1);
+            // Two phases: every insert below can spawn an engine via
+            // start_next, so collect all restore decisions first and only
+            // then apply them — a mid-loop validation failure can no longer
+            // leave half-spawned engines behind.
+            struct PendingRestore {
+                item: StoredItem,
+                output_dir: Option<String>,
+                segments: Option<SegmentState>,
+            }
+            let mut pending = Vec::with_capacity(items.len());
             for item in items {
                 // The recorded engine folder is only trusted when it sits
                 // directly inside the row's own dest; otherwise it stays
@@ -3053,48 +3090,72 @@ impl DownloadManager {
                             .parent()
                             .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
                 });
-                match item.status {
+                // Mirror restore_existing's cheap validations now, so the
+                // apply phase below cannot fail (and strand engines) partway.
+                if normalize_url(&item.url).is_err() {
+                    tracing::warn!("skipping queue entry with bad URL");
+                    continue;
+                }
+                if !sane_filename(&item.filename) {
+                    tracing::warn!("skipping queue entry: Invalid filename in queue: {}", item.filename);
+                    continue;
+                }
+                if !std::path::Path::new(&item.dest_dir).is_absolute() {
+                    tracing::warn!(
+                        "skipping queue entry: Invalid destination in queue: {}",
+                        item.dest_dir
+                    );
+                    continue;
+                }
+                // A stored bitmap resumes segmented; anything
+                // misshapen is dropped (single-stream fallback stays
+                // correct via the spawn-time file checks).
+                let segments = match &item.segments {
+                    Some(s)
+                        if s.total > 0
+                            && s.total <= MAX_SEGMENTED_TOTAL
+                            && s.done.len()
+                                == s.total.div_ceil(piece_len(s.total)) as usize =>
+                    {
+                        Some(s.clone())
+                    }
+                    _ => None,
+                };
+                pending.push(PendingRestore {
+                    item,
+                    output_dir,
+                    segments,
+                });
+            }
+            for p in pending {
+                match p.item.status {
                     DownloadStatus::Done => {
                         self.insert_history(
-                            item.url,
-                            item.dest_dir,
-                            item.filename,
-                            item.progress,
-                            output_dir,
+                            p.item.url,
+                            p.item.dest_dir,
+                            p.item.filename,
+                            p.item.progress,
+                            p.output_dir,
                         );
                     }
                     status => {
-                        // A stored bitmap resumes segmented; anything
-                        // misshapen is dropped (single-stream fallback stays
-                        // correct via the spawn-time file checks).
-                        let segments = match item.segments {
-                            Some(s)
-                                if s.total > 0
-                                    && s.total <= MAX_SEGMENTED_TOTAL
-                                    && s.done.len()
-                                        == s.total.div_ceil(piece_len(s.total)) as usize =>
-                            {
-                                Some(s)
-                            }
-                            _ => None,
-                        };
                         match self.restore_existing(
-                            &item.url,
-                            &item.dest_dir,
-                            &item.filename,
+                            &p.item.url,
+                            &p.item.dest_dir,
+                            &p.item.filename,
                             status,
-                            segments,
+                            p.segments,
                         ) {
                             Ok(restored) => {
                                 // Re-attach the recorded engine folder.
-                                if let Some(dir) = output_dir.clone() {
+                                if let Some(dir) = p.output_dir.clone() {
                                     restored.set_output_dir(dir);
                                 }
                                 // Re-stage the intake file selection: the
                                 // live map is in-memory only, so without
                                 // this a restart drops the filter and the
                                 // resume downloads every file.
-                                if let Some(sel) = item.selected_files {
+                                if let Some(sel) = p.item.selected_files {
                                     crate::torrent::stage_selection(&restored.url(), sel);
                                 }
                             }
