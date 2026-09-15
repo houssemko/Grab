@@ -1618,7 +1618,7 @@ pub struct DownloadManager {
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
-    batch: Cell<bool>,
+    batch: Cell<u32>,
     /// Server-advertised names waiting for their download to finish. The
     /// move happens at Finished so the engine never writes through a
     /// renamed path mid-transfer (stale size reads, split files).
@@ -1656,7 +1656,7 @@ impl DownloadManager {
             running: RefCell::new(HashMap::new()),
             next_id: Cell::new(1),
             on_change: RefCell::new(None),
-            batch: Cell::new(false),
+            batch: Cell::new(0),
             pending_names: RefCell::new(HashMap::new()),
             queued: Cell::new(0),
             epoch: RefCell::new(HashMap::new()),
@@ -1711,14 +1711,15 @@ impl DownloadManager {
 
     /// Delay queue persists across bulk inserts (URL-list import): each
     /// `enqueue` otherwise rewrites + fsyncs the whole queue file, turning
-    /// a 1000-line import into 1000 full rewrites. Pair with `end_batch`.
+    /// a 1000-line import into 1000 full rewrites. Nesting-safe counter:
+    /// pairs of `begin_batch` / `end_batch` may overlap.
     pub fn begin_batch(&self) {
-        self.batch.set(true);
+        self.batch.set(self.batch.get() + 1);
     }
 
     /// Persist once after a `begin_batch` block and refresh the UI.
     pub fn end_batch(self: &Rc<Self>) {
-        self.batch.set(false);
+        self.batch.set(self.batch.get().saturating_sub(1));
         self.persist_queue();
         self.changed();
     }
@@ -2932,7 +2933,7 @@ impl DownloadManager {
     }
 
     fn persist_queue(&self) {
-        if self.batch.get() {
+        if self.batch.get() > 0 {
             return;
         }
         let mut items = Vec::new();
@@ -3040,7 +3041,7 @@ impl DownloadManager {
                     .chain(done.into_iter().skip(skip))
                     .collect();
             }
-            self.batch.set(true);
+            self.batch.set(self.batch.get() + 1);
             for item in items {
                 // The recorded engine folder is only trusted when it sits
                 // directly inside the row's own dest; otherwise it stays
@@ -3102,7 +3103,7 @@ impl DownloadManager {
                     }
                 }
             }
-            self.batch.set(false);
+            self.batch.set(self.batch.get().saturating_sub(1));
             // Drop archived .torrent files no row references anymore
             // (removed rows keep theirs until now; explicit deletes drop
             // theirs at once, Finished engines drop theirs on completion).

@@ -556,19 +556,22 @@ async fn poll_loop(
             break;
         }
         if stats.finished {
-            // No seeding, or seeding without a stop rule: same as before.
-            if !seed_finished || (seed_ratio <= 0.0 && seed_time_min <= 0) {
-                if !seed_finished {
-                    let _ = session.pause(&handle).await;
-                }
+            // No seeding requested: finish immediately. The session is
+            // paused so the already-downloaded files stay on disk.
+            if !seed_finished {
+                let _ = session.pause(&handle).await;
                 let _ = tx.send(EngineMsg::Finished {
                     size: stats.total_bytes,
                 });
                 finished = true;
                 break;
             }
-            // Seeding toward a limit: stay on the loop (progress ticks keep
-            // the row's upload counters live) until a rule fires.
+            // Seeding requested: stay on the loop (progress ticks keep the
+            // row's upload counters live) until a configured rule fires.
+            // With neither rule set this is "seed forever": the loop never
+            // breaks here, so the row stays active with a working Stop
+            // action instead of flipping to Done while the engine keeps
+            // seeding in the background.
             let t0 = *finished_at.get_or_insert_with(std::time::Instant::now);
             let ratio_hit = seed_ratio > 0.0
                 && stats.total_bytes > 0
