@@ -1656,6 +1656,18 @@ pub struct DownloadManager {
     draining: Cell<bool>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RemovedSnapshot {
+    pub url: String,
+    pub dest_dir: String,
+    pub filename: String,
+    pub status: DownloadStatus,
+    pub progress: f64,
+    pub detail: String,
+    pub output_dir: String,
+    pub segments: Option<SegmentState>,
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
@@ -2753,24 +2765,16 @@ impl DownloadManager {
     /// status except `Downloading`, which restarts as `Queued`. A restored
     /// segment bitmap resumes instead of restarting; a stale one (partial
     /// file gone) is dropped by the spawn-time file checks.
-    pub fn unremove(
-        self: &Rc<Self>,
-        url: String,
-        dest_dir: String,
-        filename: String,
-        status: DownloadStatus,
-        progress: f64,
-        detail: String,
-        segments: Option<SegmentState>,
-    ) -> DownloadItem {
-        let item = DownloadItem::new(self.alloc_id(), &url, &filename, &dest_dir);
-        item.set_progress(progress.clamp(0.0, 1.0));
-        item.set_detail(detail);
-        item.set_status(match status {
+    pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
+        let item = DownloadItem::new(self.alloc_id(), &snap.url, &snap.filename, &snap.dest_dir);
+        item.set_progress(snap.progress.clamp(0.0, 1.0));
+        item.set_detail(snap.detail);
+        item.set_status(match snap.status {
             DownloadStatus::Downloading => DownloadStatus::Queued,
             s => s,
         });
-        if let Some(st) = segments {
+        item.set_output_dir(snap.output_dir);
+        if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
         self.insert(item.clone());

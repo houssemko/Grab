@@ -1,4 +1,4 @@
-use crate::download::{BLOCK_CELLS, DownloadManager, DownloadStatus, aggregate};
+use crate::download::{BLOCK_CELLS, DownloadManager, DownloadStatus, RemovedSnapshot, aggregate};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
@@ -518,26 +518,23 @@ fn build_row(
         let t = Rc::clone(toasts);
         remove_btn.connect_clicked(move |_| {
             let Some(it) = m.find(id) else { return };
-            let snapshot = (
-                it.url().to_string(),
-                it.dest_dir().to_string(),
-                it.filename().to_string(),
-                it.status(),
-                it.progress(),
-                it.detail().to_string(),
-                it.output_dir().to_string(),
-                m.segments_of(id),
-            );
-            let name = snapshot.2.clone();
+            let snapshot = RemovedSnapshot {
+                url: it.url().to_string(),
+                dest_dir: it.dest_dir().to_string(),
+                filename: it.filename().to_string(),
+                status: it.status(),
+                progress: it.progress(),
+                detail: it.detail().to_string(),
+                output_dir: it.output_dir().to_string(),
+                segments: m.segments_of(id),
+            };
+            let name = snapshot.filename.clone();
             m.remove(id);
             let toast = adw::Toast::new(&gettext("Removed {name}").replace("{name}", &name));
             toast.set_button_label(Some(&gettext("Undo")));
             let m2 = Rc::clone(&m);
             toast.connect_button_clicked(move |_| {
-                let (url, dir, fname, status, prog, detail, output_dir, segments) =
-                    snapshot.clone();
-                let restored = m2.unremove(url, dir, fname, status, prog, detail, segments);
-                restored.set_output_dir(output_dir);
+                m2.unremove(snapshot.clone());
             });
             t.add_toast(toast);
         });
