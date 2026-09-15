@@ -42,6 +42,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.4.2" date="2026-09-15">
+      <description>
+        <p>Code formatting cleanup (cargo fmt). No functional changes from 2.4.1.</p>
+      </description>
+    </release>
     <release version="2.4.1" date="2026-09-15">
       <description>
         <p>Fix: FlatPark install instructions point at the correct repo file; Undo resumes segmented downloads instead of restarting them; queue restore validates before spawning engines; row UI tolerates widget drift without panicking. Security: CI workflows pin third-party actions to commit SHAs.</p>
