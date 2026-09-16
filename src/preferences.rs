@@ -334,9 +334,9 @@ pub fn show(
     // Video pages resolve through the yt-dlp support tools; this page
     // holds the defaults new video downloads start from, plus tool setup.
     // Runs `binary --version` and reports `None` when it fails.
-    fn tool_version(binary: &std::path::Path) -> Option<String> {
+    fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
         let out = std::process::Command::new(binary)
-            .arg("--version")
+            .arg(version_arg)
             .output()
             .ok()?;
         if !out.status.success() {
@@ -367,10 +367,10 @@ pub fn show(
         spin.stop();
         spin.set_visible(false);
         let probed = crate::video::resolve_libraries().ok().map(|libs| {
-            let yt =
-                tool_version(&libs.youtube).unwrap_or_else(|| libs.youtube.display().to_string());
-            let ff =
-                tool_version(&libs.ffmpeg).unwrap_or_else(|| libs.ffmpeg.display().to_string());
+            let yt = tool_version(&libs.youtube, "--version")
+                .unwrap_or_else(|| libs.youtube.display().to_string());
+            let ff = tool_version(&libs.ffmpeg, "-version")
+                .unwrap_or_else(|| libs.ffmpeg.display().to_string());
             (yt, ff)
         });
         match probed {
@@ -566,9 +566,9 @@ pub fn show(
         gtk4::glib::spawn_future_local(async move {
             let probed = gio::spawn_blocking(|| {
                 crate::video::resolve_libraries().ok().map(|libs| {
-                    let yt = tool_version(&libs.youtube)
+                    let yt = tool_version(&libs.youtube, "--version")
                         .unwrap_or_else(|| libs.youtube.display().to_string());
-                    let ff = tool_version(&libs.ffmpeg)
+                    let ff = tool_version(&libs.ffmpeg, "-version")
                         .unwrap_or_else(|| libs.ffmpeg.display().to_string());
                     (yt, ff)
                 })

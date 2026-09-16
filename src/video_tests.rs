@@ -480,6 +480,8 @@ fn test_query<'a>(
         audio_only: false,
         video: Some(("137", "mp4")),
         audio: ("251", "webm"),
+        video_total: Some(100),
+        audio_total: Some(50),
     }
 }
 
@@ -505,13 +507,87 @@ fn resume_plan_combine_only_with_verified_parts() {
 }
 
 #[test]
-fn resume_plan_fresh_on_size_mismatch() {
+fn resume_plan_resumes_truncated_parts() {
     let dir = test_manifest_dir("truncated");
     std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 100]).unwrap();
-    // Audio part truncated: re-download, never merge a partial.
+    // Audio part truncated mid-download: resume it, never re-download.
     std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 49]).unwrap();
     let dest = dir.join("Clip.mp4");
     let m = test_manifest();
+    let q = test_query(Some(&m), &dir, &dest);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_resumes_pending_manifest() {
+    // Pause before any part completed bookkeeping: the pending sidecar
+    // (zero bytes recorded) plus partial files on disk means resume.
+    let dir = test_manifest_dir("pending");
+    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 60]).unwrap();
+    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 30]).unwrap();
+    let dest = dir.join("Clip.mp4");
+    let mut m = test_manifest();
+    m.video_bytes = 0;
+    m.audio_bytes = 0;
+    let q = test_query(Some(&m), &dir, &dest);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_without_manifest_despite_parts() {
+    // Bytes without a matching sidecar are unverifiable (pre-sidecar
+    // upgrades, foreign files): wipe and start clean.
+    let dir = test_manifest_dir("unverified");
+    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 60]).unwrap();
+    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 30]).unwrap();
+    let dest = dir.join("Clip.mp4");
+    let q = test_query(None, &dir, &dest);
+    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_on_overlong_part() {
+    // A part larger than its total cannot be resumed into: wipe it.
+    let dir = test_manifest_dir("overlong");
+    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 100]).unwrap();
+    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 60]).unwrap();
+    let dest = dir.join("Clip.mp4");
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dir, &dest);
+    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_on_sparse_shell() {
+    // The killed-attempt shape: full apparent size, nothing on disk
+    // (pre-allocated by the engine, sidecar gone with the task). The
+    // engine equates size with completeness, so this must never reach
+    // it — wipe and start over instead.
+    let dir = test_manifest_dir("sparse");
+    let vpart = part_path(&dir, "video", "mp4");
+    let apart = part_path(&dir, "audio", "webm");
+    std::fs::File::create(&vpart).unwrap().set_len(100).unwrap();
+    std::fs::File::create(&apart).unwrap().set_len(50).unwrap();
+    assert!(is_sparse_shell(&vpart));
+    assert!(is_sparse_shell(&apart));
+    let dest = dir.join("Clip.mp4");
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dir, &dest);
+    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_when_nothing_on_disk() {
+    let dir = test_manifest_dir("empty");
+    let dest = dir.join("Clip.mp4");
+    let mut m = test_manifest();
+    m.video_bytes = 0;
+    m.audio_bytes = 0;
     let q = test_query(Some(&m), &dir, &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
@@ -709,13 +785,28 @@ fn fake_tool(dir: &std::path::Path, name: &str, first_line: &str) -> std::path::
     path
 }
 
+/// Fake ffmpeg that behaves like the real one: only single-dash
+/// `-version` works, `--version` exits 8. Guards the flag plumbing that
+/// once broke every video attempt while the fakes stayed green.
+fn fake_ffmpeg_strict(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("ffmpeg");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\nif [ \"$1\" = \"-version\" ]; then echo 'ffmpeg version n9.0.1'; else echo \"Unrecognized option '$1'.\" >&2; exit 8; fi\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
 #[test]
 fn ensure_tool_versions_accepts_fresh_pair() {
     let dir = std::env::temp_dir().join(format!("grab-versions-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let yt = fake_tool(&dir, "yt-dlp", "2026.08.19");
-    let ff = fake_tool(&dir, "ffmpeg", "ffmpeg version n9.0.1");
+    let ff = fake_ffmpeg_strict(&dir);
     let libs = yt_dlp::client::deps::Libraries::new(yt, ff);
     let (yt_v, ff_v) = crate::download::tokio_rt()
         .block_on(ensure_tool_versions(&libs))
@@ -731,7 +822,7 @@ fn ensure_tool_versions_refuses_stale_yt_dlp() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let yt = fake_tool(&dir, "yt-dlp", "2024.10.07");
-    let ff = fake_tool(&dir, "ffmpeg", "ffmpeg version n9.0.1");
+    let ff = fake_ffmpeg_strict(&dir);
     let libs = yt_dlp::client::deps::Libraries::new(yt, ff);
     let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
     assert!(
