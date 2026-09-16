@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.0.1" date="2026-09-16">
+      <description>
+        <p>Video tools setup reworked: tarball builds get guided terminal install instructions per distribution, and installations report staged progress in place.</p>
+      </description>
+    </release>
     <release version="2.7.0" date="2026-09-16">
       <description>
         <p>Fix: video-page preview no longer stalls Add on canonicalized links, and metadata lookups time out with Retry instead of spinning forever. Video preferences show tool versions with install progress. More video sites supported. New Download dialog is now stepped: video details get their own page with thumbnail preview.</p>
