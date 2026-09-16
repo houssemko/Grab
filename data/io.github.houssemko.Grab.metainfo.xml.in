@@ -46,14 +46,9 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="3.0.0" date="2026-09-16">
-      <description>
-        <p>New generation: video-page downloads with a stepped intake (details page, thumbnail preview, revert-to-title), 30+ supported sites, quality picker up to 4K, audio-only mode and automatic merging.</p>
-      </description>
-    </release>
     <release version="2.7.0" date="2026-09-16">
       <description>
-        <p>Fix: video-page preview no longer stalls Add on canonicalized links, and metadata lookups time out with Retry instead of spinning forever. Video preferences show tool versions with install progress. More video sites supported.</p>
+        <p>Fix: video-page preview no longer stalls Add on canonicalized links, and metadata lookups time out with Retry instead of spinning forever. Video preferences show tool versions with install progress. More video sites supported. New Download dialog is now stepped: video details get their own page with thumbnail preview.</p>
       </description>
     </release>
     <release version="2.6.0" date="2026-09-16">
