@@ -1935,6 +1935,7 @@ impl DownloadManager {
         filename: Option<&str>,
         quality: &str,
         audio_only: bool,
+        video_format_id: Option<&str>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         if !crate::video::is_video_page(&url) {
@@ -1966,6 +1967,7 @@ impl DownloadManager {
                 expires_at: None,
                 quality: quality.to_string(),
                 audio_only,
+                video_format_id: video_format_id.map(|s| s.to_string()),
             },
         );
         Ok(self.insert(item))
@@ -2131,10 +2133,11 @@ impl DownloadManager {
             page_url,
             quality,
             audio_only,
+            video_format_id,
             ..
         }) = self.video_source(item.id())
         {
-            return self.spawn_video(item, page_url, quality, audio_only);
+            return self.spawn_video(item, page_url, quality, audio_only, video_format_id);
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
@@ -2620,6 +2623,7 @@ impl DownloadManager {
         page_url: String,
         quality: String,
         audio_only: bool,
+        video_format_id: Option<String>,
     ) {
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
@@ -2638,6 +2642,7 @@ impl DownloadManager {
             tries: opts.tries.max(1) as u32,
             timeout_secs: opts.timeout.max(1) as u64,
             user_agent: opts.user_agent.clone(),
+            video_format_id,
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();
