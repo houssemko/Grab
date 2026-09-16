@@ -649,30 +649,24 @@ pub fn show(
             );
             let dialog_b = dialog_weak.clone();
             gtk4::glib::spawn_future_local(async move {
-                match crate::video::install_ytdlp().await {
-                    Err(e) => {
-                        pop_b.popdown();
-                        if dialog_b.upgrade().is_none() {
-                            return;
-                        }
-                        row_b.set_subtitle(&e.to_string());
-                        btn_b.set_sensitive(true);
+                if let Err(e) = crate::video::install_ytdlp().await {
+                    pop_b.popdown();
+                    if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    Ok(_) => {}
+                    row_b.set_subtitle(&e.to_string());
+                    btn_b.set_sensitive(true);
+                    return;
                 }
                 label_b.set_text(&gettext("Downloading ffmpeg (2 of 2)…"));
-                match crate::video::install_ffmpeg().await {
-                    Err(e) => {
-                        pop_b.popdown();
-                        if dialog_b.upgrade().is_none() {
-                            return;
-                        }
-                        row_b.set_subtitle(&e.to_string());
-                        btn_b.set_sensitive(true);
+                if let Err(e) = crate::video::install_ffmpeg().await {
+                    pop_b.popdown();
+                    if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    Ok(_) => {}
+                    row_b.set_subtitle(&e.to_string());
+                    btn_b.set_sensitive(true);
+                    return;
                 }
                 pop_b.popdown();
                 if dialog_b.upgrade().is_none() {
