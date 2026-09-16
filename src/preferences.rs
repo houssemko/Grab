@@ -335,7 +335,10 @@ pub fn show(
     // holds the defaults new video downloads start from, plus tool setup.
     // Runs `binary --version` and reports `None` when it fails.
     fn tool_version(binary: &std::path::Path) -> Option<String> {
-        let out = std::process::Command::new(binary).arg("--version").output().ok()?;
+        let out = std::process::Command::new(binary)
+            .arg("--version")
+            .output()
+            .ok()?;
         if !out.status.success() {
             return None;
         }
@@ -351,7 +354,9 @@ pub fn show(
         }
         // ffmpeg prints a whole sentence ("ffmpeg version n9.0.1 ..."):
         // keep the version token so the row stays readable.
-        if binary.file_name().is_some_and(|n| n.to_string_lossy() == "ffmpeg")
+        if binary
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
             && let Some(token) = first.split_whitespace().nth(2)
         {
             return Some(format!("ffmpeg {token}"));
@@ -362,10 +367,10 @@ pub fn show(
         spin.stop();
         spin.set_visible(false);
         let probed = crate::video::resolve_libraries().ok().map(|libs| {
-            let yt = tool_version(&libs.youtube)
-                .unwrap_or_else(|| libs.youtube.display().to_string());
-            let ff = tool_version(&libs.ffmpeg)
-                .unwrap_or_else(|| libs.ffmpeg.display().to_string());
+            let yt =
+                tool_version(&libs.youtube).unwrap_or_else(|| libs.youtube.display().to_string());
+            let ff =
+                tool_version(&libs.ffmpeg).unwrap_or_else(|| libs.ffmpeg.display().to_string());
             (yt, ff)
         });
         match probed {

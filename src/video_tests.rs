@@ -650,16 +650,28 @@ fn preview_fresh_accepts_canonical_drift() {
     // page URL differs from the typed text, but the round-trip key
     // matches, so Add must proceed instead of re-resolving forever.
     let info = Some(test_video_info("https://www.youtube.com/watch?v=x"));
-    assert!(preview_fresh(&info, "https://youtu.be/x", "https://youtu.be/x"));
+    assert!(preview_fresh(
+        &info,
+        "https://youtu.be/x",
+        "https://youtu.be/x"
+    ));
 }
 
 #[test]
 fn preview_fresh_rejects_stale_and_empty() {
     let info = Some(test_video_info("https://vimeo.com/1"));
     // User edited the URL after resolving: not fresh.
-    assert!(!preview_fresh(&info, "https://vimeo.com/1", "https://vimeo.com/2"));
+    assert!(!preview_fresh(
+        &info,
+        "https://vimeo.com/1",
+        "https://vimeo.com/2"
+    ));
     // Nothing resolved yet.
-    assert!(!preview_fresh(&None, "https://vimeo.com/1", "https://vimeo.com/1"));
+    assert!(!preview_fresh(
+        &None,
+        "https://vimeo.com/1",
+        "https://vimeo.com/1"
+    ));
     // Empty text never matches, even with a coincidental empty key.
     assert!(!preview_fresh(&info, "", ""));
 }

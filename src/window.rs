@@ -1773,15 +1773,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 // Same freshness gate as the kick skip above: the stored
                 // page URL is canonicalized, so only the round-trip key
                 // (which text was resolved) decides.
-                let ready = if crate::video::preview_fresh(
-                    &info.borrow(),
-                    last_ok.borrow().as_str(),
-                    &url,
-                ) {
-                    info.borrow().clone()
-                } else {
-                    None
-                };
+                let ready =
+                    if crate::video::preview_fresh(&info.borrow(), last_ok.borrow().as_str(), &url)
+                    {
+                        info.borrow().clone()
+                    } else {
+                        None
+                    };
                 match ready {
                     Some(v) => {
                         let typed = file_row.text().trim().to_string();
