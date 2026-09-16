@@ -745,3 +745,13 @@ fn ensure_tool_versions_refuses_missing_binary() {
     let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
 }
+// ── default video filename ───────────────────────────────────────────
+
+#[test]
+fn default_video_filename_by_mode() {
+    assert_eq!(default_video_filename("Clip", false), "Clip.mp4");
+    assert_eq!(default_video_filename("Clip", true), "Clip.m4a");
+    // Untouched otherwise: sanitizing is the intake's job.
+    assert_eq!(default_video_filename("a/b", false), "a/b.mp4");
+    assert_eq!(default_video_filename("", true), ".m4a");
+}
