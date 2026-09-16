@@ -508,7 +508,7 @@ pub fn show(
                     .map(|p| p.to_string_lossy().into_owned());
                 let valid = path
                     .as_deref()
-                    .is_some_and(|p| crate::video::valid_cookies_file(p));
+                    .is_some_and(crate::video::valid_cookies_file);
                 if valid
                     && let Some(dir) = path
                     && s2
