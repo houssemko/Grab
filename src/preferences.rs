@@ -331,19 +331,58 @@ pub fn show(
     torrent_page.add(&torrent_net_group);
     dialog.add(&torrent_page);
 
-    // Video pages resolve through the yt-dlp support tools (P1); this page
+    // Video pages resolve through the yt-dlp support tools; this page
     // holds the defaults new video downloads start from, plus tool setup.
-    fn refresh_video_tools(row: &adw::ActionRow, btn: &gtk4::Button) {
-        match crate::video::resolve_libraries() {
-            Ok(libs) => {
-                row.set_subtitle(&format!(
-                    "{} + {}",
-                    libs.youtube.display(),
-                    libs.ffmpeg.display()
-                ));
+    // Runs `binary --version` and reports `None` when it fails.
+    fn tool_version(binary: &std::path::Path) -> Option<String> {
+        let out = std::process::Command::new(binary)
+            .arg("--version")
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let first = String::from_utf8(out.stdout)
+            .ok()?
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if first.is_empty() {
+            return None;
+        }
+        // ffmpeg prints a whole sentence ("ffmpeg version n9.0.1 ..."):
+        // keep the version token so the row stays readable.
+        if binary
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
+            && let Some(token) = first.split_whitespace().nth(2)
+        {
+            return Some(format!("ffmpeg {token}"));
+        }
+        Some(first)
+    }
+    fn refresh_video_tools(row: &adw::ActionRow, btn: &gtk4::Button, spin: &gtk4::Spinner) {
+        spin.stop();
+        spin.set_visible(false);
+        let probed = crate::video::resolve_libraries().ok().map(|libs| {
+            let yt =
+                tool_version(&libs.youtube).unwrap_or_else(|| libs.youtube.display().to_string());
+            let ff =
+                tool_version(&libs.ffmpeg).unwrap_or_else(|| libs.ffmpeg.display().to_string());
+            (yt, ff)
+        });
+        match probed {
+            Some((yt, ff)) => {
+                row.set_subtitle(
+                    &gettext("Ready • {yt} • {ff}")
+                        .replace("{yt}", &yt)
+                        .replace("{ff}", &ff),
+                );
                 btn.set_label(&gettext("Update"));
             }
-            Err(_) => {
+            None => {
                 row.set_subtitle(&gettext("Not installed"));
                 btn.set_label(&gettext("Install"));
             }
@@ -414,18 +453,88 @@ pub fn show(
     let video_tools_btn = gtk4::Button::builder().valign(gtk4::Align::Center).build();
     video_tools_row.set_activatable_widget(Some(&video_tools_btn));
     video_tools_row.add_suffix(&video_tools_btn);
+    let video_tools_spin = gtk4::Spinner::new();
+    video_tools_spin.set_visible(false);
+    video_tools_row.add_suffix(&video_tools_spin);
     video_tools_group.add(&video_tools_row);
-    refresh_video_tools(&video_tools_row, &video_tools_btn);
+    // Probe off the main thread: spawning cold binaries can jank startup.
+    // The row shows Checking until versions (or absence) resolve.
     {
-        let (row, btn) = (video_tools_row.clone(), video_tools_btn.clone());
+        let (row, btn, spin) = (
+            video_tools_row.clone(),
+            video_tools_btn.clone(),
+            video_tools_spin.clone(),
+        );
+        let dialog_weak = dialog.downgrade();
+        video_tools_row.set_subtitle(&gettext("Checking…"));
+        video_tools_btn.set_sensitive(false);
+        video_tools_spin.set_visible(true);
+        video_tools_spin.start();
+        gtk4::glib::spawn_future_local(async move {
+            let probed = gio::spawn_blocking(|| {
+                crate::video::resolve_libraries().ok().map(|libs| {
+                    let yt = tool_version(&libs.youtube)
+                        .unwrap_or_else(|| libs.youtube.display().to_string());
+                    let ff = tool_version(&libs.ffmpeg)
+                        .unwrap_or_else(|| libs.ffmpeg.display().to_string());
+                    (yt, ff)
+                })
+            })
+            .await
+            .ok()
+            .flatten();
+            if dialog_weak.upgrade().is_none() {
+                return;
+            }
+            spin.stop();
+            spin.set_visible(false);
+            match probed {
+                Some((yt, ff)) => {
+                    row.set_subtitle(
+                        &gettext("Ready • {yt} • {ff}")
+                            .replace("{yt}", &yt)
+                            .replace("{ff}", &ff),
+                    );
+                    btn.set_label(&gettext("Update"));
+                }
+                None => {
+                    row.set_subtitle(&gettext("Not installed"));
+                    btn.set_label(&gettext("Install"));
+                }
+            }
+            btn.set_sensitive(true);
+        });
+    }
+    {
+        let (row, btn, spin) = (
+            video_tools_row.clone(),
+            video_tools_btn.clone(),
+            video_tools_spin.clone(),
+        );
+        let dialog_weak = dialog.downgrade();
         video_tools_btn.connect_clicked(move |_| {
             btn.set_sensitive(false);
+            spin.set_visible(true);
+            spin.start();
             row.set_subtitle(&gettext("Installing support tools…"));
-            let (row_b, btn_b) = (row.clone(), btn.clone());
+            let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
+            let dialog_b = dialog_weak.clone();
             gtk4::glib::spawn_future_local(async move {
                 match crate::video::install_libraries().await {
-                    Ok(_) => refresh_video_tools(&row_b, &btn_b),
-                    Err(e) => row_b.set_subtitle(&e.to_string()),
+                    Ok(_) => {
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        refresh_video_tools(&row_b, &btn_b, &spin_b);
+                    }
+                    Err(e) => {
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        spin_b.stop();
+                        spin_b.set_visible(false);
+                        row_b.set_subtitle(&e.to_string());
+                    }
                 }
                 btn_b.set_sensitive(true);
             });

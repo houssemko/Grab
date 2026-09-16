@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.7.0" date="2026-09-16">
+      <description>
+        <p>Fix: video-page preview no longer stalls Add on canonicalized links, and metadata lookups time out with Retry instead of spinning forever. Video preferences show tool versions with install progress. More video sites supported.</p>
+      </description>
+    </release>
     <release version="2.6.0" date="2026-09-16">
       <description>
         <p>New: video-page downloads (YouTube, Vimeo and more) with quality picker up to 4K, audio-only mode, and automatic merging. The app is now licensed under GPL-3.0-only.</p>
