@@ -473,10 +473,10 @@ pub(crate) fn parse_yt_dlp_version(first_line: &str) -> Option<[u32; 3]> {
 /// Run `binary --version` off the caller's thread and return its first
 /// output line. `None` covers missing binaries, spawn failures and empty
 /// output alike — all mean "unusable".
-async fn tool_first_line(binary: PathBuf) -> Option<String> {
+async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
     tokio::task::spawn_blocking(move || {
         std::process::Command::new(&binary)
-            .arg("--version")
+            .arg(version_arg)
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -492,9 +492,10 @@ async fn tool_first_line(binary: PathBuf) -> Option<String> {
 /// Refuse stale or unverifiable toolchains before any network happens.
 /// Returns the raw version lines for attempt logging.
 pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
+    // ffmpeg takes a single-dash -version; --version is an error there.
     let (yt, ff) = tokio::join!(
-        tool_first_line(libs.youtube.clone()),
-        tool_first_line(libs.ffmpeg.clone())
+        tool_first_line(libs.youtube.clone(), "--version"),
+        tool_first_line(libs.ffmpeg.clone(), "-version")
     );
     let yt = yt.ok_or_else(VideoError::missing_tools)?;
     let fresh = parse_yt_dlp_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
@@ -811,13 +812,20 @@ impl VideoManifest {
 
     /// Whether the recorded part files are all present with exactly the
     /// recorded sizes. Equality (not >=) so a truncated or replaced part
-    /// forces a re-download instead of a corrupt merge.
+    /// forces a re-download instead of a corrupt merge. Zero-byte records
+    /// never count (a pending manifest carries zeros), and neither do
+    /// sparse shells (pre-allocated zeros from a killed attempt).
     fn parts_present(&self, dir: &Path) -> bool {
-        let audio_ok =
-            file_len(&part_path(dir, "audio", &self.audio_ext)) == Some(self.audio_bytes);
+        let audio_part = part_path(dir, "audio", &self.audio_ext);
+        let audio_ok = self.audio_bytes > 0
+            && file_len(&audio_part) == Some(self.audio_bytes)
+            && !is_sparse_shell(&audio_part);
         let video_ok = match &self.video_format_id {
             Some(_) => {
-                file_len(&part_path(dir, "video", &self.video_ext)) == Some(self.video_bytes)
+                let video_part = part_path(dir, "video", &self.video_ext);
+                self.video_bytes > 0
+                    && file_len(&video_part) == Some(self.video_bytes)
+                    && !is_sparse_shell(&video_part)
             }
             None => true,
         };
@@ -852,6 +860,32 @@ fn file_len(path: &Path) -> Option<u64> {
     std::fs::metadata(path).map(|m| m.len()).ok()
 }
 
+/// Allocated bytes on disk, for sparse-shell detection. `None` where the
+/// platform cannot say (non-Unix): callers treat that as dense, i.e. the
+/// pre-existing behavior.
+#[cfg(unix)]
+fn allocated_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata(path).map(|m| m.blocks() * 512).ok()
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// Whether a part file is a sparse shell: full apparent size, (almost)
+/// nothing on disk. The download engine pre-allocates part files and
+/// tracks real progress in a sidecar it deletes on abort, so a killed
+/// attempt leaves exactly this shape behind — and a naive size check
+/// would then "adopt" gigabytes of zeros.
+fn is_sparse_shell(path: &Path) -> bool {
+    match (file_len(path), allocated_bytes(path)) {
+        (Some(len), Some(allocated)) => len > 0 && allocated < len,
+        _ => false,
+    }
+}
+
 /// What the next attempt should do, decided from the sidecar and disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumePlan {
@@ -859,7 +893,12 @@ pub(crate) enum ResumePlan {
     Finished,
     /// Parts verified on disk (merge only).
     CombineOnly,
-    /// (Re)download everything.
+    /// Parts started but incomplete: proceed WITHOUT wiping so the
+    /// download engine resumes them in place (Range-append for simple
+    /// streams, segment skip via the `.parts` sidecar). Safe because the
+    /// manifest matched: same formats, same bytes.
+    Resume,
+    /// (Re)download everything, wiping staging first.
     Fresh,
 }
 
@@ -873,6 +912,11 @@ pub(crate) struct ResumeQuery<'a> {
     pub audio_only: bool,
     pub video: Option<(&'a str, &'a str)>,
     pub audio: (&'a str, &'a str),
+    /// Freshly selected total sizes, for the over-long check. `None`
+    /// means unknown: without a total, oversize is undetectable and any
+    /// existing bytes are reusable.
+    pub video_total: Option<u64>,
+    pub audio_total: Option<u64>,
 }
 
 pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
@@ -888,7 +932,40 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
         return ResumePlan::Finished;
     }
     if m.parts_present(q.dir) {
-        ResumePlan::CombineOnly
+        return ResumePlan::CombineOnly;
+    }
+    // Sparse shells (full size, nothing on disk) left by a killed attempt
+    // must not reach the engine: it equates size with completeness and
+    // would "adopt" zeros. Over-long parts cannot be resumed into either
+    // (nothing valid past the total). Either way, wipe and start over.
+    // Anything else with bytes on disk is resumable — the manifest match
+    // above is the identity check.
+    let (_, audio_ext) = q.audio;
+    let audio_part = part_path(q.dir, "audio", audio_ext);
+    let video_part = q
+        .video
+        .map(|(_, video_ext)| part_path(q.dir, "video", video_ext));
+    if is_sparse_shell(&audio_part) || video_part.as_ref().is_some_and(|p| is_sparse_shell(p)) {
+        return ResumePlan::Fresh;
+    }
+    let overlong = |path: &Path, total: Option<u64>| {
+        total.is_some_and(|t| file_len(path).is_some_and(|n| n > t))
+    };
+    if overlong(&audio_part, q.audio_total) {
+        return ResumePlan::Fresh;
+    }
+    if let Some(video_part) = &video_part
+        && overlong(video_part, q.video_total)
+    {
+        return ResumePlan::Fresh;
+    }
+    let video_has = video_part
+        .as_ref()
+        .and_then(|p| file_len(p.as_path()))
+        .is_some_and(|n| n > 0);
+    let audio_has = file_len(&audio_part).is_some_and(|n| n > 0);
+    if video_has || audio_has {
+        ResumePlan::Resume
     } else {
         ResumePlan::Fresh
     }
@@ -1062,6 +1139,8 @@ pub async fn run_video_download(
             .as_ref()
             .map(|s| (s.format_id.as_str(), s.ext.as_str())),
         audio: (audio_sel.format_id.as_str(), audio_sel.ext.as_str()),
+        video_total: video_sel.as_ref().and_then(|s| s.size),
+        audio_total: audio_sel.size,
     };
     let plan = resume_plan(&query);
     match plan {
@@ -1070,13 +1149,40 @@ pub async fn run_video_download(
             // Wipe the staging dir, not just known names: a previous
             // attempt's detached writers (pause winning the abort race) may
             // still hold the old inodes, so unlink first — they write
-            // nowhere visible afterwards.
+            // nowhere visible afterwards. Same-selection resume never
+            // reaches this arm (see Resume below); only mismatches,
+            // oversize parts, or unverifiable leftovers land here.
             let _ = tokio::fs::remove_dir_all(&staging).await;
             tokio::fs::create_dir_all(&staging)
                 .await
                 .map_err(VideoError::staging)?;
+            // Record this attempt's selection up front: a pause from here
+            // on leaves a matchable sidecar, so the next attempt resumes
+            // instead of wiping.
+            write_manifest(
+                &staging,
+                &VideoManifest {
+                    page_url: job.page_url.clone(),
+                    quality: job.quality.clone(),
+                    audio_only,
+                    video_format_id: video_sel.as_ref().map(|s| s.format_id.clone()),
+                    video_ext: video_sel
+                        .as_ref()
+                        .map(|s| s.ext.clone())
+                        .unwrap_or_default(),
+                    video_bytes: 0,
+                    audio_format_id: audio_sel.format_id.clone(),
+                    audio_ext: audio_sel.ext.clone(),
+                    audio_bytes: 0,
+                    final_bytes: None,
+                },
+            )
+            .await?;
         }
         ResumePlan::CombineOnly => {}
+        ResumePlan::Resume => {
+            phase(gettext("Resuming download…"));
+        }
     }
     let have_parts = plan == ResumePlan::CombineOnly;
 
