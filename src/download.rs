@@ -2629,6 +2629,18 @@ impl DownloadManager {
         // Overwrite any stale sender: its task is dead or guarded stale.
         self.video_abort.borrow_mut().insert(id, abort_tx);
         let opts = DownloadOptions::from_settings(&self.settings);
+        // Fail fast on a configured-but-unreadable cookies file, before
+        // any tool probing or network: same shape as the missing-archive
+        // early return in `spawn_torrent`.
+        let cookies_path = match crate::video::cookies_file(&self.settings.cookies_path()) {
+            Ok(cookies) => cookies,
+            Err(e) => {
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail(e.to_string());
+                self.changed();
+                return;
+            }
+        };
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
@@ -2638,6 +2650,7 @@ impl DownloadManager {
             tries: opts.tries.max(1) as u32,
             timeout_secs: opts.timeout.max(1) as u64,
             user_agent: opts.user_agent.clone(),
+            cookies_path,
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();

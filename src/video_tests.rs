@@ -607,6 +607,7 @@ fn pipeline_reports_missing_tools() {
         tries: 1,
         timeout_secs: 5,
         user_agent: "test".into(),
+        cookies_path: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
@@ -744,6 +745,49 @@ fn ensure_tool_versions_refuses_missing_binary() {
     );
     let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
+}
+
+// ── cookies file validation ──────────────────────────────────────────
+
+#[test]
+fn valid_cookies_file_accepts_plain() {
+    let dir = std::env::temp_dir().join(format!("grab-cookies-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let good = dir.join("cookies.txt");
+    std::fs::write(
+        &good,
+        b"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t0\tk\tv\n",
+    )
+    .unwrap();
+    assert!(valid_cookies_file(good.to_str().unwrap()));
+    assert!(!valid_cookies_file(
+        dir.join("absent.txt").to_str().unwrap()
+    ));
+    assert!(!valid_cookies_file(dir.to_str().unwrap()));
+    let empty = dir.join("empty.txt");
+    std::fs::write(&empty, b"").unwrap();
+    assert!(!valid_cookies_file(empty.to_str().unwrap()));
+    let big = dir.join("big.txt");
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(1_000_001).unwrap();
+    assert!(!valid_cookies_file(big.to_str().unwrap()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cookies_file_helper_maps_empty_to_none() {
+    assert!(matches!(cookies_file(""), Ok(None)));
+    assert!(matches!(cookies_file("   "), Ok(None)));
+}
+
+#[test]
+fn cookies_file_helper_rejects_missing() {
+    let err = cookies_file("/nonexistent-grab-test/cookies.txt").unwrap_err();
+    assert!(
+        matches!(err, VideoError::Message(_)),
+        "missing file must fail with the actionable message, got {err:?}"
+    );
 }
 // ── default video filename ───────────────────────────────────────────
 

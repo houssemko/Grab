@@ -443,6 +443,99 @@ pub fn show(
         move |sw| row.set_sensitive(!sw.is_active())
     });
     video_quality.set_sensitive(!video_audio.is_active());
+    let video_auth_group = adw::PreferencesGroup::builder()
+        .title(gettext("Authentication"))
+        .description(gettext("Age gates and member-only pages"))
+        .build();
+    let cookies_current = settings.cookies_path();
+    let cookies_label = gtk4::Label::builder()
+        .label(if cookies_current.is_empty() {
+            gettext("(None)")
+        } else {
+            cookies_current.clone()
+        })
+        .css_classes(["dimmed", "caption"])
+        .ellipsize(gtk4::pango::EllipsizeMode::Middle)
+        .hexpand(true)
+        .halign(gtk4::Align::Start)
+        .build();
+    let cookies_btn = gtk4::Button::builder()
+        .label(gettext("Choose…"))
+        .tooltip_text(gettext("Choose cookies file"))
+        .valign(gtk4::Align::Center)
+        .build();
+    let cookies_clear_btn = gtk4::Button::builder()
+        .icon_name("edit-clear-symbolic")
+        .css_classes(["flat"])
+        .tooltip_text(gettext("Clear cookies file"))
+        .valign(gtk4::Align::Center)
+        .build();
+    cookies_clear_btn.update_property(&[gtk4::accessible::Property::Label(&gettext(
+        "Clear cookies file",
+    ))]);
+    let cookies_row = adw::ActionRow::builder()
+        .title(gettext("Cookies file"))
+        .build();
+    cookies_row.add_suffix(&cookies_label);
+    cookies_row.add_suffix(&cookies_clear_btn);
+    cookies_row.add_suffix(&cookies_btn);
+    video_auth_group.add(&cookies_row);
+    {
+        let s = settings.clone();
+        let (l, row) = (cookies_label.clone(), cookies_row.clone());
+        let root = parent.root().and_downcast::<gtk4::Window>();
+        cookies_btn.connect_clicked(move |_| {
+            let filter_text = gtk4::FileFilter::new();
+            filter_text.set_name(Some(&gettext("Text files")));
+            filter_text.add_mime_type("text/plain");
+            filter_text.add_pattern("*.txt");
+            let filter_all = gtk4::FileFilter::new();
+            filter_all.set_name(Some(&gettext("All files")));
+            filter_all.add_pattern("*");
+            let filters = gio::ListStore::new::<gtk4::FileFilter>();
+            filters.append(&filter_text);
+            filters.append(&filter_all);
+            let chooser = gtk4::FileDialog::builder()
+                .title(gettext("Choose cookies file"))
+                .accept_label(gettext("Select File"))
+                .filters(&filters)
+                .build();
+            let (s2, l2, row2) = (s.clone(), l.clone(), row.clone());
+            chooser.open(root.as_ref(), gio::Cancellable::NONE, move |res| {
+                let path = res
+                    .ok()
+                    .and_then(|f| f.path())
+                    .map(|p| p.to_string_lossy().into_owned());
+                let valid = path
+                    .as_deref()
+                    .is_some_and(crate::video::valid_cookies_file);
+                if valid
+                    && let Some(dir) = path
+                    && s2
+                        .set_string(crate::settings::key::COOKIES_PATH, &dir)
+                        .is_ok()
+                {
+                    l2.set_text(&dir);
+                    row2.set_subtitle("");
+                    row2.remove_css_class("error");
+                } else {
+                    row2.set_subtitle(&gettext("Could not read that file"));
+                    row2.add_css_class("error");
+                }
+            });
+        });
+    }
+    {
+        let s = settings.clone();
+        let (l, row) = (cookies_label.clone(), cookies_row.clone());
+        cookies_clear_btn.connect_clicked(move |_| {
+            if s.set_string(crate::settings::key::COOKIES_PATH, "").is_ok() {
+                l.set_text(&gettext("(None)"));
+                row.set_subtitle("");
+                row.remove_css_class("error");
+            }
+        });
+    }
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
         .description(gettext("yt-dlp and ffmpeg resolve video pages"))
@@ -541,6 +634,7 @@ pub fn show(
         });
     }
     video_page.add(&video_quality_group);
+    video_page.add(&video_auth_group);
     video_page.add(&video_tools_group);
     dialog.add(&video_page);
     dialog.present(Some(parent));

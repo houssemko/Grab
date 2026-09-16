@@ -1512,16 +1512,18 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let url_row2 = url_row.clone();
         let file_row2 = file_row.clone();
         let dialog_weak = dialog.downgrade();
+        let settings2 = manager.settings().clone();
         Rc::new(move || {
             let my = generation.get() + 1;
             generation.set(my);
-            let (generation_b, last_b, info_b, step_b, url_b, dialog_b, file_b) = (
+            let (generation_b, last_b, info_b, step_b, url_b, dialog_b, settings_b, file_b) = (
                 generation.clone(),
                 last_ok.clone(),
                 info.clone(),
                 step2.clone(),
                 url_row2.clone(),
                 dialog_weak.clone(),
+                settings2.clone(),
                 file_row2.clone(),
             );
             glib::spawn_future_local(async move {
@@ -1538,6 +1540,20 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     show_video_ready(&step_b);
                     return;
                 }
+                // User config first, then tools: a broken cookies path is
+                // the user's own doing and reads clearer than any
+                // environment error. Both skip the spinner round-trip.
+                let cookies = match crate::video::cookies_file(&settings_b.cookies_path()) {
+                    Ok(cookies) => cookies,
+                    Err(e) => {
+                        if generation_b.get() != my {
+                            return;
+                        }
+                        info_b.borrow_mut().take();
+                        show_video_error(&step_b, &e.to_string());
+                        return;
+                    }
+                };
                 // Fast local tools check first: missing tools show Install
                 // with no spinner round-trip.
                 let libs = match crate::video::resolve_libraries() {
@@ -1552,7 +1568,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     }
                 };
                 show_video_loading(&step_b);
-                match crate::video::fetch_video_infos(libs, url.clone()).await {
+                match crate::video::fetch_video_infos(libs, url.clone(), cookies).await {
                     Err(e) => {
                         if generation_b.get() != my {
                             return;

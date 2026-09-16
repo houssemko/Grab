@@ -109,6 +109,11 @@
       <summary>Audio-only video downloads</summary>
       <description>Download only the audio track for video-page links.</description>
     </key>
+    <key name="cookies-path" type="s">
+      <default>''</default>
+      <summary>Cookies file for video pages</summary>
+      <description>Netscape-format cookie file sent when resolving age-gated or member-only video pages. Empty means none.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>
