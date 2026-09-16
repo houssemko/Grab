@@ -610,6 +610,90 @@ pub(crate) fn cookies_file(setting: &str) -> Result<Option<PathBuf>, VideoError>
     }
     Err(VideoError::cookies_missing(trimmed))
 }
+/// Browsers offered for `--cookies-from-browser`, in combo order. Values
+/// are the yt-dlp browser names; labels come from [`cookies_browser_labels`].
+pub const COOKIES_BROWSERS: &[&str] = &[
+    "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale",
+];
+
+/// Translated combo labels, index-aligned with [`COOKIES_BROWSERS`].
+/// Browser names are proper nouns and stay untranslated; only None is prose.
+pub fn cookies_browser_labels() -> Vec<String> {
+    let mut labels = vec![
+        "Brave".to_string(),
+        "Chrome".to_string(),
+        "Chromium".to_string(),
+        "Edge".to_string(),
+        "Firefox".to_string(),
+        "Opera".to_string(),
+        "Vivaldi".to_string(),
+        "Whale".to_string(),
+    ];
+    labels.insert(0, gettext("None"));
+    labels
+}
+
+/// Combo index for a stored browser value. Unknown values fall back to
+/// None rather than selecting a browser the user didn't pick.
+pub fn cookies_browser_index(value: &str) -> usize {
+    COOKIES_BROWSERS
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(0)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to off.
+pub fn cookies_browser_value(index: usize) -> &'static str {
+    COOKIES_BROWSERS.get(index).copied().unwrap_or("none")
+}
+
+/// Candidate profile directories per browser, in probe order. Mirrors the
+/// Flatpak manifest's read-only grants: inside the sandbox these resolve
+/// to host paths, which is exactly what yt-dlp needs. Outside Flatpak the
+/// same locations are simply the normal ones.
+fn browser_profile_candidates(browser: &str, home: &std::path::Path) -> Vec<PathBuf> {
+    let join = |parts: &[&str]| {
+        let mut p = home.to_path_buf();
+        p.extend(parts);
+        p
+    };
+    match browser {
+        "firefox" => vec![
+            join(&[".mozilla", "firefox"]),
+            join(&[".config", "mozilla", "firefox"]),
+            join(&["snap", "firefox", "common", ".mozilla", "firefox"]),
+        ],
+        "brave" => vec![join(&[".config", "BraveSoftware", "Brave-Browser"])],
+        "chrome" => vec![join(&[".config", "google-chrome"])],
+        "chromium" => vec![join(&[".config", "chromium"])],
+        "edge" => vec![join(&[".config", "microsoft-edge"])],
+        "opera" => vec![join(&[".config", "opera"])],
+        "vivaldi" => vec![join(&[".config", "vivaldi"])],
+        "whale" => vec![join(&[".config", "naver-whale"])],
+        _ => vec![],
+    }
+}
+
+/// Resolve a stored browser value to a `--cookies-from-browser` argument:
+/// `browser:/first-existing-profile`, or the bare browser name when no
+/// profile directory is visible (yt-dlp then reports the real absence
+/// instead of failing on our guess). `None`/unknown means off.
+pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
+    if value.is_empty() || value == "none" || !COOKIES_BROWSERS.contains(&value) {
+        return None;
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    // First visible profile wins; with none visible, pass the bare name
+    // so yt-dlp reports the real absence instead of failing on our guess.
+    match browser_profile_candidates(value, &home)
+        .into_iter()
+        .find(|p| p.is_dir())
+    {
+        Some(path) => Some(format!("{value}:{}", path.display())),
+        None => Some(value.to_string()),
+    }
+}
+
 /// Shared root for extraction scratch space.
 pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
@@ -641,6 +725,7 @@ pub async fn fetch_video_infos(
     libs: Libraries,
     url: String,
     cookies: Option<PathBuf>,
+    cookies_browser: String,
 ) -> Result<VideoInfo, VideoError> {
     let handle = crate::download::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
@@ -648,7 +733,11 @@ pub async fn fetch_video_infos(
         let out = staging_root();
         std::fs::create_dir_all(&out).map_err(VideoError::staging)?;
         let mut builder = Downloader::builder(libs, out);
-        if let Some(cookies) = cookies {
+        // Browser identity wins over the file when both are set: one
+        // identity per attempt keeps failures attributable.
+        if let Some(spec) = cookies_browser_spec(&cookies_browser) {
+            builder = builder.with_cookies_from_browser(spec);
+        } else if let Some(cookies) = cookies {
             builder = builder.with_cookies(cookies);
         }
         let downloader = builder.build().await.map_err(VideoError::fetch)?;
@@ -1061,6 +1150,9 @@ pub struct VideoJob {
     /// Validated cookies file for gated pages, if configured. Read from
     /// settings at spawn (live value); never persisted per row.
     pub cookies_path: Option<PathBuf>,
+    /// Raw browser-auth setting (`none` when off). Resolved to a
+    /// `--cookies-from-browser` spec inside the worker.
+    pub cookies_browser: String,
 }
 
 /// Progress reports are throttled to this many bytes between row updates:
@@ -1105,8 +1197,11 @@ pub async fn run_video_download(
         builder = builder.with_user_agent(job.user_agent.clone());
     }
     // Authenticated extraction for gated pages; the part downloads reuse
-    // the extractor-resolved headers as before.
-    if let Some(cookies) = &job.cookies_path {
+    // the extractor-resolved headers as before. Browser identity wins
+    // over the file when both are set.
+    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
+        builder = builder.with_cookies_from_browser(spec);
+    } else if let Some(cookies) = &job.cookies_path {
         builder = builder.with_cookies(cookies.clone());
     }
     let downloader = builder.build().await.map_err(VideoError::fetch)?;

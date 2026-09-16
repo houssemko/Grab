@@ -18,7 +18,18 @@
     "--device=dri",
     "--talk-name=org.freedesktop.portal.*",
     "--talk-name=org.gtk.vfs.*",
-    "--filesystem=xdg-download"
+    "--talk-name=org.freedesktop.secrets",
+    "--filesystem=xdg-download",
+    "--filesystem=~/.config/BraveSoftware/Brave-Browser:ro",
+    "--filesystem=~/.config/google-chrome:ro",
+    "--filesystem=~/.config/chromium:ro",
+    "--filesystem=~/.config/microsoft-edge:ro",
+    "--filesystem=~/.mozilla/firefox:ro",
+    "--filesystem=~/.config/mozilla/firefox:ro",
+    "--filesystem=~/snap/firefox/common/.mozilla/firefox:ro",
+    "--filesystem=~/.config/opera:ro",
+    "--filesystem=~/.config/vivaldi:ro",
+    "--filesystem=~/.config/naver-whale:ro"
   ],
   "modules": [
     {
