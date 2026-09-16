@@ -824,6 +824,7 @@ fn missing_cookies_file_fails_video_fast() {
             Some("Clip.mp4"),
             "1080p",
             false,
+            None,
         )
         .expect("video enqueue");
     // Failed synchronously at spawn: no engine slot taken, no network.
@@ -859,6 +860,7 @@ fn queue_file_never_carries_cookies() {
             Some("Clip.mp4"),
             "1080p",
             false,
+            None,
         )
         .expect("video enqueue");
     let text = std::fs::read_to_string(&qf).unwrap();

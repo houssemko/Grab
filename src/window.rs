@@ -1527,7 +1527,17 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         Rc::new(move || {
             let my = generation.get() + 1;
             generation.set(my);
-            let (generation_b, last_b, info_b, step_b, url_b, dialog_b, settings_b, file_b, formats_b) = (
+            let (
+                generation_b,
+                last_b,
+                info_b,
+                step_b,
+                url_b,
+                dialog_b,
+                settings_b,
+                file_b,
+                formats_b,
+            ) = (
                 generation.clone(),
                 last_ok.clone(),
                 info.clone(),
