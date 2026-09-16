@@ -2649,6 +2649,7 @@ impl DownloadManager {
                 // so send nothing and let the pump tail no-op.
                 Ok(None) => {}
                 Err(e) => {
+                    tracing::warn!(item_id = id, error = %e.to_string(), "video attempt failed");
                     tx.send(EngineMsg::Failed(e.to_string())).ok();
                 }
             }

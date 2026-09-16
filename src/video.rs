@@ -288,6 +288,9 @@ impl VideoError {
     fn interrupted() -> Self {
         Self::Message(gettext("Download interrupted"))
     }
+    fn outdated() -> Self {
+        Self::Message(gettext("Video tools are too old — update them to continue"))
+    }
     /// The exact [`crate::download::DEST_EXISTS`] sentence, so the pump's
     /// foreign-file requeue path picks a fresh name and retries the merge.
     fn exists() -> Self {
@@ -403,6 +406,65 @@ pub async fn install_libraries() -> Result<Libraries, VideoError> {
     }
 }
 
+/// Minimum accepted yt-dlp version by release date. Older binaries predate
+/// the JS-challenge era and fail extraction in ways that look like broken
+/// pages; refusing them with an actionable message beats a mystery
+/// failure. Newer versions always pass.
+pub const MIN_YTDLP_VERSION: [u32; 3] = [2026, 1, 1];
+
+/// Parse a `yt-dlp --version` first line (`2026.08.19`) into comparable
+/// parts. Anything else (nightlies, forks, garbage) is unverifiable.
+pub(crate) fn parse_yt_dlp_version(first_line: &str) -> Option<[u32; 3]> {
+    let mut parts = first_line.trim().split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some([major, minor, patch])
+}
+
+/// Run `binary --version` off the caller's thread and return its first
+/// output line. `None` covers missing binaries, spawn failures and empty
+/// output alike — all mean "unusable".
+async fn tool_first_line(binary: PathBuf) -> Option<String> {
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(&binary)
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+            .filter(|s| !s.is_empty())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Refuse stale or unverifiable toolchains before any network happens.
+/// Returns the raw version lines for attempt logging.
+pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
+    let (yt, ff) = tokio::join!(
+        tool_first_line(libs.youtube.clone()),
+        tool_first_line(libs.ffmpeg.clone())
+    );
+    let yt = yt.ok_or_else(VideoError::missing_tools)?;
+    let fresh = parse_yt_dlp_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
+    if !fresh {
+        return Err(VideoError::outdated());
+    }
+    let ff = ff.ok_or_else(VideoError::missing_tools)?;
+    Ok((yt, ff))
+}
+/// Host part of a URL for logs. Full page URLs can carry tokens; the
+/// journal gets the host, never the query string.
+pub(crate) fn page_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_default()
+}
+
 /// Shared root for extraction scratch space.
 pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
@@ -432,6 +494,8 @@ const FETCH_TIMEOUT_SECS: u64 = 60;
 /// what survives restarts.
 pub async fn fetch_video_infos(libs: Libraries, url: String) -> Result<VideoInfo, VideoError> {
     let handle = crate::download::tokio_rt().spawn(async move {
+        let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
+        tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         let out = staging_root();
         std::fs::create_dir_all(&out).map_err(VideoError::staging)?;
         let downloader = Downloader::builder(libs, out)
@@ -689,6 +753,16 @@ pub async fn run_video_download(
         .await
         .map_err(VideoError::staging)?;
     let libs = resolve_libraries()?;
+    let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
+    tracing::info!(
+        item_id = job.item_id,
+        host = %page_host(&job.page_url),
+        quality = %job.quality,
+        audio_only = job.audio_only,
+        yt_dlp = %yt_version,
+        ffmpeg = %ff_version,
+        "starting video attempt"
+    );
     // The downloader timeout covers extractor calls AND the ffmpeg merge:
     // a full-length merge on a slow CPU dwarfs any network timeout, so
     // never go below the crate default (the user's setting extends it).
@@ -759,6 +833,14 @@ pub async fn run_video_download(
     let Some(audio_sel) = audio_sel else {
         return Err(VideoError::unavailable());
     };
+
+    tracing::info!(
+        item_id = job.item_id,
+        video = ?video_sel.as_ref().map(|s| s.format_id.as_str()),
+        audio = %audio_sel.format_id,
+        audio_only = audio_only,
+        "formats selected"
+    );
 
     // Retry discipline from the sidecar.
     let manifest = read_manifest(&staging);

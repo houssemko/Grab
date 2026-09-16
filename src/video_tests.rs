@@ -675,3 +675,73 @@ fn preview_fresh_rejects_stale_and_empty() {
     // Empty text never matches, even with a coincidental empty key.
     assert!(!preview_fresh(&info, "", ""));
 }
+
+// ── tool versions ────────────────────────────────────────────────────
+
+#[test]
+fn parse_yt_dlp_version_matrix() {
+    assert_eq!(parse_yt_dlp_version("2026.08.19"), Some([2026, 8, 19]));
+    assert_eq!(parse_yt_dlp_version("  2025.01.01\n"), Some([2025, 1, 1]));
+    assert_eq!(parse_yt_dlp_version("nightly"), None);
+    assert_eq!(parse_yt_dlp_version(""), None);
+    assert_eq!(parse_yt_dlp_version("2026.08"), None);
+    assert_eq!(parse_yt_dlp_version("not.a.version"), None);
+}
+
+#[test]
+fn version_floor_accepts_new_rejects_old() {
+    assert!([2026, 8, 19] >= MIN_YTDLP_VERSION);
+    assert!([2027, 1, 1] >= MIN_YTDLP_VERSION);
+    assert!([2026, 1, 1] >= MIN_YTDLP_VERSION);
+    assert!([2025, 12, 31] < MIN_YTDLP_VERSION);
+}
+
+fn fake_tool(dir: &std::path::Path, name: &str, first_line: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\necho '{first_line}'\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn ensure_tool_versions_accepts_fresh_pair() {
+    let dir = std::env::temp_dir().join(format!("grab-versions-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let yt = fake_tool(&dir, "yt-dlp", "2026.08.19");
+    let ff = fake_tool(&dir, "ffmpeg", "ffmpeg version n9.0.1");
+    let libs = yt_dlp::client::deps::Libraries::new(yt, ff);
+    let (yt_v, ff_v) = crate::download::tokio_rt()
+        .block_on(ensure_tool_versions(&libs))
+        .expect("fresh pair passes");
+    assert_eq!(yt_v, "2026.08.19");
+    assert!(ff_v.starts_with("ffmpeg version"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ensure_tool_versions_refuses_stale_yt_dlp() {
+    let dir = std::env::temp_dir().join(format!("grab-versions-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let yt = fake_tool(&dir, "yt-dlp", "2024.10.07");
+    let ff = fake_tool(&dir, "ffmpeg", "ffmpeg version n9.0.1");
+    let libs = yt_dlp::client::deps::Libraries::new(yt, ff);
+    let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
+    assert!(
+        matches!(res, Err(VideoError::Message(_))),
+        "stale binary must fail with the actionable message, got {res:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ensure_tool_versions_refuses_missing_binary() {
+    let libs = yt_dlp::client::deps::Libraries::new(
+        "/nonexistent-grab-test/yt-dlp".into(),
+        "/nonexistent-grab-test/ffmpeg".into(),
+    );
+    let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
+    assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
+}
