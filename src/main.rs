@@ -3,6 +3,13 @@ mod download;
 mod preferences;
 mod settings;
 mod torrent;
+// Video-page extraction + resolver worker (src/video.rs): consumed by the
+// dialog, preferences, queue persistence and the engine. A few helpers
+// stay ahead of use (expiry checks for a future no-re-resolve fast path);
+// expect dead_code until they wire up. Remove this attribute if it ever
+// goes unfulfilled.
+#[expect(dead_code)]
+mod video;
 mod window;
 
 use gtk4::gio::prelude::*;

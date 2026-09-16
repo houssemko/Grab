@@ -319,7 +319,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                                 Some(env!("GRAB_VERSION")),
                             );
                             about.set_application_icon(APP_ID);
-                            about.set_license_type(gtk4::License::MitX11);
+                            about.set_license_type(gtk4::License::Gpl30Only);
                             about
                         } else {
                             let about = adw::AboutDialog::new();

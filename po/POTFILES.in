@@ -3,4 +3,5 @@ src/application.rs
 src/download.rs
 src/preferences.rs
 src/torrent.rs
+src/video.rs
 src/window.rs

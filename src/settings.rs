@@ -25,6 +25,8 @@ pub mod key {
     pub const TORRENT_SEED_RATIO: &str = "torrent-seed-ratio";
     pub const TORRENT_SEED_TIME: &str = "torrent-seed-time";
     pub const TORRENT_LISTEN_PORT: &str = "torrent-listen-port";
+    pub const VIDEO_QUALITY: &str = "video-quality";
+    pub const VIDEO_AUDIO_ONLY: &str = "video-audio-only";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
 }
@@ -90,6 +92,13 @@ impl AppSettings {
     }
     pub fn torrent_listen_port(&self) -> i32 {
         self.0.int(key::TORRENT_LISTEN_PORT)
+    }
+    // Read by the New Download video step (per-download defaults).
+    pub fn video_quality(&self) -> String {
+        self.0.string(key::VIDEO_QUALITY).to_string()
+    }
+    pub fn video_audio_only(&self) -> bool {
+        self.0.boolean(key::VIDEO_AUDIO_ONLY)
     }
     pub fn window_width(&self) -> i32 {
         self.0.int(key::WINDOW_WIDTH)

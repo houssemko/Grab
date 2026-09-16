@@ -330,5 +330,109 @@ pub fn show(
     torrent_page.add(&share_group);
     torrent_page.add(&torrent_net_group);
     dialog.add(&torrent_page);
+
+    // Video pages resolve through the yt-dlp support tools (P1); this page
+    // holds the defaults new video downloads start from, plus tool setup.
+    fn refresh_video_tools(row: &adw::ActionRow, btn: &gtk4::Button) {
+        match crate::video::resolve_libraries() {
+            Ok(libs) => {
+                row.set_subtitle(&format!(
+                    "{} + {}",
+                    libs.youtube.display(),
+                    libs.ffmpeg.display()
+                ));
+                btn.set_label(&gettext("Update"));
+            }
+            Err(_) => {
+                row.set_subtitle(&gettext("Not installed"));
+                btn.set_label(&gettext("Install"));
+            }
+        }
+    }
+    let video_page = adw::PreferencesPage::builder()
+        .title(gettext("Video"))
+        .icon_name("video-x-generic-symbolic")
+        .build();
+    let video_quality_group = adw::PreferencesGroup::builder()
+        .title(gettext("Quality"))
+        .build();
+    let video_labels = crate::video::quality_labels();
+    let video_refs: Vec<&str> = video_labels.iter().map(String::as_str).collect();
+    let video_quality = adw::ComboRow::builder()
+        .title(gettext("Preferred quality"))
+        .subtitle(gettext("Used for new video downloads"))
+        .model(&gtk4::StringList::new(&video_refs))
+        .build();
+    video_quality.set_selected(crate::video::quality_index(&settings.video_quality()) as u32);
+    video_quality_group.add(&video_quality);
+    // ComboRow holds an index, GSettings a string: sync both ways by hand
+    // (weak on the settings side so closed dialogs don't leak).
+    {
+        let row = video_quality.downgrade();
+        settings.connect_changed(Some(crate::settings::key::VIDEO_QUALITY), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                row.set_selected(crate::video::quality_index(
+                    &s.string(crate::settings::key::VIDEO_QUALITY),
+                ) as u32);
+            }
+        });
+    }
+    video_quality.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::VIDEO_QUALITY,
+                crate::video::quality_value(row.selected() as usize),
+            );
+        }
+    });
+    let video_audio = adw::SwitchRow::builder()
+        .title(gettext("Audio only"))
+        .subtitle(gettext("New video downloads skip the video track"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::VIDEO_AUDIO_ONLY,
+            &video_audio,
+            "active",
+        )
+        .build();
+    video_quality_group.add(&video_audio);
+    // Audio-only makes the quality row moot.
+    video_audio.connect_active_notify({
+        let row = video_quality.clone();
+        move |sw| row.set_sensitive(!sw.is_active())
+    });
+    video_quality.set_sensitive(!video_audio.is_active());
+    let video_tools_group = adw::PreferencesGroup::builder()
+        .title(gettext("Support tools"))
+        .description(gettext("yt-dlp and ffmpeg resolve video pages"))
+        .build();
+    let video_tools_row = adw::ActionRow::builder()
+        .title(gettext("Video support tools"))
+        .build();
+    let video_tools_btn = gtk4::Button::builder().valign(gtk4::Align::Center).build();
+    video_tools_row.set_activatable_widget(Some(&video_tools_btn));
+    video_tools_row.add_suffix(&video_tools_btn);
+    video_tools_group.add(&video_tools_row);
+    refresh_video_tools(&video_tools_row, &video_tools_btn);
+    {
+        let (row, btn) = (video_tools_row.clone(), video_tools_btn.clone());
+        video_tools_btn.connect_clicked(move |_| {
+            btn.set_sensitive(false);
+            row.set_subtitle(&gettext("Installing support tools…"));
+            let (row_b, btn_b) = (row.clone(), btn.clone());
+            gtk4::glib::spawn_future_local(async move {
+                match crate::video::install_libraries().await {
+                    Ok(_) => refresh_video_tools(&row_b, &btn_b),
+                    Err(e) => row_b.set_subtitle(&e.to_string()),
+                }
+                btn_b.set_sensitive(true);
+            });
+        });
+    }
+    video_page.add(&video_quality_group);
+    video_page.add(&video_tools_group);
+    dialog.add(&video_page);
     dialog.present(Some(parent));
 }

@@ -527,6 +527,7 @@ fn build_row(
                 detail: it.detail().to_string(),
                 output_dir: it.output_dir().to_string(),
                 segments: m.segments_of(id),
+                video_source: m.video_source(id),
             };
             let name = snapshot.filename.clone();
             m.remove(id);
@@ -1249,6 +1250,51 @@ fn present_dialog(dialog: &adw::Dialog) {
     dialog.present(win.as_ref());
 }
 
+/// Widgets of the New Download dialog's video step, shown when the URL is
+/// a video page. Managed as one unit: exactly one state visible at a time
+/// (resolving spinner, preview, missing-tools prompt, or load error).
+struct VideoStep {
+    status: adw::ActionRow,
+    title: adw::ActionRow,
+    quality: adw::ComboRow,
+    audio: adw::SwitchRow,
+    tools: adw::ActionRow,
+    error: adw::ActionRow,
+}
+
+fn hide_video_step(v: &VideoStep) {
+    v.status.set_visible(false);
+    v.title.set_visible(false);
+    v.quality.set_visible(false);
+    v.audio.set_visible(false);
+    v.tools.set_visible(false);
+    v.error.set_visible(false);
+}
+
+fn show_video_loading(v: &VideoStep) {
+    hide_video_step(v);
+    v.status.set_visible(true);
+}
+
+fn show_video_ready(v: &VideoStep) {
+    hide_video_step(v);
+    v.title.set_visible(true);
+    v.quality.set_visible(true);
+    v.audio.set_visible(true);
+}
+
+fn show_video_tools_missing(v: &VideoStep, message: &str) {
+    hide_video_step(v);
+    v.tools.set_subtitle(message);
+    v.tools.set_visible(true);
+}
+
+fn show_video_error(v: &VideoStep, message: &str) {
+    hide_video_step(v);
+    v.error.set_subtitle(message);
+    v.error.set_visible(true);
+}
+
 pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("New Download"))
@@ -1274,6 +1320,78 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .activates_default(true)
         .build();
     group.add(&file_row);
+
+    // Video step (step two): preview rows for video-page URLs. All hidden
+    // until the URL classifies as a video page; exactly one state shows.
+    let video_status = adw::ActionRow::builder()
+        .title(gettext("Looking up video…"))
+        .build();
+    let video_spinner = gtk4::Spinner::new();
+    video_spinner.start();
+    video_status.add_suffix(&video_spinner);
+    video_status.set_visible(false);
+    group.add(&video_status);
+    let video_title = adw::ActionRow::builder().build();
+    video_title.set_visible(false);
+    group.add(&video_title);
+    let quality_labels = crate::video::quality_labels();
+    let quality_refs: Vec<&str> = quality_labels.iter().map(String::as_str).collect();
+    let video_quality = adw::ComboRow::builder()
+        .title(gettext("Quality"))
+        .model(&gtk4::StringList::new(&quality_refs))
+        .build();
+    video_quality.set_visible(false);
+    group.add(&video_quality);
+    let video_audio = adw::SwitchRow::builder()
+        .title(gettext("Audio only"))
+        .subtitle(gettext("Skip the video track"))
+        .build();
+    video_audio.set_visible(false);
+    group.add(&video_audio);
+    let video_tools = adw::ActionRow::builder()
+        .title(gettext("Support tools"))
+        .build();
+    let video_install_btn = gtk4::Button::builder()
+        .label(gettext("Install"))
+        .tooltip_text(gettext("Download the yt-dlp support tools"))
+        .valign(gtk4::Align::Center)
+        .build();
+    // Whole-row click hits Install (same pattern as the torrent row below).
+    video_tools.set_activatable_widget(Some(&video_install_btn));
+    video_tools.add_suffix(&video_install_btn);
+    video_tools.set_visible(false);
+    group.add(&video_tools);
+    let video_error = adw::ActionRow::builder()
+        .title(gettext("Couldn't load the video preview"))
+        .build();
+    let video_retry_btn = gtk4::Button::builder()
+        .label(gettext("Retry"))
+        .valign(gtk4::Align::Center)
+        .build();
+    video_error.add_suffix(&video_retry_btn);
+    video_error.set_visible(false);
+    group.add(&video_error);
+    let step = Rc::new(VideoStep {
+        status: video_status,
+        title: video_title,
+        quality: video_quality,
+        audio: video_audio,
+        tools: video_tools,
+        error: video_error,
+    });
+    // Dialog-local choices, initialized from Preferences (not bound: a
+    // queued row keeps the quality picked here even if prefs change later).
+    step.quality
+        .set_selected(crate::video::quality_index(&manager.settings().video_quality()) as u32);
+    step.audio.set_active(manager.settings().video_audio_only());
+    step.quality
+        .set_sensitive(!manager.settings().video_audio_only());
+    {
+        let q = step.quality.clone();
+        step.audio.connect_active_notify(move |sw| {
+            q.set_sensitive(!sw.is_active());
+        });
+    }
 
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
@@ -1342,6 +1460,164 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             el.set_visible(false);
             ur.remove_css_class("error");
         });
+    }
+
+    // Video resolve machinery: debounced metadata lookup that never blocks
+    // the main loop. `video_generation` drops stale completions when the user
+    // keeps typing; every async touch re-checks the dialog is still open.
+    let video_generation = Rc::new(Cell::new(0u64));
+    let video_last_ok = Rc::new(RefCell::new(String::new()));
+    let video_info = Rc::new(RefCell::new(None::<crate::video::VideoInfo>));
+    // Set while the submit path re-arms the apply tick (touching the entry
+    // text): the changed handler below must ignore that synthetic edit, or
+    // every failed Enter-submit would drop the preview and re-resolve.
+    let video_quiet = Rc::new(Cell::new(false));
+    let kick_video = {
+        let generation = video_generation.clone();
+        let last_ok = video_last_ok.clone();
+        let info = video_info.clone();
+        let step2 = step.clone();
+        let url_row2 = url_row.clone();
+        let dialog_weak = dialog.downgrade();
+        Rc::new(move || {
+            let my = generation.get() + 1;
+            generation.set(my);
+            let (generation_b, last_b, info_b, step_b, url_b, dialog_b) = (
+                generation.clone(),
+                last_ok.clone(),
+                info.clone(),
+                step2.clone(),
+                url_row2.clone(),
+                dialog_weak.clone(),
+            );
+            glib::spawn_future_local(async move {
+                if dialog_b.upgrade().is_none() {
+                    return;
+                }
+                let url = url_b.text().trim().to_string();
+                if url.is_empty() || !crate::video::is_video_page(&url) {
+                    hide_video_step(&step_b);
+                    info_b.borrow_mut().take();
+                    return;
+                }
+                if *last_b.borrow() == url && info_b.borrow().is_some() {
+                    show_video_ready(&step_b);
+                    return;
+                }
+                // Fast local tools check first: missing tools show Install
+                // with no spinner round-trip.
+                let libs = match crate::video::resolve_libraries() {
+                    Ok(libs) => libs,
+                    Err(e) => {
+                        if generation_b.get() != my {
+                            return;
+                        }
+                        info_b.borrow_mut().take();
+                        show_video_tools_missing(&step_b, &e.to_string());
+                        return;
+                    }
+                };
+                show_video_loading(&step_b);
+                match crate::video::fetch_video_infos(libs, url.clone()).await {
+                    Err(e) => {
+                        if generation_b.get() != my {
+                            return;
+                        }
+                        info_b.borrow_mut().take();
+                        show_video_error(&step_b, &e.to_string());
+                    }
+                    Ok(v) => {
+                        if generation_b.get() != my {
+                            return;
+                        }
+                        step_b.title.set_title(&v.title);
+                        step_b
+                            .title
+                            .set_subtitle(v.duration_string.as_deref().unwrap_or(""));
+                        *last_b.borrow_mut() = url;
+                        *info_b.borrow_mut() = Some(v);
+                        show_video_ready(&step_b);
+                    }
+                }
+            });
+        })
+    };
+    // Debounced auto-lookup while typing (600 ms idle); Enter applies
+    // immediately through the submit path below.
+    {
+        let generation = video_generation.clone();
+        let kick = kick_video.clone();
+        let dialog_weak = dialog.downgrade();
+        let step2 = step.clone();
+        let info2 = video_info.clone();
+        let quiet = video_quiet.clone();
+        url_row.connect_changed(move |row| {
+            // Synthetic edit from the apply re-arm below: ignore it.
+            if quiet.get() {
+                return;
+            }
+            // Sync skeleton: leaving video-land (or editing a resolved URL)
+            // hides the stale step at once; the debounced kick refills it.
+            let text = row.text().trim().to_string();
+            let fresh = info2.borrow().as_ref().is_some_and(|v| v.page_url == text);
+            if !crate::video::is_video_page(&text) || !fresh {
+                hide_video_step(&step2);
+                if !fresh {
+                    info2.borrow_mut().take();
+                }
+            }
+            let my = generation.get() + 1;
+            generation.set(my);
+            let (generation_b, kick_b, dialog_b) =
+                (generation.clone(), kick.clone(), dialog_weak.clone());
+            glib::spawn_future_local(async move {
+                glib::timeout_future(std::time::Duration::from_millis(600)).await;
+                if dialog_b.upgrade().is_none() || generation_b.get() != my {
+                    return;
+                }
+                kick_b();
+            });
+        });
+    }
+    {
+        let step2 = step.clone();
+        let kick = kick_video.clone();
+        let dialog_weak = dialog.downgrade();
+        let btn = video_install_btn.clone();
+        video_install_btn.connect_clicked(move |_| {
+            btn.set_sensitive(false);
+            step2
+                .tools
+                .set_subtitle(&gettext("Installing support tools…"));
+            let (btn_b, step_b, kick_b, dialog_b) = (
+                btn.clone(),
+                step2.clone(),
+                kick.clone(),
+                dialog_weak.clone(),
+            );
+            glib::spawn_future_local(async move {
+                match crate::video::install_libraries().await {
+                    Ok(_) => {
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        btn_b.set_sensitive(true);
+                        kick_b();
+                    }
+                    Err(e) => {
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        step_b.tools.set_subtitle(&e.to_string());
+                        btn_b.set_sensitive(true);
+                    }
+                }
+            });
+        });
+    }
+    {
+        let kick = kick_video.clone();
+        video_retry_btn.connect_clicked(move |_| kick());
     }
 
     {
@@ -1442,47 +1718,96 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             }
         });
     }
-    {
+    // One submit path for the Add button and URL apply: video pages go
+    // through the Page intake (a matching preview is required so the row
+    // stores the resolved page, not a stale URL), everything else keeps
+    // the direct enqueue.
+    let submit = {
         let m = manager.clone();
         let dd = dest_dir.clone();
         let url_row = url_row.clone();
         let file_row = file_row.clone();
         let error_label = error_label.clone();
-        let dialog = dialog.downgrade();
-        add_btn.connect_clicked(move |_| {
+        let dialog_weak = dialog.downgrade();
+        let info = video_info.clone();
+        let step2 = step.clone();
+        let kick = kick_video.clone();
+        let quiet = video_quiet.clone();
+        move |rearm_apply: bool| {
+            let fail = |message: &str| {
+                error_label.set_text(message);
+                error_label.set_visible(true);
+                url_row.add_css_class("error");
+                if rearm_apply {
+                    // ponytail: libadwaita hides its apply tick before
+                    // emitting `apply`; touch the text while focused to
+                    // re-arm it. Quiet: the video changed handler must not
+                    // treat this as a user edit.
+                    quiet.set(true);
+                    let current = url_row.text().to_string();
+                    url_row.grab_focus();
+                    url_row.set_text("");
+                    url_row.set_text(&current);
+                    quiet.set(false);
+                }
+            };
+            let close = || {
+                if let Some(d) = dialog_weak.upgrade() {
+                    d.close();
+                }
+            };
             let url = url_row.text().trim().to_string();
-            let fname = file_row.text().trim().to_string();
-            match m.enqueue(
-                &url,
-                Some(&dd.borrow()),
-                if fname.is_empty() {
-                    None
-                } else {
-                    Some(fname.as_str())
-                },
-            ) {
-                Ok(_) => {
-                    if let Some(dialog) = dialog.upgrade() {
-                        dialog.close();
+            if crate::video::is_video_page(&url) {
+                let ready = info
+                    .borrow()
+                    .as_ref()
+                    .filter(|v| v.page_url == url)
+                    .cloned();
+                match ready {
+                    Some(v) => {
+                        let typed = file_row.text().trim().to_string();
+                        let audio_only = step2.audio.is_active();
+                        // Default name from the video title; the intake
+                        // sanitizes it and falls back to the URL stem.
+                        // (P3 owns the container contract: .mp4 merged,
+                        // .m4a audio-only.)
+                        let auto = typed.is_empty().then(|| {
+                            if audio_only {
+                                format!("{}.m4a", v.title)
+                            } else {
+                                format!("{}.mp4", v.title)
+                            }
+                        });
+                        let name = if typed.is_empty() {
+                            auto.as_deref()
+                        } else {
+                            Some(typed.as_str())
+                        };
+                        let quality =
+                            crate::video::quality_value(step2.quality.selected() as usize);
+                        match m.enqueue_video(
+                            &v.page_url,
+                            Some(&dd.borrow()),
+                            name,
+                            quality,
+                            audio_only,
+                        ) {
+                            Ok(_) => close(),
+                            Err(e) => fail(&e),
+                        }
+                    }
+                    None => {
+                        kick();
+                        fail(&gettext(
+                            "Still looking up the video — wait for the preview, then add.",
+                        ));
                     }
                 }
-                Err(e) => {
-                    error_label.set_text(&e);
-                    error_label.set_visible(true);
-                    url_row.add_css_class("error");
-                }
+                return;
             }
-        });
-    }
-    {
-        let m = manager.clone();
-        let dd = dest_dir.clone();
-        let file_row = file_row.clone();
-        let dialog = dialog.downgrade();
-        let error_label = error_label.clone();
-        url_row.connect_apply(move |row| {
-            let url = row.text().trim().to_string();
-            if url.is_empty() {
+            // Apply on an empty field stays silent (stray Enter); the Add
+            // button surfaces the intake error instead.
+            if url.is_empty() && rearm_apply {
                 return;
             }
             let fname = file_row.text().trim().to_string();
@@ -1495,27 +1820,26 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     Some(fname.as_str())
                 },
             ) {
-                Ok(_) => {
-                    if let Some(dialog) = dialog.upgrade() {
-                        dialog.close();
-                    }
-                }
-                Err(e) => {
-                    error_label.set_text(&e);
-                    error_label.set_visible(true);
-                    row.add_css_class("error");
-                    // ponytail: libadwaita hides its apply tick before emitting
-                    // `apply`; touch the text while focused to re-arm it.
-                    let current = row.text().to_string();
-                    row.grab_focus();
-                    row.set_text("");
-                    row.set_text(&current);
-                }
+                Ok(_) => close(),
+                Err(e) => fail(&e),
             }
-        });
+        }
+    };
+    let submit = Rc::new(submit);
+    {
+        let s = submit.clone();
+        add_btn.connect_clicked(move |_| s(false));
+    }
+    {
+        let s = submit.clone();
+        url_row.connect_apply(move |_| s(true));
     }
 
     present_dialog(&dialog);
+
+    // Keyboard-first: focus lands in the URL field so typing starts a
+    // download with no tab stops (same pattern as the rename dialog).
+    url_row.grab_focus();
 
     // ponytail: single clipboard read per dialog open; no watch, no polling.
     {

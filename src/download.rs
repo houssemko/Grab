@@ -66,6 +66,11 @@ struct StoredItem {
     /// files and for items that need no folder tracking.
     #[serde(default)]
     output_dir: Option<String>,
+    /// Video-page source for yt-dlp items: only `Some(Page)` is ever
+    /// written (plain downloads omit it, so old files stay clean and old
+    /// app versions keep reading new ones).
+    #[serde(default)]
+    video_source: Option<crate::video::VideoSource>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -494,6 +499,10 @@ pub(crate) enum EngineMsg {
     /// Replaces the stored bitfield; the block map redraws off progress
     /// ticks arriving on the same tick, so this needs no extra signal.
     TorrentPieces(Vec<bool>),
+    /// Free-form phase label from engines whose progress has stages the
+    /// byte counters don't capture (video resolve/merge). Applied as the
+    /// row detail; the next Progress tick renders over it as usual.
+    Phase(String),
 }
 
 /// Shared inputs for one download's engine task. Groups the params every
@@ -832,7 +841,7 @@ fn has_holes(path: &std::path::Path) -> bool {
 
 /// A fresh run found someone else's file at our path (it appeared after
 /// dedupe): the pump requeues under a fresh name instead of failing.
-const DEST_EXISTS: &str = "Destination already exists";
+pub(crate) const DEST_EXISTS: &str = "Destination already exists";
 
 async fn attempt_once(
     ctx: &FetchCtx,
@@ -1321,7 +1330,10 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
 /// destination. Prefers `renameat2(RENAME_NOREPLACE)` (atomic on any
 /// filesystem, FAT included); falls back to claiming `new` with a hard
 /// link, and to a plain rename only where hard links are unsupported.
-fn rename_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn rename_noreplace(
+    old: &std::path::Path,
+    new: &std::path::Path,
+) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     match rename_noreplace_sys(old, new) {
         // Ancient kernels (< 3.15) lack renameat2: use the portable path.
@@ -1651,6 +1663,13 @@ pub struct DownloadManager {
     /// Server-advertised Last-Modified by row, applied at Finished when
     /// the keep-server-date setting is on. Best-effort only.
     server_mtime: RefCell<HashMap<u64, SystemTime>>,
+    /// Video-page source by row (in-memory only, like the maps above):
+    /// persisted on [`StoredItem`] and re-staged on restore.
+    video_sources: RefCell<HashMap<u64, crate::video::VideoSource>>,
+    /// Abort senders for running resolver workers, by row. Signalled (then
+    /// dropped) from pause/park/cancel paths so the worker stops its
+    /// extractor streams promptly; the pump tail also drops them.
+    video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
@@ -1666,6 +1685,9 @@ pub(crate) struct RemovedSnapshot {
     pub detail: String,
     pub output_dir: String,
     pub segments: Option<SegmentState>,
+    /// Staged video source, so Undo on a video row restores the Page
+    /// marker instead of demoting it to a plain download.
+    pub video_source: Option<crate::video::VideoSource>,
 }
 
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
@@ -1685,6 +1707,8 @@ impl DownloadManager {
             segment_state: RefCell::new(HashMap::new()),
             torrent_pieces: RefCell::new(HashMap::new()),
             server_mtime: RefCell::new(HashMap::new()),
+            video_sources: RefCell::new(HashMap::new()),
+            video_abort: RefCell::new(HashMap::new()),
             draining: Cell::new(false),
         });
         // Live preferences: raising the download limit must wake queued
@@ -1774,6 +1798,16 @@ impl DownloadManager {
         (0..self.store.n_items())
             .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
             .find(|it| it.id() == id)
+    }
+
+    /// Preferences backing this queue (for dialog defaults).
+    pub fn settings(&self) -> &crate::settings::AppSettings {
+        &self.settings
+    }
+
+    /// Video-page source staged for a row, if any.
+    pub fn video_source(&self, id: u64) -> Option<crate::video::VideoSource> {
+        self.video_sources.borrow().get(&id).cloned()
     }
 
     /// Validate, dedupe and queue a download, starting it when a slot is free.
@@ -1886,8 +1920,64 @@ impl DownloadManager {
         Ok(item)
     }
 
+    /// Intake for video pages: the row stores the *page* URL and a
+    /// [`crate::video::VideoSource::Page`] staged before insert, so the
+    /// persist inside [`DownloadManager::insert`] already carries it and
+    /// [`DownloadManager::start_next`] parks the row for the resolver
+    /// worker instead of feeding the page to the HTTP engine.
+    ///
+    /// # Errors
+    /// Returns a display-ready message when the URL or filename is invalid.
+    pub fn enqueue_video(
+        self: &Rc<Self>,
+        page_url: &str,
+        dest_dir: Option<&str>,
+        filename: Option<&str>,
+        quality: &str,
+        audio_only: bool,
+    ) -> Result<DownloadItem, String> {
+        let url = normalize_url(page_url)?;
+        if !crate::video::is_video_page(&url) {
+            return Err(gettext("That link is not a supported video page"));
+        }
+        let dir = self.resolve_dir(dest_dir);
+        let name = filename
+            .filter(|s| sane_filename(s))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| filename_from_url(&url));
+        let name = shorten_filename(&name);
+        let name = dedupe_filename(&name, |n| {
+            let p = std::path::Path::new(&dir).join(n);
+            p.exists()
+                || (0..self.store.n_items())
+                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                    .any(|it| {
+                        (it.dest_dir() == dir && it.filename() == n)
+                            || it.output_dir() == p.to_string_lossy()
+                    })
+        });
+        let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
+        item.set_detail(gettext("Waiting to resolve video…"));
+        self.video_sources.borrow_mut().insert(
+            item.id(),
+            crate::video::VideoSource::Page {
+                page_url: url,
+                media_url: None,
+                expires_at: None,
+                quality: quality.to_string(),
+                audio_only,
+            },
+        );
+        Ok(self.insert(item))
+    }
+
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
     /// A validated piece bitmap resumes segmented instead of restarting.
+    /// The video-page source (if any) is staged *before* insert so
+    /// [`DownloadManager::start_next`] parks the row instead of spawning
+    /// the HTTP engine on the watch page. A source whose page URL doesn't
+    /// match the row is dropped (hand-edited queue file), same trust
+    /// posture as the torrent folder check.
     ///
     /// # Errors
     /// Returns a display-ready message when the stored entry is invalid.
@@ -1898,6 +1988,7 @@ impl DownloadManager {
         filename: &str,
         status: DownloadStatus,
         segments: Option<SegmentState>,
+        video_source: Option<crate::video::VideoSource>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         if !sane_filename(filename) {
@@ -1915,6 +2006,15 @@ impl DownloadManager {
         });
         if let Some(st) = segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
+        }
+        if let Some(src) = video_source {
+            let matches = matches!(&src, crate::video::VideoSource::Page { page_url, .. } if *page_url == url);
+            if matches {
+                item.set_detail(gettext("Waiting to resolve video…"));
+                self.video_sources.borrow_mut().insert(item.id(), src);
+            } else {
+                tracing::warn!("dropping video source with mismatched page URL");
+            }
         }
         Ok(self.insert(item))
     }
@@ -2026,6 +2126,15 @@ impl DownloadManager {
         let url = item.url().to_string();
         if crate::torrent::is_torrent(&url) {
             return self.spawn_torrent(item, url);
+        }
+        if let Some(crate::video::VideoSource::Page {
+            page_url,
+            quality,
+            audio_only,
+            ..
+        }) = self.video_source(item.id())
+        {
+            return self.spawn_video(item, page_url, quality, audio_only);
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
@@ -2350,6 +2459,11 @@ impl DownloadManager {
                     EngineMsg::TorrentPieces(have) => {
                         this.torrent_pieces.borrow_mut().insert(id, have);
                     }
+                    EngineMsg::Phase(detail) => {
+                        if item.status() == DownloadStatus::Downloading {
+                            item.set_detail(detail);
+                        }
+                    }
                     EngineMsg::TruncatePrefix => {
                         if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
                             truncate_to_prefix(&item.file_path(), st);
@@ -2413,6 +2527,7 @@ impl DownloadManager {
                 return;
             }
             this.running.borrow_mut().remove(&id);
+            this.video_abort.borrow_mut().remove(&id);
             if this.draining.get() {
                 return;
             }
@@ -2493,6 +2608,58 @@ impl DownloadManager {
         self.pump(item, id, generation, rx);
     }
 
+    /// Spawn the resolver worker for a video-page row. Mirrors `spawn`'s
+    /// contract (epoch bump, running slot, Downloading status, shared pump)
+    /// so pause, cancel, retry, persist and the stale-pump guard keep
+    /// working unchanged. The worker speaks [`EngineMsg`] like every other
+    /// engine; its abort sender lets pause/cancel stop the extractor
+    /// streams promptly instead of only dropping the Grab-side task.
+    fn spawn_video(
+        self: &Rc<Self>,
+        item: DownloadItem,
+        page_url: String,
+        quality: String,
+        audio_only: bool,
+    ) {
+        let id = item.id();
+        let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
+        self.epoch.borrow_mut().insert(id, generation);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        // Overwrite any stale sender: its task is dead or guarded stale.
+        self.video_abort.borrow_mut().insert(id, abort_tx);
+        let opts = DownloadOptions::from_settings(&self.settings);
+        let job = crate::video::VideoJob {
+            item_id: id,
+            page_url,
+            quality,
+            audio_only,
+            dest: item.file_path(),
+            tries: opts.tries.max(1) as u32,
+            timeout_secs: opts.timeout.max(1) as u64,
+            user_agent: opts.user_agent.clone(),
+        };
+        let handle = tokio_rt().spawn(async move {
+            let worker_tx = tx.clone();
+            match crate::video::run_video_download(job, abort_rx, worker_tx).await {
+                Ok(Some(size)) => {
+                    tx.send(EngineMsg::Finished { size }).ok();
+                }
+                // Aborted: the pauser/canceller already set the row status,
+                // so send nothing and let the pump tail no-op.
+                Ok(None) => {}
+                Err(e) => {
+                    tx.send(EngineMsg::Failed(e.to_string())).ok();
+                }
+            }
+        });
+        self.running.borrow_mut().insert(id, handle);
+        item.set_status(DownloadStatus::Downloading);
+        item.set_detail(gettext("Resolving video…"));
+        self.changed();
+        self.pump(item, id, generation, rx);
+    }
+
     fn notify_finished(&self, item: &DownloadItem, result: Result<(), String>) {
         if !self.notifications_enabled() {
             return;
@@ -2524,6 +2691,7 @@ impl DownloadManager {
 
     /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
+        self.stop_video_worker(id);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -2625,10 +2793,20 @@ impl DownloadManager {
         self.start_next();
     }
 
+    /// Signal a running resolver worker to stop its extractor streams. The
+    /// Grab task abort follows (or already ran): whichever wins, the
+    /// attempt is over and a later resume replays from the sidecar.
+    fn stop_video_worker(&self, id: u64) {
+        if let Some(stop) = self.video_abort.borrow_mut().remove(&id) {
+            let _ = stop.send(());
+        }
+    }
+
     /// Stop the engine for `id`, keeping file, bitmap and progress, and
     /// mark it queued. Unlike pause the row yields its slot; unlike cancel
     /// nothing is deleted and progress is kept.
     fn park(&self, id: u64) {
+        self.stop_video_worker(id);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -2689,6 +2867,7 @@ impl DownloadManager {
     }
 
     fn cancel_inner(&self, id: u64, keep_partial: bool) {
+        self.stop_video_worker(id);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -2741,6 +2920,9 @@ impl DownloadManager {
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.cancel_inner(id, true);
         self.epoch.borrow_mut().remove(&id);
+        // The snapshot carries the source for Undo; the live map drops it
+        // with the row (cancel keeps it, remove doesn't).
+        self.video_sources.borrow_mut().remove(&id);
         if let Some(pos) = (0..self.store.n_items()).find(|&i| {
             self.store
                 .item(i)
@@ -2776,6 +2958,11 @@ impl DownloadManager {
         item.set_output_dir(snap.output_dir);
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
+        }
+        // Re-stage before insert: the persist inside `insert` already
+        // carries it and `start_next` dispatches on it.
+        if let Some(src) = snap.video_source {
+            self.video_sources.borrow_mut().insert(item.id(), src);
         }
         self.insert(item.clone());
         item
@@ -2976,8 +3163,12 @@ impl DownloadManager {
                     let selected_files = crate::torrent::get_selection(&it.url().to_string());
                     // Empty means "no folder tracked": omit it so old files
                     // stay clean and old app versions keep reading new ones.
+                    // Same for the video source: only Page rows write it.
                     let output_dir = it.output_dir().to_string();
                     let output_dir = (!output_dir.is_empty()).then_some(output_dir);
+                    let video_source = self
+                        .video_source(it.id())
+                        .filter(|s| matches!(s, crate::video::VideoSource::Page { .. }));
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
@@ -2987,6 +3178,7 @@ impl DownloadManager {
                         segments,
                         selected_files,
                         output_dir,
+                        video_source,
                     });
                 }
             }
@@ -3151,6 +3343,7 @@ impl DownloadManager {
                             &p.item.filename,
                             status,
                             p.segments,
+                            p.item.video_source.clone(),
                         ) {
                             Ok(restored) => {
                                 // Re-attach the recorded engine folder.

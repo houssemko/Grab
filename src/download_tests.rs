@@ -1,4 +1,5 @@
 use super::*;
+use crate::video::test_support::NoVideoTools;
 use pretty_assertions::assert_eq;
 
 static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -30,6 +31,36 @@ fn test_queue_file(tag: &str) -> std::path::PathBuf {
     // SAFETY: test setup runs before any test thread spawns.
     unsafe { std::env::set_var("GRAB_QUEUE_FILE", &p) };
     p
+}
+
+/// Spin the default MainContext until the row's engine slot frees (or the
+/// deadline passes), then drain to quiescence like [`run_loop`]: the pump
+/// tail runs after the slot frees, and a woken-but-unpolled tail left
+/// behind would abort a later test on the thread guard. The caller must
+/// hold MAIN_LOOP_LOCK (via test_locks).
+fn drain_engine(manager: &DownloadManager, id: u64) {
+    let ctx = glib::MainContext::default();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while manager.running.borrow().contains_key(&id) && std::time::Instant::now() < deadline {
+        ctx.iteration(false);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    quiesce(&ctx);
+}
+
+/// Pump until the context goes quiet (50 idle rounds), so no woken tail is
+/// left for another test's loop to trip over. Shared tail for drains that
+/// don't go through [`run_loop`].
+fn quiesce(ctx: &glib::MainContext) {
+    let mut idle_rounds = 0;
+    while idle_rounds < 50 {
+        if ctx.iteration(false) {
+            idle_rounds = 0;
+        } else {
+            idle_rounds += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
 }
 
 fn test_settings() -> crate::settings::AppSettings {
@@ -352,6 +383,7 @@ fn overcap_queue_keeps_active_first() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            video_source: None,
         },
         StoredItem {
             url: "https://example.com/paused.iso".to_string(),
@@ -362,6 +394,7 @@ fn overcap_queue_keeps_active_first() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            video_source: None,
         },
     ];
     for i in 0..1000 {
@@ -374,6 +407,7 @@ fn overcap_queue_keeps_active_first() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            video_source: None,
         });
     }
     let queue = StoredQueue {
@@ -560,6 +594,192 @@ fn transferring_ignores_paused() {
     queued.set_status(DownloadStatus::Queued);
     manager.store().append(&queued);
     assert!(manager.has_transferring());
+}
+
+#[test]
+fn enqueue_video_spawns_and_fails_without_tools() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("enqueue-video");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir()
+        .join("grab-video-enqueue")
+        .to_string_lossy()
+        .into_owned();
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest),
+            Some("My Video.mp4"),
+            "1080p",
+            false,
+        )
+        .expect("video enqueue");
+    let id = item.id();
+    // The worker runs and fails fast on the missing tools (no network).
+    drain_engine(&manager, id);
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    assert_eq!(
+        item.detail(),
+        "Video downloads need the yt-dlp support tools"
+    );
+    // The Page marker survives the failure, so Retry replays the pipeline.
+    assert!(matches!(
+        manager.video_source(id),
+        Some(crate::video::VideoSource::Page { .. })
+    ));
+    // Engine slot and abort sender are both released.
+    assert!(!manager.running.borrow().contains_key(&id));
+    assert!(!manager.video_abort.borrow().contains_key(&id));
+    crate::video::clean_staging(&crate::video::staging_dir(id));
+}
+
+#[test]
+fn enqueue_video_rejects_direct_url() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("enqueue-video-direct");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    assert!(
+        manager
+            .enqueue_video("https://example.com/f.iso", None, None, "1080p", false)
+            .is_err()
+    );
+    assert_eq!(manager.store().n_items(), 0);
+}
+
+#[test]
+fn video_source_survives_restore_and_retry() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("video-restore");
+    let _notools = NoVideoTools::apply();
+    let dest = std::env::temp_dir().join("grab-video-restore");
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest = dest.to_string_lossy().into_owned();
+    let id = {
+        let settings = test_settings();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let item = manager
+            .enqueue_video(
+                "https://vimeo.com/123456",
+                Some(&dest),
+                Some("Clip.mp4"),
+                "720p",
+                true,
+            )
+            .expect("video enqueue");
+        // Persisted with the Page marker (not silently dropped).
+        let text = std::fs::read_to_string(&qf).unwrap();
+        assert!(text.contains("\"video_source\""));
+        assert!(text.contains("vimeo.com/123456"));
+        let id = item.id();
+        drain_engine(&manager, id);
+        id
+    };
+    // Fresh manager over the same queue file re-stages the source and
+    // replays the worker (which fails fast here, proving the dispatch).
+    let settings = test_settings();
+    let manager2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    manager2.restore_queue();
+    let restored = manager2.find(id).expect("restored video row");
+    drain_engine(&manager2, id);
+    assert_eq!(restored.status(), DownloadStatus::Failed);
+    let stored = manager2.video_source(id).expect("re-staged source");
+    assert!(
+        matches!(stored, crate::video::VideoSource::Page { ref quality, audio_only: true, .. } if quality == "720p")
+    );
+    crate::video::clean_staging(&crate::video::staging_dir(id));
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn mismatched_video_source_dropped_on_restore() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let qf = test_queue_file("video-mismatch");
+    // Hand-edited queue: the Page marker names another video.
+    let queue = StoredQueue {
+        version: QUEUE_VERSION,
+        items: vec![StoredItem {
+            url: "https://example.com/f.iso".into(),
+            dest_dir: "/tmp/dl".into(),
+            filename: "f.iso".into(),
+            status: DownloadStatus::Paused,
+            progress: 0.0,
+            segments: None,
+            selected_files: None,
+            output_dir: None,
+            video_source: Some(crate::video::VideoSource::Page {
+                page_url: "https://vimeo.com/OTHER".into(),
+                media_url: None,
+                expires_at: None,
+                quality: "1080p".into(),
+                audio_only: false,
+            }),
+        }],
+    };
+    std::fs::write(&qf, serde_json::to_string(&queue).unwrap()).unwrap();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    // Paused stays parked: no spawn, no network.
+    manager.restore_queue();
+    assert_eq!(manager.store().n_items(), 1);
+    let item = manager
+        .store()
+        .item(0)
+        .and_downcast::<DownloadItem>()
+        .unwrap();
+    assert_eq!(manager.video_source(item.id()), None);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn unremove_restores_video_source() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("video-unremove");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir()
+        .join("grab-video-unremove")
+        .to_string_lossy()
+        .into_owned();
+    let item = manager
+        .enqueue_video(
+            "https://vimeo.com/123456",
+            Some(&dest),
+            Some("Clip.mp4"),
+            "720p",
+            false,
+        )
+        .expect("video enqueue");
+    let id = item.id();
+    drain_engine(&manager, id);
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    let snap = RemovedSnapshot {
+        url: item.url().to_string(),
+        dest_dir: item.dest_dir().to_string(),
+        filename: item.filename().to_string(),
+        status: item.status(),
+        progress: item.progress(),
+        detail: item.detail().to_string(),
+        output_dir: item.output_dir().to_string(),
+        segments: None,
+        video_source: manager.video_source(id),
+    };
+    manager.remove(id);
+    assert_eq!(manager.video_source(id), None);
+    let revived = manager.unremove(snap);
+    let new_id = revived.id();
+    // Failed requeues and replays the worker (fast tools failure here).
+    drain_engine(&manager, new_id);
+    assert_eq!(revived.status(), DownloadStatus::Failed);
+    assert!(matches!(
+        manager.video_source(new_id),
+        Some(crate::video::VideoSource::Page { .. })
+    ));
+    crate::video::clean_staging(&crate::video::staging_dir(id));
+    crate::video::clean_staging(&crate::video::staging_dir(new_id));
 }
 
 #[test]
@@ -1217,6 +1437,7 @@ fn restore_keeps_exact_filename() {
             "ubuntu.iso",
             DownloadStatus::Downloading,
             None,
+            None,
         )
         .unwrap();
     assert_eq!(item.filename(), "ubuntu.iso");
@@ -1244,6 +1465,7 @@ fn queue_roundtrip_and_mapping() {
                 segments: None,
                 selected_files: None,
                 output_dir: None,
+                video_source: None,
             },
             StoredItem {
                 url: "https://example.com/b.iso".to_string(),
@@ -1254,6 +1476,7 @@ fn queue_roundtrip_and_mapping() {
                 segments: None,
                 selected_files: None,
                 output_dir: None,
+                video_source: None,
             },
         ],
     };
@@ -1381,6 +1604,7 @@ fn restore_rejects_bad_filenames() {
                     bad,
                     DownloadStatus::Queued,
                     None,
+                    None,
                 )
                 .is_err()
         );
@@ -1392,6 +1616,7 @@ fn restore_rejects_bad_filenames() {
                 "relative/dir",
                 "f.iso",
                 DownloadStatus::Queued,
+                None,
                 None,
             )
             .is_err()
@@ -1414,6 +1639,7 @@ fn batch_restore_hundred_done() {
             segments: None,
             selected_files: None,
             output_dir: None,
+            video_source: None,
         })
         .collect();
     let queue = StoredQueue {
@@ -1625,6 +1851,7 @@ fn restore_preserves_intent() {
         segments: None,
         selected_files: None,
         output_dir: None,
+        video_source: None,
     })
     .collect();
     let queue = StoredQueue {
@@ -1674,6 +1901,7 @@ fn restored_status_mapping() {
                 "/tmp/dl",
                 "m.iso",
                 stored,
+                None,
                 None,
             )
             .unwrap();
@@ -2073,6 +2301,9 @@ fn stale_pump_future_ignores_respawned_row() {
     if manager.running.borrow().contains_key(&id) {
         abort(&server, "cancelled engine never exited");
     }
+    // Quiesce like run_loop: the cancelled pump's woken tail must finish
+    // here, not on a later test's thread (thread-guard abort).
+    quiesce(&ctx);
     cleanup(&server, &dir);
     settings.set_int("max-concurrent", 3).unwrap();
 }
@@ -2339,6 +2570,7 @@ fn killed_segmented_resume_starts_over() {
                 segments: None,
                 selected_files: None,
                 output_dir: None,
+                video_source: None,
             }],
         })
         .unwrap(),
@@ -2657,7 +2889,14 @@ fn restart_with_smaller_file_keeps_partial() {
     // pre-written partial, and the restore path is synchronous, so no
     // race with the engine's first metadata read.
     let item = manager
-        .restore_existing(&url, &dest, "t.bin", DownloadStatus::Downloading, None)
+        .restore_existing(
+            &url,
+            &dest,
+            "t.bin",
+            DownloadStatus::Downloading,
+            None,
+            None,
+        )
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
     // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).

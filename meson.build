@@ -1,7 +1,7 @@
 project('grab', 'rust',
   version: '2.4.0',
   meson_version: '>= 0.59.0',
-  license: 'MIT',
+  license: 'GPL-3.0-only',
 )
 
 # Flathub requires each module's license under share/licenses/$APP_ID.

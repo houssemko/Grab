@@ -2,7 +2,7 @@
 <component type="desktop-application">
   <id>io.github.houssemko.Grab</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>MIT</project_license>
+  <project_license>GPL-3.0-only</project_license>
   <name>Grab</name>
   <summary>Download manager for GNOME</summary>
   <description>
@@ -14,6 +14,10 @@
     <p>
       Filter and search the queue, retry failures in bulk, and keep
       everything organized with a download history that survives restarts.
+    </p>
+    <p>
+      Paste a video link to fetch it in up to 4K quality or as audio-only,
+      with the title and quality picked before you add it to the queue.
     </p>
   </description>
   <launchable type="desktop-id">io.github.houssemko.Grab.desktop</launchable>
@@ -42,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="2.6.0" date="2026-09-16">
+      <description>
+        <p>New: video-page downloads (YouTube, Vimeo and more) with quality picker up to 4K, audio-only mode, and automatic merging. The app is now licensed under GPL-3.0-only.</p>
+      </description>
+    </release>
     <release version="2.5.1" date="2026-09-15">
       <description>
         <p>Test-reliability fix: the integration-test fixture server retries startup on fresh ports instead of flaking. No functional changes.</p>

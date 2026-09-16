@@ -62,3 +62,9 @@ Flatpak-only.
 ```bash
 flatpak-builder --user --install build build-aux/io.github.houssemko.Grab.json
 ```
+
+## License
+
+Grab is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 only. See [LICENSE](LICENSE) for the full text.
