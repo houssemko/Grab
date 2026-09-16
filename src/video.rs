@@ -180,6 +180,16 @@ pub fn is_video_page(url: &str) -> bool {
     matches!(classify(url), VideoSource::Page { .. })
 }
 
+/// Whether a resolved preview still matches the dialog's current text.
+/// The dialog kick and the submit gate must agree on this: the extractor
+/// canonicalizes page URLs (youtu.be → youtube.com/watch), so comparing
+/// the stored canonical URL against the typed text would reject every
+/// canonicalized preview and trap Add in a re-resolve loop. The
+/// round-trip key (which exact text was resolved) is the stable one.
+pub fn preview_fresh(info: &Option<VideoInfo>, last_ok: &str, url: &str) -> bool {
+    !url.is_empty() && last_ok == url && info.is_some()
+}
+
 fn video_domain(host: &str) -> bool {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     VIDEO_DOMAINS
@@ -412,6 +422,11 @@ pub fn clean_staging(dir: &Path) {
     }
 }
 
+/// How long one metadata extraction may take before it counts as failed.
+/// Without a ceiling a throttled host parks the dialog on its spinner
+/// forever; the error path (with Retry) is strictly more useful.
+const FETCH_TIMEOUT_SECS: u64 = 60;
+
 /// Extract metadata for one video page. The media URLs inside the returned
 /// [`VideoInfo`] are only passed on to the download step; the *page URL* is
 /// what survives restarts.
@@ -423,10 +438,18 @@ pub async fn fetch_video_infos(libs: Libraries, url: String) -> Result<VideoInfo
             .build()
             .await
             .map_err(VideoError::fetch)?;
-        let video = downloader
-            .fetch_video_infos(&url)
-            .await
-            .map_err(VideoError::fetch)?;
+        let video = match tokio::time::timeout(
+            Duration::from_secs(FETCH_TIMEOUT_SECS),
+            downloader.fetch_video_infos(&url),
+        )
+        .await
+        {
+            Ok(Ok(video)) => video,
+            Ok(Err(e)) => return Err(VideoError::fetch(&e)),
+            Err(_) => {
+                return Err(VideoError::fetch(gettext("the lookup timed out")));
+            }
+        };
         Ok::<_, VideoError>(VideoInfo::from(&video, &url))
     });
     match handle.await {

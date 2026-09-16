@@ -1500,7 +1500,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     info_b.borrow_mut().take();
                     return;
                 }
-                if *last_b.borrow() == url && info_b.borrow().is_some() {
+                if crate::video::preview_fresh(&info_b.borrow(), last_b.borrow().as_str(), &url) {
                     show_video_ready(&step_b);
                     return;
                 }
@@ -1741,6 +1741,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let error_label = error_label.clone();
         let dialog_weak = dialog.downgrade();
         let info = video_info.clone();
+        let last_ok = video_last_ok.clone();
         let step2 = step.clone();
         let kick = kick_video.clone();
         let quiet = video_quiet.clone();
@@ -1769,11 +1770,18 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             };
             let url = url_row.text().trim().to_string();
             if crate::video::is_video_page(&url) {
-                let ready = info
-                    .borrow()
-                    .as_ref()
-                    .filter(|v| v.page_url == url)
-                    .cloned();
+                // Same freshness gate as the kick skip above: the stored
+                // page URL is canonicalized, so only the round-trip key
+                // (which text was resolved) decides.
+                let ready = if crate::video::preview_fresh(
+                    &info.borrow(),
+                    last_ok.borrow().as_str(),
+                    &url,
+                ) {
+                    info.borrow().clone()
+                } else {
+                    None
+                };
                 match ready {
                     Some(v) => {
                         let typed = file_row.text().trim().to_string();

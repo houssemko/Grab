@@ -620,91 +620,46 @@ fn pipeline_reports_missing_tools() {
     assert!(!staging_dir(item_id).exists());
 }
 
-// ── TEMPORARY live checks for new domains (deleted before merge) ─────
-// Ignored: network + real tools. XDG_DATA_HOME=/tmp/opencode/livecheck.
-// Run SOLO: cargo test -- --ignored --test-threads=1 live_new_domain --nocapture
-#[test]
-#[ignore]
-fn live_new_domain_archive_video() {
-    unsafe {
-        std::env::set_var("XDG_DATA_HOME", "/tmp/opencode/livecheck");
+// ── preview freshness (dialog kick/submit gate) ──────────────────────
+
+fn test_video_info(page_url: &str) -> VideoInfo {
+    VideoInfo {
+        id: "x".into(),
+        title: "T".into(),
+        thumbnail: None,
+        duration: None,
+        duration_string: None,
+        page_url: page_url.into(),
+        expires_at: None,
     }
-    assert!(is_video_page(
-        "https://archive.org/details/M1_20241029_164500_Agenda"
-    ));
-    let item_id = 720_000 + std::process::id() as u64;
-    let dest = std::path::PathBuf::from(format!(
-        "/tmp/opencode/livecheck/out/live-new-{item_id}.mp4"
-    ));
-    let _ = std::fs::remove_file(&dest);
-    let job = VideoJob {
-        item_id,
-        page_url: "https://archive.org/details/M1_20241029_164500_Agenda".into(),
-        quality: "480p".into(),
-        audio_only: false,
-        dest: dest.clone(),
-        tries: 2,
-        timeout_secs: 120,
-        user_agent: "test".into(),
-    };
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let pump = std::thread::spawn(move || {
-        let mut ticks = 0u32;
-        while rx.blocking_recv().is_some() {
-            ticks += 1;
-        }
-        ticks
-    });
-    let res = crate::download::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
-    let ticks = pump.join().unwrap();
-    eprintln!("LIVE-NEW-VIDEO result: {res:?} ticks={ticks}");
-    assert!(ticks >= 1);
-    assert!(matches!(res, Ok(Some(n)) if n > 500_000));
-    assert!(dest.exists());
-    assert!(!staging_dir(item_id).exists());
 }
 
 #[test]
-#[ignore]
-fn live_new_domain_archive_audio_fallback() {
-    unsafe {
-        std::env::set_var("XDG_DATA_HOME", "/tmp/opencode/livecheck");
-    }
-    let url = "https://archive.org/details/t3-podcast-7";
-    assert!(is_video_page(url));
-    // archive.org is NOT in the audio-first preset list: reaching audio
-    // means the worker fell back on its own from missing video formats.
-    assert!(!is_audio_first(url));
-    let item_id = 730_000 + std::process::id() as u64;
-    let dest = std::path::PathBuf::from(format!(
-        "/tmp/opencode/livecheck/out/live-new-{item_id}.mp4"
+fn preview_fresh_matches_round_trip() {
+    let info = Some(test_video_info("https://www.youtube.com/watch?v=x"));
+    assert!(preview_fresh(
+        &info,
+        "https://www.youtube.com/watch?v=x",
+        "https://www.youtube.com/watch?v=x",
     ));
-    let _ = std::fs::remove_file(&dest);
-    let job = VideoJob {
-        item_id,
-        page_url: url.into(),
-        quality: "480p".into(),
-        audio_only: false, // deliberately NOT audio-only: worker must fall back
-        dest: dest.clone(),
-        tries: 2,
-        timeout_secs: 120,
-        user_agent: "test".into(),
-    };
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let pump = std::thread::spawn(move || {
-        let mut ticks = 0u32;
-        while rx.blocking_recv().is_some() {
-            ticks += 1;
-        }
-        ticks
-    });
-    let res = crate::download::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
-    let ticks = pump.join().unwrap();
-    eprintln!("LIVE-NEW-AUDIO result: {res:?} ticks={ticks}");
-    assert!(ticks >= 1);
-    assert!(matches!(res, Ok(Some(n)) if n > 100_000));
-    assert!(dest.exists());
-    assert!(!staging_dir(item_id).exists());
+}
+
+#[test]
+fn preview_fresh_accepts_canonical_drift() {
+    // Extractor canonicalized youtu.be → youtube.com/watch: the stored
+    // page URL differs from the typed text, but the round-trip key
+    // matches, so Add must proceed instead of re-resolving forever.
+    let info = Some(test_video_info("https://www.youtube.com/watch?v=x"));
+    assert!(preview_fresh(&info, "https://youtu.be/x", "https://youtu.be/x"));
+}
+
+#[test]
+fn preview_fresh_rejects_stale_and_empty() {
+    let info = Some(test_video_info("https://vimeo.com/1"));
+    // User edited the URL after resolving: not fresh.
+    assert!(!preview_fresh(&info, "https://vimeo.com/1", "https://vimeo.com/2"));
+    // Nothing resolved yet.
+    assert!(!preview_fresh(&None, "https://vimeo.com/1", "https://vimeo.com/1"));
+    // Empty text never matches, even with a coincidental empty key.
+    assert!(!preview_fresh(&info, "", ""));
 }
