@@ -687,6 +687,7 @@ fn pipeline_reports_missing_tools() {
         user_agent: "test".into(),
         video_format_id: None,
         cookies_path: None,
+        cookies_browser: "none".into(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
@@ -1135,6 +1136,56 @@ fn distro_packages_unknown_is_none() {
     assert_eq!(distro_packages(""), None);
     assert_eq!(distro_packages("NAME=No ID here\n"), None);
     assert_eq!(distro_packages("ID=mysteryos\nNAME=Mystery\n"), None);
+}
+
+// ── browser cookies ──────────────────────────────────────────────────
+
+#[test]
+fn cookies_browser_index_round_trip() {
+    assert_eq!(cookies_browser_index("none"), 0);
+    assert_eq!(cookies_browser_index("firefox"), 5);
+    assert_eq!(cookies_browser_value(5), "firefox");
+    assert_eq!(cookies_browser_value(99), "none");
+    // Unknown values fall back to off, never to a browser.
+    assert_eq!(cookies_browser_index("chromium-beta"), 0);
+    assert_eq!(cookies_browser_index(""), 0);
+    assert_eq!(cookies_browser_labels().len(), COOKIES_BROWSERS.len());
+}
+
+#[test]
+fn cookies_browser_spec_paths() {
+    let home = std::env::temp_dir().join(format!("grab-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    let profile = home.join(".config").join("google-chrome");
+    std::fs::create_dir_all(&profile).unwrap();
+    let with_home = |f: &dyn Fn()| {
+        let saved = std::env::var_os("HOME");
+        // SAFETY: serial suite; restored below even if the inner check panics.
+        unsafe {
+            std::env::set_var("HOME", &home);
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match saved {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        r.unwrap();
+    };
+    with_home(&|| {
+        assert_eq!(
+            cookies_browser_spec("chrome"),
+            Some(format!("chrome:{}", profile.display()))
+        );
+        // No profile dir present: bare name, so yt-dlp reports the real
+        // absence instead of failing on our guess.
+        assert_eq!(cookies_browser_spec("firefox"), Some("firefox".to_string()));
+    });
+    assert_eq!(cookies_browser_spec("none"), None);
+    assert_eq!(cookies_browser_spec(""), None);
+    assert_eq!(cookies_browser_spec("mystery"), None);
+    let _ = std::fs::remove_dir_all(&home);
 }
 
 // ── tool search order ────────────────────────────────────────────────

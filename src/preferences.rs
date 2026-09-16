@@ -536,6 +536,49 @@ pub fn show(
             }
         });
     }
+    // Browser identity, mutually exclusive-ish with the file above: when
+    // set, the worker sends browser cookies and ignores the file, so the
+    // file row dims to say so.
+    let browser_labels = crate::video::cookies_browser_labels();
+    let browser_refs: Vec<&str> = browser_labels.iter().map(String::as_str).collect();
+    let browser_row = adw::ComboRow::builder()
+        .title(gettext("Cookies from Browser"))
+        .subtitle(gettext("Reads this browser's profile directly"))
+        .model(&gtk4::StringList::new(&browser_refs))
+        .build();
+    browser_row
+        .set_selected(crate::video::cookies_browser_index(&settings.cookies_browser()) as u32);
+    video_auth_group.add(&browser_row);
+    {
+        let row = browser_row.downgrade();
+        let file = cookies_row.clone();
+        settings.connect_changed(Some(crate::settings::key::COOKIES_BROWSER), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                let selected = crate::video::cookies_browser_index(
+                    &s.string(crate::settings::key::COOKIES_BROWSER),
+                ) as u32;
+                row.set_selected(selected);
+                file.set_sensitive(selected == 0);
+            }
+        });
+    }
+    browser_row.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::COOKIES_BROWSER,
+                crate::video::cookies_browser_value(row.selected() as usize),
+            );
+        }
+    });
+    cookies_row
+        .set_sensitive(crate::video::cookies_browser_index(&settings.cookies_browser()) == 0);
+    {
+        let file = cookies_row.clone();
+        browser_row.connect_selected_notify(move |row| {
+            file.set_sensitive(row.selected() == 0);
+        });
+    }
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
         .description(gettext("yt-dlp and ffmpeg resolve video pages"))

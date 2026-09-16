@@ -1587,7 +1587,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     }
                 };
                 show_video_loading(&step_b);
-                match crate::video::fetch_video_infos(libs, url.clone(), cookies).await {
+                match crate::video::fetch_video_infos(
+                    libs,
+                    url.clone(),
+                    cookies,
+                    settings_b.cookies_browser(),
+                )
+                .await
+                {
                     Err(e) => {
                         if generation_b.get() != my {
                             return;

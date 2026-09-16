@@ -2656,6 +2656,7 @@ impl DownloadManager {
             user_agent: opts.user_agent.clone(),
             video_format_id,
             cookies_path,
+            cookies_browser: self.settings.cookies_browser(),
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();
