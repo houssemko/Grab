@@ -1599,11 +1599,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         // Thumbnail, best-effort: fetched off-thread, applied
                         // on the main thread only if this preview is still
                         // current. Any failure leaves the row imageless.
-                        let (thumb_b, dialog_c, generation_c, step_c, info_c) = (
+                        let (thumb_b, dialog_c, generation_c, info_c) = (
                             step_b.thumb.clone(),
                             dialog_b.clone(),
                             generation_b.clone(),
-                            step_b.clone(),
                             info_b.clone(),
                         );
                         glib::spawn_future_local(async move {
@@ -2020,7 +2019,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let b = add_btn.clone();
         let ur = url_row.clone();
         ur.connect_changed(move |row| {
-            if crate::video::is_video_page(&row.text().trim().to_string()) {
+            if crate::video::is_video_page(row.text().trim()) {
                 b.set_label(&gettext("_Continue"));
             } else {
                 b.set_label(&gettext("_Add Download"));
