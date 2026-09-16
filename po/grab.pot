@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-16 11:38+0100\n"
+"POT-Creation-Date: 2026-09-16 11:55+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,7 +18,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/application.rs:114 src/window.rs:1799
+#: src/application.rs:114 src/window.rs:1824
 msgid "Could not read that .torrent file"
 msgstr ""
 
@@ -54,7 +54,7 @@ msgid "Downloads"
 msgstr ""
 
 #: src/application.rs:343 src/window.rs:740 src/window.rs:775 src/window.rs:789
-#: src/window.rs:1308 src/window.rs:1868
+#: src/window.rs:1308 src/window.rs:1893
 msgid "New Download"
 msgstr ""
 
@@ -102,7 +102,7 @@ msgstr ""
 msgid "Magnet link is too long (max {n} characters)"
 msgstr ""
 
-#: src/download.rs:340 src/download.rs:2576
+#: src/download.rs:340 src/download.rs:2579
 msgid "Torrent file is missing from the archive"
 msgstr ""
 
@@ -133,7 +133,7 @@ msgid "File changed on server"
 msgstr ""
 
 #: src/download.rs:807 src/download.rs:813 src/download.rs:819
-#: src/download.rs:2536 src/download.rs:2537 src/video.rs:322
+#: src/download.rs:2539 src/download.rs:2540 src/video.rs:328
 msgid "Download interrupted"
 msgstr ""
 
@@ -190,85 +190,85 @@ msgstr ""
 msgid "Incomplete piece"
 msgstr ""
 
-#: src/download.rs:1941
+#: src/download.rs:1942
 msgid "That link is not a supported video page"
 msgstr ""
 
-#: src/download.rs:1960 src/download.rs:2013
+#: src/download.rs:1961 src/download.rs:2015
 msgid "Waiting to resolve video…"
 msgstr ""
 
-#: src/download.rs:2061 src/download.rs:2362
+#: src/download.rs:2063 src/download.rs:2365
 msgid "Finished • {size}"
 msgstr ""
 
-#: src/download.rs:2063 src/download.rs:2364
+#: src/download.rs:2065 src/download.rs:2367
 msgid "Finished"
 msgstr ""
 
-#: src/download.rs:2121
+#: src/download.rs:2123
 msgid "Invalid speed limit: {limit}"
 msgstr ""
 
-#: src/download.rs:2186
+#: src/download.rs:2189
 msgid "Starting…"
 msgstr ""
 
-#: src/download.rs:2188
+#: src/download.rs:2191
 msgid "Connecting to {host}…"
 msgstr ""
 
-#: src/download.rs:2258
+#: src/download.rs:2261
 msgid " • ↑ {upspeed}/s · {up} up{ratio}"
 msgstr ""
 
-#: src/download.rs:2277
+#: src/download.rs:2280
 msgid "{pct}% ({amounts}) • {speed} • ETA {eta}{filter}{up}"
 msgstr ""
 
-#: src/download.rs:2288
+#: src/download.rs:2291
 msgid "{done} • {speed}{filter}{up}"
 msgstr ""
 
-#: src/download.rs:2606
+#: src/download.rs:2609
 msgid "Starting torrent…"
 msgstr ""
 
 #. Resolve (with retries): the extractor cache already drops expired
 #. format URLs, so a cached hit is safe to download from.
-#: src/download.rs:2672 src/video.rs:856
+#: src/download.rs:2677 src/video.rs:970
 msgid "Resolving video…"
 msgstr ""
 
-#: src/download.rs:2684
+#: src/download.rs:2689
 msgid "Download finished"
 msgstr ""
 
-#: src/download.rs:2686
+#: src/download.rs:2691
 msgid "Download failed"
 msgstr ""
 
-#: src/download.rs:2720
+#: src/download.rs:2725
 msgid "Paused • {pct}%"
 msgstr ""
 
-#: src/download.rs:2751 src/download.rs:3023
+#: src/download.rs:2756 src/download.rs:3028
 msgid "Download not found"
 msgstr ""
 
-#: src/download.rs:2753
+#: src/download.rs:2758
 msgid "Renaming torrent downloads isn't supported"
 msgstr ""
 
-#: src/download.rs:2758
+#: src/download.rs:2763
 msgid "Pause or wait for the download to finish first"
 msgstr ""
 
-#: src/download.rs:2762
+#: src/download.rs:2767
 msgid "Only completed or not-yet-started downloads can be renamed"
 msgstr ""
 
-#: src/download.rs:2771
+#: src/download.rs:2776
 msgid "That isn't a valid file name"
 msgstr ""
 
@@ -280,13 +280,13 @@ msgstr ""
 msgid "(System Downloads folder)"
 msgstr ""
 
-#: src/preferences.rs:37 src/preferences.rs:463 src/window.rs:1429
-#: src/window.rs:1448
+#: src/preferences.rs:37 src/preferences.rs:463 src/window.rs:1436
+#: src/window.rs:1455
 msgid "Choose…"
 msgstr ""
 
-#: src/preferences.rs:38 src/preferences.rs:63 src/window.rs:1449
-#: src/window.rs:1463
+#: src/preferences.rs:38 src/preferences.rs:63 src/window.rs:1456
+#: src/window.rs:1470
 msgid "Choose download folder"
 msgstr ""
 
@@ -298,7 +298,7 @@ msgstr ""
 msgid "Download folder"
 msgstr ""
 
-#: src/preferences.rs:64 src/window.rs:1464
+#: src/preferences.rs:64 src/window.rs:1471
 msgid "Select Folder"
 msgstr ""
 
@@ -464,7 +464,7 @@ msgstr ""
 msgid "Not installed"
 msgstr ""
 
-#: src/preferences.rs:387 src/preferences.rs:595 src/window.rs:1384
+#: src/preferences.rs:387 src/preferences.rs:595 src/window.rs:1390
 msgid "Install"
 msgstr ""
 
@@ -472,7 +472,7 @@ msgstr ""
 msgid "Video"
 msgstr ""
 
-#: src/preferences.rs:396 src/window.rs:1369
+#: src/preferences.rs:396
 msgid "Quality"
 msgstr ""
 
@@ -484,7 +484,7 @@ msgstr ""
 msgid "Used for new video downloads"
 msgstr ""
 
-#: src/preferences.rs:429 src/window.rs:1375
+#: src/preferences.rs:429 src/window.rs:1381
 msgid "Audio only"
 msgstr ""
 
@@ -532,7 +532,7 @@ msgstr ""
 msgid "Could not read that file"
 msgstr ""
 
-#: src/preferences.rs:540 src/window.rs:1381
+#: src/preferences.rs:540 src/window.rs:1387
 msgid "Support tools"
 msgstr ""
 
@@ -548,7 +548,7 @@ msgstr ""
 msgid "Checking…"
 msgstr ""
 
-#: src/preferences.rs:612 src/window.rs:1717
+#: src/preferences.rs:612 src/window.rs:1742
 msgid "Installing support tools…"
 msgstr ""
 
@@ -600,47 +600,47 @@ msgstr ""
 msgid "480p"
 msgstr ""
 
-#: src/video.rs:287
+#: src/video.rs:293
 msgid "Video downloads need the yt-dlp support tools"
 msgstr ""
 
-#: src/video.rs:291
+#: src/video.rs:297
 msgid "Couldn't read the video page: {detail}"
 msgstr ""
 
-#: src/video.rs:296
+#: src/video.rs:302
 msgid "Couldn't install the video support tools: {detail}"
 msgstr ""
 
-#: src/video.rs:302
+#: src/video.rs:308
 msgid "Couldn't prepare video staging: {detail}"
 msgstr ""
 
-#: src/video.rs:309
+#: src/video.rs:315
 msgid "No suitable formats found for this video"
 msgstr ""
 
-#: src/video.rs:313
+#: src/video.rs:319
 msgid "Media download failed: {detail}"
 msgstr ""
 
-#: src/video.rs:318
+#: src/video.rs:324
 msgid "Couldn't merge video and audio: {detail}"
 msgstr ""
 
-#: src/video.rs:325
+#: src/video.rs:331
 msgid "Video tools are too old — update them to continue"
 msgstr ""
 
-#: src/video.rs:329
+#: src/video.rs:335
 msgid "Cookies file is missing or unreadable: {path}"
 msgstr ""
 
-#: src/video.rs:581
+#: src/video.rs:591
 msgid "the lookup timed out"
 msgstr ""
 
-#: src/video.rs:1058
+#: src/video.rs:1190
 msgid "Merging…"
 msgstr ""
 
@@ -668,7 +668,7 @@ msgstr ""
 msgid "Queue for later"
 msgstr ""
 
-#: src/window.rs:169 src/window.rs:1397
+#: src/window.rs:169 src/window.rs:1403
 msgid "Retry"
 msgstr ""
 
@@ -728,7 +728,7 @@ msgstr ""
 msgid "Download Manager"
 msgstr ""
 
-#: src/window.rs:741 src/window.rs:2081
+#: src/window.rs:741 src/window.rs:2114
 msgid "Add Multiple URLs"
 msgstr ""
 
@@ -804,7 +804,7 @@ msgstr ""
 msgid "File name"
 msgstr ""
 
-#: src/window.rs:1198 src/window.rs:1836 src/window.rs:2116 src/window.rs:2233
+#: src/window.rs:1198 src/window.rs:1861 src/window.rs:2149 src/window.rs:2266
 msgid "_Cancel"
 msgstr ""
 
@@ -832,88 +832,104 @@ msgstr ""
 msgid "Revert to Title"
 msgstr ""
 
-#: src/window.rs:1376
+#: src/window.rs:1371
+msgid "Video format"
+msgstr ""
+
+#: src/window.rs:1372
+msgid "Best match follows your preferred quality"
+msgstr ""
+
+#. Rebuild the format picker from this resolve: Best
+#. match first (the preference applies to it), then
+#. the exact pinnable formats. Selection resets —
+#. a pin from another video must never carry over.
+#: src/window.rs:1373 src/window.rs:1629
+msgid "Best match"
+msgstr ""
+
+#: src/window.rs:1382
 msgid "Skip the video track"
 msgstr ""
 
-#: src/window.rs:1385
+#: src/window.rs:1391
 msgid "Download the yt-dlp support tools"
 msgstr ""
 
-#: src/window.rs:1394
+#: src/window.rs:1400
 msgid "Couldn't load the video preview"
 msgstr ""
 
-#: src/window.rs:1430
+#: src/window.rs:1437
 msgid "Choose a .torrent file"
 msgstr ""
 
-#: src/window.rs:1434
+#: src/window.rs:1441
 msgid "Torrent file"
 msgstr ""
 
-#: src/window.rs:1452
+#: src/window.rs:1459
 msgid "Save to"
 msgstr ""
 
-#: src/window.rs:1774
+#: src/window.rs:1799
 msgid "Torrent files"
 msgstr ""
 
-#: src/window.rs:1780
+#: src/window.rs:1805
 msgid "Choose torrent file"
 msgstr ""
 
-#: src/window.rs:1781
+#: src/window.rs:1806
 msgid "Add Torrent"
 msgstr ""
 
-#: src/window.rs:1840 src/window.rs:1858 src/window.rs:2041
+#: src/window.rs:1865 src/window.rs:1883 src/window.rs:2074
 msgid "_Add Download"
 msgstr ""
 
-#: src/window.rs:1874
+#: src/window.rs:1899
 msgid "Video Details"
 msgstr ""
 
-#: src/window.rs:1986
+#: src/window.rs:2019
 msgid "Still looking up the video — wait for the preview, then add."
 msgstr ""
 
-#: src/window.rs:2039
+#: src/window.rs:2072
 msgid "_Continue"
 msgstr ""
 
-#: src/window.rs:2087
+#: src/window.rs:2120
 msgid "One URL per line"
 msgstr ""
 
-#: src/window.rs:2120
+#: src/window.rs:2153
 msgid "_Add Downloads"
 msgstr ""
 
-#: src/window.rs:2155
+#: src/window.rs:2188
 msgid "Enter at least one URL"
 msgstr ""
 
-#: src/window.rs:2173
+#: src/window.rs:2206
 msgid "Added {added} of {total} URLs ({skipped} invalid lines skipped)"
 msgstr ""
 
-#: src/window.rs:2202
+#: src/window.rs:2235
 msgid "Files"
 msgstr ""
 
-#: src/window.rs:2204
+#: src/window.rs:2237
 msgid "{} file"
 msgid_plural "{} files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2237
+#: src/window.rs:2270
 msgid "_Add Files"
 msgstr ""
 
-#: src/window.rs:2266
+#: src/window.rs:2299
 msgid "Select at least one file"
 msgstr ""

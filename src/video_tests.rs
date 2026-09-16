@@ -300,6 +300,7 @@ fn serde_page_round_trip() {
         expires_at: Some(1_700_000_000),
         quality: "720p".into(),
         audio_only: true,
+        video_format_id: Some("137".into()),
     };
     let json = serde_json::to_string(&src).unwrap();
     let back: VideoSource = serde_json::from_str(&json).unwrap();
@@ -308,8 +309,8 @@ fn serde_page_round_trip() {
 
 #[test]
 fn serde_page_old_json_gets_defaults() {
-    // Queue files written before quality/audio_only existed must still
-    // parse: quality falls back to 1080p, audio to off.
+    // Queue files written before quality/audio_only/format existed must
+    // still parse: quality falls back to 1080p, audio to off, no pin.
     let json = r#"{"Page":{"page_url":"https://vimeo.com/99","media_url":null,"expires_at":null}}"#;
     let back: VideoSource = serde_json::from_str(json).unwrap();
     assert_eq!(
@@ -320,6 +321,7 @@ fn serde_page_old_json_gets_defaults() {
             expires_at: None,
             quality: "1080p".into(),
             audio_only: false,
+            video_format_id: None,
         }
     );
 }
@@ -607,6 +609,7 @@ fn pipeline_reports_missing_tools() {
         tries: 1,
         timeout_secs: 5,
         user_agent: "test".into(),
+        video_format_id: None,
         cookies_path: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -632,6 +635,7 @@ fn test_video_info(page_url: &str) -> VideoInfo {
         duration_string: None,
         page_url: page_url.into(),
         expires_at: None,
+        formats: vec![],
     }
 }
 
@@ -798,4 +802,204 @@ fn default_video_filename_by_mode() {
     // Untouched otherwise: sanitizing is the intake's job.
     assert_eq!(default_video_filename("a/b", false), "a/b.mp4");
     assert_eq!(default_video_filename("", true), ".m4a");
+}
+
+// ── video format options ─────────────────────────────────────────────
+
+fn test_video(formats: serde_json::Value) -> yt_dlp::model::Video {
+    serde_json::from_value(serde_json::json!({
+        "id": "x",
+        "title": "T",
+        "age_limit": 0,
+        "live_status": "not_live",
+        "playable_in_embed": true,
+        "extractor": "generic",
+        "extractor_key": "Generic",
+        "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+        "formats": formats,
+    }))
+    .expect("test video must parse")
+}
+
+fn test_format_full(
+    id: &str,
+    vcodec: &str,
+    acodec: &str,
+    height: Option<u32>,
+    filesize: Option<i64>,
+    protocol: &str,
+    drm: bool,
+) -> serde_json::Value {
+    let mut v = serde_json::json!({
+        "format": id,
+        "format_id": id,
+        "protocol": protocol,
+        "ext": "mp4",
+        "url": format!("https://cdn.example/{id}"),
+        "vcodec": vcodec,
+        "acodec": acodec,
+        "http_headers": {},
+    });
+    if drm {
+        v["has_drm"] = serde_json::json!(true);
+    }
+    match (height, filesize) {
+        (Some(h), Some(n)) => {
+            v["height"] = h.into();
+            v["filesize"] = n.into();
+        }
+        (Some(h), None) => {
+            v["height"] = h.into();
+        }
+        _ => {}
+    }
+    v
+}
+
+#[test]
+fn video_format_options_lists_best_per_height() {
+    let video = test_video(serde_json::json!([
+        test_format_full(
+            "v360-vp9",
+            "vp9",
+            "none",
+            Some(360),
+            Some(10_000_000),
+            "https",
+            false
+        ),
+        test_format_full(
+            "v1080-vp9",
+            "vp9",
+            "none",
+            Some(1080),
+            Some(200_000_000),
+            "https",
+            false
+        ),
+        test_format_full(
+            "v1080-avc",
+            "avc1.640028",
+            "none",
+            Some(1080),
+            Some(180_000_000),
+            "https",
+            false
+        ),
+        test_format_full(
+            "v720",
+            "avc1.64001f",
+            "none",
+            Some(720),
+            Some(90_000_000),
+            "https",
+            false
+        ),
+        test_format_full(
+            "a-only",
+            "none",
+            "opus",
+            None,
+            Some(8_000_000),
+            "https",
+            false
+        ),
+        test_format_full(
+            "hls",
+            "avc1.640028",
+            "none",
+            Some(1080),
+            Some(180_000_000),
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "drm",
+            "avc1.640028",
+            "none",
+            Some(480),
+            Some(40_000_000),
+            "https",
+            true
+        ),
+        test_format_full(
+            "muxed",
+            "avc1.640028",
+            "mp4a.40.2",
+            Some(720),
+            Some(95_000_000),
+            "https",
+            false
+        ),
+    ]));
+    let opts = video_format_options(&video);
+    // 1080p prefers AVC1 over bigger VP9; audio-only, HLS, DRM and muxed
+    // never list; tallest first.
+    assert_eq!(
+        opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["v1080-avc", "v720", "v360-vp9"]
+    );
+    assert_eq!(opts[0].label, "1080p · avc1 · 180.0 MB");
+    assert_eq!(opts[0].height, 1080);
+}
+
+#[test]
+fn video_format_options_empty_without_fetchable_video() {
+    let video = test_video(serde_json::json!([test_format_full(
+        "a-only",
+        "none",
+        "opus",
+        None,
+        Some(8_000_000),
+        "https",
+        false
+    ),]));
+    assert!(video_format_options(&video).is_empty());
+}
+
+#[test]
+fn find_usable_format_matches() {
+    let formats: Vec<yt_dlp::model::format::Format> = serde_json::from_value(serde_json::json!([
+        test_format_full(
+            "137",
+            "avc1.640028",
+            "none",
+            Some(1080),
+            Some(100),
+            "https",
+            false
+        ),
+        test_format_full(
+            "hls",
+            "avc1.640028",
+            "none",
+            Some(1080),
+            Some(100),
+            "m3u8_native",
+            false
+        ),
+    ]))
+    .unwrap();
+    assert_eq!(
+        find_usable_format(&formats, "137").map(|s| s.format_id),
+        Some("137".to_string())
+    );
+    assert!(find_usable_format(&formats, "nope").is_none());
+    assert!(find_usable_format(&formats, "hls").is_none());
+}
+
+#[test]
+fn video_source_page_carries_format_pin() {
+    let src = VideoSource::Page {
+        page_url: "https://vimeo.com/99".into(),
+        media_url: None,
+        expires_at: None,
+        quality: "1080p".into(),
+        audio_only: false,
+        video_format_id: Some("137".into()),
+    };
+    let json = serde_json::to_string(&src).unwrap();
+    assert!(json.contains("\"video_format_id\":\"137\""));
+    let back: VideoSource = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, src);
 }

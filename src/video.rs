@@ -180,6 +180,11 @@ pub enum VideoSource {
         quality: String,
         #[serde(default)]
         audio_only: bool,
+        /// Pinned video format id chosen in the dialog (`None` = the
+        /// quality preset decides at attempt time). Falls back to the
+        /// preset when the id vanishes from fresh metadata.
+        #[serde(default)]
+        video_format_id: Option<String>,
     },
 }
 
@@ -199,6 +204,7 @@ pub fn classify(url: &str) -> VideoSource {
                     expires_at: None,
                     quality: default_video_quality(),
                     audio_only: false,
+                    video_format_id: None,
                 }
             } else {
                 VideoSource::Direct
@@ -353,6 +359,9 @@ pub struct VideoInfo {
     /// Unix time after which every resolved format URL is stale, derived
     /// from the youngest `available_at` across formats.
     pub expires_at: Option<i64>,
+    /// Pinnable video-only formats, tallest first (empty when the page
+    /// carries none). Computed once at resolve; the dialog lists these.
+    pub formats: Vec<VideoFormatOption>,
 }
 
 impl VideoInfo {
@@ -377,6 +386,7 @@ impl VideoInfo {
             duration_string: v.duration_string.clone(),
             page_url,
             expires_at,
+            formats: video_format_options(v),
         }
     }
 }
@@ -589,6 +599,107 @@ pub async fn fetch_video_infos(
     }
 }
 
+/// One video-only format, deduplicated and labeled for the dialog combo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoFormatOption {
+    pub id: String,
+    pub label: String,
+    pub height: u32,
+}
+
+/// Human size for format labels. Decimal units, one fraction digit.
+fn fmt_video_bytes(n: u64) -> String {
+    const GB: f64 = 1_000_000_000.0;
+    const MB: f64 = 1_000_000.0;
+    let f = n as f64;
+    if f >= GB {
+        format!("{:.1} GB", f / GB)
+    } else if f >= MB {
+        format!("{:.1} MB", f / MB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Listable video-only formats for one video: best per height, tallest
+/// first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
+/// muxed files stay on the automatic path, which already adopts them.
+/// Audio-only and manifest formats never appear here.
+pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
+    use std::collections::HashMap;
+    let mut best: HashMap<u32, &Format> = HashMap::new();
+    for f in &video.formats {
+        if f.protocol != Protocol::Https {
+            continue;
+        }
+        if matches!(f.has_drm, Some(DrmStatus::Yes)) {
+            continue;
+        }
+        let vcodec = f.codec_info.video_codec.as_deref().unwrap_or("none");
+        if vcodec == "none" {
+            continue;
+        }
+        let acodec = f.codec_info.audio_codec.as_deref().unwrap_or("none");
+        if acodec != "none" {
+            continue;
+        }
+        let Some(h) = f.video_resolution.height.filter(|&h| h > 0) else {
+            continue;
+        };
+        let replace = match best.get(&h) {
+            None => true,
+            Some(cur) => {
+                let cur_avc = cur
+                    .codec_info
+                    .video_codec
+                    .as_deref()
+                    .is_some_and(|c| c.starts_with("avc1"));
+                let new_avc = vcodec.starts_with("avc1");
+                (new_avc && !cur_avc)
+                    || (new_avc == cur_avc
+                        && filesize_of(f).unwrap_or(0) > filesize_of(cur).unwrap_or(0))
+            }
+        };
+        if replace {
+            best.insert(h, f);
+        }
+    }
+    let mut out: Vec<VideoFormatOption> = best
+        .into_iter()
+        .map(|(height, f)| {
+            let short = f
+                .codec_info
+                .video_codec
+                .as_deref()
+                .unwrap_or("?")
+                .split('.')
+                .next()
+                .unwrap_or("?");
+            let label = match filesize_of(f) {
+                Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
+                None => format!("{height}p · {short}"),
+            };
+            VideoFormatOption {
+                id: f.format_id.clone(),
+                label,
+                height,
+            }
+        })
+        .collect();
+    out.sort_by_key(|a| std::cmp::Reverse(a.height));
+    out
+}
+
+/// Find one format by id, accepting only what the pipeline can fetch.
+/// `None` covers unknown ids and HLS/DRM/missing-URL formats alike: the
+/// caller falls back to the quality preset.
+fn find_usable_format(formats: &[Format], id: &str) -> Option<StreamSel> {
+    formats
+        .iter()
+        .find(|f| f.format_id == id)
+        .and_then(|f| StreamSel::from_format(f).ok())
+}
+
 /// Map a stored quality value to the extractor selector. Unknown values
 /// fall back to 1080p (same fallback as the combo mapping).
 pub fn selector_for_quality(value: &str) -> VideoQuality {
@@ -795,6 +906,9 @@ pub struct VideoJob {
     pub tries: u32,
     pub timeout_secs: u64,
     pub user_agent: String,
+    /// Dialog-pinned video format id, if the user picked an exact format.
+    /// `None` means the quality preset decides at attempt time.
+    pub video_format_id: Option<String>,
     /// Validated cookies file for gated pages, if configured. Read from
     /// settings at spawn (live value); never persisted per row.
     pub cookies_path: Option<PathBuf>,
@@ -876,15 +990,33 @@ pub async fn run_video_download(
     // play back on fewer targets), best audio. Rejections (HLS/DRM/missing
     // URL) degrade candidates to absent here; the plan below decides
     // between split, single-file and audio-only from what's fetchable.
-    let mut video_sel: Option<StreamSel> = (!job.audio_only)
-        .then(|| {
-            video.select_video_format(
+    // A pinned format id (dialog pick) wins over the preset; when it
+    // vanishes from fresh metadata the preset takes over again instead
+    // of failing the row.
+    let mut video_sel: Option<StreamSel> = if job.audio_only {
+        None
+    } else if let Some(pinned) = job.video_format_id.as_deref() {
+        find_usable_format(&video.formats, pinned).or_else(|| {
+            tracing::info!(
+                item_id = job.item_id,
+                pinned,
+                "pinned video format gone, falling back to preset"
+            );
+            video
+                .select_video_format(
+                    selector_for_quality(&job.quality),
+                    VideoCodecPreference::AVC1,
+                )
+                .and_then(|f| StreamSel::from_format(f).ok())
+        })
+    } else {
+        video
+            .select_video_format(
                 selector_for_quality(&job.quality),
                 VideoCodecPreference::AVC1,
             )
-        })
-        .flatten()
-        .and_then(|f| StreamSel::from_format(f).ok());
+            .and_then(|f| StreamSel::from_format(f).ok())
+    };
     let mut audio_sel: Option<StreamSel> = video
         .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
         .and_then(|f| StreamSel::from_format(f).ok());
