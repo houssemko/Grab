@@ -655,51 +655,14 @@ pub fn cookies_browser_value(index: usize) -> &'static str {
     COOKIES_BROWSERS.get(index).copied().unwrap_or("none")
 }
 
-/// Candidate profile directories per browser, in probe order. Mirrors the
-/// Flatpak manifest's read-only grants: inside the sandbox these resolve
-/// to host paths, which is exactly what yt-dlp needs. Outside Flatpak the
-/// same locations are simply the normal ones.
-fn browser_profile_candidates(browser: &str, home: &std::path::Path) -> Vec<PathBuf> {
-    let join = |parts: &[&str]| {
-        let mut p = home.to_path_buf();
-        p.extend(parts);
-        p
-    };
-    match browser {
-        "firefox" => vec![
-            join(&[".mozilla", "firefox"]),
-            join(&[".config", "mozilla", "firefox"]),
-            join(&["snap", "firefox", "common", ".mozilla", "firefox"]),
-        ],
-        "brave" => vec![join(&[".config", "BraveSoftware", "Brave-Browser"])],
-        "chrome" => vec![join(&[".config", "google-chrome"])],
-        "chromium" => vec![join(&[".config", "chromium"])],
-        "edge" => vec![join(&[".config", "microsoft-edge"])],
-        "opera" => vec![join(&[".config", "opera"])],
-        "vivaldi" => vec![join(&[".config", "vivaldi"])],
-        "whale" => vec![join(&[".config", "naver-whale"])],
-        _ => vec![],
-    }
-}
-
-/// Resolve a stored browser value to a `--cookies-from-browser` argument:
-/// `browser:/first-existing-profile`, or the bare browser name when no
-/// profile directory is visible (yt-dlp then reports the real absence
-/// instead of failing on our guess). `None`/unknown means off.
+/// Return the browser name for `--cookies-from-browser`. yt-dlp resolves
+/// the cookie database itself (handles Flatpak paths, multiple profiles,
+/// etc.). `None`/unknown means off.
 pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     if value.is_empty() || value == "none" || !COOKIES_BROWSERS.contains(&value) {
         return None;
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    // First visible profile wins; with none visible, pass the bare name
-    // so yt-dlp reports the real absence instead of failing on our guess.
-    match browser_profile_candidates(value, &home)
-        .into_iter()
-        .find(|p| p.is_dir())
-    {
-        Some(path) => Some(format!("{value}:{}", path.display())),
-        None => Some(value.to_string()),
-    }
+    Some(value.to_string())
 }
 
 /// Shared root for extraction scratch space.
