@@ -1524,6 +1524,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             return;
                         }
                         info_b.borrow_mut().take();
+                        tracing::warn!(
+                            host = %crate::video::page_host(&url),
+                            error = %e.to_string(),
+                            "video preview failed"
+                        );
                         show_video_error(&step_b, &e.to_string());
                     }
                     Ok(v) => {
