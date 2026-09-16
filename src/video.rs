@@ -433,13 +433,7 @@ async fn tool_first_line(binary: PathBuf) -> Option<String> {
             .ok()
             .filter(|o| o.status.success())
             .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| {
-                s.lines()
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            })
+            .map(|s| s.lines().next().unwrap_or("").trim().to_string())
             .filter(|s| !s.is_empty())
     })
     .await
@@ -449,9 +443,7 @@ async fn tool_first_line(binary: PathBuf) -> Option<String> {
 
 /// Refuse stale or unverifiable toolchains before any network happens.
 /// Returns the raw version lines for attempt logging.
-pub(crate) async fn ensure_tool_versions(
-    libs: &Libraries,
-) -> Result<(String, String), VideoError> {
+pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
     let (yt, ff) = tokio::join!(
         tool_first_line(libs.youtube.clone()),
         tool_first_line(libs.ffmpeg.clone())
