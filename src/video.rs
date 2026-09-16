@@ -30,11 +30,11 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use yt_dlp::Downloader;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
-use yt_dlp::model::format::{Format, HttpHeaders};
+use yt_dlp::model::format::{Format, HttpHeaders, Protocol};
 use yt_dlp::model::selector::{
     AudioCodecPreference, AudioQuality, VideoCodecPreference, VideoQuality,
 };
-use yt_dlp::model::{FORMAT_URL_LIFETIME, Video};
+use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
 use yt_dlp::{DownloadPriority, DownloadStatus as YtDownloadStatus};
 
 /// Values for the `video-quality` GSettings key and the per-item quality
@@ -77,9 +77,11 @@ pub fn quality_labels() -> Vec<String> {
     ]
 }
 /// Hosts routed through the video extractor instead of the plain HTTP
-/// engine. Suffix-matched (`music.youtube.com` counts), lowercase. Curated
-/// for v1; extend here as supported sites grow — this is the only place
-/// that decides what a "video page" is.
+/// engine. Suffix-matched (`music.youtube.com` counts), lowercase.
+/// DRM-free sites only: DRM-walled services (Netflix and kin) fail cleanly
+/// at selection time, so listing them here would only promise what the
+/// pipeline refuses to fetch. Extend here as verified sites grow — this is
+/// the only place that decides what a "video page" is.
 const VIDEO_DOMAINS: &[&str] = &[
     "youtube.com",
     "youtu.be",
@@ -94,7 +96,37 @@ const VIDEO_DOMAINS: &[&str] = &[
     "twitter.com",
     "x.com",
     "bilibili.com",
+    "instagram.com",
+    "facebook.com",
+    "fb.watch",
+    "threads.com",
+    "bsky.app",
+    "pinterest.com",
+    "pin.it",
+    "tumblr.com",
+    "vk.com",
+    "ok.ru",
+    "coub.com",
+    "bitchute.com",
+    "odysee.com",
+    "rutube.ru",
+    "nicovideo.jp",
+    "ted.com",
+    "archive.org",
+    "drive.google.com",
+    "dropbox.com",
+    "mediafire.com",
+    "loom.com",
+    "wistia.com",
+    "wistia.net",
+    "soundcloud.com",
+    "bandcamp.com",
 ];
+
+/// Domains whose pages carry no video tracks (audio-first services). The
+/// New Download dialog presets Audio-only for these; the worker also falls
+/// back to audio-only on its own when no usable video format selects.
+const AUDIO_FIRST_DOMAINS: &[&str] = &["soundcloud.com", "bandcamp.com"];
 
 /// Where a to-be-downloaded resource comes from. Serialized into the queue
 /// file, so it stays stable across releases.
@@ -153,6 +185,20 @@ fn video_domain(host: &str) -> bool {
     VIDEO_DOMAINS
         .iter()
         .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+}
+
+/// Whether a video-page URL belongs to an audio-first service (no video
+/// tracks expected). Used to preset the dialog; the worker re-derives the
+/// effective mode from the selected formats anyway.
+pub fn is_audio_first(url: &str) -> bool {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+        .is_some_and(|host| {
+            AUDIO_FIRST_DOMAINS
+                .iter()
+                .any(|d| host == *d || host.ends_with(&format!(".{d}")))
+        })
 }
 
 /// Unix timestamp now, seconds.
@@ -412,10 +458,23 @@ struct StreamSel {
     url: String,
     headers: HttpHeaders,
     size: Option<u64>,
+    /// Whether the stream carries an audio track (muxed files do).
+    has_audio: bool,
 }
 
 impl StreamSel {
+    /// Build from an extractor format, accepting only what the pipeline
+    /// can actually fetch: plain-HTTPS, DRM-free streams with a URL.
+    /// Anything else (HLS manifests, encrypted formats) is a clean
+    /// unavailable error — never playlist bytes merged as media, never
+    /// encrypted garbage saved as a finished file.
     fn from_format(f: &Format) -> Result<Self, VideoError> {
+        if f.protocol != Protocol::Https {
+            return Err(VideoError::unavailable());
+        }
+        if matches!(f.has_drm, Some(DrmStatus::Yes)) {
+            return Err(VideoError::unavailable());
+        }
         Ok(Self {
             format_id: f.format_id.clone(),
             ext: f.download_info.ext.as_str().to_string(),
@@ -426,6 +485,11 @@ impl StreamSel {
                 .ok_or_else(VideoError::unavailable)?,
             headers: f.download_info.http_headers.clone(),
             size: filesize_of(f),
+            has_audio: f
+                .codec_info
+                .audio_codec
+                .as_deref()
+                .is_some_and(|c| c != "none"),
         })
     }
 }
@@ -637,24 +701,43 @@ pub async fn run_video_download(
     };
 
     // Select streams: AVC1 default for compat (VP9/AV1 need no merge but
-    // play back on fewer targets), best audio.
-    let video_sel: Option<StreamSel> = if job.audio_only {
-        None
-    } else {
-        Some(StreamSel::from_format(
-            video
-                .select_video_format(
-                    selector_for_quality(&job.quality),
-                    VideoCodecPreference::AVC1,
-                )
-                .ok_or_else(VideoError::unavailable)?,
-        )?)
+    // play back on fewer targets), best audio. Rejections (HLS/DRM/missing
+    // URL) degrade candidates to absent here; the plan below decides
+    // between split, single-file and audio-only from what's fetchable.
+    let mut video_sel: Option<StreamSel> = (!job.audio_only)
+        .then(|| {
+            video.select_video_format(
+                selector_for_quality(&job.quality),
+                VideoCodecPreference::AVC1,
+            )
+        })
+        .flatten()
+        .and_then(|f| StreamSel::from_format(f).ok());
+    let mut audio_sel: Option<StreamSel> = video
+        .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
+        .and_then(|f| StreamSel::from_format(f).ok());
+    // Muxed-only sources (one file, both tracks — archive.org, file
+    // lockers): adopt the file directly instead of failing on the missing
+    // split counterpart. A downloaded track beats a failed row; the
+    // manifest records the effective single-part mode so retries agree.
+    let mut audio_only = job.audio_only;
+    if audio_sel.is_none() {
+        let muxed = video_sel
+            .take_if(|v| v.has_audio)
+            .or_else(|| {
+                video
+                    .best_audio_video_format()
+                    .ok()
+                    .and_then(|m| StreamSel::from_format(m).ok())
+            });
+        if let Some(m) = muxed {
+            audio_sel = Some(m);
+            audio_only = true;
+        }
+    }
+    let Some(audio_sel) = audio_sel else {
+        return Err(VideoError::unavailable());
     };
-    let audio_sel = StreamSel::from_format(
-        video
-            .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
-            .ok_or_else(VideoError::unavailable)?,
-    )?;
 
     // Retry discipline from the sidecar.
     let manifest = read_manifest(&staging);
@@ -664,7 +747,7 @@ pub async fn run_video_download(
         dest: &job.dest,
         page_url: &job.page_url,
         quality: &job.quality,
-        audio_only: job.audio_only,
+        audio_only,
         video: video_sel
             .as_ref()
             .map(|s| (s.format_id.as_str(), s.ext.as_str())),
@@ -692,7 +775,7 @@ pub async fn run_video_download(
     let combined_total: Option<u64> =
         match (video_sel.as_ref().and_then(|s| s.size), audio_sel.size) {
             (Some(v), Some(a)) => Some(v + a),
-            (None, Some(a)) if job.audio_only => Some(a),
+            (None, Some(a)) if audio_only => Some(a),
             _ => None,
         };
     let v_done = Arc::new(AtomicU64::new(0));
@@ -779,7 +862,7 @@ pub async fn run_video_download(
                 &VideoManifest {
                     page_url: job.page_url.clone(),
                     quality: job.quality.clone(),
-                    audio_only: job.audio_only,
+                    audio_only,
                     video_format_id: video_sel.as_ref().map(|s| s.format_id.clone()),
                     video_ext: video_sel
                         .as_ref()

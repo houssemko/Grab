@@ -1551,6 +1551,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let step2 = step.clone();
         let info2 = video_info.clone();
         let quiet = video_quiet.clone();
+        let settings = manager.settings().clone();
         url_row.connect_changed(move |row| {
             // Synthetic edit from the apply re-arm below: ignore it.
             if quiet.get() {
@@ -1558,12 +1559,22 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             }
             // Sync skeleton: leaving video-land (or editing a resolved URL)
             // hides the stale step at once; the debounced kick refills it.
+            // A new video URL also re-seeds the per-download choices from
+            // preferences (plus the audio-first preset), still overridable.
             let text = row.text().trim().to_string();
             let fresh = info2.borrow().as_ref().is_some_and(|v| v.page_url == text);
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
                 if !fresh {
                     info2.borrow_mut().take();
+                    if crate::video::is_video_page(&text) {
+                        step2.audio.set_active(
+                            settings.video_audio_only() || crate::video::is_audio_first(&text),
+                        );
+                        step2.quality.set_selected(crate::video::quality_index(
+                            &settings.video_quality(),
+                        ) as u32);
+                    }
                 }
             }
             let my = generation.get() + 1;
