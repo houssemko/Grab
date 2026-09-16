@@ -783,6 +783,82 @@ fn unremove_restores_video_source() {
 }
 
 #[test]
+fn settings_cookies_path_round_trip() {
+    // NOTE: no pristine-defaults assert (see notification_toggles): the
+    // memory GSettings backend is process-shared.
+    let settings = test_settings();
+    settings
+        .set_string("cookies-path", "/tmp/dl/cookies.txt")
+        .unwrap();
+    assert_eq!(settings.cookies_path(), "/tmp/dl/cookies.txt");
+    settings.set_string("cookies-path", "").unwrap();
+    assert_eq!(settings.cookies_path(), "");
+}
+
+#[test]
+fn missing_cookies_file_fails_video_fast() {
+    // No env scrubbing needed: user config validates before any tool
+    // probing, so this is deterministic with or without yt-dlp around.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("video-cookies-missing");
+    let settings = test_settings();
+    settings
+        .set_string("cookies-path", "/nonexistent-grab-test/cookies.txt")
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let item = manager
+        .enqueue_video(
+            "https://vimeo.com/123456",
+            Some("/tmp/dl"),
+            Some("Clip.mp4"),
+            "1080p",
+            false,
+        )
+        .expect("video enqueue");
+    // Failed synchronously at spawn: no engine slot taken, no network.
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    assert_eq!(
+        item.detail(),
+        "Cookies file is missing or unreadable: /nonexistent-grab-test/cookies.txt"
+    );
+    assert!(!manager.running.borrow().contains_key(&item.id()));
+    // Retry replays the guard instead of hanging: still failed, same cause.
+    manager.retry(item.id());
+    assert_eq!(item.status(), DownloadStatus::Failed);
+    assert_eq!(
+        item.detail(),
+        "Cookies file is missing or unreadable: /nonexistent-grab-test/cookies.txt"
+    );
+}
+
+#[test]
+fn queue_file_never_carries_cookies() {
+    // Secrets must not reach the persisted queue, whatever the settings.
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let qf = test_queue_file("video-cookies-persist");
+    let settings = test_settings();
+    settings
+        .set_string("cookies-path", "/tmp/dl/cookies.txt")
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    manager
+        .enqueue_video(
+            "https://vimeo.com/123456",
+            Some("/tmp/dl"),
+            Some("Clip.mp4"),
+            "1080p",
+            false,
+        )
+        .expect("video enqueue");
+    let text = std::fs::read_to_string(&qf).unwrap();
+    assert!(
+        !text.contains("cookies"),
+        "persisted queue must not mention cookies: {text}"
+    );
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
 fn active_count_covers_cancel_all_scope() {
     let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("active-count");
