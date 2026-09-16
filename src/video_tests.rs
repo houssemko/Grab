@@ -1153,39 +1153,15 @@ fn cookies_browser_index_round_trip() {
 }
 
 #[test]
-fn cookies_browser_spec_paths() {
-    let home = std::env::temp_dir().join(format!("grab-home-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    let profile = home.join(".config").join("google-chrome");
-    std::fs::create_dir_all(&profile).unwrap();
-    let with_home = |f: &dyn Fn()| {
-        let saved = std::env::var_os("HOME");
-        // SAFETY: serial suite; restored below even if the inner check panics.
-        unsafe {
-            std::env::set_var("HOME", &home);
-        }
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        unsafe {
-            match saved {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-        r.unwrap();
-    };
-    with_home(&|| {
-        assert_eq!(
-            cookies_browser_spec("chrome"),
-            Some(format!("chrome:{}", profile.display()))
-        );
-        // No profile dir present: bare name, so yt-dlp reports the real
-        // absence instead of failing on our guess.
-        assert_eq!(cookies_browser_spec("firefox"), Some("firefox".to_string()));
-    });
+fn cookies_browser_spec_returns_bare_name() {
+    // Legacy contract: spec was a `browser:/path` pre-resolved form.
+    // Now it's just the bare browser name — yt-dlp resolves the cookie DB.
+    assert_eq!(cookies_browser_spec("chrome"), Some("chrome".to_string()));
+    assert_eq!(cookies_browser_spec("firefox"), Some("firefox".to_string()));
+    assert_eq!(cookies_browser_spec("brave"), Some("brave".to_string()));
     assert_eq!(cookies_browser_spec("none"), None);
     assert_eq!(cookies_browser_spec(""), None);
     assert_eq!(cookies_browser_spec("mystery"), None);
-    let _ = std::fs::remove_dir_all(&home);
 }
 
 // ── tool search order ────────────────────────────────────────────────
