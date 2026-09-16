@@ -1136,3 +1136,72 @@ fn distro_packages_unknown_is_none() {
     assert_eq!(distro_packages("NAME=No ID here\n"), None);
     assert_eq!(distro_packages("ID=mysteryos\nNAME=Mystery\n"), None);
 }
+
+// ── tool search order ────────────────────────────────────────────────
+
+/// Scoped PATH + XDG_DATA_HOME override, restored on drop. Serial suite
+/// only: the environment is process-global (same precedent as the queue
+/// file and NoVideoTools helpers).
+struct ScopedEnv {
+    path: Option<std::ffi::OsString>,
+    xdg: Option<std::ffi::OsString>,
+}
+
+impl ScopedEnv {
+    fn apply(path: &str, xdg: &std::path::Path) -> Self {
+        let saved = Self {
+            path: std::env::var_os("PATH"),
+            xdg: std::env::var_os("XDG_DATA_HOME"),
+        };
+        // SAFETY: serial suite; restored on drop below.
+        unsafe {
+            std::env::set_var("PATH", path);
+            std::env::set_var("XDG_DATA_HOME", xdg);
+        }
+        saved
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        // SAFETY: same serial-suite context as apply().
+        unsafe {
+            match &self.path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.xdg {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+        }
+    }
+}
+
+fn fake_executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, b"").unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn user_installed_tools_win_over_bundle() {
+    // User dir holds our own binaries, PATH leads nowhere (in particular
+    // the Flatpak bundle dir is absent on a dev host): resolution must
+    // find the user copies. On a Flatpak system this same order lets a
+    // user Update override the bundle.
+    let dir = std::env::temp_dir().join(format!("grab-userlibs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let libs = dir.join("xdg").join("grab").join("libs");
+    std::fs::create_dir_all(&libs).unwrap();
+    fake_executable(&libs, "yt-dlp");
+    fake_executable(&libs, "ffmpeg");
+    let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
+    let found = resolve_libraries().expect("user tools resolve");
+    assert_eq!(found.youtube, libs.join("yt-dlp"));
+    assert_eq!(found.ffmpeg, libs.join("ffmpeg"));
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
