@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-16 11:47+0100\n"
+"POT-Creation-Date: 2026-09-16 11:55+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,7 +18,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/application.rs:114 src/window.rs:1806
+#: src/application.rs:114 src/window.rs:1824
 msgid "Could not read that .torrent file"
 msgstr ""
 
@@ -54,7 +54,7 @@ msgid "Downloads"
 msgstr ""
 
 #: src/application.rs:343 src/window.rs:740 src/window.rs:775 src/window.rs:789
-#: src/window.rs:1308 src/window.rs:1875
+#: src/window.rs:1308 src/window.rs:1893
 msgid "New Download"
 msgstr ""
 
@@ -236,39 +236,39 @@ msgstr ""
 
 #. Resolve (with retries): the extractor cache already drops expired
 #. format URLs, so a cached hit is safe to download from.
-#: src/download.rs:2664 src/video.rs:928
+#: src/download.rs:2677 src/video.rs:970
 msgid "Resolving video…"
 msgstr ""
 
-#: src/download.rs:2676
+#: src/download.rs:2689
 msgid "Download finished"
 msgstr ""
 
-#: src/download.rs:2678
+#: src/download.rs:2691
 msgid "Download failed"
 msgstr ""
 
-#: src/download.rs:2712
+#: src/download.rs:2725
 msgid "Paused • {pct}%"
 msgstr ""
 
-#: src/download.rs:2743 src/download.rs:3015
+#: src/download.rs:2756 src/download.rs:3028
 msgid "Download not found"
 msgstr ""
 
-#: src/download.rs:2745
+#: src/download.rs:2758
 msgid "Renaming torrent downloads isn't supported"
 msgstr ""
 
-#: src/download.rs:2750
+#: src/download.rs:2763
 msgid "Pause or wait for the download to finish first"
 msgstr ""
 
-#: src/download.rs:2754
+#: src/download.rs:2767
 msgid "Only completed or not-yet-started downloads can be renamed"
 msgstr ""
 
-#: src/download.rs:2763
+#: src/download.rs:2776
 msgid "That isn't a valid file name"
 msgstr ""
 
@@ -280,7 +280,8 @@ msgstr ""
 msgid "(System Downloads folder)"
 msgstr ""
 
-#: src/preferences.rs:37 src/window.rs:1436 src/window.rs:1455
+#: src/preferences.rs:37 src/preferences.rs:463 src/window.rs:1436
+#: src/window.rs:1455
 msgid "Choose…"
 msgstr ""
 
@@ -451,19 +452,19 @@ msgid ""
 "engine first starts."
 msgstr ""
 
-#: src/preferences.rs:379 src/preferences.rs:494
+#: src/preferences.rs:379 src/preferences.rs:587
 msgid "Ready • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:383 src/preferences.rs:498
+#: src/preferences.rs:383 src/preferences.rs:591
 msgid "Update"
 msgstr ""
 
-#: src/preferences.rs:386 src/preferences.rs:501
+#: src/preferences.rs:386 src/preferences.rs:594
 msgid "Not installed"
 msgstr ""
 
-#: src/preferences.rs:387 src/preferences.rs:502 src/window.rs:1390
+#: src/preferences.rs:387 src/preferences.rs:595 src/window.rs:1390
 msgid "Install"
 msgstr ""
 
@@ -491,23 +492,63 @@ msgstr ""
 msgid "New video downloads skip the video track"
 msgstr ""
 
-#: src/preferences.rs:447 src/window.rs:1387
-msgid "Support tools"
+#: src/preferences.rs:447
+msgid "Authentication"
 msgstr ""
 
 #: src/preferences.rs:448
+msgid "Age gates and member-only pages"
+msgstr ""
+
+#: src/preferences.rs:453 src/preferences.rs:533
+msgid "(None)"
+msgstr ""
+
+#: src/preferences.rs:464 src/preferences.rs:499
+msgid "Choose cookies file"
+msgstr ""
+
+#: src/preferences.rs:470 src/preferences.rs:474
+msgid "Clear cookies file"
+msgstr ""
+
+#: src/preferences.rs:477
+msgid "Cookies file"
+msgstr ""
+
+#: src/preferences.rs:489
+msgid "Text files"
+msgstr ""
+
+#: src/preferences.rs:493
+msgid "All files"
+msgstr ""
+
+#: src/preferences.rs:500
+msgid "Select File"
+msgstr ""
+
+#: src/preferences.rs:522
+msgid "Could not read that file"
+msgstr ""
+
+#: src/preferences.rs:540 src/window.rs:1387
+msgid "Support tools"
+msgstr ""
+
+#: src/preferences.rs:541
 msgid "yt-dlp and ffmpeg resolve video pages"
 msgstr ""
 
-#: src/preferences.rs:451
+#: src/preferences.rs:544
 msgid "Video support tools"
 msgstr ""
 
-#: src/preferences.rs:469
+#: src/preferences.rs:562
 msgid "Checking…"
 msgstr ""
 
-#: src/preferences.rs:519 src/window.rs:1724
+#: src/preferences.rs:612 src/window.rs:1742
 msgid "Installing support tools…"
 msgstr ""
 
@@ -591,11 +632,15 @@ msgstr ""
 msgid "Video tools are too old — update them to continue"
 msgstr ""
 
-#: src/video.rs:557
+#: src/video.rs:335
+msgid "Cookies file is missing or unreadable: {path}"
+msgstr ""
+
+#: src/video.rs:591
 msgid "the lookup timed out"
 msgstr ""
 
-#: src/video.rs:1148
+#: src/video.rs:1190
 msgid "Merging…"
 msgstr ""
 
@@ -683,7 +728,7 @@ msgstr ""
 msgid "Download Manager"
 msgstr ""
 
-#: src/window.rs:741 src/window.rs:2096
+#: src/window.rs:741 src/window.rs:2114
 msgid "Add Multiple URLs"
 msgstr ""
 
@@ -759,7 +804,7 @@ msgstr ""
 msgid "File name"
 msgstr ""
 
-#: src/window.rs:1198 src/window.rs:1843 src/window.rs:2131 src/window.rs:2248
+#: src/window.rs:1198 src/window.rs:1861 src/window.rs:2149 src/window.rs:2266
 msgid "_Cancel"
 msgstr ""
 
@@ -799,7 +844,7 @@ msgstr ""
 #. match first (the preference applies to it), then
 #. the exact pinnable formats. Selection resets —
 #. a pin from another video must never carry over.
-#: src/window.rs:1373 src/window.rs:1612
+#: src/window.rs:1373 src/window.rs:1629
 msgid "Best match"
 msgstr ""
 
@@ -827,64 +872,64 @@ msgstr ""
 msgid "Save to"
 msgstr ""
 
-#: src/window.rs:1781
+#: src/window.rs:1799
 msgid "Torrent files"
 msgstr ""
 
-#: src/window.rs:1787
+#: src/window.rs:1805
 msgid "Choose torrent file"
 msgstr ""
 
-#: src/window.rs:1788
+#: src/window.rs:1806
 msgid "Add Torrent"
 msgstr ""
 
-#: src/window.rs:1847 src/window.rs:1865 src/window.rs:2056
+#: src/window.rs:1865 src/window.rs:1883 src/window.rs:2074
 msgid "_Add Download"
 msgstr ""
 
-#: src/window.rs:1881
+#: src/window.rs:1899
 msgid "Video Details"
 msgstr ""
 
-#: src/window.rs:2001
+#: src/window.rs:2019
 msgid "Still looking up the video — wait for the preview, then add."
 msgstr ""
 
-#: src/window.rs:2054
+#: src/window.rs:2072
 msgid "_Continue"
 msgstr ""
 
-#: src/window.rs:2102
+#: src/window.rs:2120
 msgid "One URL per line"
 msgstr ""
 
-#: src/window.rs:2135
+#: src/window.rs:2153
 msgid "_Add Downloads"
 msgstr ""
 
-#: src/window.rs:2170
+#: src/window.rs:2188
 msgid "Enter at least one URL"
 msgstr ""
 
-#: src/window.rs:2188
+#: src/window.rs:2206
 msgid "Added {added} of {total} URLs ({skipped} invalid lines skipped)"
 msgstr ""
 
-#: src/window.rs:2217
+#: src/window.rs:2235
 msgid "Files"
 msgstr ""
 
-#: src/window.rs:2219
+#: src/window.rs:2237
 msgid "{} file"
 msgid_plural "{} files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2252
+#: src/window.rs:2270
 msgid "_Add Files"
 msgstr ""
 
-#: src/window.rs:2281
+#: src/window.rs:2299
 msgid "Select at least one file"
 msgstr ""
