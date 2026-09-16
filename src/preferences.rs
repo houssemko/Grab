@@ -605,30 +605,80 @@ pub fn show(
             video_tools_spin.clone(),
         );
         let dialog_weak = dialog.downgrade();
+        // Outside Flatpak the button guides through self-install; the
+        // automatic download stays Flatpak-only.
+        if !crate::video::in_flatpak() {
+            btn.set_label(&gettext("How to Install"));
+            btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
+        }
         video_tools_btn.connect_clicked(move |_| {
+            if !crate::video::in_flatpak() {
+                let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
+                let dialog_b = dialog_weak.clone();
+                crate::install_help::show(&btn, move || {
+                    if dialog_b.upgrade().is_none() {
+                        return;
+                    }
+                    refresh_video_tools(&row_b, &btn_b, &spin_b);
+                });
+                return;
+            }
             btn.set_sensitive(false);
-            spin.set_visible(true);
-            spin.start();
-            row.set_subtitle(&gettext("Installing support tools…"));
-            let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
+            let pop_label = gtk4::Label::new(Some(&gettext("Downloading yt-dlp (1 of 2)…")));
+            pop_label.set_wrap(true);
+            pop_label.set_max_width_chars(30);
+            let pop_spin = gtk4::Spinner::new();
+            pop_spin.start();
+            let pop_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+            pop_box.set_margin_top(18);
+            pop_box.set_margin_bottom(18);
+            pop_box.set_margin_start(18);
+            pop_box.set_margin_end(18);
+            pop_box.append(&pop_spin);
+            pop_box.append(&pop_label);
+            let pop = gtk4::Popover::new();
+            pop.set_child(Some(&pop_box));
+            pop.set_parent(&btn);
+            pop.popup();
+            let (row_b, btn_b, spin_b, pop_b, label_b) = (
+                row.clone(),
+                btn.clone(),
+                spin.clone(),
+                pop.clone(),
+                pop_label.clone(),
+            );
             let dialog_b = dialog_weak.clone();
             gtk4::glib::spawn_future_local(async move {
-                match crate::video::install_libraries().await {
-                    Ok(_) => {
-                        if dialog_b.upgrade().is_none() {
-                            return;
-                        }
-                        refresh_video_tools(&row_b, &btn_b, &spin_b);
-                    }
+                match crate::video::install_ytdlp().await {
                     Err(e) => {
+                        pop_b.popdown();
                         if dialog_b.upgrade().is_none() {
                             return;
                         }
-                        spin_b.stop();
-                        spin_b.set_visible(false);
                         row_b.set_subtitle(&e.to_string());
+                        btn_b.set_sensitive(true);
+                        return;
                     }
+                    Ok(_) => {}
                 }
+                label_b.set_text(&gettext("Downloading ffmpeg (2 of 2)…"));
+                match crate::video::install_ffmpeg().await {
+                    Err(e) => {
+                        pop_b.popdown();
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        row_b.set_subtitle(&e.to_string());
+                        btn_b.set_sensitive(true);
+                        return;
+                    }
+                    Ok(_) => {}
+                }
+                pop_b.popdown();
+                if dialog_b.upgrade().is_none() {
+                    return;
+                }
+                refresh_video_tools(&row_b, &btn_b, &spin_b);
                 btn_b.set_sensitive(true);
             });
         });

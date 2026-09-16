@@ -1,5 +1,6 @@
 mod application;
 mod download;
+mod install_help;
 mod preferences;
 mod settings;
 mod torrent;
