@@ -1363,14 +1363,20 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     video_name.set_visible(false);
     video_revert_btn.set_visible(false);
     video_group.add(&video_name);
-    let quality_labels = crate::video::quality_labels();
-    let quality_refs: Vec<&str> = quality_labels.iter().map(String::as_str).collect();
+    // Format picker, filled per video on resolve: row zero is always the
+    // automatic Best match (the quality preference applies to it), the
+    // rest are exact pinnable formats, tallest first. Starts with only
+    // Best match until the first lookup lands.
     let video_quality = adw::ComboRow::builder()
-        .title(gettext("Quality"))
-        .model(&gtk4::StringList::new(&quality_refs))
+        .title(gettext("Video format"))
+        .subtitle(gettext("Best match follows your preferred quality"))
+        .model(&gtk4::StringList::new(&[gettext("Best match").as_str()]))
         .build();
     video_quality.set_visible(false);
     video_group.add(&video_quality);
+    // Index-aligned with the combo rows above: row zero is Best match
+    // (no pin), the rest are exact format ids, or empty pre-resolve.
+    let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .subtitle(gettext("Skip the video track"))
@@ -1412,9 +1418,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         error: video_error,
     });
     // Dialog-local choices, initialized from Preferences (not bound: a
-    // queued row keeps the quality picked here even if prefs change later).
-    step.quality
-        .set_selected(crate::video::quality_index(&manager.settings().video_quality()) as u32);
+    // queued row keeps the audio choice made here even if prefs change
+    // later). The format picker always opens on Best match; exact picks
+    // are per lookup, so nothing persists here.
+    step.quality.set_selected(0);
     step.audio.set_active(manager.settings().video_audio_only());
     step.quality
         .set_sensitive(!manager.settings().video_audio_only());
@@ -1500,6 +1507,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let video_generation = Rc::new(Cell::new(0u64));
     let video_last_ok = Rc::new(RefCell::new(String::new()));
     let video_info = Rc::new(RefCell::new(None::<crate::video::VideoInfo>));
+    // Index-aligned with the format combo rows: row zero is Best match
+    // (no pin), the rest are exact format ids. Reset on every resolve.
+    let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
     // Set while the submit path re-arms the apply tick (touching the entry
     // text): the changed handler below must ignore that synthetic edit, or
     // every failed Enter-submit would drop the preview and re-resolve.
@@ -1512,10 +1522,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let url_row2 = url_row.clone();
         let file_row2 = file_row.clone();
         let dialog_weak = dialog.downgrade();
+        let formats_kick = format_ids.clone();
         Rc::new(move || {
             let my = generation.get() + 1;
             generation.set(my);
-            let (generation_b, last_b, info_b, step_b, url_b, dialog_b, file_b) = (
+            let (generation_b, last_b, info_b, step_b, url_b, dialog_b, file_b, formats_b) = (
                 generation.clone(),
                 last_ok.clone(),
                 info.clone(),
@@ -1523,6 +1534,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 url_row2.clone(),
                 dialog_weak.clone(),
                 file_row2.clone(),
+                formats_kick.clone(),
             );
             glib::spawn_future_local(async move {
                 if dialog_b.upgrade().is_none() {
@@ -1594,6 +1606,22 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         }
                         step_b.thumb.set_visible(false);
                         *last_b.borrow_mut() = url;
+                        // Rebuild the format picker from this resolve: Best
+                        // match first (the preference applies to it), then
+                        // the exact pinnable formats. Selection resets —
+                        // a pin from another video must never carry over.
+                        let mut labels = vec![gettext("Best match")];
+                        let mut ids: Vec<Option<String>> = vec![None];
+                        for opt in &v.formats {
+                            labels.push(opt.label.clone());
+                            ids.push(Some(opt.id.clone()));
+                        }
+                        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                        step_b
+                            .quality
+                            .set_model(Some(&gtk4::StringList::new(&refs)));
+                        *formats_b.borrow_mut() = ids;
+                        step_b.quality.set_selected(0);
                         *info_b.borrow_mut() = Some(v);
                         show_video_ready(&step_b);
                         // Thumbnail, best-effort: fetched off-thread, applied
@@ -1670,9 +1698,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         step2.audio.set_active(
                             settings.video_audio_only() || crate::video::is_audio_first(&text),
                         );
-                        step2.quality.set_selected(crate::video::quality_index(
-                            &settings.video_quality(),
-                        ) as u32);
                     }
                 }
             }
@@ -1890,6 +1915,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let quiet = video_quiet.clone();
         let nav2 = nav.clone();
         let video_nav_page2 = video_nav_page.clone();
+        let formats = format_ids.clone();
         move |rearm_apply: bool| {
             let fail = |message: &str| {
                 error_label.set_text(message);
@@ -1949,14 +1975,21 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         } else {
                             Some(typed.as_str())
                         };
-                        let quality =
-                            crate::video::quality_value(step2.quality.selected() as usize);
+                        // The fallback quality always comes from live
+                        // preferences; the exact pick (if any) rides along.
+                        let quality = m.settings().video_quality();
+                        let format_id = formats
+                            .borrow()
+                            .get(step2.quality.selected() as usize)
+                            .cloned()
+                            .flatten();
                         match m.enqueue_video(
                             &v.page_url,
                             Some(&dd.borrow()),
                             name,
-                            quality,
+                            &quality,
                             audio_only,
+                            format_id.as_deref(),
                         ) {
                             Ok(_) => close(),
                             Err(e) => show_video_error(&step2, &e),

@@ -354,6 +354,9 @@ pub struct VideoInfo {
     /// Unix time after which every resolved format URL is stale, derived
     /// from the youngest `available_at` across formats.
     pub expires_at: Option<i64>,
+    /// Pinnable video-only formats, tallest first (empty when the page
+    /// carries none). Computed once at resolve; the dialog lists these.
+    pub formats: Vec<VideoFormatOption>,
 }
 
 impl VideoInfo {
@@ -378,6 +381,7 @@ impl VideoInfo {
             duration_string: v.duration_string.clone(),
             page_url,
             expires_at,
+            formats: video_format_options(v),
         }
     }
 }

@@ -614,6 +614,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
             Some("My Video.mp4"),
             "1080p",
             false,
+            None,
         )
         .expect("video enqueue");
     let id = item.id();
@@ -643,7 +644,14 @@ fn enqueue_video_rejects_direct_url() {
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     assert!(
         manager
-            .enqueue_video("https://example.com/f.iso", None, None, "1080p", false)
+            .enqueue_video(
+                "https://example.com/f.iso",
+                None,
+                None,
+                "1080p",
+                false,
+                None
+            )
             .is_err()
     );
     assert_eq!(manager.store().n_items(), 0);
@@ -667,6 +675,7 @@ fn video_source_survives_restore_and_retry() {
                 Some("Clip.mp4"),
                 "720p",
                 true,
+                None,
             )
             .expect("video enqueue");
         // Persisted with the Page marker (not silently dropped).
@@ -715,6 +724,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 expires_at: None,
                 quality: "1080p".into(),
                 audio_only: false,
+                video_format_id: None,
             }),
         }],
     };
@@ -751,6 +761,7 @@ fn unremove_restores_video_source() {
             Some("Clip.mp4"),
             "720p",
             false,
+            None,
         )
         .expect("video enqueue");
     let id = item.id();
