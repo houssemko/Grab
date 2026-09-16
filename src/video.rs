@@ -468,11 +468,19 @@ pub fn user_lib_dir() -> PathBuf {
     base.join("grab").join("libs")
 }
 
-/// Candidate directories for the tools, in priority order: the Flatpak
-/// bundle, Grab's user library dir, then PATH (which inside Flatpak
-/// includes the runtime's /usr/bin where ffmpeg ships).
+/// Bundled-tool directory inside the Flatpak sandbox. This is Flatpak
+/// convention (the app tree is mounted at `/app`), not an XDG standard —
+/// XDG only defines user directories, never bundle layouts. Absent
+/// outside Flatpak, where the lookup simply skips it.
+const FLATPAK_APP_BIN: &str = "/app/bin";
+
+/// Candidate directories for the tools, in priority order: the user's own
+/// installs first (so Update actually takes effect over the bundle),
+/// then the Flatpak bundle, then PATH (which inside Flatpak includes the
+/// runtime's /usr/bin where ffmpeg ships). A stale user copy cannot pin
+/// old tools: the version floor refuses it with an update prompt.
 fn tool_search_dirs() -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("/app/bin"), user_lib_dir()];
+    let mut dirs = vec![user_lib_dir(), PathBuf::from(FLATPAK_APP_BIN)];
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()));
     }
