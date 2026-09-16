@@ -3,9 +3,9 @@ name: Flatpak test bundle
 # On-demand test builds for local testing: builds Grab.flatpak from any
 # branch, tag, or SHA in CI and uploads it as a workflow artifact to
 # download. Nothing touches releases. Also runs automatically on pull
-# requests touching code, data, or packaging. No --force-clean: that flag
-# is for release hygiene (and runners are ephemeral anyway, so the speed
-# lever is the SDK cache, not incrementality).
+# requests touching code, data, translations, or packaging. Always a full
+# pristine build (--force-clean, no SDK cache): validation must never
+# depend on what a previous run left behind.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +17,7 @@ on:
     paths:
       - "src/**"
       - "data/**"
+      - "po/**"
       - "build-aux/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -30,4 +31,4 @@ jobs:
     with:
       # Dispatch input when manually run, PR merge commit otherwise.
       ref: ${{ inputs.ref || github.sha }}
-      cache-sdk: true
+      force-clean: true

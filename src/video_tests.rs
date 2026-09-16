@@ -45,6 +45,129 @@ fn classify_bilibili() {
 }
 
 #[test]
+fn classify_top_up_domains() {
+    // Every allowlisted video domain routes to the extractor.
+    for url in [
+        "https://www.instagram.com/reel/abc123/",
+        "https://www.facebook.com/watch/?v=123",
+        "https://fb.watch/abc123/",
+        "https://www.threads.com/@user/post/abc",
+        "https://bsky.app/profile/user/post/abc",
+        "https://www.pinterest.com/pin/123/",
+        "https://pin.it/abc123",
+        "https://user.tumblr.com/post/123",
+        "https://vk.com/video-123_456",
+        "https://ok.ru/video/123",
+        "https://www.coub.com/view/abc",
+        "https://www.bitchute.com/video/abc/",
+        "https://odysee.com/@channel:abc/video:def",
+        "https://rutube.ru/video/abc/",
+        "https://www.nicovideo.jp/watch/sm123",
+        "https://www.ted.com/talks/speaker_title",
+        "https://archive.org/details/some-item",
+        "https://drive.google.com/file/d/abc/view",
+        "https://www.dropbox.com/s/abc/file.mp4",
+        "https://www.mediafire.com/file/abc/file.mp4",
+        "https://www.loom.com/share/abc",
+        "https://example.wistia.com/medias/abc",
+        "https://fast.wistia.net/embed/abc",
+        "https://soundcloud.com/artist/track",
+        "https://bandcamp.com/track/name",
+        "https://artist.bandcamp.com/track/name",
+    ] {
+        assert!(is_video_page(url), "should route to video: {url}");
+    }
+}
+
+#[test]
+fn classify_drm_walled_stays_direct() {
+    // DRM services are deliberately NOT listed: routing them would only
+    // promise what the pipeline refuses to fetch.
+    for url in [
+        "https://www.netflix.com/watch/123",
+        "https://www.disneyplus.com/video/abc",
+        "https://www.primevideo.com/detail/abc",
+        "https://open.spotify.com/track/abc",
+    ] {
+        assert_eq!(
+            classify(url),
+            VideoSource::Direct,
+            "must stay direct: {url}"
+        );
+    }
+}
+
+// ── audio-first ──────────────────────────────────────────────────────
+
+#[test]
+fn audio_first_domains() {
+    assert!(is_audio_first("https://soundcloud.com/artist/track"));
+    assert!(is_audio_first("https://m.soundcloud.com/artist/track"));
+    assert!(is_audio_first("https://artist.bandcamp.com/track/name"));
+    assert!(is_audio_first("https://bandcamp.com/track/name"));
+}
+
+#[test]
+fn audio_first_negative() {
+    assert!(!is_audio_first("https://www.youtube.com/watch?v=x"));
+    assert!(!is_audio_first("https://vimeo.com/123"));
+    assert!(!is_audio_first("https://example.com/f.mp3"));
+    assert!(!is_audio_first("not a url"));
+}
+
+// ── format guards ────────────────────────────────────────────────────
+
+fn test_format(overrides: serde_json::Value) -> yt_dlp::model::format::Format {
+    let mut base = serde_json::json!({
+        "format": "137 - 1920x1080",
+        "format_id": "137",
+        "protocol": "https",
+        "ext": "mp4",
+        "url": "https://cdn.example/v.mp4",
+        "vcodec": "avc1.640028",
+        "acodec": "none",
+        "http_headers": {},
+        "filesize": 100,
+    });
+    for (k, v) in overrides.as_object().unwrap() {
+        base[k] = v.clone();
+    }
+    serde_json::from_value(base).expect("test format must parse")
+}
+
+#[test]
+fn from_format_accepts_plain_https() {
+    let sel = StreamSel::from_format(&test_format(serde_json::json!({}))).unwrap();
+    assert_eq!(sel.format_id, "137");
+    assert_eq!(sel.url, "https://cdn.example/v.mp4");
+    assert_eq!(sel.size, Some(100));
+}
+
+#[test]
+fn from_format_rejects_hls_manifest() {
+    let f = test_format(serde_json::json!({"protocol": "m3u8_native"}));
+    assert!(StreamSel::from_format(&f).is_err());
+}
+
+#[test]
+fn from_format_rejects_unknown_protocol() {
+    let f = test_format(serde_json::json!({"protocol": "weirdcast"}));
+    assert!(StreamSel::from_format(&f).is_err());
+}
+
+#[test]
+fn from_format_rejects_drm() {
+    let f = test_format(serde_json::json!({"has_drm": true}));
+    assert!(StreamSel::from_format(&f).is_err());
+}
+
+#[test]
+fn from_format_rejects_missing_url() {
+    let f = test_format(serde_json::json!({"url": null}));
+    assert!(StreamSel::from_format(&f).is_err());
+}
+
+#[test]
 fn classify_reddit_video() {
     assert!(is_video_page(
         "https://www.reddit.com/r/pics/comments/abc/test/"
@@ -494,5 +617,94 @@ fn pipeline_reports_missing_tools() {
     assert!(rx.try_recv().is_err());
     drop(rx);
     clean_staging(&staging_dir(item_id));
+    assert!(!staging_dir(item_id).exists());
+}
+
+// ── TEMPORARY live checks for new domains (deleted before merge) ─────
+// Ignored: network + real tools. XDG_DATA_HOME=/tmp/opencode/livecheck.
+// Run SOLO: cargo test -- --ignored --test-threads=1 live_new_domain --nocapture
+#[test]
+#[ignore]
+fn live_new_domain_archive_video() {
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", "/tmp/opencode/livecheck");
+    }
+    assert!(is_video_page(
+        "https://archive.org/details/M1_20241029_164500_Agenda"
+    ));
+    let item_id = 720_000 + std::process::id() as u64;
+    let dest = std::path::PathBuf::from(format!(
+        "/tmp/opencode/livecheck/out/live-new-{item_id}.mp4"
+    ));
+    let _ = std::fs::remove_file(&dest);
+    let job = VideoJob {
+        item_id,
+        page_url: "https://archive.org/details/M1_20241029_164500_Agenda".into(),
+        quality: "480p".into(),
+        audio_only: false,
+        dest: dest.clone(),
+        tries: 2,
+        timeout_secs: 120,
+        user_agent: "test".into(),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let pump = std::thread::spawn(move || {
+        let mut ticks = 0u32;
+        while rx.blocking_recv().is_some() {
+            ticks += 1;
+        }
+        ticks
+    });
+    let res = crate::download::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
+    let ticks = pump.join().unwrap();
+    eprintln!("LIVE-NEW-VIDEO result: {res:?} ticks={ticks}");
+    assert!(ticks >= 1);
+    assert!(matches!(res, Ok(Some(n)) if n > 500_000));
+    assert!(dest.exists());
+    assert!(!staging_dir(item_id).exists());
+}
+
+#[test]
+#[ignore]
+fn live_new_domain_archive_audio_fallback() {
+    unsafe {
+        std::env::set_var("XDG_DATA_HOME", "/tmp/opencode/livecheck");
+    }
+    let url = "https://archive.org/details/t3-podcast-7";
+    assert!(is_video_page(url));
+    // archive.org is NOT in the audio-first preset list: reaching audio
+    // means the worker fell back on its own from missing video formats.
+    assert!(!is_audio_first(url));
+    let item_id = 730_000 + std::process::id() as u64;
+    let dest = std::path::PathBuf::from(format!(
+        "/tmp/opencode/livecheck/out/live-new-{item_id}.mp4"
+    ));
+    let _ = std::fs::remove_file(&dest);
+    let job = VideoJob {
+        item_id,
+        page_url: url.into(),
+        quality: "480p".into(),
+        audio_only: false, // deliberately NOT audio-only: worker must fall back
+        dest: dest.clone(),
+        tries: 2,
+        timeout_secs: 120,
+        user_agent: "test".into(),
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let pump = std::thread::spawn(move || {
+        let mut ticks = 0u32;
+        while rx.blocking_recv().is_some() {
+            ticks += 1;
+        }
+        ticks
+    });
+    let res = crate::download::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
+    let ticks = pump.join().unwrap();
+    eprintln!("LIVE-NEW-AUDIO result: {res:?} ticks={ticks}");
+    assert!(ticks >= 1);
+    assert!(matches!(res, Ok(Some(n)) if n > 100_000));
+    assert!(dest.exists());
     assert!(!staging_dir(item_id).exists());
 }
