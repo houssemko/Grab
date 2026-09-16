@@ -63,6 +63,39 @@ pub fn quality_value(index: usize) -> &'static str {
     VIDEO_QUALITY_VALUES.get(index).copied().unwrap_or("1080p")
 }
 
+/// Default file name for a resolved video when the user left the name
+/// blank: the video title plus the container the worker will produce
+/// (.mp4 merged, .m4a audio-only). The intake sanitizes it further.
+pub fn default_video_filename(title: &str, audio_only: bool) -> String {
+    if audio_only {
+        format!("{title}.m4a")
+    } else {
+        format!("{title}.mp4")
+    }
+}
+
+/// Maximum accepted thumbnail body: artwork is kilobytes, anything larger
+/// is a misbehaving server, not an image worth holding in memory.
+const THUMB_MAX_BYTES: u64 = 512 * 1024;
+
+/// Fetch a preview thumbnail. Best-effort by contract: `None` on any
+/// failure (network, status, size) and the dialog simply shows no image.
+pub(crate) async fn fetch_thumbnail_bytes(url: &str) -> Option<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    if resp.content_length().is_some_and(|n| n > THUMB_MAX_BYTES) {
+        return None;
+    }
+    let bytes = resp.bytes().await.ok()?;
+    (bytes.len() as u64 <= THUMB_MAX_BYTES).then(|| bytes.to_vec())
+}
+
 /// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`].
 /// Shared by Preferences and the New Download dialog so both combos stay
 /// in the same order.
