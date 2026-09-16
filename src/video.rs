@@ -13,8 +13,8 @@
 //! * **The tools may be missing.** The Flatpak bundle ships `yt-dlp` in
 //!   `/app/bin` and ffmpeg in the runtime, but tarball/dev builds rely on
 //!   the user library directory ([`user_lib_dir`]), populated by
-//!   [`install_libraries`]. Callers detect the gap with
-//!   [`resolve_libraries`] and offer an install action (AdwBanner).
+//!   [`install_ytdlp`] and [`install_ffmpeg`]. Callers detect the gap with
+//!   [`resolve_libraries`] and offer an install action.
 //!
 //! All yt-dlp work runs on Grab's shared Tokio runtime
 //! ([`crate::download::tokio_rt`]) so no GTK thread is ever blocked.
@@ -391,6 +391,71 @@ impl VideoInfo {
     }
 }
 
+/// Whether we run inside the Flatpak sandbox. Only there is the Install
+/// button the viable path (users cannot install host packages into the
+/// sandbox); tarball/dev builds get guided self-install instead.
+pub(crate) fn in_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}
+
+/// Package manager commands for the detected distro. `None` means unknown
+/// distro: show manual install links instead of a wrong command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DistroPackages {
+    /// Pretty distro name for the dialog title, e.g. "Fedora".
+    pub distro: String,
+    /// Full install command for yt-dlp, e.g. "sudo dnf install yt-dlp".
+    pub yt_dlp: String,
+    /// Full install command for ffmpeg.
+    pub ffmpeg: String,
+}
+
+fn package_manager(id: &str) -> Option<&'static str> {
+    match id {
+        "fedora" | "rhel" | "centos" | "almalinux" | "rocky" => Some("sudo dnf install"),
+        "ubuntu" | "debian" | "pop" | "linuxmint" | "elementary" | "zorin" => {
+            Some("sudo apt install")
+        }
+        "arch" | "manjaro" | "endeavouros" | "cachyos" => Some("sudo pacman -S"),
+        "opensuse-tumbleweed" | "opensuse-leap" | "sles" | "opensuse" => {
+            Some("sudo zypper install")
+        }
+        "alpine" => Some("sudo apk add"),
+        "gentoo" => Some("sudo emerge --ask"),
+        "void" => Some("sudo xbps-install -S"),
+        "solus" => Some("sudo eopkg install"),
+        _ => None,
+    }
+}
+
+/// Parse `/etc/os-release` content into install commands. Takes the file
+/// content (not the path) so unit tests feed fixtures directly. Falls
+/// back to `ID_LIKE` tokens when `ID` itself is unknown.
+pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
+    let mut id: Option<&str> = None;
+    let mut id_like = "";
+    let mut name: Option<&str> = None;
+    for line in os_release.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim_matches('"');
+        match key {
+            "ID" => id = Some(value),
+            "ID_LIKE" => id_like = value,
+            "NAME" => name = Some(value),
+            _ => {}
+        }
+    }
+    let id = id?;
+    let pm =
+        package_manager(id).or_else(|| id_like.split_whitespace().find_map(package_manager))?;
+    Some(DistroPackages {
+        distro: name.unwrap_or(id).to_string(),
+        yt_dlp: format!("{pm} yt-dlp"),
+        ffmpeg: format!("{pm} ffmpeg"),
+    })
+}
 /// Directory where dev/tarball installs keep the yt-dlp and ffmpeg
 /// binaries: `$XDG_DATA_HOME/grab/libs` (Flatpak bundles live in /app/bin,
 /// so this is unused there).
@@ -434,21 +499,28 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg))
 }
 
-/// Install yt-dlp + ffmpeg into the user library dir (tarball/dev builds).
-/// Runs on Grab's Tokio runtime regardless of the calling thread; await
-/// from a spawned task — never block the GTK thread on it.
-pub async fn install_libraries() -> Result<Libraries, VideoError> {
+/// Install just yt-dlp into the user library dir (tarball/dev builds).
+/// Split from ffmpeg so the UI can report honest per-tool stages; the
+/// crate installer exposes no progress of its own. Await from a spawned
+/// task — never block the GTK thread on it.
+pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
-    let handle = crate::download::tokio_rt().spawn(async move {
-        let installer = LibraryInstaller::new(dir);
-        let (youtube, ffmpeg) = tokio::join!(
-            installer.install_youtube(None),
-            installer.install_ffmpeg(None)
-        );
-        Ok::<_, yt_dlp::error::Error>(Libraries::new(youtube?, ffmpeg?))
-    });
+    let handle = crate::download::tokio_rt()
+        .spawn(async move { LibraryInstaller::new(dir).install_youtube(None).await });
     match handle.await {
-        Ok(Ok(libs)) => Ok(libs),
+        Ok(Ok(path)) => Ok(path),
+        Ok(Err(e)) => Err(VideoError::install(&e)),
+        Err(e) => Err(VideoError::runtime(&e)),
+    }
+}
+
+/// Install just ffmpeg into the user library dir. See [`install_ytdlp`].
+pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
+    let dir = user_lib_dir();
+    let handle = crate::download::tokio_rt()
+        .spawn(async move { LibraryInstaller::new(dir).install_ffmpeg(None).await });
+    match handle.await {
+        Ok(Ok(path)) => Ok(path),
         Ok(Err(e)) => Err(VideoError::install(&e)),
         Err(e) => Err(VideoError::runtime(&e)),
     }

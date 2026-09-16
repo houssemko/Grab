@@ -1094,3 +1094,45 @@ fn video_source_page_carries_format_pin() {
     let back: VideoSource = serde_json::from_str(&json).unwrap();
     assert_eq!(back, src);
 }
+
+// ── distro package managers ──────────────────────────────────────────
+
+#[test]
+fn distro_packages_known_ids() {
+    let fedora = "ID=fedora\nNAME=Fedora\n";
+    assert_eq!(
+        distro_packages(fedora).map(|d| (d.distro, d.yt_dlp, d.ffmpeg)),
+        Some((
+            "Fedora".to_string(),
+            "sudo dnf install yt-dlp".to_string(),
+            "sudo dnf install ffmpeg".to_string(),
+        ))
+    );
+    let ubuntu = "ID=ubuntu\nID_LIKE=debian\nNAME=Ubuntu\n";
+    assert_eq!(
+        distro_packages(ubuntu).map(|d| d.yt_dlp),
+        Some("sudo apt install yt-dlp".to_string())
+    );
+    let arch = "ID=arch\nNAME=Arch\n";
+    assert_eq!(
+        distro_packages(arch).map(|d| d.ffmpeg),
+        Some("sudo pacman -S ffmpeg".to_string())
+    );
+}
+
+#[test]
+fn distro_packages_id_like_fallback() {
+    // Unknown derivative riding a known family (e.g. a Ubuntu respin
+    // with its own ID) still resolves through ID_LIKE.
+    let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
+    let found = distro_packages(neon).expect("ID_LIKE fallback");
+    assert_eq!(found.distro, "KDE neon");
+    assert_eq!(found.yt_dlp, "sudo apt install yt-dlp");
+}
+
+#[test]
+fn distro_packages_unknown_is_none() {
+    assert_eq!(distro_packages(""), None);
+    assert_eq!(distro_packages("NAME=No ID here\n"), None);
+    assert_eq!(distro_packages("ID=mysteryos\nNAME=Mystery\n"), None);
+}
