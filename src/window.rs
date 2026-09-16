@@ -1374,9 +1374,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .build();
     video_quality.set_visible(false);
     video_group.add(&video_quality);
-    // Index-aligned with the combo rows above: row zero is Best match
-    // (no pin), the rest are exact format ids, or empty pre-resolve.
-    let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .subtitle(gettext("Skip the video track"))

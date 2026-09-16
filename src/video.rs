@@ -686,14 +686,14 @@ pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
             }
         })
         .collect();
-    out.sort_by(|a, b| b.height.cmp(&a.height));
+    out.sort_by_key(|a| std::cmp::Reverse(a.height));
     out
 }
 
 /// Find one format by id, accepting only what the pipeline can fetch.
 /// `None` covers unknown ids and HLS/DRM/missing-URL formats alike: the
 /// caller falls back to the quality preset.
-pub(crate) fn find_usable_format(formats: &[Format], id: &str) -> Option<StreamSel> {
+fn find_usable_format(formats: &[Format], id: &str) -> Option<StreamSel> {
     formats
         .iter()
         .find(|f| f.format_id == id)
