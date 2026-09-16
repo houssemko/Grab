@@ -722,14 +722,12 @@ pub async fn run_video_download(
     // manifest records the effective single-part mode so retries agree.
     let mut audio_only = job.audio_only;
     if audio_sel.is_none() {
-        let muxed = video_sel
-            .take_if(|v| v.has_audio)
-            .or_else(|| {
-                video
-                    .best_audio_video_format()
-                    .ok()
-                    .and_then(|m| StreamSel::from_format(m).ok())
-            });
+        let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
+            video
+                .best_audio_video_format()
+                .ok()
+                .and_then(|m| StreamSel::from_format(m).ok())
+        });
         if let Some(m) = muxed {
             audio_sel = Some(m);
             audio_only = true;
