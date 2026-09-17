@@ -1203,14 +1203,16 @@ fn hls_joins_carry_master_query() {
 
 #[test]
 fn hls_format_spec_names_height_and_pin() {
-    assert_eq!(hls_format_spec("best", None, false), "bv+ba/bv*+ba/b");
+    // bv* leads so direct muxed files win over lower splits; the
+    // trailing /b still catches audio-only pages.
+    assert_eq!(hls_format_spec("best", None, false), "bv*+ba/b");
     assert_eq!(
         hls_format_spec("1080p", None, false),
-        "bv[height<=1080]+ba/bv*[height<=1080]+ba/b"
+        "bv*[height<=1080]+ba/b"
     );
     assert_eq!(
         hls_format_spec("mystery", None, false),
-        "bv[height<=1080]+ba/bv*[height<=1080]+ba/b"
+        "bv*[height<=1080]+ba/b"
     );
     assert_eq!(
         hls_format_spec("1080p", Some("hls-99"), false),
@@ -1218,7 +1220,7 @@ fn hls_format_spec_names_height_and_pin() {
     );
     assert_eq!(
         hls_format_spec("1080p", Some("   "), false),
-        "bv[height<=1080]+ba/bv*[height<=1080]+ba/b"
+        "bv*[height<=1080]+ba/b"
     );
     assert_eq!(hls_format_spec("1080p", None, true), "ba/b");
     assert_eq!(hls_format_spec("1080p", Some("hls-99"), true), "ba/b");

@@ -2498,10 +2498,10 @@ async fn stop_hls_capture(
 }
 
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (yt-dlp
-/// re-resolves and merges itself). Height dominates like the picker;
-/// no codec filter, so a weird page can never fail on sorting. A
-/// pinned muxed id may gain a redundant second audio track via `+ba`,
-/// which players ignore — always pairing audio beats risking silence.
+/// re-resolves and merges itself). `bv*` (any video, muxed included)
+/// leads so direct muxed files win over lower splits; height caps
+/// like the picker. A muxed pick may gain a redundant second audio
+/// track via `+ba`, which players ignore — completeness beats purity.
 fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> String {
     if audio_only {
         return "ba/b".to_string();
@@ -2510,8 +2510,8 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
         return format!("{id}+ba/b");
     }
     match quality_height(quality) {
-        Some(h) => format!("bv[height<={h}]+ba/bv*[height<={h}]+ba/b"),
-        None => "bv+ba/bv*+ba/b".to_string(),
+        Some(h) => format!("bv*[height<={h}]+ba/b"),
+        None => "bv*+ba/b".to_string(),
     }
 }
 
