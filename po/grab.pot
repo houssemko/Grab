@@ -812,10 +812,6 @@ msgstr ""
 msgid "File name (optional)"
 msgstr ""
 
-#: src/window.rs:1338
-msgid "Video thumbnail"
-msgstr ""
-
 #: src/window.rs:1342
 msgid "Looking up video…"
 msgstr ""

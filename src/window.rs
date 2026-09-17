@@ -1254,11 +1254,10 @@ fn present_dialog(dialog: &adw::Dialog) {
 /// details navigation page. Managed as one unit: exactly one state
 /// visible at a time (resolving spinner, preview, missing-tools prompt,
 /// or load error). The group header itself carries the video identity
-/// (title + page URL); the thumbnail suffix is best-effort decoration.
+/// (title + page URL).
 struct VideoStep {
     status: adw::ActionRow,
     group: adw::PreferencesGroup,
-    thumb: gtk4::Picture,
     name: adw::EntryRow,
     revert: gtk4::Button,
     quality: adw::ComboRow,
@@ -1275,7 +1274,6 @@ fn hide_video_step(v: &VideoStep) {
     v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
-    v.thumb.set_visible(false);
 }
 
 fn show_video_loading(v: &VideoStep) {
@@ -1331,13 +1329,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
 
     // Video step (details navigation page): preview rows for video-page
     // URLs. All hidden until a lookup runs; exactly one state shows.
-    let video_thumb = gtk4::Picture::new();
-    video_thumb.set_content_fit(gtk4::ContentFit::Cover);
-    video_thumb.set_size_request(96, 54);
-    video_thumb.set_visible(false);
-    video_thumb.set_tooltip_text(Some(&gettext("Video thumbnail")));
     let video_group = adw::PreferencesGroup::new();
-    video_group.set_header_suffix(Some(&video_thumb));
     let video_status = adw::ActionRow::builder()
         .title(gettext("Looking up video…"))
         .build();
@@ -1406,7 +1398,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let step = Rc::new(VideoStep {
         status: video_status,
         group: video_group,
-        thumb: video_thumb,
         name: video_name,
         revert: video_revert_btn,
         quality: video_quality,
@@ -1619,7 +1610,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             };
                             step_b.name.set_text(&base);
                         }
-                        step_b.thumb.set_visible(false);
                         *last_b.borrow_mut() = url;
                         // Rebuild the format picker from this resolve: Best
                         // match first (the preference applies to it), then
@@ -1639,41 +1629,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         step_b.quality.set_selected(0);
                         *info_b.borrow_mut() = Some(v);
                         show_video_ready(&step_b);
-                        // Thumbnail, best-effort: fetched off-thread, applied
-                        // on the main thread only if this preview is still
-                        // current. Any failure leaves the row imageless.
-                        let (thumb_b, dialog_c, generation_c, info_c) = (
-                            step_b.thumb.clone(),
-                            dialog_b.clone(),
-                            generation_b.clone(),
-                            info_b.clone(),
-                        );
-                        glib::spawn_future_local(async move {
-                            let thumb_url =
-                                info_c.borrow().as_ref().and_then(|i| i.thumbnail.clone());
-                            let Some(thumb_url) = thumb_url else { return };
-                            if dialog_c.upgrade().is_none() || generation_c.get() != my {
-                                return;
-                            }
-                            if let Some(bytes) =
-                                crate::video::fetch_thumbnail_bytes(&thumb_url).await
-                            {
-                                if dialog_c.upgrade().is_none() || generation_c.get() != my {
-                                    return;
-                                }
-                                let current =
-                                    info_c.borrow().as_ref().and_then(|i| i.thumbnail.clone());
-                                if current.as_deref() != Some(thumb_url.as_str()) {
-                                    return;
-                                }
-                                if let Ok(tex) =
-                                    gtk4::gdk::Texture::from_bytes(&glib::Bytes::from(&bytes[..]))
-                                {
-                                    thumb_b.set_paintable(Some(&tex));
-                                    thumb_b.set_visible(true);
-                                }
-                            }
-                        });
                     }
                 }
             });

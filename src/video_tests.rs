@@ -706,7 +706,6 @@ fn test_video_info(page_url: &str) -> VideoInfo {
     VideoInfo {
         id: "x".into(),
         title: "T".into(),
-        thumbnail: None,
         duration: None,
         duration_string: None,
         page_url: page_url.into(),

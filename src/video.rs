@@ -74,28 +74,6 @@ pub fn default_video_filename(title: &str, audio_only: bool) -> String {
     }
 }
 
-/// Maximum accepted thumbnail body: artwork is kilobytes, anything larger
-/// is a misbehaving server, not an image worth holding in memory.
-const THUMB_MAX_BYTES: u64 = 512 * 1024;
-
-/// Fetch a preview thumbnail. Best-effort by contract: `None` on any
-/// failure (network, status, size) and the dialog simply shows no image.
-pub(crate) async fn fetch_thumbnail_bytes(url: &str) -> Option<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .ok()?;
-    let resp = client.get(url).send().await.ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    if resp.content_length().is_some_and(|n| n > THUMB_MAX_BYTES) {
-        return None;
-    }
-    let bytes = resp.bytes().await.ok()?;
-    (bytes.len() as u64 <= THUMB_MAX_BYTES).then(|| bytes.to_vec())
-}
-
 /// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`].
 /// Shared by Preferences and the New Download dialog so both combos stay
 /// in the same order.
@@ -338,13 +316,12 @@ impl VideoError {
 }
 
 /// Extraction result, kept deliberately small: the queue row needs the
-/// title/thumbnail/duration, and the *page URL* for expiry-safe re-resolve.
+/// title/duration, and the *page URL* for expiry-safe re-resolve.
 #[derive(Clone, Debug)]
 pub struct VideoInfo {
     /// Extractor video id (not persisted; informational).
     pub id: String,
     pub title: String,
-    pub thumbnail: Option<String>,
     /// Duration in seconds.
     pub duration: Option<i64>,
     /// Preformatted duration from the extractor (e.g. "41:21").
@@ -376,7 +353,6 @@ impl VideoInfo {
         Self {
             id: v.id.clone(),
             title: v.title.clone(),
-            thumbnail: v.thumbnail.clone(),
             duration: v.duration,
             duration_string: v.duration_string.clone(),
             page_url,
