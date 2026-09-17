@@ -1100,8 +1100,9 @@ fn fmt_video_bytes(n: u64) -> String {
 
 /// Listable video-only formats for one video: best per height, tallest
 /// first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
-/// muxed files stay on the automatic path, which already adopts them.
-/// Audio-only and manifest formats never appear here.
+/// HLS variants fill heights with no direct stream (the worker pulls
+/// those via ffmpeg); muxed files stay on the automatic path, which
+/// already adopts them. Audio-only formats never appear here.
 pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
     use std::collections::HashMap;
     let mut best: HashMap<u32, &Format> = HashMap::new();
@@ -1137,17 +1138,34 @@ pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
             best.insert(h, f);
         }
     }
+    // HLS gap-fill: heights with no direct stream still list, so the
+    // dialog can pin them and the worker routes them to ffmpeg.
+    for f in &video.formats {
+        if HlsSel::from_format(f).is_none() {
+            continue;
+        }
+        let Some(h) = f.video_resolution.height.filter(|&h| h > 0) else {
+            continue;
+        };
+        best.entry(h).or_insert(f);
+    }
     let mut out: Vec<VideoFormatOption> = best
         .into_iter()
         .map(|(height, f)| {
-            let short = f
-                .codec_info
-                .video_codec
-                .as_deref()
-                .unwrap_or("?")
-                .split('.')
-                .next()
-                .unwrap_or("?");
+            // HLS variants show their transport, not a codec that
+            // ffmpeg — not the engine — will consume.
+            let short = if f.protocol == Protocol::M3U8Native {
+                "HLS".to_string()
+            } else {
+                f.codec_info
+                    .video_codec
+                    .as_deref()
+                    .unwrap_or("?")
+                    .split('.')
+                    .next()
+                    .unwrap_or("?")
+                    .to_string()
+            };
             let label = match filesize_of(f) {
                 Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
                 None => format!("{height}p · {short}"),
@@ -1181,6 +1199,109 @@ fn codec_rank(vcodec: &str) -> u8 {
         4
     }
 }
+/// One HLS manifest variant for the ffmpeg fallback path: owned
+/// values, like [`StreamSel`]. ffmpeg resolves the variant playlist
+/// (and segment keys) itself.
+#[derive(Debug, Clone)]
+struct HlsSel {
+    url: String,
+    headers: HttpHeaders,
+    height: Option<u32>,
+}
+
+impl HlsSel {
+    /// Build from an extractor format: manifest protocol, DRM-free,
+    /// with a playlist URL.
+    fn from_format(f: &Format) -> Option<Self> {
+        if f.protocol != Protocol::M3U8Native {
+            return None;
+        }
+        if matches!(f.has_drm, Some(DrmStatus::Yes)) {
+            return None;
+        }
+        Some(Self {
+            url: f.download_info.url.clone().filter(|u| !u.is_empty())?,
+            headers: f.download_info.http_headers.clone(),
+            height: f.video_resolution.height.filter(|&h| h > 0),
+        })
+    }
+}
+
+/// Stored quality value to a height cap: `None` (Best) takes the
+/// tallest variant available.
+fn quality_height(value: &str) -> Option<u32> {
+    match value {
+        "best" => None,
+        "2160p" => Some(2160),
+        "1440p" => Some(1440),
+        "1080p" => Some(1080),
+        "720p" => Some(720),
+        "480p" => Some(480),
+        _ => Some(1080),
+    }
+}
+
+/// Best HLS variant for a height cap: smallest height at or above the
+/// cap, else the tallest available. Mirrors the crate's
+/// closest-at-or-above preset semantics.
+fn select_hls_format(formats: &[Format], want: Option<u32>) -> Option<HlsSel> {
+    let cands: Vec<HlsSel> = formats.iter().filter_map(HlsSel::from_format).collect();
+    match want {
+        Some(h) => cands
+            .iter()
+            .find(|s| s.height.is_some_and(|x| x >= h))
+            .or_else(|| cands.iter().max_by_key(|s| s.height.unwrap_or(0)))
+            .cloned(),
+        None => cands.into_iter().max_by_key(|s| s.height.unwrap_or(0)),
+    }
+}
+
+/// Find one HLS variant by dialog-pinned id.
+fn find_hls_format(formats: &[Format], id: &str) -> Option<HlsSel> {
+    formats
+        .iter()
+        .find(|f| f.format_id == id)
+        .and_then(HlsSel::from_format)
+}
+
+/// `-headers` value for ffmpeg: the extractor-resolved headers
+/// (variant and segment requests often need the same auth), with the
+/// configured user agent winning over the extractor's.
+fn ffmpeg_headers(headers: &HttpHeaders, user_agent: &str) -> String {
+    let ua = if user_agent.trim().is_empty() {
+        headers.user_agent.as_str()
+    } else {
+        user_agent.trim()
+    };
+    let mut out = String::new();
+    for (name, value) in [
+        ("User-Agent", ua),
+        ("Accept", headers.accept.as_str()),
+        ("Accept-Language", headers.accept_language.as_str()),
+        ("Sec-Fetch-Mode", headers.sec_fetch_mode.as_str()),
+    ] {
+        let value = value.trim();
+        if !value.is_empty() {
+            out.push_str(name);
+            out.push_str(": ");
+            out.push_str(value);
+            out.push_str("\r\n");
+        }
+    }
+    out
+}
+
+/// Total bytes written from one ffmpeg `-progress pipe:1` line
+/// (`total_size=N`). The pump renders byte amounts with unknown total,
+/// the same shape as length-less engine rows.
+fn parse_progress_size(line: &str) -> Option<u64> {
+    let (key, raw) = line.split_once('=')?;
+    if key.trim() != "total_size" {
+        return None;
+    }
+    raw.trim().parse().ok()
+}
+
 /// Find one format by id, accepting only what the pipeline can fetch.
 /// `None` covers unknown ids and HLS/DRM/missing-URL formats alike: the
 /// caller falls back to the quality preset.
@@ -1520,6 +1641,7 @@ pub async fn run_video_download(
     // the crate's extractor timeout via [`fetch_video_page`].
     let timeout = Duration::from_secs(job.timeout_secs.max(300));
     let youtube_bin = libs.youtube.clone();
+    let ffmpeg_bin = libs.ffmpeg.clone();
     let mut builder = Downloader::builder(libs, staging.clone()).with_timeout(timeout);
     if !job.user_agent.is_empty() {
         builder = builder.with_user_agent(job.user_agent.clone());
@@ -1618,6 +1740,30 @@ pub async fn run_video_download(
             audio_sel = Some(m);
             audio_only = true;
         }
+    }
+    // HLS fallback (x.com VODs, live replays): nothing above is
+    // directly fetchable, but manifest variants exist. ffmpeg pulls the
+    // playlist itself — variant choice, segment keys and all — so this
+    // path bypasses engine downloads, the merge and the resume sidecar:
+    // every attempt starts fresh. A dialog-pinned HLS id wins over the
+    // quality preset.
+    let hls_sel: Option<HlsSel> = if audio_sel.is_some() {
+        None
+    } else {
+        job.video_format_id
+            .as_deref()
+            .and_then(|id| find_hls_format(&video.formats, id))
+            .or_else(|| select_hls_format(&video.formats, quality_height(&job.quality)))
+    };
+    if let Some(hls) = hls_sel {
+        tracing::info!(
+            item_id = job.item_id,
+            page_host = %page_host(&job.page_url),
+            height = ?hls.height,
+            audio_only = job.audio_only,
+            "downloading HLS variant via ffmpeg",
+        );
+        return run_hls_download(&ffmpeg_bin, &staging, &job, hls, abort, timeout, tx).await;
     }
     let Some(audio_sel) = audio_sel else {
         return Err(VideoError::unavailable_detail(&video.formats));
@@ -1867,6 +2013,149 @@ async fn finish_merge(
     }
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(final_bytes.unwrap_or(0))
+}
+
+/// Download one HLS variant with ffmpeg (`-c copy`: the variant
+/// playlist, segment requests and any playlist keys are ffmpeg's
+/// business). No resume — every attempt wipes staging and restarts —
+/// and no merge phase: the output file is final. Returns the final
+/// size, or `None` when aborted.
+async fn run_hls_download(
+    ffmpeg: &Path,
+    staging: &Path,
+    job: &VideoJob,
+    hls: HlsSel,
+    abort: oneshot::Receiver<()>,
+    timeout: Duration,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+) -> Result<Option<u64>, VideoError> {
+    use crate::download::EngineMsg;
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    tokio::fs::create_dir_all(staging)
+        .await
+        .map_err(VideoError::staging)?;
+    let out_path = staging.join(if job.audio_only { "hls.m4a" } else { "hls.mp4" });
+    let mut cmd = tokio::process::Command::new(ffmpeg);
+    cmd.arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("warning")
+        .arg("-nostats")
+        .arg("-progress")
+        .arg("pipe:1")
+        .arg("-i")
+        .arg(&hls.url);
+    let headers = ffmpeg_headers(&hls.headers, &job.user_agent);
+    if !headers.is_empty() {
+        cmd.arg("-headers").arg(headers);
+    }
+    if job.audio_only {
+        cmd.arg("-vn");
+    }
+    cmd.arg("-c")
+        .arg("copy")
+        .arg(&out_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| VideoError::runtime("ffmpeg gave no progress pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
+    // Drain both pipes concurrently: an unread pipe stalls ffmpeg once
+    // full, and the tail diagnoses failures. Progress reports byte
+    // amounts with unknown total, like length-less engine rows.
+    let tx_p = tx.clone();
+    let progress = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let (mut sent, mut have) = (0u64, 0u64);
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(n) = parse_progress_size(&line) {
+                have = have.max(n);
+                if have.saturating_sub(sent) >= PROGRESS_GRANULARITY {
+                    sent = have;
+                    tx_p.send(EngineMsg::Progress {
+                        downloaded: have,
+                        total: None,
+                        uploaded: 0,
+                        upload_bps: 0,
+                    })
+                    .ok();
+                }
+            }
+        }
+        have
+    });
+    let logs = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 8192 {
+                        tail.drain(..tail.len() - 8192);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
+    let status = tokio::select! {
+        biased;
+        _ = abort => {
+            child.kill().await.ok();
+            let _ = child.wait().await;
+            progress.abort();
+            logs.abort();
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            return Ok(None);
+        }
+        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                child.kill().await.ok();
+                progress.abort();
+                logs.abort();
+                return Err(VideoError::runtime(&e));
+            }
+            Err(_) => {
+                child.kill().await.ok();
+                progress.abort();
+                logs.abort();
+                return Err(VideoError::part_failed("timed out"));
+            }
+        },
+    };
+    let _ = progress.await;
+    let log_tail = logs.await.unwrap_or_default();
+    if !status.success() {
+        let detail = log_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("ffmpeg reported failure")
+            .trim()
+            .to_string();
+        return Err(VideoError::part_failed(detail));
+    }
+    // Atomic claim into place (EXDEV-safe, no clobber).
+    match crate::download::rename_noreplace(&out_path, &job.dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(VideoError::exists());
+        }
+        Err(e) => return Err(VideoError::combine(&e)),
+    }
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    Ok(file_len(&job.dest))
 }
 
 #[cfg(test)]
