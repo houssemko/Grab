@@ -1030,6 +1030,108 @@ fn unavailable_detail_counts_rejections() {
 }
 
 #[test]
+fn hls_selection_prefers_capped_height() {
+    let formats: Vec<yt_dlp::model::format::Format> = serde_json::from_value(serde_json::json!([
+        test_format_full(
+            "h480",
+            "avc1",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full("https", "avc1", "none", Some(720), None, "https", false),
+    ]))
+    .unwrap();
+    // Closest at or above the cap; tallest when capped above all.
+    assert_eq!(
+        select_hls_format(&formats, Some(720)).expect("hls").url,
+        "https://cdn.example/h1080"
+    );
+    assert_eq!(
+        select_hls_format(&formats, Some(2160)).expect("hls").url,
+        "https://cdn.example/h1080"
+    );
+    // Best takes the tallest; https entries never select as HLS.
+    assert_eq!(
+        select_hls_format(&formats, None).expect("hls").url,
+        "https://cdn.example/h1080"
+    );
+    assert!(select_hls_format(&[], Some(720)).is_none());
+    assert!(find_hls_format(&formats, "h480").is_some());
+    assert!(find_hls_format(&formats, "https").is_none());
+    assert!(find_hls_format(&formats, "gone").is_none());
+}
+
+#[test]
+fn ffmpeg_headers_passthrough() {
+    let headers = yt_dlp::model::format::HttpHeaders {
+        user_agent: "Extractor/1".into(),
+        accept: "*/*".into(),
+        accept_language: "".into(),
+        sec_fetch_mode: "no-cors".into(),
+    };
+    // Caller UA wins; empty values are skipped; lines are CRLF.
+    assert_eq!(
+        ffmpeg_headers(&headers, "Grab/1"),
+        "User-Agent: Grab/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\n"
+    );
+    assert_eq!(
+        ffmpeg_headers(&headers, ""),
+        "User-Agent: Extractor/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\n"
+    );
+    let bare = yt_dlp::model::format::HttpHeaders {
+        user_agent: "".into(),
+        accept: "".into(),
+        accept_language: "".into(),
+        sec_fetch_mode: "".into(),
+    };
+    assert_eq!(ffmpeg_headers(&bare, ""), "");
+}
+
+#[test]
+fn ffmpeg_progress_reports_total_size() {
+    assert_eq!(parse_progress_size("total_size=1048576"), Some(1048576));
+    assert_eq!(parse_progress_size("total_size=0"), Some(0));
+    assert_eq!(parse_progress_size("out_time_ms=123456"), None);
+    assert_eq!(parse_progress_size("progress=end"), None);
+    assert_eq!(parse_progress_size("total_size=abc"), None);
+    assert_eq!(parse_progress_size("garbage"), None);
+}
+
+#[test]
+fn picker_lists_hls_gap_heights() {
+    let video = test_video(serde_json::json!([
+        test_format_full("v720", "avc1", "none", Some(720), None, "https", false),
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]));
+    let opts = video_format_options(&video);
+    assert_eq!(
+        opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
+        ["h1080", "v720"]
+    );
+    assert_eq!(opts[0].label, "1080p · HLS");
+}
+
+#[test]
 fn codec_rank_orders_newest_first() {
     assert!(codec_rank("av01.0.08M.08") < codec_rank("vp9"));
     assert!(codec_rank("VP9") < codec_rank("hev1.1.6.L93"));
