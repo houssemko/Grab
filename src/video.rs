@@ -837,15 +837,53 @@ pub fn clean_staging(dir: &Path) {
 /// forever; the error path (with Retry) is strictly more useful.
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
-/// Fill in object fields the bundled yt-dlp binary omits but the crate's
-/// model demands. Without this, one sparse object (today: a thumbnail
-/// without `preference`/`id`) fails the entire preview parse.
+/// Fill in fields the bundled yt-dlp binary omits but the crate's model
+/// demands. Without this, one sparse object (a thumbnail without
+/// `preference`, an x.com page without `live_status`) fails the entire
+/// preview parse. Arrays Grab never reads are dropped instead of
+/// repaired; formats (which the pipeline does read) get neutral defaults
+/// for their required scalars.
 fn sanitize_video_json(value: &mut serde_json::Value) {
-    if let Some(thumbs) = value.get_mut("thumbnails").and_then(|t| t.as_array_mut()) {
-        for thumb in thumbs.iter_mut() {
-            if let Some(obj) = thumb.as_object_mut() {
-                obj.entry("preference").or_insert(serde_json::json!(0));
-                obj.entry("id").or_insert(serde_json::json!(""));
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    obj.entry("id").or_insert(serde_json::json!(""));
+    obj.entry("title").or_insert(serde_json::json!(""));
+    obj.entry("age_limit").or_insert(serde_json::json!(0));
+    obj.entry("live_status").or_insert(serde_json::json!(""));
+    obj.entry("playable_in_embed")
+        .or_insert(serde_json::json!(false));
+    obj.entry("extractor").or_insert(serde_json::json!(""));
+    obj.entry("extractor_key").or_insert(serde_json::json!(""));
+    if !obj.get("_version").is_some_and(|v| v.is_object()) {
+        obj.insert(
+            "_version".to_string(),
+            serde_json::json!({"version": "", "repository": ""}),
+        );
+    }
+    // Unread arrays/objects: one sparse entry must not fail the video.
+    for key in ["thumbnails", "chapters", "tags", "categories"] {
+        if obj.contains_key(key) {
+            obj.insert(key.to_string(), serde_json::json!([]));
+        }
+    }
+    for key in ["subtitles", "automatic_captions"] {
+        if obj.contains_key(key) {
+            obj.insert(key.to_string(), serde_json::json!({}));
+        }
+    }
+    if obj.contains_key("heatmap") {
+        obj.insert("heatmap".to_string(), serde_json::Value::Null);
+    }
+    if let Some(formats) = obj.get_mut("formats").and_then(|f| f.as_array_mut()) {
+        for format in formats.iter_mut() {
+            if let Some(entry) = format.as_object_mut() {
+                entry.entry("format").or_insert(serde_json::json!(""));
+                entry.entry("format_id").or_insert(serde_json::json!(""));
+                entry.entry("http_headers").or_insert(serde_json::json!({}));
+                if entry.contains_key("fragments") {
+                    entry.insert("fragments".to_string(), serde_json::json!([]));
+                }
             }
         }
     }

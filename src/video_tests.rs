@@ -1109,28 +1109,46 @@ fn cookies_browser_index_round_trip() {
 }
 
 #[test]
-fn sparse_thumbnails_get_neutral_defaults() {
-    // The binary omits thumbnail `preference`/`id` on some pages; the
-    // crate model demands them, so one sparse object used to fail the
-    // whole preview parse. Present values must survive untouched.
+fn sparse_x_com_json_parses_to_video() {
+    // x.com omits top-level scalars (live_status, …) and ships sparse
+    // nested objects; every one of those used to abort the preview with
+    // a missing-field JSON error. Unread arrays are dropped, formats get
+    // neutral defaults, and the full model parse succeeds.
     let mut v = serde_json::json!({
-        "thumbnails": [
-            {"url": "http://e/1.jpg"},
-            {"url": "http://e/2.jpg", "preference": -2, "id": "t2"},
-            "not-an-object",
-        ]
+        "id": "abc",
+        "title": "T",
+        "webpage_url": "https://x.com/u/status/abc",
+        "duration": 42,
+        "thumbnails": [{"url": "http://e/1.jpg"}],
+        "chapters": [{"title": "c"}],
+        "tags": ["t"],
+        "subtitles": {"en": [{"url": "http://e/s"}]},
+        "heatmap": [{"start_time": 0.0}],
+        "formats": [
+            {
+                "url": "https://e/v.mp4",
+                "http_headers": {},
+                "fragments": [{"url": "http://e/f"}],
+            },
+            {"format_id": "hls-1", "protocol": "m3u8_native", "url": "https://e/m.m3u8"},
+        ],
     });
     sanitize_video_json(&mut v);
-    let thumbs = v["thumbnails"].as_array().unwrap();
-    assert_eq!(thumbs[0]["preference"], 0);
-    assert_eq!(thumbs[0]["id"], "");
-    assert_eq!(thumbs[1]["preference"], -2);
-    assert_eq!(thumbs[1]["id"], "t2");
-    assert_eq!(thumbs[2], serde_json::json!("not-an-object"));
-    // Missing array entirely: nothing to do, no panic.
-    let mut bare = serde_json::json!({"id": "x"});
+    let video: Video = serde_json::from_value(v).expect("sparse page parses");
+    assert_eq!(video.live_status, "");
+    assert_eq!(video.age_limit, 0);
+    assert!(!video.playable_in_embed);
+    assert!(video.thumbnails.is_empty());
+    assert!(video.chapters.is_empty());
+    assert_eq!(video.formats.len(), 2);
+    assert_eq!(video.formats[0].format_id, "");
+    assert_eq!(video.formats[1].format_id, "hls-1");
+    // Missing top-level scalars get defaults too.
+    let mut bare = serde_json::json!({"formats": []});
     sanitize_video_json(&mut bare);
-    assert!(bare.get("thumbnails").is_none());
+    let bare: Video = serde_json::from_value(bare).expect("bare page parses");
+    assert_eq!(bare.id, "");
+    assert_eq!(bare.extractor_info.extractor, "");
 }
 
 #[test]
