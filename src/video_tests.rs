@@ -1202,6 +1202,25 @@ fn hls_joins_carry_master_query() {
 }
 
 #[test]
+fn hls_estimate_needs_bandwidth_and_duration() {
+    // 8 Mbit/s over 90 s ≈ 90 MB.
+    assert_eq!(hls_estimated_total(Some(8_000_000), 90.0), Some(90_000_000));
+    assert_eq!(hls_estimated_total(None, 90.0), None);
+    assert_eq!(hls_estimated_total(Some(8_000_000), 0.0), None);
+    // Absurd figures never size a bitmap: capped, not wrapped.
+    assert_eq!(hls_estimated_total(Some(u64::MAX), 1e12), None);
+    assert_eq!(hls_estimated_total(Some(8_000_000), f64::INFINITY), None);
+}
+
+#[test]
+fn hls_media_duration_sums_extinf() {
+    let text = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.006,\nseg0.ts\n#EXTINF:4.0,bogus\nseg1.ts\n#EXT-X-ENDLIST\n";
+    assert!((hls_media_duration(text) - 10.006).abs() < 1e-9);
+    assert_eq!(hls_media_duration("#EXTM3U\n#EXT-X-ENDLIST\n"), 0.0);
+    assert_eq!(hls_media_duration("not a playlist"), 0.0);
+}
+
+#[test]
 fn picker_lists_hls_gap_heights() {
     let video = test_video(serde_json::json!([
         test_format_full("v720", "avc1", "none", Some(720), None, "https", false),

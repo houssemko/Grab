@@ -1148,7 +1148,7 @@ const PIECE_TARGET_COUNT: u64 = 4096;
 /// persisted bitmaps stay valid across restarts: DO NOT change the formula
 /// without a queue migration (restore drops mismatched bitmaps to a safe
 /// single-stream resume instead of corrupting).
-fn piece_len(total: u64) -> u64 {
+pub(crate) fn piece_len(total: u64) -> u64 {
     total
         .div_ceil(PIECE_TARGET_COUNT)
         .clamp(PIECE_MIN, PIECE_MAX)

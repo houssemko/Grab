@@ -1009,3 +1009,7 @@ msgstr ""
 #: src/window.rs:101
 msgid "Stop"
 msgstr ""
+
+#: src/video.rs:354
+msgid "unclassified"
+msgstr ""
