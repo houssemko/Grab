@@ -20,6 +20,7 @@
 //! ([`crate::download::tokio_rt`]) so no GTK thread is ever blocked.
 
 use gettextrs::gettext;
+use libc;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -594,32 +595,6 @@ pub(crate) fn page_host(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a cookies file is usable: exists, is a file, and has a sane
-/// size. Shared by the preferences picker and the worker so both agree.
-pub(crate) fn valid_cookies_file(path: &str) -> bool {
-    let path = std::path::Path::new(path);
-    path.is_file()
-        && std::fs::metadata(path)
-            .map(|m| m.len() > 0 && m.len() <= 1_000_000)
-            .unwrap_or(false)
-}
-
-/// Resolve a configured cookies path or fail fast with an actionable
-/// message. Runs before any tool probing: a user config error beats an
-/// environment error, and it keeps the missing-file test deterministic
-/// on machines with and without the tools installed.
-pub(crate) fn cookies_file(setting: &str) -> Result<Option<PathBuf>, VideoError> {
-    let trimmed = setting.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if valid_cookies_file(trimmed) {
-        return Ok(Some(PathBuf::from(trimmed)));
-    }
-    Err(VideoError::cookies_missing(trimmed))
-}
-/// Browsers offered for `--cookies-from-browser`, in combo order. Values
-/// are the yt-dlp browser names; labels come from [`cookies_browser_labels`].
 pub const COOKIES_BROWSERS: &[&str] = &[
     "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale",
 ];
@@ -655,14 +630,191 @@ pub fn cookies_browser_value(index: usize) -> &'static str {
     COOKIES_BROWSERS.get(index).copied().unwrap_or("none")
 }
 
-/// Return the browser name for `--cookies-from-browser`. yt-dlp resolves
-/// the cookie database itself (handles Flatpak paths, multiple profiles,
-/// etc.). `None`/unknown means off.
-pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
-    if value.is_empty() || value == "none" || !COOKIES_BROWSERS.contains(&value) {
+/// Real home directory from the kernel passwd database, bypassing any
+/// sandbox `$HOME` remapping. Returns `None` on non-Unix or when the
+/// lookup fails for any reason.
+#[cfg(unix)]
+pub(crate) fn real_home_dir() -> Option<PathBuf> {
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return None;
+        }
+        let pw = &*pw;
+        let cstr = pw.pw_dir;
+        let len = libc::strlen(cstr);
+        if len == 0 {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(cstr as *const u8, len);
+        let s = std::str::from_utf8(bytes).ok()?;
+        Some(PathBuf::from(s.to_owned()))
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn real_home_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Returns the real host configuration directory, even inside a Flatpak
+/// sandbox where `$HOME` and `$XDG_CONFIG_HOME` point to the app's own
+/// sandboxed directories. Inside Flatpak, `$HOST_XDG_CONFIG_HOME` carries
+/// the host value; otherwise we fall back to the passwd database home
+/// (which is the real home, not any sandbox remapping).
+pub(crate) fn real_config_home() -> PathBuf {
+    // Flatpak 1.8+ exposes the host XDG values under HOST_-prefixed
+    // variables so sandboxed apps can still find host-installed browsers.
+    if let Some(host) = std::env::var_os("HOST_XDG_CONFIG_HOME") {
+        let p = PathBuf::from(&host);
+        if p.is_absolute() {
+            return p;
+        }
+    }
+    // Flatpak may not expose HOST_XDG_CONFIG_HOME on older runtimes.
+    // The sandbox $HOME is wrong, but the kernel passwd entry for our
+    // UID still points at the real home directory.
+    if let Some(real_home) = real_home_dir() {
+        let p = real_home.join(".config");
+        if p.is_absolute() {
+            return p;
+        }
+    }
+    // Non-Flatpak fallback: the normal XDG config home.
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(|h| PathBuf::from(&h).join(".config"))
+                .unwrap_or_else(|| PathBuf::from("/etc/xdg"))
+        })
+}
+
+/// Resolve the cookie database path for a given browser using XDG
+/// conventions against the real host config directory. Inside a Flatpak
+/// sandbox, `$HOME` points at the sandbox, so we use
+/// [`real_config_home`] (which reads `HOST_XDG_CONFIG_HOME` or the passwd
+/// home) instead of `$XDG_CONFIG_HOME` / `$HOME`.
+///
+/// Returns the absolute path to the `Cookies` (Chromium-based) or
+/// `cookies.sqlite` (Firefox) file, or `None` when the browser is off or
+/// the profile dir doesn't exist on disk. The caller passes the returned
+/// path to yt-dlp via `--cookies`; yt-dlp then opens the DB directly,
+/// bypassing its own `--cookies-from-browser` path lookup entirely.
+pub(crate) fn resolve_cookies_db_path(browser: &str) -> Option<PathBuf> {
+    if browser.is_empty() || browser == "none" {
         return None;
     }
-    Some(value.to_string())
+    let config = real_config_home();
+    fn chromium_cookies(config: &Path, subdir: &str) -> Option<PathBuf> {
+        let profile = config.join(subdir).join("Default");
+        let cookies = profile.join("Cookies");
+        if cookies.is_file() {
+            Some(cookies)
+        } else {
+            let alt = config.join(subdir).join("Cookies");
+            if alt.is_file() { Some(alt) } else { None }
+        }
+    }
+    fn firefox_cookies(config: &Path) -> Option<PathBuf> {
+        let snap_base = config
+            .join("snap")
+            .join("firefox")
+            .join("common")
+            .join(".mozilla")
+            .join("firefox");
+        let mozilla = config.join("mozilla").join("firefox");
+        let direct = config.join("firefox");
+        for base in [&snap_base, &mozilla, &direct] {
+            if let Some(cookies) = find_firefox_profile_cookies(base) {
+                return Some(cookies);
+            }
+        }
+        None
+    }
+    fn find_firefox_profile_cookies(base: &Path) -> Option<PathBuf> {
+        let profiles_ini = base.join("profiles.ini");
+        let profiles: Vec<PathBuf> = if profiles_ini.is_file() {
+            let text = std::fs::read_to_string(&profiles_ini).ok()?;
+            let mut paths = Vec::new();
+            let mut current: Option<String> = None;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    current = None;
+                } else if let Some((key, value)) = line.split_once('=') {
+                    match key.trim() {
+                        "Path" => current = Some(value.trim().to_string()),
+                        _ => {}
+                    }
+                }
+            }
+            for p in current.into_iter().filter(|p| !p.is_empty()) {
+                let p = if p.starts_with('.') {
+                    p[1..].to_string()
+                } else {
+                    format!(".{}", p)
+                };
+                paths.push(base.join(&p));
+            }
+            paths
+        } else {
+            let mut fallbacks = vec!["default".to_string()];
+            if let Ok(entries) = std::fs::read_dir(base) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    if name.ends_with(".default")
+                        || name.ends_with(".default-release")
+                        || name == "default-release"
+                    {
+                        fallbacks.push(name);
+                    }
+                }
+            }
+            fallbacks.into_iter().map(|p| base.join(p)).collect()
+        };
+        profiles.into_iter().find_map(|p| {
+            let cookies = p.join("cookies.sqlite");
+            if cookies.is_file() {
+                Some(cookies)
+            } else {
+                None
+            }
+        })
+    }
+    match browser {
+        "brave" => {
+            for sub in &[
+                "BraveSoftware/Brave-Browser",
+                "BraveSoftware/Brave-Origin-Nightly",
+                "BraveSoftware/Brave-Beta",
+                "BraveSoftware/Brave-Stable",
+            ] {
+                if let Some(p) = chromium_cookies(&config, sub) {
+                    return Some(p);
+                }
+            }
+            None
+        }
+        "chrome" => chromium_cookies(&config, "google-chrome")
+            .or_else(|| chromium_cookies(&config, "google-chrome-beta"))
+            .or_else(|| chromium_cookies(&config, "google-chrome-unstable")),
+        "chromium" => chromium_cookies(&config, "chromium")
+            .or_else(|| chromium_cookies(&config, "chromium-beta")),
+        "edge" => chromium_cookies(&config, "microsoft-edge")
+            .or_else(|| chromium_cookies(&config, "microsoft-edge-beta"))
+            .or_else(|| chromium_cookies(&config, "microsoft-edge-dev")),
+        "opera" => {
+            chromium_cookies(&config, "opera").or_else(|| chromium_cookies(&config, "opera-beta"))
+        }
+        "vivaldi" => chromium_cookies(&config, "vivaldi")
+            .or_else(|| chromium_cookies(&config, "vivaldi-snapshot")),
+        "whale" => chromium_cookies(&config, "naver-whale")
+            .or_else(|| chromium_cookies(&config, "naver-whale-beta")),
+        "firefox" => firefox_cookies(&config),
+        _ => None,
+    }
 }
 
 /// Shared root for extraction scratch space.
@@ -706,8 +858,8 @@ pub async fn fetch_video_infos(
         let mut builder = Downloader::builder(libs, out);
         // Browser identity wins over the file when both are set: one
         // identity per attempt keeps failures attributable.
-        if let Some(spec) = cookies_browser_spec(&cookies_browser) {
-            builder = builder.with_cookies_from_browser(spec);
+        if let Some(cookies) = crate::video::resolve_cookies_db_path(&cookies_browser) {
+            builder = builder.with_cookies(cookies);
         } else if let Some(cookies) = cookies {
             builder = builder.with_cookies(cookies);
         }
@@ -1122,7 +1274,7 @@ pub struct VideoJob {
     /// settings at spawn (live value); never persisted per row.
     pub cookies_path: Option<PathBuf>,
     /// Raw browser-auth setting (`none` when off). Resolved to a
-    /// `--cookies-from-browser` spec inside the worker.
+    /// `--cookies` path inside the worker via XDG.
     pub cookies_browser: String,
 }
 
@@ -1170,8 +1322,8 @@ pub async fn run_video_download(
     // Authenticated extraction for gated pages; the part downloads reuse
     // the extractor-resolved headers as before. Browser identity wins
     // over the file when both are set.
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
-        builder = builder.with_cookies_from_browser(spec);
+    if let Some(cookies) = crate::video::resolve_cookies_db_path(&job.cookies_browser) {
+        builder = builder.with_cookies(cookies);
     } else if let Some(cookies) = &job.cookies_path {
         builder = builder.with_cookies(cookies.clone());
     }

@@ -102,12 +102,10 @@ impl AppSettings {
     pub fn video_audio_only(&self) -> bool {
         self.0.boolean(key::VIDEO_AUDIO_ONLY)
     }
-    pub fn cookies_path(&self) -> String {
-        self.0.string(key::COOKIES_PATH).to_string()
-    }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
     }
+
     pub fn window_width(&self) -> i32 {
         self.0.int(key::WINDOW_WIDTH)
     }

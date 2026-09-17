@@ -2630,42 +2630,43 @@ impl DownloadManager {
         self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-        // Overwrite any stale sender: its task is dead or guarded stale.
         self.video_abort.borrow_mut().insert(id, abort_tx);
-        let opts = DownloadOptions::from_settings(&self.settings);
-        // Fail fast on a configured-but-unreadable cookies file, before
-        // any tool probing or network: same shape as the missing-archive
-        // early return in `spawn_torrent`.
-        let cookies_path = match crate::video::cookies_file(&self.settings.cookies_path()) {
-            Ok(cookies) => cookies,
-            Err(e) => {
-                item.set_status(DownloadStatus::Failed);
-                item.set_detail(e.to_string());
-                self.changed();
-                return;
-            }
-        };
+        let settings = self.settings.clone();
+        let dest = item.file_path();
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
             quality,
             audio_only,
-            dest: item.file_path(),
-            tries: opts.tries.max(1) as u32,
-            timeout_secs: opts.timeout.max(1) as u64,
-            user_agent: opts.user_agent.clone(),
+            dest,
+            tries: settings.retries() as u32,
+            timeout_secs: settings.timeout() as u64,
+            user_agent: settings.user_agent().clone(),
             video_format_id,
-            cookies_path,
-            cookies_browser: self.settings.cookies_browser(),
+            cookies_path: None,
+            cookies_browser: settings.cookies_browser(),
         };
         let handle = tokio_rt().spawn(async move {
+            let libs = crate::video::resolve_libraries()
+                .map_err(|e| {
+                    tracing::warn!(item_id = id, error = %e.to_string(), "video tools missing");
+                    e.to_string()
+                })
+                .ok();
+            let staging = crate::video::staging_dir(id);
+            let timeout = std::time::Duration::from_secs(job.timeout_secs.max(300));
+            let mut builder = {
+                let libs = match &libs {
+                    Some(l) => l.clone(),
+                    None => return,
+                };
+                yt_dlp::Downloader::builder(libs, staging.clone()).with_timeout(timeout)
+            };
             let worker_tx = tx.clone();
             match crate::video::run_video_download(job, abort_rx, worker_tx).await {
                 Ok(Some(size)) => {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
-                // Aborted: the pauser/canceller already set the row status,
-                // so send nothing and let the pump tail no-op.
                 Ok(None) => {}
                 Err(e) => {
                     tracing::warn!(item_id = id, error = %e.to_string(), "video attempt failed");

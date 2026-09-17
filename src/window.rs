@@ -1559,22 +1559,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     show_video_ready(&step_b);
                     return;
                 }
-                // User config first, then tools: a broken cookies path is
-                // the user's own doing and reads clearer than any
-                // environment error. Both skip the spinner round-trip.
-                let cookies = match crate::video::cookies_file(&settings_b.cookies_path()) {
-                    Ok(cookies) => cookies,
-                    Err(e) => {
-                        if generation_b.get() != my {
-                            return;
-                        }
-                        info_b.borrow_mut().take();
-                        show_video_error(&step_b, &e.to_string());
-                        return;
-                    }
-                };
-                // Fast local tools check first: missing tools show Install
-                // with no spinner round-trip.
+                // User config first, then tools: the worker resolves browser
+                // cookie paths itself via XDG (see real_config_home), so a
+                // broken path here is the user's own doing and reads clearer
+                // than any environment error. Both skip the spinner round-trip.
                 let libs = match crate::video::resolve_libraries() {
                     Ok(libs) => libs,
                     Err(e) => {
@@ -1590,7 +1578,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 match crate::video::fetch_video_infos(
                     libs,
                     url.clone(),
-                    cookies,
+                    None,
                     settings_b.cookies_browser(),
                 )
                 .await
