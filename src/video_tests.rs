@@ -1003,6 +1003,33 @@ fn video_format_options_lists_best_per_height() {
 }
 
 #[test]
+fn unavailable_detail_counts_rejections() {
+    let mut no_link = test_format_full("n", "avc1", "none", Some(720), None, "https", false);
+    no_link.as_object_mut().unwrap().remove("url");
+    let formats: Vec<yt_dlp::model::format::Format> = serde_json::from_value(serde_json::json!([
+        test_format_full("v", "avc1", "none", Some(720), None, "https", false),
+        test_format_full("h", "avc1", "none", Some(720), None, "m3u8_native", false),
+        test_format_full("d", "avc1", "none", Some(720), None, "https", true),
+        no_link,
+    ]))
+    .unwrap();
+    let message = match VideoError::unavailable_detail(&formats) {
+        VideoError::Message(m) => m,
+        other => panic!("expected message, got {other:?}"),
+    };
+    assert!(message.contains("4 listed"), "{message}");
+    assert!(message.contains("manifest: 1"), "{message}");
+    assert!(message.contains("DRM: 1"), "{message}");
+    assert!(message.contains("no link: 1"), "{message}");
+    assert!(message.contains("video-only: 1"), "{message}");
+    let empty = match VideoError::unavailable_detail(&[]) {
+        VideoError::Message(m) => m,
+        other => panic!("expected message, got {other:?}"),
+    };
+    assert!(empty.contains("listed none"), "{empty}");
+}
+
+#[test]
 fn codec_rank_orders_newest_first() {
     assert!(codec_rank("av01.0.08M.08") < codec_rank("vp9"));
     assert!(codec_rank("VP9") < codec_rank("hev1.1.6.L93"));

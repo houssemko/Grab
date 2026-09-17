@@ -981,3 +981,23 @@ msgstr ""
 #: src/preferences.rs:649
 msgid "Couldn't check for updates"
 msgstr ""
+
+#: src/video.rs:340
+msgid "No suitable formats found for this media ({total} listed: {reasons})"
+msgstr ""
+
+#: src/video.rs:330
+msgid "manifest"
+msgstr ""
+
+#: src/video.rs:331
+msgid "DRM"
+msgstr ""
+
+#: src/video.rs:332
+msgid "no link"
+msgstr ""
+
+#: src/video.rs:333
+msgid "video-only"
+msgstr ""

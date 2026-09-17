@@ -292,6 +292,56 @@ impl VideoError {
     fn unavailable() -> Self {
         Self::Message(gettext("No suitable formats found for this media"))
     }
+    /// Same failure with a rejection census, so a page of manifest-only
+    /// variants (live/HLS pages) reads differently from a DRM or
+    /// link-less one instead of guessing.
+    fn unavailable_detail(formats: &[Format]) -> Self {
+        let total = formats.len();
+        if total == 0 {
+            return Self::Message(gettext(
+                "No suitable formats found for this media (the page listed none)",
+            ));
+        }
+        let (mut manifest, mut drm, mut no_link, mut video_only) = (0, 0, 0, 0);
+        for f in formats {
+            if f.protocol != Protocol::Https {
+                manifest += 1;
+            } else if matches!(f.has_drm, Some(DrmStatus::Yes)) {
+                drm += 1;
+            } else if f
+                .download_info
+                .url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .is_none()
+            {
+                no_link += 1;
+            } else if f
+                .codec_info
+                .audio_codec
+                .as_deref()
+                .is_none_or(|c| c == "none")
+            {
+                video_only += 1;
+            }
+        }
+        let mut reasons = Vec::new();
+        for (n, label) in [
+            (manifest, gettext("manifest")),
+            (drm, gettext("DRM")),
+            (no_link, gettext("no link")),
+            (video_only, gettext("video-only")),
+        ] {
+            if n > 0 {
+                reasons.push(format!("{label}: {n}"));
+            }
+        }
+        Self::Message(
+            gettext("No suitable formats found for this media ({total} listed: {reasons})")
+                .replace("{total}", &total.to_string())
+                .replace("{reasons}", &reasons.join(", ")),
+        )
+    }
     fn part_failed(e: impl std::fmt::Display) -> Self {
         Self::Message(
             gettext("Media download failed: {detail}").replace("{detail}", &e.to_string()),
@@ -1570,7 +1620,7 @@ pub async fn run_video_download(
         }
     }
     let Some(audio_sel) = audio_sel else {
-        return Err(VideoError::unavailable());
+        return Err(VideoError::unavailable_detail(&video.formats));
     };
 
     tracing::info!(
