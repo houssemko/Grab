@@ -998,21 +998,23 @@ fn sanitize_video_json(value: &mut serde_json::Value) {
             serde_json::json!({"version": "", "repository": ""}),
         );
     }
-    // Unread arrays/objects: one sparse entry must not fail the video.
+    // Unread arrays/objects: one sparse entry must not fail the video,
+    // so they are always reset — not just when absent. Some extractors
+    // (TikTok) also emit explicit nulls, which serde defaults don't
+    // cover (those only fill in missing keys). Formats are read by the
+    // pipeline, so they are repaired entry by entry below instead.
     for key in ["thumbnails", "chapters", "tags", "categories"] {
-        if obj.contains_key(key) {
-            obj.insert(key.to_string(), serde_json::json!([]));
-        }
+        obj.insert(key.to_string(), serde_json::json!([]));
     }
     for key in ["subtitles", "automatic_captions"] {
-        if obj.contains_key(key) {
-            obj.insert(key.to_string(), serde_json::json!({}));
-        }
+        obj.insert(key.to_string(), serde_json::json!({}));
     }
-    if obj.contains_key("heatmap") {
-        obj.insert("heatmap".to_string(), serde_json::Value::Null);
+    obj.insert("heatmap".to_string(), serde_json::Value::Null);
+    if !obj.get("formats").is_some_and(|v| v.is_array()) {
+        obj.insert("formats".to_string(), serde_json::json!([]));
     }
     if let Some(formats) = obj.get_mut("formats").and_then(|f| f.as_array_mut()) {
+        formats.retain(|f| f.is_object());
         for format in formats.iter_mut() {
             if let Some(entry) = format.as_object_mut() {
                 coerce_int_fields(entry);
@@ -1321,6 +1323,235 @@ fn parse_progress_size(line: &str) -> Option<u64> {
         return None;
     }
     raw.trim().parse().ok()
+}
+
+/// One variant (`EXT-X-STREAM-INF`) of an HLS master playlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HlsVariant {
+    uri: String,
+    height: Option<u32>,
+    audio_group: Option<String>,
+}
+
+/// One audio rendition (`EXT-X-MEDIA TYPE=AUDIO`) of a master playlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HlsAudio {
+    group: String,
+    uri: Option<String>,
+}
+
+/// Split an HLS tag attribute list on commas outside quotes
+/// (`BANDWIDTH=123,RESOLUTION=640x360,AUDIO="a"`).
+fn split_hls_attrs(line: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                parts.push(line[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(line[start..].trim());
+    parts
+}
+
+/// Parse one `KEY=VALUE` attribute pair, unquoting the value.
+fn hls_attr(part: &str) -> Option<(&str, &str)> {
+    let (key, value) = part.split_once('=')?;
+    Some((key.trim(), value.trim().trim_matches('"')))
+}
+
+/// Height from a `RESOLUTION=WxH` value.
+fn hls_resolution_height(value: &str) -> Option<u32> {
+    value.split_once('x')?.1.parse().ok()
+}
+
+/// Parse an HLS master playlist into variants + audio renditions,
+/// resolving relative URIs against the playlist URL. Returns `None`
+/// when the text is a media playlist (segments, no variants), which
+/// the caller downloads directly.
+fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec<HlsAudio>)> {
+    let mut variants = Vec::new();
+    let mut audios = Vec::new();
+    let mut pending: Option<HlsVariant> = None;
+    let mut is_master = false;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if let Some(rest) = line.strip_prefix("#EXT-X-STREAM-INF:") {
+            is_master = true;
+            let mut variant = HlsVariant {
+                uri: String::new(),
+                height: None,
+                audio_group: None,
+            };
+            for part in split_hls_attrs(rest) {
+                match hls_attr(part) {
+                    Some(("RESOLUTION", v)) => variant.height = hls_resolution_height(v),
+                    Some(("AUDIO", v)) => variant.audio_group = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+            pending = Some(variant);
+        } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA:") {
+            let (mut kind, mut group, mut uri) = ("", "", None);
+            for part in split_hls_attrs(rest) {
+                match hls_attr(part) {
+                    Some(("TYPE", v)) => kind = v,
+                    Some(("GROUP-ID", v)) => group = v,
+                    Some(("URI", v)) => uri = Some(v.to_string()),
+                    _ => {}
+                }
+            }
+            if kind == "AUDIO" && !group.is_empty() {
+                let uri = uri.and_then(|u| base.join(&u).ok()).map(|u| u.to_string());
+                audios.push(HlsAudio {
+                    group: group.to_string(),
+                    uri,
+                });
+            }
+        } else if !line.starts_with('#')
+            && let Some(mut variant) = pending.take()
+            && let Ok(uri) = base.join(line)
+        {
+            variant.uri = uri.to_string();
+            variants.push(variant);
+        }
+    }
+    if !is_master {
+        return None;
+    }
+    Some((variants, audios))
+}
+
+/// Concrete ffmpeg inputs for one HLS capture: the video playlist
+/// plus, when the variant carries separate audio, its rendition URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HlsInput {
+    video: String,
+    audio: Option<String>,
+}
+
+/// Pick the variant for a height cap (smallest at or above, else
+/// tallest — the same rule as [`select_hls_format`]), preferring
+/// variants that actually carry audio, and attach their rendition.
+fn pick_hls_variant(
+    variants: &[HlsVariant],
+    audios: &[HlsAudio],
+    want: Option<u32>,
+) -> Option<HlsInput> {
+    let mut cands: Vec<&HlsVariant> = variants.iter().filter(|v| !v.uri.is_empty()).collect();
+    if cands.is_empty() {
+        return None;
+    }
+    // Audio-bearing first (muxed variants have no AUDIO tag, which
+    // also counts), then closest height at or above the cap.
+    cands.sort_by_key(|v| {
+        let has_audio = v.audio_group.is_none()
+            || audios
+                .iter()
+                .any(|a| Some(a.group.as_str()) == v.audio_group.as_deref() && a.uri.is_some());
+        (!has_audio, v.height.unwrap_or(0))
+    });
+    let pick = match want {
+        Some(h) => cands
+            .iter()
+            .find(|v| v.height.is_some_and(|x| x >= h))
+            .or_else(|| cands.iter().max_by_key(|v| v.height.unwrap_or(0)))
+            .cloned(),
+        None => cands.into_iter().max_by_key(|v| v.height.unwrap_or(0)),
+    }?;
+    let audio = pick.audio_group.as_deref().and_then(|group| {
+        audios
+            .iter()
+            .find(|a| a.group == group)
+            .and_then(|a| a.uri.clone())
+    });
+    Some(HlsInput {
+        video: pick.uri.clone(),
+        audio,
+    })
+}
+
+/// Request headers for playlist fetches: extractor-resolved headers
+/// with the configured user agent winning. Empty values are skipped.
+fn hls_request_headers(headers: &HttpHeaders, user_agent: &str) -> reqwest::header::HeaderMap {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let ua = if user_agent.trim().is_empty() {
+        headers.user_agent.as_str()
+    } else {
+        user_agent.trim()
+    };
+    let mut map = HeaderMap::new();
+    for (name, value) in [
+        ("user-agent", ua),
+        ("accept", headers.accept.as_str()),
+        ("accept-language", headers.accept_language.as_str()),
+        ("sec-fetch-mode", headers.sec_fetch_mode.as_str()),
+    ] {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            map.insert(name, value);
+        }
+    }
+    map
+}
+
+/// Resolve what ffmpeg should open for one HLS format URL: when the URL
+/// is a master playlist, pick the height-appropriate variant (plus its
+/// audio rendition, if separate); otherwise — media playlist, fetch
+/// failure, anything unexpected — hand ffmpeg the URL untouched, which
+/// is exactly today's behavior.
+async fn resolve_hls_input(
+    url: &str,
+    headers: &HttpHeaders,
+    user_agent: &str,
+    want: Option<u32>,
+) -> HlsInput {
+    let fallback = || HlsInput {
+        video: url.to_string(),
+        audio: None,
+    };
+    let Ok(base) = url::Url::parse(url) else {
+        return fallback();
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .ok();
+    let Some(client) = client else {
+        return fallback();
+    };
+    let text = match client
+        .get(url)
+        .headers(hls_request_headers(headers, user_agent))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.text().await {
+            Ok(text) => text,
+            Err(_) => return fallback(),
+        },
+        _ => return fallback(),
+    };
+    if !text.contains("#EXT-X-STREAM-INF") {
+        return fallback();
+    }
+    match parse_hls_master(&text, &base) {
+        Some((variants, audios)) => {
+            pick_hls_variant(&variants, &audios, want).unwrap_or_else(fallback)
+        }
+        None => fallback(),
+    }
 }
 
 /// Find one format by id, accepting only what the pipeline can fetch.
@@ -2132,21 +2363,36 @@ async fn run_hls_download(
         .await
         .map_err(VideoError::staging)?;
     let out_path = staging.join(if job.audio_only { "hls.m4a" } else { "hls.mp4" });
+    // Master playlists resolve to a height-appropriate variant plus its
+    // audio rendition when separate; anything else passes through as today's
+    // single input.
+    let input = resolve_hls_input(&hls.url, &hls.headers, &job.user_agent, hls.height).await;
     let mut cmd = tokio::process::Command::new(ffmpeg);
     cmd.arg("-hide_banner")
         .arg("-loglevel")
         .arg("warning")
         .arg("-nostats")
         .arg("-progress")
-        .arg("pipe:1")
-        .arg("-i")
-        .arg(&hls.url);
+        .arg("pipe:1");
     let headers = ffmpeg_headers(&hls.headers, &job.user_agent);
-    if !headers.is_empty() {
-        cmd.arg("-headers").arg(headers);
-    }
+    // `-headers` is per-input: it must precede each `-i` it covers.
+    let input_arg = |cmd: &mut tokio::process::Command, url: &str| {
+        if !headers.is_empty() {
+            cmd.arg("-headers").arg(&headers);
+        }
+        cmd.arg("-i").arg(url);
+    };
     if job.audio_only {
+        // Audio rendition alone when split (skips the video segments),
+        // else the variant with video dropped.
+        input_arg(&mut cmd, input.audio.as_deref().unwrap_or(&input.video));
         cmd.arg("-vn");
+    } else if let Some(audio) = &input.audio {
+        input_arg(&mut cmd, &input.video);
+        input_arg(&mut cmd, audio);
+        cmd.arg("-map").arg("0:v:0").arg("-map").arg("1:a:0");
+    } else {
+        input_arg(&mut cmd, &input.video);
     }
     cmd.arg("-c")
         .arg("copy")
