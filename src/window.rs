@@ -1192,6 +1192,7 @@ fn show_rename_dialog(
     let dialog = adw::Dialog::builder()
         .title(gettext("Rename Download"))
         .build();
+    dialog.set_follows_content_size(true);
     dialog.set_content_width(380);
 
     let page = adw::PreferencesPage::new();
@@ -1337,6 +1338,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("New Download"))
         .build();
+    dialog.set_follows_content_size(true);
     dialog.set_content_width(420);
 
     let page = adw::PreferencesPage::new();
@@ -2179,6 +2181,7 @@ pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("Add Multiple URLs"))
         .build();
+    dialog.set_follows_content_size(true);
     dialog.set_content_width(480);
 
     let page = adw::PreferencesPage::new();
@@ -2294,6 +2297,7 @@ pub(crate) fn show_torrent_files_dialog(
     entries: Vec<crate::torrent::TorrentFileEntry>,
 ) {
     let dialog = adw::Dialog::builder().title(&file_name).build();
+    dialog.set_follows_content_size(true);
     dialog.set_content_width(420);
 
     let page = adw::PreferencesPage::new();
