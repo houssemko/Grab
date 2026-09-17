@@ -30,7 +30,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use yt_dlp::Downloader;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
-use yt_dlp::model::format::{Format, HttpHeaders, Protocol};
+use yt_dlp::model::format::{Extension, Format, FormatType, HttpHeaders, Protocol};
 use yt_dlp::model::selector::{
     AudioCodecPreference, AudioQuality, VideoCodecPreference, VideoQuality,
 };
@@ -319,7 +319,8 @@ impl VideoError {
                 "No suitable formats found for this media (the page listed none)",
             ));
         }
-        let (mut manifest, mut drm, mut no_link, mut video_only) = (0, 0, 0, 0);
+        let (mut manifest, mut drm, mut no_link, mut video_only, mut unclassified) =
+            (0, 0, 0, 0, 0);
         for f in formats {
             if f.protocol != Protocol::Https {
                 manifest += 1;
@@ -333,6 +334,8 @@ impl VideoError {
                 .is_none()
             {
                 no_link += 1;
+            } else if f.format_type() == FormatType::Unknown {
+                unclassified += 1;
             } else if f
                 .codec_info
                 .audio_codec
@@ -348,6 +351,7 @@ impl VideoError {
             (drm, gettext("DRM")),
             (no_link, gettext("no link")),
             (video_only, gettext("video-only")),
+            (unclassified, gettext("unclassified")),
         ] {
             if n > 0 {
                 reasons.push(format!("{label}: {n}"));
@@ -997,7 +1001,14 @@ fn sanitize_video_json(value: &mut serde_json::Value) {
             "_version".to_string(),
             serde_json::json!({"version": "", "repository": ""}),
         );
+    } else if let Some(ver) = obj.get_mut("_version").and_then(|v| v.as_object_mut()) {
+        // Present-but-sparse version blocks fail the parse the same way.
+        ver.entry("version").or_insert(serde_json::json!(""));
+        ver.entry("repository").or_insert(serde_json::json!(""));
     }
+    // downloader_options is never read: a sparse object (just
+    // http_chunk_size today) would fail the parse for nothing.
+    obj.remove("downloader_options");
     // Unread arrays/objects: one sparse entry must not fail the video,
     // so they are always reset — not just when absent. Some extractors
     // (TikTok) also emit explicit nulls, which serde defaults don't
@@ -1234,6 +1245,9 @@ struct HlsSel {
     /// formats: used when the variant's own master names no audio.
     /// Set after selection; [`HlsSel::from_format`] leaves it empty.
     fallback_audio: Option<String>,
+    /// Overall bitrate in bits per second from the format metadata:
+    /// size-estimate fallback when playlists name no bandwidth.
+    bandwidth_bps: Option<u64>,
 }
 
 impl HlsSel {
@@ -1251,6 +1265,12 @@ impl HlsSel {
             headers: f.download_info.http_headers.clone(),
             height: f.video_resolution.height.filter(|&h| h > 0),
             fallback_audio: None,
+            // yt-dlp reports kilobits per second here.
+            bandwidth_bps: f
+                .rates_info
+                .total_rate
+                .map(|r| r.into_inner() as u64 * 1000)
+                .filter(|&b| b > 0),
         })
     }
 }
@@ -1294,7 +1314,8 @@ fn find_hls_format(formats: &[Format], id: &str) -> Option<HlsSel> {
 
 /// URL of an audio-only HLS format, when the page lists HLS audio
 /// beside (not inside) its video variants: used when the picked
-/// variant's own master names no audio rendition.
+/// variant's own master names no audio rendition. Highest bitrate
+/// wins; subtitles masquerading as audio-less video never qualify.
 fn select_hls_audio_url(formats: &[Format]) -> Option<String> {
     formats
         .iter()
@@ -1310,8 +1331,17 @@ fn select_hls_audio_url(formats: &[Format]) -> Option<String> {
                     .as_deref()
                     .is_some_and(|c| c != "none")
         })
-        .filter_map(|f| f.download_info.url.clone())
-        .find(|u| !u.is_empty())
+        .filter_map(|f| {
+            f.download_info.url.clone().and_then(|url| {
+                if url.is_empty() {
+                    return None;
+                }
+                let bitrate = f.rates_info.total_rate.map(|r| r.into_inner() as i64);
+                Some((bitrate.unwrap_or(0), url))
+            })
+        })
+        .max_by_key(|(bitrate, _)| *bitrate)
+        .map(|(_, url)| url)
 }
 
 /// `-headers` value for ffmpeg: the extractor-resolved headers
@@ -1331,12 +1361,16 @@ fn ffmpeg_headers(headers: &HttpHeaders, user_agent: &str) -> String {
         ("Sec-Fetch-Mode", headers.sec_fetch_mode.as_str()),
     ] {
         let value = value.trim();
-        if !value.is_empty() {
-            out.push_str(name);
-            out.push_str(": ");
-            out.push_str(value);
-            out.push_str("\r\n");
+        // Reject embedded newlines like the reqwest side does
+        // (HeaderValue::from_str): extractor JSON controls these
+        // values, and a CR/LF would inject headers into ffmpeg.
+        if value.is_empty() || value.bytes().any(|b| b == b'\r' || b == b'\n') {
+            continue;
         }
+        out.push_str(name);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push_str("\r\n");
     }
     out
 }
@@ -1361,6 +1395,8 @@ struct HlsVariant {
     /// Raw CODECS attribute: variants naming both an audio and a video
     /// codec carry muxed segments, so no separate audio is needed.
     codecs: Option<String>,
+    /// Peak bandwidth in bits per second, for size estimates.
+    bandwidth: Option<u64>,
 }
 
 /// One audio rendition (`EXT-X-MEDIA TYPE=AUDIO`) of a master playlist.
@@ -1442,12 +1478,14 @@ fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec
                 height: None,
                 audio_group: None,
                 codecs: None,
+                bandwidth: None,
             };
             for part in split_hls_attrs(rest) {
                 match hls_attr(part) {
                     Some(("RESOLUTION", v)) => variant.height = hls_resolution_height(v),
                     Some(("AUDIO", v)) => variant.audio_group = Some(v.to_string()),
                     Some(("CODECS", v)) => variant.codecs = Some(v.to_string()),
+                    Some(("BANDWIDTH", v)) => variant.bandwidth = v.parse().ok(),
                     _ => {}
                 }
             }
@@ -1493,6 +1531,11 @@ fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec
 struct HlsInput {
     video: String,
     audio: Option<String>,
+    /// Peak variant bandwidth in bits per second, for size estimates.
+    bandwidth_bps: Option<u64>,
+    /// Estimated total bytes (bandwidth × media duration), when both
+    /// are known: drives the block map like engine rows.
+    total_bytes: Option<u64>,
 }
 
 /// Pick the variant for a height cap (smallest at or above, else
@@ -1525,9 +1568,13 @@ fn pick_hls_variant(
     };
     cands.sort_by_key(|v| (audio_score(v), v.height.unwrap_or(0)));
     let pick = match want {
+        // Sounding variants first even against the cap: a shorter
+        // variant with audio beats silent height-fit.
         Some(h) => cands
             .iter()
+            .filter(|v| audio_score(v) < 2)
             .find(|v| v.height.is_some_and(|x| x >= h))
+            .or_else(|| cands.iter().find(|v| v.height.is_some_and(|x| x >= h)))
             .or_else(|| cands.iter().max_by_key(|v| v.height.unwrap_or(0)))
             .cloned(),
         None => cands
@@ -1548,7 +1595,41 @@ fn pick_hls_variant(
     Some(HlsInput {
         video: pick.uri.clone(),
         audio,
+        bandwidth_bps: pick.bandwidth.filter(|&b| b > 0),
+        // Duration needs the variant media playlist; resolved by the
+        // caller, which already holds the playlist client.
+        total_bytes: None,
     })
+}
+
+/// Upper bound for block-map size estimates: garbage bandwidth figures
+/// must never size a bitmap to absurdity (piece counts stay bounded
+/// the same way engine totals do).
+const HLS_MAP_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+
+/// Total media duration of an HLS media playlist: sum of EXTINF
+/// segment lengths. Sliding live windows sum to what's listed.
+fn hls_media_duration(text: &str) -> f64 {
+    text.lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#EXTINF:")
+                .and_then(|rest| rest.split(',').next())
+                .and_then(|n| n.trim().parse::<f64>().ok())
+                .filter(|n| n.is_finite() && *n > 0.0)
+        })
+        .sum()
+}
+
+/// Estimated capture size from peak bandwidth and media duration.
+/// `None` when either is unknown or the math overflows the map cap.
+fn hls_estimated_total(bandwidth_bps: Option<u64>, duration_secs: f64) -> Option<u64> {
+    let total = (bandwidth_bps? as f64) * duration_secs / 8.0;
+    if total.is_finite() && total >= 1.0 && total <= HLS_MAP_MAX_BYTES as f64 {
+        Some(total as u64)
+    } else {
+        None
+    }
 }
 
 /// Request headers for playlist fetches: extractor-resolved headers
@@ -1586,15 +1667,37 @@ fn hls_request_headers(headers: &HttpHeaders, user_agent: &str) -> reqwest::head
 /// audio rendition, if separate); otherwise — media playlist, fetch
 /// failure, anything unexpected — hand ffmpeg the URL untouched, which
 /// is exactly today's behavior.
+/// Fetch one playlist as text: `None` on any network, status or
+/// body failure. Callers fall back to handing ffmpeg the URL blind.
+async fn fetch_playlist_text(
+    client: &reqwest::Client,
+    url: &str,
+    headers: &HttpHeaders,
+    user_agent: &str,
+) -> Option<String> {
+    match client
+        .get(url)
+        .headers(hls_request_headers(headers, user_agent))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
+        _ => None,
+    }
+}
+
 async fn resolve_hls_input(
     url: &str,
     headers: &HttpHeaders,
     user_agent: &str,
     want: Option<u32>,
+    fallback_bps: Option<u64>,
 ) -> HlsInput {
     let fallback = || HlsInput {
         video: url.to_string(),
         audio: None,
+        bandwidth_bps: fallback_bps,
+        total_bytes: None,
     };
     let Ok(base) = url::Url::parse(url) else {
         return fallback();
@@ -1606,27 +1709,33 @@ async fn resolve_hls_input(
     let Some(client) = client else {
         return fallback();
     };
-    let text = match client
-        .get(url)
-        .headers(hls_request_headers(headers, user_agent))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => match resp.text().await {
-            Ok(text) => text,
-            Err(_) => return fallback(),
-        },
-        _ => return fallback(),
+    let Some(text) = fetch_playlist_text(&client, url, headers, user_agent).await else {
+        return fallback();
     };
     if !text.contains("#EXT-X-STREAM-INF") {
+        // Media playlist straight away: durations are listed, size
+        // comes from the format's own bitrate when known.
+        let total = hls_estimated_total(fallback_bps, hls_media_duration(&text));
+        let mut input = fallback();
+        input.total_bytes = total;
+        return input;
+    }
+    let Some((variants, audios)) = parse_hls_master(&text, &base) else {
         return fallback();
+    };
+    let Some(mut input) = pick_hls_variant(&variants, &audios, want) else {
+        return fallback();
+    };
+    // Variant media playlists list their own segments: sum them for
+    // the estimate. A failed fetch just drops the map, never the
+    // download — ffmpeg opens the same URL itself below.
+    if let Some(media) = fetch_playlist_text(&client, &input.video, headers, user_agent).await {
+        input.total_bytes = hls_estimated_total(
+            input.bandwidth_bps.or(fallback_bps),
+            hls_media_duration(&media),
+        );
     }
-    match parse_hls_master(&text, &base) {
-        Some((variants, audios)) => {
-            pick_hls_variant(&variants, &audios, want).unwrap_or_else(fallback)
-        }
-        None => fallback(),
-    }
+    input
 }
 
 /// Find one format by id, accepting only what the pipeline can fetch.
@@ -2058,6 +2167,10 @@ pub async fn run_video_download(
     // lockers): adopt the file directly instead of failing on the missing
     // split counterpart. A downloaded track beats a failed row; the
     // manifest records the effective single-part mode so retries agree.
+    // Unclassified last resort (TikTok-style sparse extractors): both
+    // codec fields missing leaves media typed Unknown — invisible to
+    // every selector above. Only video-container extensions qualify,
+    // so storyboards and manifests can never adopt here.
     let mut audio_only = job.audio_only;
     if audio_sel.is_none() {
         let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
@@ -2067,6 +2180,24 @@ pub async fn run_video_download(
                 .and_then(|m| StreamSel::from_format(m).ok())
         });
         if let Some(m) = muxed {
+            audio_sel = Some(m);
+            audio_only = true;
+        }
+    }
+    if audio_sel.is_none() {
+        let unknown = video.formats.iter().find(|f| {
+            f.format_type() == FormatType::Unknown
+                && matches!(
+                    f.download_info.ext,
+                    Extension::Mp4
+                        | Extension::Webm
+                        | Extension::Avi
+                        | Extension::Flv
+                        | Extension::Ts
+                )
+                && StreamSel::from_format(f).is_ok()
+        });
+        if let Some(m) = unknown.and_then(|m| StreamSel::from_format(m).ok()) {
             audio_sel = Some(m);
             audio_only = true;
         }
@@ -2447,7 +2578,14 @@ async fn run_hls_download(
     // Master playlists resolve to a height-appropriate variant plus its
     // audio rendition when separate; anything else passes through as today's
     // single input.
-    let mut input = resolve_hls_input(&hls.url, &hls.headers, &job.user_agent, hls.height).await;
+    let mut input = resolve_hls_input(
+        &hls.url,
+        &hls.headers,
+        &job.user_agent,
+        hls.height,
+        hls.bandwidth_bps,
+    )
+    .await;
     // Page-level fallback: the master named no audio, but the page
     // lists an audio-only HLS rendition beside its video variants.
     if input.audio.is_none() {
@@ -2499,9 +2637,17 @@ async fn run_hls_download(
     // full, and the tail diagnoses failures. Progress reports byte
     // amounts with unknown total, like length-less engine rows.
     let tx_p = tx.clone();
+    // Block map for parity with engine rows: mark the completed piece
+    // prefix as bytes land. Estimates can overshoot (live windows,
+    // peak-vs-average bitrate); overruns are ignored downstream.
+    let map_total = input.total_bytes;
+    if let Some(total) = map_total {
+        tx.send(EngineMsg::SegmentsInit { total }).ok();
+    }
+    let map_piece = map_total.map(crate::download::piece_len);
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let (mut sent, mut have) = (0u64, 0u64);
+        let (mut sent, mut have, mut piece_done) = (0u64, 0u64, 0u64);
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(n) = parse_progress_size(&line) {
                 have = have.max(n);
@@ -2514,6 +2660,13 @@ async fn run_hls_download(
                         upload_bps: 0,
                     })
                     .ok();
+                    if let Some(piece) = map_piece {
+                        let done_idx = have / piece;
+                        while piece_done < done_idx {
+                            tx_p.send(EngineMsg::PieceDone(piece_done)).ok();
+                            piece_done += 1;
+                        }
+                    }
                 }
             }
         }
