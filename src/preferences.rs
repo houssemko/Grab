@@ -389,7 +389,7 @@ pub fn show(
         }
     }
     let video_page = adw::PreferencesPage::builder()
-        .title(gettext("Video"))
+        .title(gettext("Media"))
         .icon_name("video-x-generic-symbolic")
         .build();
     let video_quality_group = adw::PreferencesGroup::builder()
@@ -399,7 +399,7 @@ pub fn show(
     let video_refs: Vec<&str> = video_labels.iter().map(String::as_str).collect();
     let video_quality = adw::ComboRow::builder()
         .title(gettext("Preferred quality"))
-        .subtitle(gettext("Used for new video downloads"))
+        .subtitle(gettext("Used for new media downloads"))
         .model(&gtk4::StringList::new(&video_refs))
         .build();
     video_quality.set_selected(crate::video::quality_index(&settings.video_quality()) as u32);
@@ -427,7 +427,7 @@ pub fn show(
     });
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
-        .subtitle(gettext("New video downloads skip the video track"))
+        .subtitle(gettext("New media downloads skip the video track"))
         .build();
     settings
         .bind(
@@ -479,10 +479,10 @@ pub fn show(
     });
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
-        .description(gettext("yt-dlp and ffmpeg resolve video pages"))
+        .description(gettext("yt-dlp and ffmpeg resolve media pages"))
         .build();
     let video_tools_row = adw::ActionRow::builder()
-        .title(gettext("Video support tools"))
+        .title(gettext("Media support tools"))
         .build();
     let video_tools_btn = gtk4::Button::builder().valign(gtk4::Align::Center).build();
     video_tools_row.set_activatable_widget(Some(&video_tools_btn));

@@ -651,7 +651,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
     assert_eq!(item.status(), DownloadStatus::Failed);
     assert_eq!(
         item.detail(),
-        "Video downloads need the yt-dlp support tools"
+        "Media downloads need the yt-dlp support tools"
     );
     // The Page marker survives the failure, so Retry replays the pipeline.
     assert!(matches!(

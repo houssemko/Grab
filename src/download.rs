@@ -1973,7 +1973,7 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         if !crate::video::is_video_page(&url) {
-            return Err(gettext("That link is not a supported video page"));
+            return Err(gettext("That link is not a supported media page"));
         }
         let dir = self.resolve_dir(dest_dir);
         let name = filename
@@ -1992,7 +1992,11 @@ impl DownloadManager {
                     })
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
-        item.set_detail(gettext("Waiting to resolve video…"));
+        item.set_detail(if audio_only {
+            gettext("Waiting to resolve audio…")
+        } else {
+            gettext("Waiting to resolve media…")
+        });
         self.video_sources.borrow_mut().insert(
             item.id(),
             crate::video::VideoSource::Page {
@@ -2046,7 +2050,18 @@ impl DownloadManager {
         if let Some(src) = video_source {
             let matches = matches!(&src, crate::video::VideoSource::Page { page_url, .. } if *page_url == url);
             if matches {
-                item.set_detail(gettext("Waiting to resolve video…"));
+                let audio_only = matches!(
+                    &src,
+                    crate::video::VideoSource::Page {
+                        audio_only: true,
+                        ..
+                    }
+                );
+                item.set_detail(if audio_only {
+                    gettext("Waiting to resolve audio…")
+                } else {
+                    gettext("Waiting to resolve media…")
+                });
                 self.video_sources.borrow_mut().insert(item.id(), src);
             } else {
                 tracing::warn!("dropping video source with mismatched page URL");
@@ -2696,7 +2711,11 @@ impl DownloadManager {
         });
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
-        item.set_detail(gettext("Resolving video…"));
+        item.set_detail(if audio_only {
+            gettext("Resolving audio…")
+        } else {
+            gettext("Resolving media…")
+        });
         self.changed();
         self.pump(item, id, generation, rx);
     }

@@ -1266,6 +1266,15 @@ struct VideoStep {
     error: adw::ActionRow,
 }
 
+/// Desensitize the details-page Add button while a lookup resolves.
+/// No-op until the button exists (see `lookup_add`); every terminal
+/// lookup state re-enables it.
+fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
+    if let Some(button) = cell.borrow().as_ref() {
+        button.set_sensitive(enabled);
+    }
+}
+
 fn hide_video_step(v: &VideoStep) {
     v.status.set_visible(false);
     v.name.set_visible(false);
@@ -1331,7 +1340,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     // URLs. All hidden until a lookup runs; exactly one state shows.
     let video_group = adw::PreferencesGroup::new();
     let video_status = adw::ActionRow::builder()
-        .title(gettext("Looking up video…"))
+        .title(gettext("Looking up media…"))
         .build();
     let video_spinner = gtk4::Spinner::new();
     video_spinner.start();
@@ -1360,7 +1369,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     // rest are exact pinnable formats, tallest first. Starts with only
     // Best match until the first lookup lands.
     let video_quality = adw::ComboRow::builder()
-        .title(gettext("Video format"))
+        .title(gettext("Media format"))
         .subtitle(gettext("Best match follows your preferred quality"))
         .model(&gtk4::StringList::new(&[gettext("Best match").as_str()]))
         .build();
@@ -1386,7 +1395,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     video_tools.set_visible(false);
     video_group.add(&video_tools);
     let video_error = adw::ActionRow::builder()
-        .title(gettext("Couldn't load the video preview"))
+        .title(gettext("Couldn't load the media preview"))
         .build();
     let video_retry_btn = gtk4::Button::builder()
         .label(gettext("Retry"))
@@ -1502,6 +1511,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     // text): the changed handler below must ignore that synthetic edit, or
     // every failed Enter-submit would drop the preview and re-resolve.
     let video_quiet = Rc::new(Cell::new(false));
+    // The details-page Add button, desensitized while a lookup is in
+    // flight: submit already refuses early adds with a message, but a
+    // dead button says so upfront. Populated once the button exists.
+    let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
     let kick_video = {
         let generation = video_generation.clone();
         let last_ok = video_last_ok.clone();
@@ -1512,6 +1525,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let dialog_weak = dialog.downgrade();
         let formats_kick = format_ids.clone();
         let settings2 = manager.settings().clone();
+        let lookup_add_kick = lookup_add.clone();
         Rc::new(move || {
             let my = generation.get() + 1;
             generation.set(my);
@@ -1525,6 +1539,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 settings_b,
                 file_b,
                 formats_b,
+                lookup_add_b,
             ) = (
                 generation.clone(),
                 last_ok.clone(),
@@ -1535,6 +1550,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 settings2.clone(),
                 file_row2.clone(),
                 formats_kick.clone(),
+                lookup_add_kick.clone(),
             );
             glib::spawn_future_local(async move {
                 if dialog_b.upgrade().is_none() {
@@ -1544,10 +1560,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 if url.is_empty() || !crate::video::is_video_page(&url) {
                     hide_video_step(&step_b);
                     info_b.borrow_mut().take();
+                    set_lookup_add(&lookup_add_b, true);
                     return;
                 }
                 if crate::video::preview_fresh(&info_b.borrow(), last_b.borrow().as_str(), &url) {
                     show_video_ready(&step_b);
+                    set_lookup_add(&lookup_add_b, true);
                     return;
                 }
                 // Fast local tools check first: missing tools show Install
@@ -1560,10 +1578,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         }
                         info_b.borrow_mut().take();
                         show_video_tools_missing(&step_b, &e.to_string());
+                        set_lookup_add(&lookup_add_b, true);
                         return;
                     }
                 };
                 show_video_loading(&step_b);
+                set_lookup_add(&lookup_add_b, false);
                 match crate::video::fetch_video_infos(
                     libs,
                     url.clone(),
@@ -1582,6 +1602,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             "video preview failed"
                         );
                         show_video_error(&step_b, &e.to_string());
+                        set_lookup_add(&lookup_add_b, true);
                     }
                     Ok(v) => {
                         if generation_b.get() != my {
@@ -1629,6 +1650,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         step_b.quality.set_selected(0);
                         *info_b.borrow_mut() = Some(v);
                         show_video_ready(&step_b);
+                        set_lookup_add(&lookup_add_b, true);
                     }
                 }
             });
@@ -1880,6 +1902,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     video_hb.pack_end(&final_add_btn);
     video_toolbar.add_top_bar(&video_hb);
     video_toolbar.set_content(Some(&video_page));
+    // Wire the lookup gate: the kick above desensitizes this button while
+    // resolving and re-enables it at every terminal state.
+    lookup_add.replace(Some(final_add_btn.clone()));
 
     let entry_nav_page = adw::NavigationPage::builder()
         .tag("entry")
@@ -1889,7 +1914,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         .build();
     let video_nav_page = adw::NavigationPage::builder()
         .tag("video")
-        .title(gettext("Video Details"))
+        .title(gettext("Media Details"))
         .child(&video_toolbar)
         .build();
     let nav = adw::NavigationView::new();
@@ -1925,6 +1950,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
         let nav2 = nav.clone();
         let video_nav_page2 = video_nav_page.clone();
         let formats = format_ids.clone();
+        let lookup_add_submit = lookup_add.clone();
         move |rearm_apply: bool| {
             let fail = |message: &str| {
                 error_label.set_text(message);
@@ -2001,7 +2027,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             format_id.as_deref(),
                         ) {
                             Ok(_) => close(),
-                            Err(e) => show_video_error(&step2, &e),
+                            Err(e) => {
+                                show_video_error(&step2, &e);
+                                set_lookup_add(&lookup_add_submit, true);
+                            }
                         }
                     }
                     None => {
@@ -2009,7 +2038,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         show_video_error(
                             &step2,
                             &gettext(
-                                "Still looking up the video — wait for the preview, then add.",
+                                "Still looking up the media — wait for the preview, then add.",
                             ),
                         );
                     }

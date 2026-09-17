@@ -190,14 +190,6 @@ msgstr ""
 msgid "Incomplete piece"
 msgstr ""
 
-#: src/download.rs:1942
-msgid "That link is not a supported video page"
-msgstr ""
-
-#: src/download.rs:1961 src/download.rs:2015
-msgid "Waiting to resolve video…"
-msgstr ""
-
 #: src/download.rs:2063 src/download.rs:2365
 msgid "Finished • {size}"
 msgstr ""
@@ -232,12 +224,6 @@ msgstr ""
 
 #: src/download.rs:2609
 msgid "Starting torrent…"
-msgstr ""
-
-#. Resolve (with retries): the extractor cache already drops expired
-#. format URLs, so a cached hit is safe to download from.
-#: src/download.rs:2678 src/video.rs:1214
-msgid "Resolving video…"
 msgstr ""
 
 #: src/download.rs:2690
@@ -468,10 +454,6 @@ msgstr ""
 msgid "Install"
 msgstr ""
 
-#: src/preferences.rs:392
-msgid "Video"
-msgstr ""
-
 #: src/preferences.rs:396
 msgid "Quality"
 msgstr ""
@@ -480,16 +462,8 @@ msgstr ""
 msgid "Preferred quality"
 msgstr ""
 
-#: src/preferences.rs:402
-msgid "Used for new video downloads"
-msgstr ""
-
 #: src/preferences.rs:429 src/window.rs:1378
 msgid "Audio only"
-msgstr ""
-
-#: src/preferences.rs:430
-msgid "New video downloads skip the video track"
 msgstr ""
 
 #: src/preferences.rs:447
@@ -510,14 +484,6 @@ msgstr ""
 
 #: src/preferences.rs:583 src/window.rs:1384
 msgid "Support tools"
-msgstr ""
-
-#: src/preferences.rs:584
-msgid "yt-dlp and ffmpeg resolve video pages"
-msgstr ""
-
-#: src/preferences.rs:587
-msgid "Video support tools"
 msgstr ""
 
 #: src/preferences.rs:605
@@ -588,24 +554,12 @@ msgstr ""
 msgid "480p"
 msgstr ""
 
-#: src/video.rs:293
-msgid "Video downloads need the yt-dlp support tools"
-msgstr ""
-
 #: src/video.rs:297
 msgid "Couldn't read the video page: {detail}"
 msgstr ""
 
-#: src/video.rs:302
-msgid "Couldn't install the video support tools: {detail}"
-msgstr ""
-
 #: src/video.rs:308
 msgid "Couldn't prepare video staging: {detail}"
-msgstr ""
-
-#: src/video.rs:315
-msgid "No suitable formats found for this video"
 msgstr ""
 
 #: src/video.rs:319
@@ -812,16 +766,8 @@ msgstr ""
 msgid "File name (optional)"
 msgstr ""
 
-#: src/window.rs:1342
-msgid "Looking up video…"
-msgstr ""
-
 #: src/window.rs:1356 src/window.rs:1360
 msgid "Revert to Title"
-msgstr ""
-
-#: src/window.rs:1371
-msgid "Video format"
 msgstr ""
 
 #: src/window.rs:1372
@@ -842,10 +788,6 @@ msgstr ""
 
 #: src/window.rs:1388
 msgid "Download the yt-dlp support tools"
-msgstr ""
-
-#: src/window.rs:1397
-msgid "Couldn't load the video preview"
 msgstr ""
 
 #: src/window.rs:1434
@@ -874,14 +816,6 @@ msgstr ""
 
 #: src/window.rs:1918 src/window.rs:1936 src/window.rs:2127
 msgid "_Add Download"
-msgstr ""
-
-#: src/window.rs:1952
-msgid "Video Details"
-msgstr ""
-
-#: src/window.rs:2072
-msgid "Still looking up the video — wait for the preview, then add."
 msgstr ""
 
 #: src/window.rs:2125
@@ -954,4 +888,76 @@ msgstr ""
 
 #: src/install_help.rs:133
 msgid "Open"
+msgstr ""
+
+#: src/window.rs:1343
+msgid "Looking up media…"
+msgstr ""
+
+#: src/window.rs:1372
+msgid "Media format"
+msgstr ""
+
+#: src/window.rs:1398
+msgid "Couldn't load the media preview"
+msgstr ""
+
+#: src/window.rs:1917
+msgid "Media Details"
+msgstr ""
+
+#: src/window.rs:2041
+msgid "Still looking up the media — wait for the preview, then add."
+msgstr ""
+
+#: src/preferences.rs:392
+msgid "Media"
+msgstr ""
+
+#: src/preferences.rs:402
+msgid "Used for new media downloads"
+msgstr ""
+
+#: src/preferences.rs:430
+msgid "New media downloads skip the video track"
+msgstr ""
+
+#: src/preferences.rs:482
+msgid "yt-dlp and ffmpeg resolve media pages"
+msgstr ""
+
+#: src/preferences.rs:485
+msgid "Media support tools"
+msgstr ""
+
+#: src/download.rs:1976
+msgid "That link is not a supported media page"
+msgstr ""
+
+#: src/download.rs:1996 src/download.rs:2061
+msgid "Waiting to resolve audio…"
+msgstr ""
+
+#: src/download.rs:1998 src/download.rs:2063
+msgid "Waiting to resolve media…"
+msgstr ""
+
+#: src/download.rs:2715 src/video.rs:1423
+msgid "Resolving audio…"
+msgstr ""
+
+#: src/download.rs:2717 src/video.rs:1425
+msgid "Resolving media…"
+msgstr ""
+
+#: src/download_tests.rs:654 src/video.rs:271
+msgid "Media downloads need the yt-dlp support tools"
+msgstr ""
+
+#: src/video.rs:280
+msgid "Couldn't install the media support tools: {detail}"
+msgstr ""
+
+#: src/video.rs:293
+msgid "No suitable formats found for this media"
 msgstr ""
