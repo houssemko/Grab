@@ -289,7 +289,9 @@ fn build_row(
 
     // Click the row body to reveal the block map. Clicks landing on a
     // button belong to the button: walk up from the pick target and
-    // ignore those. Only live rows expand (finished ones have no map).
+    // ignore those. Only live rows expand (finished ones have no map),
+    // and only with map data to show (resolving or chunk-less rows
+    // ignore the click).
     {
         let click = gtk4::GestureClick::new();
         let m = Rc::clone(manager);
@@ -321,7 +323,9 @@ fn build_row(
                     DownloadStatus::Downloading | DownloadStatus::Paused
                 )
             });
-            if live {
+            // No map without data: resolving rows and chunk-less videos
+            // have nothing to reveal, so the click does nothing.
+            if live && !m.piece_bitmap(id).is_empty() {
                 exp.set(!exp.get());
                 rev.set_reveal_child(exp.get());
                 blk.queue_draw();
