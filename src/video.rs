@@ -521,6 +521,36 @@ pub(crate) fn parse_yt_dlp_version(first_line: &str) -> Option<[u32; 3]> {
     Some([major, minor, patch])
 }
 
+/// Whether a release `tag` is newer than the installed version line.
+/// Unparseable tags never trigger an update prompt: an unknown upstream
+/// shape must not nag. Tags carry no `v` prefix (`2026.08.19`), but one
+/// is tolerated.
+pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
+    match (
+        parse_yt_dlp_version(installed),
+        parse_yt_dlp_version(tag.trim_start_matches('v')),
+    ) {
+        (Some(current), Some(latest)) => latest > current,
+        _ => false,
+    }
+}
+
+/// Latest released yt-dlp tag without downloading anything: one
+/// user-initiated GitHub API call for the update check. `None` on any
+/// network/API failure — the row then reports the check failed instead
+/// of prompting.
+pub async fn latest_ytdlp_tag() -> Option<String> {
+    let handle = crate::download::tokio_rt().spawn(async move {
+        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp");
+        fetcher
+            .fetch_latest_release(None)
+            .await
+            .ok()
+            .map(|release| release.tag_name)
+    });
+    handle.await.ok().flatten()
+}
+
 /// Run `binary --version` off the caller's thread and return its first
 /// output line. `None` covers missing binaries, spawn failures and empty
 /// output alike — all mean "unusable".

@@ -961,3 +961,23 @@ msgstr ""
 #: src/video.rs:293
 msgid "No suitable formats found for this media"
 msgstr ""
+
+#: src/preferences.rs:390 src/preferences.rs:645 src/preferences.rs:650
+msgid "Check for Updates"
+msgstr ""
+
+#: src/preferences.rs:598
+msgid "Checking for updates…"
+msgstr ""
+
+#: src/preferences.rs:619
+msgid "Update available: {installed} → {latest}"
+msgstr ""
+
+#: src/preferences.rs:641
+msgid "Up to date • {yt} • {ff}"
+msgstr ""
+
+#: src/preferences.rs:649
+msgid "Couldn't check for updates"
+msgstr ""
