@@ -1616,12 +1616,14 @@ async fn finish_merge(
     };
     // Atomic claim: a foreign file appearing after intake dedupe requeues
     // with a fresh name through the pump's DEST_EXISTS path, parts intact.
+    // Any other move failure (permissions, full disk, …) is a merge-phase
+    // error, not a staging one.
     match crate::download::rename_noreplace(&final_tmp, dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
         }
-        Err(e) => return Err(VideoError::staging(&e)),
+        Err(e) => return Err(VideoError::combine(&e)),
     }
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(dest);
