@@ -369,6 +369,34 @@ fn rename_noreplace_never_clobbers() {
 }
 
 #[test]
+fn rename_noreplace_spans_filesystems() {
+    // Staging lives on tmpfs while downloads sit on disk: the move must
+    // survive EXDEV. /dev/shm is a separate tmpfs on Linux, so moving
+    // out of it exercises the copy fallback; elsewhere it exercises the
+    // rename path — the contract (moved, source gone, never clobbers)
+    // holds on both.
+    let shm = std::path::Path::new("/dev/shm");
+    if !shm.is_dir() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("grab-xdev-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = shm.join(format!("grab-xdev-src-{}", std::process::id()));
+    let busy = dir.join("busy.bin");
+    let free = dir.join("free.bin");
+    std::fs::write(&src, b"cross-device bytes").unwrap();
+    std::fs::write(&busy, b"victim").unwrap();
+    // Occupied destination: error, victim and source untouched.
+    assert!(rename_noreplace(&src, &busy).is_err());
+    assert_eq!(std::fs::read(&busy).unwrap(), b"victim");
+    // Free destination: content moved, source gone.
+    assert!(rename_noreplace(&src, &free).is_ok());
+    assert!(!src.exists());
+    assert_eq!(std::fs::read(&free).unwrap(), b"cross-device bytes");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn overcap_queue_keeps_active_first() {
     let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("overcap");

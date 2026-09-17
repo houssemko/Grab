@@ -1109,6 +1109,31 @@ fn cookies_browser_index_round_trip() {
 }
 
 #[test]
+fn sparse_thumbnails_get_neutral_defaults() {
+    // The binary omits thumbnail `preference`/`id` on some pages; the
+    // crate model demands them, so one sparse object used to fail the
+    // whole preview parse. Present values must survive untouched.
+    let mut v = serde_json::json!({
+        "thumbnails": [
+            {"url": "http://e/1.jpg"},
+            {"url": "http://e/2.jpg", "preference": -2, "id": "t2"},
+            "not-an-object",
+        ]
+    });
+    sanitize_video_json(&mut v);
+    let thumbs = v["thumbnails"].as_array().unwrap();
+    assert_eq!(thumbs[0]["preference"], 0);
+    assert_eq!(thumbs[0]["id"], "");
+    assert_eq!(thumbs[1]["preference"], -2);
+    assert_eq!(thumbs[1]["id"], "t2");
+    assert_eq!(thumbs[2], serde_json::json!("not-an-object"));
+    // Missing array entirely: nothing to do, no panic.
+    let mut bare = serde_json::json!({"id": "x"});
+    sanitize_video_json(&mut bare);
+    assert!(bare.get("thumbnails").is_none());
+}
+
+#[test]
 fn cookies_browser_spec_falls_back_to_bare_name() {
     // Hermetic: point the host config lookup at an empty dir so no real
     // browser profile on the dev machine leaks into the assertion. With

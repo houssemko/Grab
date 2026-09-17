@@ -1329,7 +1329,9 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
 /// Rename without clobbering: `std::fs::rename` silently replaces the
 /// destination. Prefers `renameat2(RENAME_NOREPLACE)` (atomic on any
 /// filesystem, FAT included); falls back to claiming `new` with a hard
-/// link, and to a plain rename only where hard links are unsupported.
+/// link, to a plain rename only where hard links are unsupported, and to
+/// a copy where source and destination live on different filesystems
+/// (staging is on tmpfs, downloads usually are not).
 pub(crate) fn rename_noreplace(
     old: &std::path::Path,
     new: &std::path::Path,
@@ -1339,24 +1341,56 @@ pub(crate) fn rename_noreplace(
         // Ancient kernels (< 3.15) lack renameat2: use the portable path.
         // ENOSYS is 38 in the Linux UAPI (asm-generic and x86 alike).
         Err(e) if e.raw_os_error() == Some(38) => {}
+        // Cross-device: no rename variant can span filesystems (EXDEV
+        // 18); copy through a `create_new` claim instead.
+        Err(e) if e.raw_os_error() == Some(18) => return copy_noreplace(old, new),
         r => return r,
     }
     // Claim `new` atomically via the link: an `exists()` pre-check followed
     // by a plain rename is a TOCTOU — a rival rename can slip in between
     // and get clobbered. Retry the link on transient errors; fall back to
     // plain rename only where hard links cannot work at all (Linux UAPI
-    // numbers: EXDEV 18, EPERM 1, EOPNOTSUPP 95, ENOSYS 38).
+    // numbers: EPERM 1, EOPNOTSUPP 95, ENOSYS 38), and to a copy across
+    // filesystems (EXDEV 18).
     loop {
         match std::fs::hard_link(old, new) {
             Ok(()) => return std::fs::remove_file(old),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) if matches!(e.raw_os_error(), Some(18 | 1 | 95 | 38)) => {
+            Err(e) if e.raw_os_error() == Some(18) => {
+                return copy_noreplace(old, new);
+            }
+            Err(e) if matches!(e.raw_os_error(), Some(1 | 95 | 38)) => {
                 return std::fs::rename(old, new);
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Copy `old` to `new` without replacing an existing `new`, then remove
+/// `old`. Cross-device fallback for [`rename_noreplace`]: neither rename
+/// nor link can span filesystems, so bytes are copied through a
+/// `create_new` handle — the atomic claim, no TOCTOU — and the source is
+/// unlinked only after the copy lands. A failed copy removes the partial
+/// destination, which only this call could have created.
+fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+    let mut src = std::fs::File::open(old)?;
+    let permissions = src.metadata().map(|m| m.permissions()).ok();
+    let mut dst = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(new)?;
+    let copy = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
+    if copy.is_err() {
+        let _ = std::fs::remove_file(new);
+        return copy.map(|_| ());
+    }
+    drop(dst);
+    if let Some(permissions) = permissions {
+        let _ = std::fs::set_permissions(new, permissions);
+    }
+    std::fs::remove_file(old)
 }
 
 /// `renameat2(olddirfd, old, newdirfd, new, RENAME_NOREPLACE)` without a
