@@ -1230,6 +1230,10 @@ struct HlsSel {
     url: String,
     headers: HttpHeaders,
     height: Option<u32>,
+    /// Separate audio rendition URL when the page lists audio-only HLS
+    /// formats: used when the variant's own master names no audio.
+    /// Set after selection; [`HlsSel::from_format`] leaves it empty.
+    fallback_audio: Option<String>,
 }
 
 impl HlsSel {
@@ -1246,6 +1250,7 @@ impl HlsSel {
             url: f.download_info.url.clone().filter(|u| !u.is_empty())?,
             headers: f.download_info.http_headers.clone(),
             height: f.video_resolution.height.filter(|&h| h > 0),
+            fallback_audio: None,
         })
     }
 }
@@ -1285,6 +1290,28 @@ fn find_hls_format(formats: &[Format], id: &str) -> Option<HlsSel> {
         .iter()
         .find(|f| f.format_id == id)
         .and_then(HlsSel::from_format)
+}
+
+/// URL of an audio-only HLS format, when the page lists HLS audio
+/// beside (not inside) its video variants: used when the picked
+/// variant's own master names no audio rendition.
+fn select_hls_audio_url(formats: &[Format]) -> Option<String> {
+    formats
+        .iter()
+        .filter(|f| {
+            f.protocol == Protocol::M3U8Native
+                && !matches!(f.has_drm, Some(DrmStatus::Yes))
+                && f.codec_info
+                    .video_codec
+                    .as_deref()
+                    .is_none_or(|c| c == "none")
+                && f.codec_info
+                    .audio_codec
+                    .as_deref()
+                    .is_some_and(|c| c != "none")
+        })
+        .filter_map(|f| f.download_info.url.clone())
+        .find(|u| !u.is_empty())
 }
 
 /// `-headers` value for ffmpeg: the extractor-resolved headers
@@ -1331,6 +1358,9 @@ struct HlsVariant {
     uri: String,
     height: Option<u32>,
     audio_group: Option<String>,
+    /// Raw CODECS attribute: variants naming both an audio and a video
+    /// codec carry muxed segments, so no separate audio is needed.
+    codecs: Option<String>,
 }
 
 /// One audio rendition (`EXT-X-MEDIA TYPE=AUDIO`) of a master playlist.
@@ -1338,6 +1368,7 @@ struct HlsVariant {
 struct HlsAudio {
     group: String,
     uri: Option<String>,
+    default: bool,
 }
 
 /// Split an HLS tag attribute list on commas outside quotes
@@ -1371,6 +1402,29 @@ fn hls_resolution_height(value: &str) -> Option<u32> {
     value.split_once('x')?.1.parse().ok()
 }
 
+/// Whether a variant's CODECS list names an audio codec alongside
+/// video: such segments are muxed, so the variant needs no rendition.
+fn hls_codecs_have_audio(codecs: &str) -> bool {
+    let c = codecs.to_ascii_lowercase();
+    ["mp4a", "ac-3", "ec-3", "opus", "vorbis", "flac", "alac"]
+        .iter()
+        .any(|a| c.contains(a))
+}
+
+/// Join a playlist-relative URI against its base, carrying the base
+/// query string over when the reference has none (tokenized masters
+/// like Twitter's authenticate every URL with the same query — the
+/// same default yt-dlp applies via `variant_query`).
+fn join_hls_url(base: &url::Url, reference: &str) -> Option<url::Url> {
+    let mut url = base.join(reference).ok()?;
+    if url.query().is_none()
+        && let Some(query) = base.query()
+    {
+        url.set_query(Some(query));
+    }
+    Some(url)
+}
+
 /// Parse an HLS master playlist into variants + audio renditions,
 /// resolving relative URIs against the playlist URL. Returns `None`
 /// when the text is a media playlist (segments, no variants), which
@@ -1387,35 +1441,41 @@ fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec
                 uri: String::new(),
                 height: None,
                 audio_group: None,
+                codecs: None,
             };
             for part in split_hls_attrs(rest) {
                 match hls_attr(part) {
                     Some(("RESOLUTION", v)) => variant.height = hls_resolution_height(v),
                     Some(("AUDIO", v)) => variant.audio_group = Some(v.to_string()),
+                    Some(("CODECS", v)) => variant.codecs = Some(v.to_string()),
                     _ => {}
                 }
             }
             pending = Some(variant);
         } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA:") {
-            let (mut kind, mut group, mut uri) = ("", "", None);
+            let (mut kind, mut group, mut uri, mut default) = ("", "", None, false);
             for part in split_hls_attrs(rest) {
                 match hls_attr(part) {
                     Some(("TYPE", v)) => kind = v,
                     Some(("GROUP-ID", v)) => group = v,
                     Some(("URI", v)) => uri = Some(v.to_string()),
+                    Some(("DEFAULT", "YES")) => default = true,
                     _ => {}
                 }
             }
             if kind == "AUDIO" && !group.is_empty() {
-                let uri = uri.and_then(|u| base.join(&u).ok()).map(|u| u.to_string());
+                let uri = uri
+                    .and_then(|u| join_hls_url(base, &u))
+                    .map(|u| u.to_string());
                 audios.push(HlsAudio {
                     group: group.to_string(),
                     uri,
+                    default,
                 });
             }
         } else if !line.starts_with('#')
             && let Some(mut variant) = pending.take()
-            && let Ok(uri) = base.join(line)
+            && let Some(uri) = join_hls_url(base, line)
         {
             variant.uri = uri.to_string();
             variants.push(variant);
@@ -1447,27 +1507,42 @@ fn pick_hls_variant(
     if cands.is_empty() {
         return None;
     }
-    // Audio-bearing first (muxed variants have no AUDIO tag, which
-    // also counts), then closest height at or above the cap.
-    cands.sort_by_key(|v| {
-        let has_audio = v.audio_group.is_none()
-            || audios
-                .iter()
-                .any(|a| Some(a.group.as_str()) == v.audio_group.as_deref() && a.uri.is_some());
-        (!has_audio, v.height.unwrap_or(0))
-    });
+    // Sounding variants first, then shortest: a video downloads with
+    // audio, so certainty beats an exact height-cap fit. Proven audio
+    // (CODECS names it, or the group is defined — a group without URI
+    // is muxed in the variant) outranks assumed-muxed (no AUDIO tag),
+    // which outranks dangling group references.
+    let audio_score = |v: &HlsVariant| {
+        if v.codecs.as_deref().is_some_and(hls_codecs_have_audio) {
+            0
+        } else {
+            match &v.audio_group {
+                None => 1,
+                Some(group) if audios.iter().any(|a| &a.group == group) => 0,
+                Some(_) => 2,
+            }
+        }
+    };
+    cands.sort_by_key(|v| (audio_score(v), v.height.unwrap_or(0)));
     let pick = match want {
         Some(h) => cands
             .iter()
             .find(|v| v.height.is_some_and(|x| x >= h))
             .or_else(|| cands.iter().max_by_key(|v| v.height.unwrap_or(0)))
             .cloned(),
-        None => cands.into_iter().max_by_key(|v| v.height.unwrap_or(0)),
+        None => cands
+            .iter()
+            .filter(|v| audio_score(v) < 2)
+            .max_by_key(|v| v.height.unwrap_or(0))
+            .or_else(|| cands.iter().max_by_key(|v| v.height.unwrap_or(0)))
+            .cloned(),
     }?;
+    // DEFAULT-marked rendition first, like a player would auto-select.
     let audio = pick.audio_group.as_deref().and_then(|group| {
         audios
             .iter()
-            .find(|a| a.group == group)
+            .filter(|a| a.group == group && a.uri.is_some())
+            .min_by_key(|a| !a.default)
             .and_then(|a| a.uri.clone())
     });
     Some(HlsInput {
@@ -2010,13 +2085,19 @@ pub async fn run_video_download(
             .and_then(|id| find_hls_format(&video.formats, id))
             .or_else(|| select_hls_format(&video.formats, quality_height(&job.quality)))
     };
-    if let Some(hls) = hls_sel {
+    if let Some(mut hls) = hls_sel {
         // An abort that fired during resolve means stop-before-start:
         // for live rows there is deliberately no pauser preset waiting
         // on a message, so report instead of going quiet (the pump tail
         // would fail the row either way — this names the cause).
         if job.is_live && abort.try_recv().is_ok() {
             return Err(VideoError::interrupted());
+        }
+        // Page-level audio rendition as last resort: the variant's own
+        // master may name no audio while the page lists HLS audio beside
+        // its video variants.
+        if hls.fallback_audio.is_none() {
+            hls.fallback_audio = select_hls_audio_url(&video.formats);
         }
         tracing::info!(
             item_id = job.item_id,
@@ -2366,7 +2447,12 @@ async fn run_hls_download(
     // Master playlists resolve to a height-appropriate variant plus its
     // audio rendition when separate; anything else passes through as today's
     // single input.
-    let input = resolve_hls_input(&hls.url, &hls.headers, &job.user_agent, hls.height).await;
+    let mut input = resolve_hls_input(&hls.url, &hls.headers, &job.user_agent, hls.height).await;
+    // Page-level fallback: the master named no audio, but the page
+    // lists an audio-only HLS rendition beside its video variants.
+    if input.audio.is_none() {
+        input.audio.clone_from(&hls.fallback_audio);
+    }
     let mut cmd = tokio::process::Command::new(ffmpeg);
     cmd.arg("-hide_banner")
         .arg("-loglevel")

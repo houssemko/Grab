@@ -1118,30 +1118,43 @@ fn hls_master_parses_variants_and_audio() {
     let base = url::Url::parse("https://cdn.example/vid/master.m3u8").unwrap();
     let text = "#EXTM3U\n\
         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"en\",URI=\"audio.m3u8\"\n\
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"es\",DEFAULT=YES,URI=\"audio-es.m3u8\"\n\
         #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aac\"\n\
         low.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS=\"mp4a.40.2,avc1.640028\"\n\
+        mid-muxed.m3u8\n\
         #EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,AUDIO=\"aac\"\n\
         /abs/hi.m3u8\n\
         #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160\n\
         ultra.m3u8\n";
     let (variants, audios) = parse_hls_master(text, &base).expect("master");
-    assert_eq!(variants.len(), 3);
+    assert_eq!(variants.len(), 4);
     assert_eq!(variants[0].height, Some(360));
     assert_eq!(variants[0].uri, "https://cdn.example/vid/low.m3u8");
-    assert_eq!(variants[1].uri, "https://cdn.example/abs/hi.m3u8");
-    assert_eq!(variants[2].audio_group, None);
-    assert_eq!(audios.len(), 1);
+    assert_eq!(variants[1].uri, "https://cdn.example/vid/mid-muxed.m3u8");
+    assert!(
+        variants[1]
+            .codecs
+            .as_deref()
+            .is_some_and(|c| c.contains("mp4a"))
+    );
+    assert_eq!(variants[2].uri, "https://cdn.example/abs/hi.m3u8");
+    assert_eq!(variants[3].audio_group, None);
+    assert_eq!(audios.len(), 2);
     assert_eq!(
         audios[0].uri.as_deref(),
         Some("https://cdn.example/vid/audio.m3u8")
     );
-    // Height cap takes the smallest grouped variant at or above;
-    // Best takes the tallest even without audio.
+    // Height cap takes the smallest sounding variant at or above, with
+    // CODECS-muxed winning ties; the DEFAULT rendition is selected.
     let pick = pick_hls_variant(&variants, &audios, Some(720)).expect("pick");
-    assert_eq!(pick.video, "https://cdn.example/abs/hi.m3u8");
+    assert_eq!(pick.video, "https://cdn.example/vid/mid-muxed.m3u8");
+    assert_eq!(pick.audio, None);
+    let hi = pick_hls_variant(&variants, &audios, Some(1080)).expect("hi");
+    assert_eq!(hi.video, "https://cdn.example/abs/hi.m3u8");
     assert_eq!(
-        pick.audio.as_deref(),
-        Some("https://cdn.example/vid/audio.m3u8")
+        hi.audio.as_deref(),
+        Some("https://cdn.example/vid/audio-es.m3u8")
     );
     let best = pick_hls_variant(&variants, &audios, None).expect("best");
     assert_eq!(best.video, "https://cdn.example/vid/ultra.m3u8");
@@ -1166,6 +1179,26 @@ fn explicit_nulls_parse_to_defaults() {
     let nulls_video: Video = serde_json::from_value(nulls).expect("nulls parse");
     assert!(nulls_video.formats.is_empty());
     assert!(nulls_video.thumbnails.is_empty());
+}
+
+#[test]
+fn hls_joins_carry_master_query() {
+    // Tokenized masters (Twitter) authenticate every URL with the same
+    // query: relative references inherit it, absolute ones keep theirs.
+    let base = url::Url::parse("https://cdn.example/vid/master.m3u8?tag=12").unwrap();
+    assert_eq!(
+        join_hls_url(&base, "low.m3u8").unwrap().as_str(),
+        "https://cdn.example/vid/low.m3u8?tag=12"
+    );
+    assert_eq!(
+        join_hls_url(&base, "/abs/hi.m3u8?tag=34").unwrap().as_str(),
+        "https://cdn.example/abs/hi.m3u8?tag=34"
+    );
+    let plain = url::Url::parse("https://cdn.example/vid/master.m3u8").unwrap();
+    assert_eq!(
+        join_hls_url(&plain, "low.m3u8").unwrap().as_str(),
+        "https://cdn.example/vid/low.m3u8"
+    );
 }
 
 #[test]
