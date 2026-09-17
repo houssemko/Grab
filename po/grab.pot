@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-16 14:17+0100\n"
+"POT-Creation-Date: 2026-09-17 08:30+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -500,38 +500,6 @@ msgstr ""
 msgid "Age gates and member-only pages"
 msgstr ""
 
-#: src/preferences.rs:453 src/preferences.rs:533
-msgid "(None)"
-msgstr ""
-
-#: src/preferences.rs:464 src/preferences.rs:499
-msgid "Choose cookies file"
-msgstr ""
-
-#: src/preferences.rs:470 src/preferences.rs:474
-msgid "Clear cookies file"
-msgstr ""
-
-#: src/preferences.rs:477
-msgid "Cookies file"
-msgstr ""
-
-#: src/preferences.rs:489
-msgid "Text files"
-msgstr ""
-
-#: src/preferences.rs:493
-msgid "All files"
-msgstr ""
-
-#: src/preferences.rs:500
-msgid "Select File"
-msgstr ""
-
-#: src/preferences.rs:522
-msgid "Could not read that file"
-msgstr ""
-
 #: src/preferences.rs:545
 msgid "Cookies from Browser"
 msgstr ""
@@ -650,10 +618,6 @@ msgstr ""
 
 #: src/video.rs:331
 msgid "Video tools are too old — update them to continue"
-msgstr ""
-
-#: src/video.rs:335
-msgid "Cookies file is missing or unreadable: {path}"
 msgstr ""
 
 #: src/video.rs:632
@@ -846,10 +810,6 @@ msgstr ""
 
 #: src/window.rs:1326
 msgid "File name (optional)"
-msgstr ""
-
-#: src/window.rs:1338
-msgid "Video thumbnail"
 msgstr ""
 
 #: src/window.rs:1342

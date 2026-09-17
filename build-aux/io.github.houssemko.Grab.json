@@ -48,6 +48,21 @@
       ]
     },
     {
+      "name": "deno",
+      "buildsystem": "simple",
+      "build-commands": [
+        "install -Dm755 deno /app/bin/deno",
+        "deno --version"
+      ],
+      "sources": [
+        {
+          "type": "archive",
+          "url": "https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-unknown-linux-gnu.zip",
+          "sha256": "394f07f4da2bebe6ce6f1e7ce0fa16429b29b08c35e3fac3fe25972676dff4b2"
+        }
+      ]
+    },
+    {
       "name": "grab",
       "buildsystem": "meson",
       "builddir": true,
