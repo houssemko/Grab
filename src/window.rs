@@ -75,7 +75,12 @@ fn another_queued(manager: &DownloadManager, item: &crate::download::DownloadIte
     n > 1 || (n == 1 && item.status() != DownloadStatus::Queued)
 }
 
-fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_available: bool) {
+fn refresh_row(
+    item: &crate::download::DownloadItem,
+    w: &RowWidgets,
+    defer_available: bool,
+    is_live: bool,
+) {
     let frac = item.progress().clamp(0.0, 1.0);
     w.progress.set_fraction(frac);
     let active = item.status() == DownloadStatus::Downloading;
@@ -86,12 +91,28 @@ fn refresh_row(item: &crate::download::DownloadItem, w: &RowWidgets, defer_avail
         item.status(),
         DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
     );
-    w.toggle_btn.set_visible(running);
+    // Live captures can't pause or defer mid-flight (resuming a moved-on
+    // stream is meaningless): the toggle and queue buttons hide, and Stop
+    // keeps what's recorded instead of discarding it.
+    let live_capturing = active && is_live;
+    w.toggle_btn.set_visible(running && !live_capturing);
     w.stop_btn.set_visible(running);
+    if live_capturing {
+        w.stop_btn.set_tooltip_text(Some(&gettext("Stop")));
+        w.stop_btn
+            .update_property(&[gtk4::accessible::Property::Label(&gettext(
+                "Stop recording",
+            ))]);
+    } else {
+        w.stop_btn.set_tooltip_text(Some(&gettext("Cancel")));
+        w.stop_btn
+            .update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
+    }
     // Deferring only makes sense while holding a slot that someone else
     // is waiting for; queued rows are already waiting.
     w.queue_btn.set_visible(
         defer_available
+            && !live_capturing
             && matches!(
                 item.status(),
                 DownloadStatus::Downloading | DownloadStatus::Paused
@@ -426,6 +447,7 @@ fn build_row(
                     expanded: Rc::clone(&exp_sync),
                 },
                 another_queued(&m_sync, it),
+                m_sync.is_live_video(it.id()),
             );
         }
     };
@@ -454,6 +476,7 @@ fn build_row(
             expanded: Rc::clone(&expanded),
         },
         another_queued(manager, item),
+        manager.is_live_video(item.id()),
     );
 
     {
@@ -2040,9 +2063,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             &v.page_url,
                             Some(&dd.borrow()),
                             name,
-                            &quality,
-                            audio_only,
-                            format_id.as_deref(),
+                            crate::video::VideoChoices {
+                                quality,
+                                audio_only,
+                                video_format_id: format_id,
+                                is_live: v.is_live,
+                            },
                         ) {
                             Ok(_) => close(),
                             Err(e) => {

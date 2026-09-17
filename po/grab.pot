@@ -1001,3 +1001,11 @@ msgstr ""
 #: src/video.rs:333
 msgid "video-only"
 msgstr ""
+
+#: src/window.rs:104
+msgid "Stop recording"
+msgstr ""
+
+#: src/window.rs:101
+msgid "Stop"
+msgstr ""

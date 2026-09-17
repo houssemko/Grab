@@ -139,6 +139,17 @@ const VIDEO_DOMAINS: &[&str] = &[
 /// back to audio-only on its own when no usable video format selects.
 const AUDIO_FIRST_DOMAINS: &[&str] = &["soundcloud.com", "bandcamp.com"];
 
+/// Per-row video choices from the New Download dialog: quality
+/// preset, mode, format pin and liveness. Bundled so intake entry
+/// points stay under the argument-count lint.
+#[derive(Debug, Clone)]
+pub struct VideoChoices {
+    pub quality: String,
+    pub audio_only: bool,
+    pub video_format_id: Option<String>,
+    pub is_live: bool,
+}
+
 /// Where a to-be-downloaded resource comes from. Serialized into the queue
 /// file, so it stays stable across releases.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -158,6 +169,11 @@ pub enum VideoSource {
         quality: String,
         #[serde(default)]
         audio_only: bool,
+        /// Whether the page is a live stream. Persisted so rows restored
+        /// across launches keep their live behavior (stop-and-keep
+        /// instead of pause/cancel); refreshed on every resolve.
+        #[serde(default)]
+        is_live: bool,
         /// Pinned video format id chosen in the dialog (`None` = the
         /// quality preset decides at attempt time). Falls back to the
         /// preset when the id vanishes from fresh metadata.
@@ -182,6 +198,7 @@ pub fn classify(url: &str) -> VideoSource {
                     expires_at: None,
                     quality: default_video_quality(),
                     audio_only: false,
+                    is_live: false,
                     video_format_id: None,
                 }
             } else {
@@ -384,6 +401,9 @@ pub struct VideoInfo {
     /// Pinnable video-only formats, tallest first (empty when the page
     /// carries none). Computed once at resolve; the dialog lists these.
     pub formats: Vec<VideoFormatOption>,
+    /// Whether the page is currently live. Decides stop-and-keep
+    /// behavior for HLS captures; refreshed on every resolve.
+    pub is_live: bool,
 }
 
 impl VideoInfo {
@@ -408,6 +428,7 @@ impl VideoInfo {
             page_url,
             expires_at,
             formats: video_format_options(v),
+            is_live: v.is_live.unwrap_or(false),
         }
     }
 }
@@ -1597,6 +1618,9 @@ pub struct VideoJob {
     /// Dialog-pinned video format id, if the user picked an exact format.
     /// `None` means the quality preset decides at attempt time.
     pub video_format_id: Option<String>,
+    /// Whether the page is currently live. A live HLS capture finalizes
+    /// and keeps its partial on stop instead of discarding it.
+    pub is_live: bool,
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
@@ -1614,7 +1638,7 @@ const PROGRESS_GRANULARITY: u64 = 65536;
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
 pub async fn run_video_download(
     job: VideoJob,
-    abort: oneshot::Receiver<()>,
+    mut abort: oneshot::Receiver<()>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
@@ -1756,6 +1780,13 @@ pub async fn run_video_download(
             .or_else(|| select_hls_format(&video.formats, quality_height(&job.quality)))
     };
     if let Some(hls) = hls_sel {
+        // An abort that fired during resolve means stop-before-start:
+        // for live rows there is deliberately no pauser preset waiting
+        // on a message, so report instead of going quiet (the pump tail
+        // would fail the row either way — this names the cause).
+        if job.is_live && abort.try_recv().is_ok() {
+            return Err(VideoError::interrupted());
+        }
         tracing::info!(
             item_id = job.item_id,
             page_host = %page_host(&job.page_url),
@@ -2015,6 +2046,71 @@ async fn finish_merge(
     Ok(final_bytes.unwrap_or(0))
 }
 
+/// Ask ffmpeg to stop gracefully: SIGTERM finalizes the container so
+/// the partial plays, unlike SIGKILL. Escalates to SIGKILL after
+/// `grace`, then waits out the exit either way. Returns whether the
+/// process exited on its own accord — only then is the file adoptable.
+async fn terminate_ffmpeg(child: &mut tokio::process::Child, grace: Duration) -> bool {
+    if let Some(pid) = child.id() {
+        // SAFETY: constant signal number; ESRCH (already dead) is harmless.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+        return true;
+    }
+    child.kill().await.ok();
+    let _ = child.wait().await;
+    false
+}
+
+/// Move a finished HLS capture into place. Captures that never got
+/// data (stopped before the first segment) fail instead of stranding
+/// an empty Done row.
+async fn adopt_hls_output(
+    out: &Path,
+    dest: &Path,
+    staging: &Path,
+) -> Result<Option<u64>, VideoError> {
+    if file_len(out).unwrap_or(0) == 0 {
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Err(VideoError::part_failed("nothing recorded"));
+    }
+    // Atomic claim into place (EXDEV-safe, no clobber).
+    match crate::download::rename_noreplace(out, dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(VideoError::exists());
+        }
+        Err(e) => return Err(VideoError::combine(&e)),
+    }
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    Ok(file_len(dest))
+}
+
+/// Stop a live HLS capture and keep what's recorded: terminate
+/// gracefully, then adopt the partial if it finalized. Used for both
+/// user stops and timeouts on live rows — a stalled or stopped live
+/// capture still yields playable media instead of nothing.
+async fn stop_hls_capture(
+    child: &mut tokio::process::Child,
+    progress: tokio::task::JoinHandle<u64>,
+    logs: tokio::task::JoinHandle<String>,
+    out_path: PathBuf,
+    dest: PathBuf,
+    staging: PathBuf,
+) -> Result<Option<u64>, VideoError> {
+    let exited_clean = terminate_ffmpeg(child, Duration::from_secs(10)).await;
+    progress.abort();
+    let _ = logs.await;
+    if !exited_clean {
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+        return Err(VideoError::part_failed("nothing recorded"));
+    }
+    adopt_hls_output(&out_path, &dest, &staging).await
+}
+
 /// Download one HLS variant with ffmpeg (`-c copy`: the variant
 /// playlist, segment requests and any playlist keys are ffmpeg's
 /// business). No resume — every attempt wipes staging and restarts —
@@ -2108,9 +2204,23 @@ async fn run_hls_download(
         }
         String::from_utf8_lossy(&tail).into_owned()
     });
+    let live = job.is_live;
     let status = tokio::select! {
         biased;
         _ = abort => {
+            if live {
+                // Live captures keep what's recorded (see
+                // stop_hls_capture); VOD attempts just stop.
+                return stop_hls_capture(
+                    &mut child,
+                    progress,
+                    logs,
+                    out_path,
+                    job.dest.clone(),
+                    staging.to_path_buf(),
+                )
+                .await;
+            }
             child.kill().await.ok();
             let _ = child.wait().await;
             progress.abort();
@@ -2127,6 +2237,18 @@ async fn run_hls_download(
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
+                // A stalled live capture still yields what it got.
+                if live {
+                    return stop_hls_capture(
+                        &mut child,
+                        progress,
+                        logs,
+                        out_path,
+                        job.dest.clone(),
+                        staging.to_path_buf(),
+                    )
+                    .await;
+                }
                 child.kill().await.ok();
                 progress.abort();
                 logs.abort();
@@ -2146,16 +2268,7 @@ async fn run_hls_download(
             .to_string();
         return Err(VideoError::part_failed(detail));
     }
-    // Atomic claim into place (EXDEV-safe, no clobber).
-    match crate::download::rename_noreplace(&out_path, &job.dest) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(VideoError::exists());
-        }
-        Err(e) => return Err(VideoError::combine(&e)),
-    }
-    let _ = tokio::fs::remove_dir_all(staging).await;
-    Ok(file_len(&job.dest))
+    adopt_hls_output(&out_path, &job.dest, staging).await
 }
 
 #[cfg(test)]
