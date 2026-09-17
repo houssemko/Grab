@@ -1,7 +1,11 @@
 name: CI
 
+# Scoped so one push does one run: PR branches report via
+# pull_request only (push-all would duplicate every PR run);
+# main still verifies merges, tags and direct pushes.
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
