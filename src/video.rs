@@ -268,7 +268,7 @@ pub enum VideoError {
 
 impl VideoError {
     fn missing_tools() -> Self {
-        Self::MissingLibraries(gettext("Video downloads need the yt-dlp support tools"))
+        Self::MissingLibraries(gettext("Media downloads need the yt-dlp support tools"))
     }
     fn fetch(e: impl std::fmt::Display) -> Self {
         Self::Fetch(
@@ -277,7 +277,7 @@ impl VideoError {
     }
     fn install(e: impl std::fmt::Display) -> Self {
         Self::Message(
-            gettext("Couldn't install the video support tools: {detail}")
+            gettext("Couldn't install the media support tools: {detail}")
                 .replace("{detail}", &e.to_string()),
         )
     }
@@ -290,7 +290,7 @@ impl VideoError {
         Self::Runtime(e.to_string())
     }
     fn unavailable() -> Self {
-        Self::Message(gettext("No suitable formats found for this video"))
+        Self::Message(gettext("No suitable formats found for this media"))
     }
     fn part_failed(e: impl std::fmt::Display) -> Self {
         Self::Message(
@@ -1419,7 +1419,11 @@ pub async fn run_video_download(
 
     // Resolve (with retries, always fresh: without a cache backend every
     // attempt re-extracts, so expired format URLs never survive a retry).
-    phase(gettext("Resolving video…"));
+    phase(if job.audio_only {
+        gettext("Resolving audio…")
+    } else {
+        gettext("Resolving media…")
+    });
     let mut video: Option<Video> = None;
     for attempt in 0..job.tries.max(1) {
         match fetch_video_page(
@@ -1677,7 +1681,11 @@ pub async fn run_video_download(
             )
             .await?;
         }
-        phase(gettext("Merging…"));
+        // Only merged video shows a merge phase: audio-only rows adopt
+        // the part directly, so announcing a merge would be wrong.
+        if vpart.is_some() {
+            phase(gettext("Merging…"));
+        }
         finish_merge(
             &downloader,
             &staging,
