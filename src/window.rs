@@ -1798,6 +1798,24 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
             }
         });
     }
+    // Toggling the mode re-seeds an untouched name: the resolve-time
+    // seed ran under the other mode, so without this the row keeps a
+    // .mp4 name for an audio download (or vice versa). An edited name
+    // is never clobbered.
+    {
+        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        audio.connect_active_notify(move |sw| {
+            if let Some(v) = info.borrow().as_ref() {
+                let active = sw.is_active();
+                let current = name.text().to_string();
+                if current.trim().is_empty()
+                    || current == crate::video::default_video_filename(&v.title, !active)
+                {
+                    name.set_text(&crate::video::default_video_filename(&v.title, active));
+                }
+            }
+        });
+    }
 
     {
         let m = manager.clone();
