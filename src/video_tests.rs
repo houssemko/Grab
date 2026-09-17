@@ -1114,6 +1114,61 @@ fn ffmpeg_progress_reports_total_size() {
 }
 
 #[test]
+fn hls_master_parses_variants_and_audio() {
+    let base = url::Url::parse("https://cdn.example/vid/master.m3u8").unwrap();
+    let text = "#EXTM3U\n\
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"en\",URI=\"audio.m3u8\"\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aac\"\n\
+        low.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,AUDIO=\"aac\"\n\
+        /abs/hi.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160\n\
+        ultra.m3u8\n";
+    let (variants, audios) = parse_hls_master(text, &base).expect("master");
+    assert_eq!(variants.len(), 3);
+    assert_eq!(variants[0].height, Some(360));
+    assert_eq!(variants[0].uri, "https://cdn.example/vid/low.m3u8");
+    assert_eq!(variants[1].uri, "https://cdn.example/abs/hi.m3u8");
+    assert_eq!(variants[2].audio_group, None);
+    assert_eq!(audios.len(), 1);
+    assert_eq!(
+        audios[0].uri.as_deref(),
+        Some("https://cdn.example/vid/audio.m3u8")
+    );
+    // Height cap takes the smallest grouped variant at or above;
+    // Best takes the tallest even without audio.
+    let pick = pick_hls_variant(&variants, &audios, Some(720)).expect("pick");
+    assert_eq!(pick.video, "https://cdn.example/abs/hi.m3u8");
+    assert_eq!(
+        pick.audio.as_deref(),
+        Some("https://cdn.example/vid/audio.m3u8")
+    );
+    let best = pick_hls_variant(&variants, &audios, None).expect("best");
+    assert_eq!(best.video, "https://cdn.example/vid/ultra.m3u8");
+    assert_eq!(best.audio, None);
+    assert!(pick_hls_variant(&[], &audios, Some(720)).is_none());
+    // Media playlists (segments, no variants) pass through untouched.
+    let media = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
+    assert!(parse_hls_master(media, &base).is_none());
+}
+
+#[test]
+fn explicit_nulls_parse_to_defaults() {
+    // TikTok shape: explicit nulls where the model wants maps/arrays.
+    let mut nulls = serde_json::json!({
+        "id": "tk",
+        "title": "T",
+        "thumbnails": serde_json::Value::Null,
+        "subtitles": serde_json::Value::Null,
+        "formats": serde_json::Value::Null,
+    });
+    sanitize_video_json(&mut nulls);
+    let nulls_video: Video = serde_json::from_value(nulls).expect("nulls parse");
+    assert!(nulls_video.formats.is_empty());
+    assert!(nulls_video.thumbnails.is_empty());
+}
+
+#[test]
 fn picker_lists_hls_gap_heights() {
     let video = test_video(serde_json::json!([
         test_format_full("v720", "avc1", "none", Some(720), None, "https", false),
