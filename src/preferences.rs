@@ -363,16 +363,23 @@ pub fn show(
         }
         Some(first)
     }
-    fn refresh_video_tools(row: &adw::ActionRow, btn: &gtk4::Button, spin: &gtk4::Spinner) {
-        spin.stop();
-        spin.set_visible(false);
-        let probed = crate::video::resolve_libraries().ok().map(|libs| {
-            let yt = tool_version(&libs.youtube, "--version")
-                .unwrap_or_else(|| libs.youtube.display().to_string());
-            let ff = tool_version(&libs.ffmpeg, "-version")
-                .unwrap_or_else(|| libs.ffmpeg.display().to_string());
-            (yt, ff)
-        });
+    /// What the tools-row button does: Install when tools are missing,
+    /// Check to probe GitHub for a newer yt-dlp, Update once one is
+    /// known. The check-then-act shape keeps a permanent Update button
+    /// off fresh installs while leaving on-demand updates one click
+    /// away (yt-dlp's pace makes them genuinely useful).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ToolAction {
+        Install,
+        Check,
+        Update,
+    }
+    fn paint_tools_state(
+        row: &adw::ActionRow,
+        btn: &gtk4::Button,
+        action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
+        probed: Option<(String, String)>,
+    ) {
         match probed {
             Some((yt, ff)) => {
                 row.set_subtitle(
@@ -380,13 +387,36 @@ pub fn show(
                         .replace("{yt}", &yt)
                         .replace("{ff}", &ff),
                 );
-                btn.set_label(&gettext("Update"));
+                btn.set_label(&gettext("Check for Updates"));
+                action.set(ToolAction::Check);
             }
             None => {
                 row.set_subtitle(&gettext("Not installed"));
                 btn.set_label(&gettext("Install"));
+                action.set(ToolAction::Install);
             }
         }
+    }
+    fn refresh_video_tools(
+        row: &adw::ActionRow,
+        btn: &gtk4::Button,
+        spin: &gtk4::Spinner,
+        action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
+    ) {
+        spin.stop();
+        spin.set_visible(false);
+        paint_tools_state(
+            row,
+            btn,
+            action,
+            crate::video::resolve_libraries().ok().map(|libs| {
+                let yt = tool_version(&libs.youtube, "--version")
+                    .unwrap_or_else(|| libs.youtube.display().to_string());
+                let ff = tool_version(&libs.ffmpeg, "-version")
+                    .unwrap_or_else(|| libs.ffmpeg.display().to_string());
+                (yt, ff)
+            }),
+        );
     }
     let video_page = adw::PreferencesPage::builder()
         .title(gettext("Media"))
@@ -493,6 +523,7 @@ pub fn show(
     video_tools_group.add(&video_tools_row);
     // Probe off the main thread: spawning cold binaries can jank startup.
     // The row shows Checking until versions (or absence) resolve.
+    let tool_action = std::rc::Rc::new(std::cell::Cell::new(ToolAction::Check));
     {
         let (row, btn, spin) = (
             video_tools_row.clone(),
@@ -500,6 +531,7 @@ pub fn show(
             video_tools_spin.clone(),
         );
         let dialog_weak = dialog.downgrade();
+        let action = tool_action.clone();
         video_tools_row.set_subtitle(&gettext("Checking…"));
         video_tools_btn.set_sensitive(false);
         video_tools_spin.set_visible(true);
@@ -522,20 +554,7 @@ pub fn show(
             }
             spin.stop();
             spin.set_visible(false);
-            match probed {
-                Some((yt, ff)) => {
-                    row.set_subtitle(
-                        &gettext("Ready • {yt} • {ff}")
-                            .replace("{yt}", &yt)
-                            .replace("{ff}", &ff),
-                    );
-                    btn.set_label(&gettext("Update"));
-                }
-                None => {
-                    row.set_subtitle(&gettext("Not installed"));
-                    btn.set_label(&gettext("Install"));
-                }
-            }
+            paint_tools_state(&row, &btn, &action, probed);
             btn.set_sensitive(true);
         });
     }
@@ -546,6 +565,7 @@ pub fn show(
             video_tools_spin.clone(),
         );
         let dialog_weak = dialog.downgrade();
+        let action = tool_action.clone();
         // Outside Flatpak the button guides through self-install; the
         // automatic download stays Flatpak-only.
         if !crate::video::in_flatpak() {
@@ -556,11 +576,82 @@ pub fn show(
             if !crate::video::in_flatpak() {
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
                 let dialog_b = dialog_weak.clone();
+                let action_b = action.clone();
                 crate::install_help::show(&btn, move || {
                     if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    refresh_video_tools(&row_b, &btn_b, &spin_b);
+                    refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b);
+                });
+                return;
+            }
+            if action.get() == ToolAction::Check {
+                // One user-initiated probe: compare the installed yt-dlp
+                // against the latest GitHub tag, then morph into Update
+                // only when something newer exists.
+                let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
+                let dialog_b = dialog_weak.clone();
+                let action_b = action.clone();
+                btn.set_sensitive(false);
+                spin.set_visible(true);
+                spin.start();
+                row.set_subtitle(&gettext("Checking for updates…"));
+                gtk4::glib::spawn_future_local(async move {
+                    let current = gio::spawn_blocking(|| {
+                        crate::video::resolve_libraries()
+                            .ok()
+                            .and_then(|libs| tool_version(&libs.youtube, "--version"))
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    let tag = crate::video::latest_ytdlp_tag().await;
+                    if dialog_b.upgrade().is_none() {
+                        return;
+                    }
+                    spin_b.stop();
+                    spin_b.set_visible(false);
+                    match (current, tag) {
+                        (Some(installed), Some(tag))
+                            if crate::video::ytdlp_update_available(&installed, &tag) =>
+                        {
+                            row_b.set_subtitle(
+                                &gettext("Update available: {installed} → {latest}")
+                                    .replace("{installed}", installed.trim())
+                                    .replace("{latest}", tag.trim()),
+                            );
+                            btn_b.set_label(&gettext("Update"));
+                            action_b.set(ToolAction::Update);
+                        }
+                        (Some(installed), Some(_)) => {
+                            let yt = installed.trim().to_string();
+                            let ff = gio::spawn_blocking(|| {
+                                crate::video::resolve_libraries()
+                                    .ok()
+                                    .and_then(|libs| tool_version(&libs.ffmpeg, "-version"))
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                            if dialog_b.upgrade().is_none() {
+                                return;
+                            }
+                            row_b.set_subtitle(
+                                &gettext("Up to date • {yt} • {ff}")
+                                    .replace("{yt}", &yt)
+                                    .replace("{ff}", &ff),
+                            );
+                            btn_b.set_label(&gettext("Check for Updates"));
+                            action_b.set(ToolAction::Check);
+                        }
+                        _ => {
+                            row_b.set_subtitle(&gettext("Couldn't check for updates"));
+                            btn_b.set_label(&gettext("Check for Updates"));
+                            action_b.set(ToolAction::Check);
+                        }
+                    }
+                    btn_b.set_sensitive(true);
                 });
                 return;
             }
@@ -589,6 +680,7 @@ pub fn show(
                 pop_label.clone(),
             );
             let dialog_b = dialog_weak.clone();
+            let action_b = action.clone();
             gtk4::glib::spawn_future_local(async move {
                 if let Err(e) = crate::video::install_ytdlp().await {
                     pop_b.popdown();
@@ -613,7 +705,7 @@ pub fn show(
                 if dialog_b.upgrade().is_none() {
                     return;
                 }
-                refresh_video_tools(&row_b, &btn_b, &spin_b);
+                refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b);
                 btn_b.set_sensitive(true);
             });
         });

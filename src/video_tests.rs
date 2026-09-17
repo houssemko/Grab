@@ -1129,6 +1129,17 @@ fn cookies_browser_index_round_trip() {
 }
 
 #[test]
+fn ytdlp_update_available_compares_releases() {
+    assert!(ytdlp_update_available("2026.08.19", "2026.09.01"));
+    assert!(!ytdlp_update_available("2026.09.01", "2026.09.01"));
+    assert!(!ytdlp_update_available("2026.09.02", "2026.09.01"));
+    // Unparseable tags never nag.
+    assert!(!ytdlp_update_available("2026.09.01", "nightly"));
+    assert!(!ytdlp_update_available("nightly", "2026.09.01"));
+    assert!(!ytdlp_update_available("", ""));
+}
+
+#[test]
 fn sparse_x_com_json_parses_to_video() {
     // x.com omits top-level scalars (live_status, …) and ships sparse
     // nested objects; every one of those used to abort the preview with
