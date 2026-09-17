@@ -27,7 +27,6 @@ pub mod key {
     pub const TORRENT_LISTEN_PORT: &str = "torrent-listen-port";
     pub const VIDEO_QUALITY: &str = "video-quality";
     pub const VIDEO_AUDIO_ONLY: &str = "video-audio-only";
-    pub const COOKIES_PATH: &str = "cookies-path";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
@@ -101,9 +100,6 @@ impl AppSettings {
     }
     pub fn video_audio_only(&self) -> bool {
         self.0.boolean(key::VIDEO_AUDIO_ONLY)
-    }
-    pub fn cookies_path(&self) -> String {
-        self.0.string(key::COOKIES_PATH).to_string()
     }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
