@@ -837,16 +837,52 @@ pub fn clean_staging(dir: &Path) {
 /// forever; the error path (with Retry) is strictly more useful.
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
+/// Integer-valued fields the model demands as i64/u64 but extractors
+/// sometimes emit as floats (Instagram reels report fractional
+/// durations). Truncation matches the old display semantics.
+const INT_FIELDS: &[&str] = &[
+    "duration",
+    "timestamp",
+    "release_timestamp",
+    "release_year",
+    "view_count",
+    "like_count",
+    "comment_count",
+    "channel_follower_count",
+    "age_limit",
+    "available_at",
+    "filesize",
+    "filesize_approx",
+    "language_preference",
+    "source_preference",
+    "asr",
+    "width",
+    "height",
+];
+
+/// Truncate float values to integers for [`INT_FIELDS`] in one JSON
+/// object. Anything else (strings, bools, nulls, objects) is untouched.
+fn coerce_int_fields(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    for key in INT_FIELDS {
+        if let Some(v) = obj.get_mut(*key)
+            && let Some(f) = v.as_f64()
+        {
+            *v = serde_json::json!(f.trunc() as i64);
+        }
+    }
+}
+
 /// Fill in fields the bundled yt-dlp binary omits but the crate's model
 /// demands. Without this, one sparse object (a thumbnail without
-/// `preference`, an x.com page without `live_status`) fails the entire
-/// preview parse. Arrays Grab never reads are dropped instead of
-/// repaired; formats (which the pipeline does read) get neutral defaults
-/// for their required scalars.
+/// `preference`, an x.com page without `live_status`, an Instagram reel
+/// with a fractional duration) fails the entire preview parse. Arrays
+/// Grab never reads are dropped instead of repaired; formats (which the
+/// pipeline does read) get neutral defaults for their required scalars.
 fn sanitize_video_json(value: &mut serde_json::Value) {
     let Some(obj) = value.as_object_mut() else {
         return;
     };
+    coerce_int_fields(obj);
     obj.entry("id").or_insert(serde_json::json!(""));
     obj.entry("title").or_insert(serde_json::json!(""));
     obj.entry("age_limit").or_insert(serde_json::json!(0));
@@ -878,6 +914,7 @@ fn sanitize_video_json(value: &mut serde_json::Value) {
     if let Some(formats) = obj.get_mut("formats").and_then(|f| f.as_array_mut()) {
         for format in formats.iter_mut() {
             if let Some(entry) = format.as_object_mut() {
+                coerce_int_fields(entry);
                 entry.entry("format").or_insert(serde_json::json!(""));
                 entry.entry("format_id").or_insert(serde_json::json!(""));
                 entry.entry("http_headers").or_insert(serde_json::json!({}));

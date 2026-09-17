@@ -1118,7 +1118,8 @@ fn sparse_x_com_json_parses_to_video() {
         "id": "abc",
         "title": "T",
         "webpage_url": "https://x.com/u/status/abc",
-        "duration": 42,
+        "duration": 7.66599888973779,
+        "view_count": 1200.0,
         "thumbnails": [{"url": "http://e/1.jpg"}],
         "chapters": [{"title": "c"}],
         "tags": ["t"],
@@ -1129,6 +1130,7 @@ fn sparse_x_com_json_parses_to_video() {
                 "url": "https://e/v.mp4",
                 "http_headers": {},
                 "fragments": [{"url": "http://e/f"}],
+                "filesize": 180000000.0,
             },
             {"format_id": "hls-1", "protocol": "m3u8_native", "url": "https://e/m.m3u8"},
         ],
@@ -1137,6 +1139,7 @@ fn sparse_x_com_json_parses_to_video() {
     let video: Video = serde_json::from_value(v).expect("sparse page parses");
     assert_eq!(video.live_status, "");
     assert_eq!(video.age_limit, 0);
+    assert_eq!(video.duration, Some(7));
     assert!(!video.playable_in_embed);
     assert!(video.thumbnails.is_empty());
     assert!(video.chapters.is_empty());
