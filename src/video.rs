@@ -2136,7 +2136,7 @@ pub async fn run_video_download(
     // A pinned format id (dialog pick) wins over the preset; when it
     // vanishes from fresh metadata the preset takes over again instead
     // of failing the row.
-    let mut video_sel: Option<StreamSel> = if job.audio_only {
+    let video_sel: Option<StreamSel> = if job.audio_only {
         None
     } else if let Some(pinned) = job.video_format_id.as_deref() {
         find_usable_format(&video.formats, pinned).or_else(|| {
@@ -2172,13 +2172,38 @@ pub async fn run_video_download(
     // every selector above. Only video-container extensions qualify,
     // so storyboards and manifests can never adopt here.
     let mut audio_only = job.audio_only;
-    if audio_sel.is_none() {
-        let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
-            video
-                .best_audio_video_format()
-                .ok()
-                .and_then(|m| StreamSel::from_format(m).ok())
-        });
+    // HLS fallback (x.com VODs, live replays): nothing above is
+    // directly fetchable, but manifest variants exist. VOD captures go
+    // through yt-dlp (variant/audio selection, retries, merging); live
+    // captures stay on direct ffmpeg for stop-and-keep. A dialog-pinned
+    // HLS id wins over the quality preset. Resolve HLS first, before
+    // muxed/Unknown adoption, so pinned HLS ids are honored and don't get
+    // shadowed by the muxed path.
+    let hls_sel: Option<HlsSel> = if job.audio_only {
+        None
+    } else {
+        job.video_format_id
+            .as_deref()
+            .and_then(|id| find_hls_format(&video.formats, id))
+            .or_else(|| select_hls_format(&video.formats, quality_height(&job.quality)))
+    };
+    // Muxed-only sources (one file, both tracks  archive.org, file
+    // lockers): adopt the file directly instead of failing on the missing
+    // split counterpart. A downloaded track beats a failed row; the
+    // manifest records the effective single-part mode so retries agree.
+    // Unclassified last resort (TikTok-style sparse extractors): both
+    // codec fields missing leaves media typed Unknown  invisible to
+    // every selector above. Only video-container extensions qualify,
+    // so storyboards and manifests can never adopt here.
+    // Gate on video need rather than audio absence: TikTok pages list
+    // a separate audio-only track, so audio_sel is Some and both old
+    // fallbacks were skipped, leaving video_sel=None. This fires when
+    // video is needed (not audio_only) and no video format was selected.
+    if !job.audio_only && video_sel.is_none() {
+        let muxed = video
+            .best_audio_video_format()
+            .ok()
+            .and_then(|m| StreamSel::from_format(m).ok());
         if let Some(m) = muxed {
             audio_sel = Some(m);
             audio_only = true;
@@ -2202,19 +2227,6 @@ pub async fn run_video_download(
             audio_only = true;
         }
     }
-    // HLS fallback (x.com VODs, live replays): nothing above is
-    // directly fetchable, but manifest variants exist. VOD captures go
-    // through yt-dlp (variant/audio selection, retries, merging); live
-    // captures stay on direct ffmpeg for stop-and-keep. A dialog-pinned
-    // HLS id wins over the quality preset.
-    let hls_sel: Option<HlsSel> = if audio_sel.is_some() {
-        None
-    } else {
-        job.video_format_id
-            .as_deref()
-            .and_then(|id| find_hls_format(&video.formats, id))
-            .or_else(|| select_hls_format(&video.formats, quality_height(&job.quality)))
-    };
     if let Some(mut hls) = hls_sel {
         // An abort that fired during resolve means stop-before-start:
         // for live rows there is deliberately no pauser preset waiting
