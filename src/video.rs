@@ -330,11 +330,6 @@ impl VideoError {
     fn outdated() -> Self {
         Self::Message(gettext("Video tools are too old — update them to continue"))
     }
-    fn cookies_missing(path: &str) -> Self {
-        Self::Message(
-            gettext("Cookies file is missing or unreadable: {path}").replace("{path}", path),
-        )
-    }
     /// The exact [`crate::download::DEST_EXISTS`] sentence, so the pump's
     /// foreign-file requeue path picks a fresh name and retries the merge.
     fn exists() -> Self {
@@ -594,30 +589,6 @@ pub(crate) fn page_host(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a cookies file is usable: exists, is a file, and has a sane
-/// size. Shared by the preferences picker and the worker so both agree.
-pub(crate) fn valid_cookies_file(path: &str) -> bool {
-    let path = std::path::Path::new(path);
-    path.is_file()
-        && std::fs::metadata(path)
-            .map(|m| m.len() > 0 && m.len() <= 1_000_000)
-            .unwrap_or(false)
-}
-
-/// Resolve a configured cookies path or fail fast with an actionable
-/// message. Runs before any tool probing: a user config error beats an
-/// environment error, and it keeps the missing-file test deterministic
-/// on machines with and without the tools installed.
-pub(crate) fn cookies_file(setting: &str) -> Result<Option<PathBuf>, VideoError> {
-    let trimmed = setting.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if valid_cookies_file(trimmed) {
-        return Ok(Some(PathBuf::from(trimmed)));
-    }
-    Err(VideoError::cookies_missing(trimmed))
-}
 /// Browsers offered for `--cookies-from-browser`, in combo order. Values
 /// are the yt-dlp browser names; labels come from [`cookies_browser_labels`].
 pub const COOKIES_BROWSERS: &[&str] = &[
@@ -896,7 +867,6 @@ const FETCH_TIMEOUT_SECS: u64 = 60;
 pub async fn fetch_video_infos(
     libs: Libraries,
     url: String,
-    cookies: Option<PathBuf>,
     cookies_browser: String,
 ) -> Result<VideoInfo, VideoError> {
     let handle = crate::download::tokio_rt().spawn(async move {
@@ -905,12 +875,8 @@ pub async fn fetch_video_infos(
         let out = staging_root();
         std::fs::create_dir_all(&out).map_err(VideoError::staging)?;
         let mut builder = Downloader::builder(libs, out);
-        // Browser identity wins over the file when both are set: one
-        // identity per attempt keeps failures attributable.
         if let Some(spec) = cookies_browser_spec(&cookies_browser) {
             builder = builder.with_cookies_from_browser(spec);
-        } else if let Some(cookies) = cookies {
-            builder = builder.with_cookies(cookies);
         }
         let downloader = builder.build().await.map_err(VideoError::fetch)?;
         let video = match tokio::time::timeout(
@@ -1319,9 +1285,6 @@ pub struct VideoJob {
     /// Dialog-pinned video format id, if the user picked an exact format.
     /// `None` means the quality preset decides at attempt time.
     pub video_format_id: Option<String>,
-    /// Validated cookies file for gated pages, if configured. Read from
-    /// settings at spawn (live value); never persisted per row.
-    pub cookies_path: Option<PathBuf>,
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
@@ -1368,13 +1331,10 @@ pub async fn run_video_download(
     if !job.user_agent.is_empty() {
         builder = builder.with_user_agent(job.user_agent.clone());
     }
-    // Authenticated extraction for gated pages; the part downloads reuse
-    // the extractor-resolved headers as before. Browser identity wins
-    // over the file when both are set.
+    // Authenticated extraction for gated pages via the browser profile;
+    // the part downloads reuse the extractor-resolved headers as before.
     if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
         builder = builder.with_cookies_from_browser(spec);
-    } else if let Some(cookies) = &job.cookies_path {
-        builder = builder.with_cookies(cookies.clone());
     }
     let downloader = builder.build().await.map_err(VideoError::fetch)?;
     let phase = |text: String| {
