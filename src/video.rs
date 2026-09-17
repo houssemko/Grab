@@ -655,12 +655,213 @@ pub fn cookies_browser_value(index: usize) -> &'static str {
     COOKIES_BROWSERS.get(index).copied().unwrap_or("none")
 }
 
-/// Return the browser name for `--cookies-from-browser`. yt-dlp resolves
-/// the cookie database itself (handles Flatpak paths, multiple profiles,
-/// etc.). `None`/unknown means off.
+/// Real home directory from the passwd database, bypassing any sandbox
+/// `$HOME` remapping (inside Flatpak `$HOME` is the app sandbox dir, not
+/// the user's home). `None` on non-Unix or lookup failure.
+#[cfg(unix)]
+pub(crate) fn real_home_dir() -> Option<PathBuf> {
+    // SAFETY: getpwuid returns a pointer to static storage (or null); we
+    // only read pw_dir up to its NUL terminator on the calling thread.
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() {
+            return None;
+        }
+        let dir = (*pw).pw_dir;
+        if dir.is_null() {
+            return None;
+        }
+        let len = libc::strlen(dir);
+        if len == 0 {
+            return None;
+        }
+        let bytes = std::slice::from_raw_parts(dir as *const u8, len);
+        std::str::from_utf8(bytes).ok().map(PathBuf::from)
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn real_home_dir() -> Option<PathBuf> {
+    None
+}
+
+/// Real host config directory, even inside a Flatpak sandbox where
+/// `$HOME`/`$XDG_CONFIG_HOME` point at the app's own sandbox dirs.
+/// Priority: `HOST_XDG_CONFIG_HOME` (Flatpak exposes the host value),
+/// then passwd-database home + `.config`, then the normal XDG fallback.
+pub(crate) fn real_config_home() -> PathBuf {
+    if let Some(host) = std::env::var_os("HOST_XDG_CONFIG_HOME") {
+        let p = PathBuf::from(&host);
+        if p.is_absolute() {
+            return p;
+        }
+    }
+    if let Some(home) = real_home_dir() {
+        return home.join(".config");
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("/etc/xdg"))
+}
+
+/// Profile directories holding a Chromium `Cookies` database, best first:
+/// `Default`, then a top-level `Cookies` file, then `Profile *`.
+fn chromium_profile_dirs(config: &Path, subdir: &str) -> Vec<PathBuf> {
+    let base = config.join(subdir);
+    let mut out = vec![base.join("Default"), base.clone()];
+    if let Ok(entries) = std::fs::read_dir(&base) {
+        let mut rest: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_dir()
+                    && p.file_name()
+                        .is_some_and(|n| n.to_string_lossy().starts_with("Profile "))
+            })
+            .collect();
+        rest.sort();
+        out.extend(rest);
+    }
+    out.into_iter()
+        .filter(|p| p.join("Cookies").is_file())
+        .collect()
+}
+
+/// Firefox profile directories under one base dir, default first. Parses
+/// every `[Profile*]` section of `profiles.ini` (`Path` + `IsRelative`
+/// + `Default`); falls back to a directory scan when there is no ini.
+fn firefox_profile_dirs(base: &Path) -> Vec<PathBuf> {
+    if let Ok(text) = std::fs::read_to_string(base.join("profiles.ini")) {
+        let mut ranked: Vec<(PathBuf, bool)> = Vec::new();
+        let mut path: Option<String> = None;
+        let mut relative = true;
+        let mut is_default = false;
+        let mut flush = |path: &mut Option<String>, relative: &mut bool, is_default: &mut bool| {
+            if let Some(p) = path.take() {
+                let dir = if *relative && !std::path::Path::new(&p).is_absolute() {
+                    base.join(&p)
+                } else {
+                    PathBuf::from(&p)
+                };
+                ranked.push((dir, *is_default));
+            }
+            *relative = true;
+            *is_default = false;
+        };
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                flush(&mut path, &mut relative, &mut is_default);
+            } else if let Some((key, value)) = line.split_once('=') {
+                match key.trim() {
+                    "Path" => path = Some(value.trim().to_string()),
+                    "IsRelative" => relative = value.trim() != "0",
+                    "Default" => is_default = value.trim() == "1",
+                    _ => {}
+                }
+            }
+        }
+        flush(&mut path, &mut relative, &mut is_default);
+        ranked.sort_by_key(|(_, d)| !d);
+        return ranked
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| p.join("cookies.sqlite").is_file())
+            .collect();
+    }
+    if let Ok(entries) = std::fs::read_dir(base) {
+        let mut names: Vec<String> = entries
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".default-release") || n.ends_with(".default"))
+            .collect();
+        names.sort();
+        names
+            .into_iter()
+            .map(|n| base.join(n))
+            .filter(|p| p.join("cookies.sqlite").is_file())
+            .collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Chromium config subdirs per browser, most common first (sandbox grants
+/// cover the primaries; alternates still resolve outside Flatpak).
+fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
+    match browser {
+        "brave" => &["BraveSoftware/Brave-Browser"],
+        "chrome" => &[
+            "google-chrome",
+            "google-chrome-beta",
+            "google-chrome-unstable",
+        ],
+        "chromium" => &["chromium", "chromium-beta"],
+        "edge" => &[
+            "microsoft-edge",
+            "microsoft-edge-beta",
+            "microsoft-edge-dev",
+        ],
+        "opera" => &["opera", "opera-beta"],
+        "vivaldi" => &["vivaldi", "vivaldi-snapshot"],
+        "whale" => &["naver-whale"],
+        _ => &[],
+    }
+}
+
+/// Absolute browser profile directory for `--cookies-from-browser`, resolved
+/// against the real host config/home dirs (see [`real_config_home`]) so it
+/// works inside the Flatpak sandbox where `$HOME` is remapped. Testable core:
+/// `config_home` stands in for [`real_config_home`], `home` for the passwd
+/// home (snap Firefox lives under it, not under the config dir).
+pub(crate) fn browser_profile_dir_in(
+    config_home: &Path,
+    home: &Path,
+    browser: &str,
+) -> Option<PathBuf> {
+    if browser == "firefox" {
+        return [
+            home.join(".mozilla/firefox"),
+            config_home.join("mozilla/firefox"),
+            home.join("snap/firefox/common/.mozilla/firefox"),
+        ]
+        .into_iter()
+        .find_map(|base| firefox_profile_dirs(&base).into_iter().next());
+    }
+    chromium_subdirs(browser)
+        .iter()
+        .find_map(|sub| chromium_profile_dirs(config_home, sub).into_iter().next())
+}
+
+/// [`browser_profile_dir_in`] against the real host directories. When
+/// `HOST_XDG_CONFIG_HOME` is set (Flatpak, and the unit tests), the home
+/// dir is its parent — `<home>/.config` — so both roots stay consistent
+/// without touching the sandbox `$HOME`.
+pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
+    let config = real_config_home();
+    let home = std::env::var_os("HOST_XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .and_then(|p| p.parent().map(PathBuf::from))
+        .or_else(real_home_dir)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"));
+    browser_profile_dir_in(&config, &home, browser)
+}
+
+/// Spec for `--cookies-from-browser`: `browser:/absolute/profile/dir` when
+/// the profile resolves on disk, else the bare browser name so yt-dlp falls
+/// back to its own `$HOME`-relative lookup (correct outside Flatpak).
+/// `None`/unknown means off. The profile path must be the profile
+/// *directory* — yt-dlp opens and decrypts the cookie database itself
+/// (keyring included); a raw `Cookies` file is not a `--cookies` export.
 pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     if value.is_empty() || value == "none" || !COOKIES_BROWSERS.contains(&value) {
         return None;
+    }
+    if let Some(dir) = browser_profile_dir(value) {
+        return Some(format!("{value}:{}", dir.display()));
     }
     Some(value.to_string())
 }

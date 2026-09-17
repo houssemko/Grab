@@ -1153,15 +1153,123 @@ fn cookies_browser_index_round_trip() {
 }
 
 #[test]
-fn cookies_browser_spec_returns_bare_name() {
-    // Legacy contract: spec was a `browser:/path` pre-resolved form.
-    // Now it's just the bare browser name — yt-dlp resolves the cookie DB.
+fn cookies_browser_spec_falls_back_to_bare_name() {
+    // Hermetic: point the host config lookup at an empty dir so no real
+    // browser profile on the dev machine leaks into the assertion. With
+    // nothing on disk the spec stays the bare name and yt-dlp falls back
+    // to its own $HOME-relative lookup (correct outside Flatpak).
+    let dir = std::env::temp_dir().join(format!("grab-nocookies-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".config")).unwrap();
+    let _env = ScopedHostConfig::apply(&dir.join(".config"));
     assert_eq!(cookies_browser_spec("chrome"), Some("chrome".to_string()));
     assert_eq!(cookies_browser_spec("firefox"), Some("firefox".to_string()));
     assert_eq!(cookies_browser_spec("brave"), Some("brave".to_string()));
     assert_eq!(cookies_browser_spec("none"), None);
     assert_eq!(cookies_browser_spec(""), None);
     assert_eq!(cookies_browser_spec("mystery"), None);
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Scoped HOST_XDG_CONFIG_HOME override, restored on drop. Serial suite
+/// only: the environment is process-global (same precedent as ScopedEnv).
+/// Setting it also pins the derived home dir (its parent), so profile
+/// resolution stays hermetic without touching the real home.
+struct ScopedHostConfig {
+    saved: Option<std::ffi::OsString>,
+}
+
+impl ScopedHostConfig {
+    fn apply(config_home: &std::path::Path) -> Self {
+        let saved = std::env::var_os("HOST_XDG_CONFIG_HOME");
+        // SAFETY: serial suite; restored on drop below.
+        unsafe {
+            std::env::set_var("HOST_XDG_CONFIG_HOME", config_home);
+        }
+        Self { saved }
+    }
+}
+
+impl Drop for ScopedHostConfig {
+    fn drop(&mut self) {
+        // SAFETY: same serial-suite context as apply().
+        unsafe {
+            match &self.saved {
+                Some(v) => std::env::set_var("HOST_XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("HOST_XDG_CONFIG_HOME"),
+            }
+        }
+    }
+}
+
+#[test]
+fn browser_profile_prefers_default_over_numbered() {
+    let dir = std::env::temp_dir().join(format!("grab-chromium-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for profile in ["Default", "Profile 1"] {
+        let p = dir.join("BraveSoftware/Brave-Browser").join(profile);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("Cookies"), b"sqlite").unwrap();
+    }
+    let found = browser_profile_dir_in(&dir, &dir, "brave").expect("brave resolves");
+    assert_eq!(found, dir.join("BraveSoftware/Brave-Browser/Default"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browser_profile_unknown_browser_resolves_nothing() {
+    let dir = std::env::temp_dir().join(format!("grab-nobrowser-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    assert_eq!(browser_profile_dir_in(&dir, &dir, "mystery"), None);
+    assert_eq!(browser_profile_dir_in(&dir, &dir, "none"), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn firefox_profile_prefers_default_section() {
+    let dir = std::env::temp_dir().join(format!("grab-firefox-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let base = dir.join(".mozilla/firefox");
+    for profile in ["aaaa1111.other", "bbbb2222.main"] {
+        let p = base.join(profile);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("cookies.sqlite"), b"sqlite").unwrap();
+    }
+    std::fs::write(
+        base.join("profiles.ini"),
+        "[Profile0]\nName=other\nIsRelative=1\nPath=aaaa1111.other\n\n\
+         [Profile1]\nName=main\nIsRelative=1\nPath=bbbb2222.main\nDefault=1\n",
+    )
+    .unwrap();
+    let found = browser_profile_dir_in(&dir.join(".config"), &dir, "firefox").expect("ff resolves");
+    assert_eq!(found, base.join("bbbb2222.main"));
+    let spec = {
+        let _env = ScopedHostConfig::apply(&dir.join(".config"));
+        std::fs::create_dir_all(dir.join(".config")).unwrap();
+        cookies_browser_spec("firefox")
+    };
+    assert_eq!(spec, Some(format!("firefox:{}", found.display())));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cookies_browser_spec_pins_chromium_profile_path() {
+    let dir = std::env::temp_dir().join(format!("grab-pin-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let profile = dir.join(".config/BraveSoftware/Brave-Browser/Default");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("Cookies"), b"sqlite").unwrap();
+    let _env = ScopedHostConfig::apply(&dir.join(".config"));
+    assert_eq!(
+        cookies_browser_spec("brave"),
+        Some(format!("brave:{}", profile.display()))
+    );
+    // A browser with no profile on disk keeps the bare-name fallback.
+    assert_eq!(cookies_browser_spec("chrome"), Some("chrome".to_string()));
+    drop(_env);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── tool search order ────────────────────────────────────────────────

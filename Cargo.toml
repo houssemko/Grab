@@ -29,6 +29,7 @@ gettext-rs = "0.8"
 # binaries: rustls keeps the rustls-only posture; no cache backend in v1
 # (metadata is refetched, CDN URLs expire in ~6h anyway).
 yt-dlp = { version = "2.8.3", default-features = false, features = ["rustls"] }
+libc = "0.2"
 thiserror = "2"
 
 [dev-dependencies]

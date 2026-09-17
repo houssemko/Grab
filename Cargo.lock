@@ -1229,6 +1229,7 @@ dependencies = [
  "gtk4",
  "httpdate",
  "libadwaita",
+ "libc",
  "librqbit",
  "pretty_assertions",
  "reqwest",
