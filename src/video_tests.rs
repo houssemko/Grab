@@ -1202,22 +1202,78 @@ fn hls_joins_carry_master_query() {
 }
 
 #[test]
-fn hls_estimate_needs_bandwidth_and_duration() {
-    // 8 Mbit/s over 90 s ≈ 90 MB.
-    assert_eq!(hls_estimated_total(Some(8_000_000), 90.0), Some(90_000_000));
-    assert_eq!(hls_estimated_total(None, 90.0), None);
-    assert_eq!(hls_estimated_total(Some(8_000_000), 0.0), None);
-    // Absurd figures never size a bitmap: capped, not wrapped.
-    assert_eq!(hls_estimated_total(Some(u64::MAX), 1e12), None);
-    assert_eq!(hls_estimated_total(Some(8_000_000), f64::INFINITY), None);
+fn hls_format_spec_names_height_and_pin() {
+    assert_eq!(hls_format_spec("best", None, false), "bv+ba/bv*+ba/b");
+    assert_eq!(
+        hls_format_spec("1080p", None, false),
+        "bv[height<=1080]+ba/bv*[height<=1080]+ba/b"
+    );
+    assert_eq!(
+        hls_format_spec("mystery", None, false),
+        "bv[height<=1080]+ba/bv*[height<=1080]+ba/b"
+    );
+    assert_eq!(
+        hls_format_spec("1080p", Some("hls-99"), false),
+        "hls-99+ba/b"
+    );
+    assert_eq!(
+        hls_format_spec("1080p", Some("   "), false),
+        "bv[height<=1080]+ba/bv*[height<=1080]+ba/b"
+    );
+    assert_eq!(hls_format_spec("1080p", None, true), "ba/b");
+    assert_eq!(hls_format_spec("1080p", Some("hls-99"), true), "ba/b");
 }
 
 #[test]
-fn hls_media_duration_sums_extinf() {
-    let text = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.006,\nseg0.ts\n#EXTINF:4.0,bogus\nseg1.ts\n#EXT-X-ENDLIST\n";
-    assert!((hls_media_duration(text) - 10.006).abs() < 1e-9);
-    assert_eq!(hls_media_duration("#EXTM3U\n#EXT-X-ENDLIST\n"), 0.0);
-    assert_eq!(hls_media_duration("not a playlist"), 0.0);
+fn ytdlp_progress_parses_percent_and_size() {
+    let (frac, total) =
+        parse_ytdlp_progress("[download]  45.2% of ~50.00MiB at 1.23MiB/s ETA 00:20")
+            .expect("progress");
+    assert!((frac - 0.452).abs() < 1e-12);
+    assert_eq!(total, Some(52_428_800));
+    assert_eq!(
+        parse_ytdlp_progress("[download] 100% of 10.00MiB in 5s"),
+        Some((1.0, Some(10_485_760)))
+    );
+    assert_eq!(parse_ytdlp_progress("[download] Destination: x.mp4"), None);
+    assert_eq!(
+        parse_ytdlp_progress("[download] file already downloaded"),
+        None
+    );
+    assert_eq!(parse_ytdlp_progress("[Merger] Merging"), None);
+    assert_eq!(parse_ytdlp_progress("[info] x"), None);
+    assert_eq!(parse_ytdlp_progress("garbage"), None);
+    assert!(is_ytdlp_merge_line("[Merger] Merging formats"));
+    assert!(is_ytdlp_merge_line("[ExtractAudio] Destination"));
+    assert!(!is_ytdlp_merge_line("[download] 10% of 1MiB"));
+    assert_eq!(
+        parse_ytdlp_after_move("/tmp/grab/abc.mp4"),
+        Some("/tmp/grab/abc.mp4")
+    );
+    assert_eq!(parse_ytdlp_after_move("[download] 10%"), None);
+    assert_eq!(parse_ytdlp_after_move(""), None);
+    // Size units, approximate marker included.
+    assert_eq!(
+        parse_ytdlp_progress("[download] 50% of ~1.50GiB at 1MiB/s"),
+        Some((0.5, Some(1_610_612_736)))
+    );
+    assert_eq!(
+        parse_ytdlp_progress("[download] 25% of 800K at 1MiB/s"),
+        Some((0.25, Some(819_200)))
+    );
+}
+
+#[test]
+fn piece_marks_cover_prefix_once() {
+    let mut marked = 0u64;
+    assert!(piece_marks(100, &mut marked, 50).is_empty());
+    assert_eq!(piece_marks(100, &mut marked, 250), vec![0, 1]);
+    assert!(piece_marks(100, &mut marked, 250).is_empty());
+    assert_eq!(
+        piece_marks(100, &mut marked, 1000),
+        vec![2, 3, 4, 5, 6, 7, 8, 9]
+    );
+    assert!(piece_marks(0, &mut marked, 1000).is_empty());
 }
 
 #[test]

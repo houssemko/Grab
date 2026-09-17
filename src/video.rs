@@ -1245,9 +1245,6 @@ struct HlsSel {
     /// formats: used when the variant's own master names no audio.
     /// Set after selection; [`HlsSel::from_format`] leaves it empty.
     fallback_audio: Option<String>,
-    /// Overall bitrate in bits per second from the format metadata:
-    /// size-estimate fallback when playlists name no bandwidth.
-    bandwidth_bps: Option<u64>,
 }
 
 impl HlsSel {
@@ -1265,12 +1262,6 @@ impl HlsSel {
             headers: f.download_info.http_headers.clone(),
             height: f.video_resolution.height.filter(|&h| h > 0),
             fallback_audio: None,
-            // yt-dlp reports kilobits per second here.
-            bandwidth_bps: f
-                .rates_info
-                .total_rate
-                .map(|r| r.into_inner() as u64 * 1000)
-                .filter(|&b| b > 0),
         })
     }
 }
@@ -1395,12 +1386,10 @@ struct HlsVariant {
     /// Raw CODECS attribute: variants naming both an audio and a video
     /// codec carry muxed segments, so no separate audio is needed.
     codecs: Option<String>,
-    /// Peak bandwidth in bits per second, for size estimates.
-    bandwidth: Option<u64>,
 }
 
-/// One audio rendition (`EXT-X-MEDIA TYPE=AUDIO`) of a master playlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// One audio rendition (`EXT-X-MEDIA TYPE=AUDIO`) of a master playlist.
 struct HlsAudio {
     group: String,
     uri: Option<String>,
@@ -1478,14 +1467,12 @@ fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec
                 height: None,
                 audio_group: None,
                 codecs: None,
-                bandwidth: None,
             };
             for part in split_hls_attrs(rest) {
                 match hls_attr(part) {
                     Some(("RESOLUTION", v)) => variant.height = hls_resolution_height(v),
                     Some(("AUDIO", v)) => variant.audio_group = Some(v.to_string()),
                     Some(("CODECS", v)) => variant.codecs = Some(v.to_string()),
-                    Some(("BANDWIDTH", v)) => variant.bandwidth = v.parse().ok(),
                     _ => {}
                 }
             }
@@ -1531,11 +1518,6 @@ fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec
 struct HlsInput {
     video: String,
     audio: Option<String>,
-    /// Peak variant bandwidth in bits per second, for size estimates.
-    bandwidth_bps: Option<u64>,
-    /// Estimated total bytes (bandwidth × media duration), when both
-    /// are known: drives the block map like engine rows.
-    total_bytes: Option<u64>,
 }
 
 /// Pick the variant for a height cap (smallest at or above, else
@@ -1595,41 +1577,7 @@ fn pick_hls_variant(
     Some(HlsInput {
         video: pick.uri.clone(),
         audio,
-        bandwidth_bps: pick.bandwidth.filter(|&b| b > 0),
-        // Duration needs the variant media playlist; resolved by the
-        // caller, which already holds the playlist client.
-        total_bytes: None,
     })
-}
-
-/// Upper bound for block-map size estimates: garbage bandwidth figures
-/// must never size a bitmap to absurdity (piece counts stay bounded
-/// the same way engine totals do).
-const HLS_MAP_MAX_BYTES: u64 = 64 * 1024 * 1024 * 1024;
-
-/// Total media duration of an HLS media playlist: sum of EXTINF
-/// segment lengths. Sliding live windows sum to what's listed.
-fn hls_media_duration(text: &str) -> f64 {
-    text.lines()
-        .filter_map(|line| {
-            line.trim()
-                .strip_prefix("#EXTINF:")
-                .and_then(|rest| rest.split(',').next())
-                .and_then(|n| n.trim().parse::<f64>().ok())
-                .filter(|n| n.is_finite() && *n > 0.0)
-        })
-        .sum()
-}
-
-/// Estimated capture size from peak bandwidth and media duration.
-/// `None` when either is unknown or the math overflows the map cap.
-fn hls_estimated_total(bandwidth_bps: Option<u64>, duration_secs: f64) -> Option<u64> {
-    let total = (bandwidth_bps? as f64) * duration_secs / 8.0;
-    if total.is_finite() && total >= 1.0 && total <= HLS_MAP_MAX_BYTES as f64 {
-        Some(total as u64)
-    } else {
-        None
-    }
 }
 
 /// Request headers for playlist fetches: extractor-resolved headers
@@ -1691,13 +1639,10 @@ async fn resolve_hls_input(
     headers: &HttpHeaders,
     user_agent: &str,
     want: Option<u32>,
-    fallback_bps: Option<u64>,
 ) -> HlsInput {
     let fallback = || HlsInput {
         video: url.to_string(),
         audio: None,
-        bandwidth_bps: fallback_bps,
-        total_bytes: None,
     };
     let Ok(base) = url::Url::parse(url) else {
         return fallback();
@@ -1713,29 +1658,12 @@ async fn resolve_hls_input(
         return fallback();
     };
     if !text.contains("#EXT-X-STREAM-INF") {
-        // Media playlist straight away: durations are listed, size
-        // comes from the format's own bitrate when known.
-        let total = hls_estimated_total(fallback_bps, hls_media_duration(&text));
-        let mut input = fallback();
-        input.total_bytes = total;
-        return input;
+        return fallback();
     }
     let Some((variants, audios)) = parse_hls_master(&text, &base) else {
         return fallback();
     };
-    let Some(mut input) = pick_hls_variant(&variants, &audios, want) else {
-        return fallback();
-    };
-    // Variant media playlists list their own segments: sum them for
-    // the estimate. A failed fetch just drops the map, never the
-    // download — ffmpeg opens the same URL itself below.
-    if let Some(media) = fetch_playlist_text(&client, &input.video, headers, user_agent).await {
-        input.total_bytes = hls_estimated_total(
-            input.bandwidth_bps.or(fallback_bps),
-            hls_media_duration(&media),
-        );
-    }
-    input
+    pick_hls_variant(&variants, &audios, want).unwrap_or_else(fallback)
 }
 
 /// Find one format by id, accepting only what the pipeline can fetch.
@@ -2203,11 +2131,10 @@ pub async fn run_video_download(
         }
     }
     // HLS fallback (x.com VODs, live replays): nothing above is
-    // directly fetchable, but manifest variants exist. ffmpeg pulls the
-    // playlist itself — variant choice, segment keys and all — so this
-    // path bypasses engine downloads, the merge and the resume sidecar:
-    // every attempt starts fresh. A dialog-pinned HLS id wins over the
-    // quality preset.
+    // directly fetchable, but manifest variants exist. VOD captures go
+    // through yt-dlp (variant/audio selection, retries, merging); live
+    // captures stay on direct ffmpeg for stop-and-keep. A dialog-pinned
+    // HLS id wins over the quality preset.
     let hls_sel: Option<HlsSel> = if audio_sel.is_some() {
         None
     } else {
@@ -2235,9 +2162,25 @@ pub async fn run_video_download(
             page_host = %page_host(&job.page_url),
             height = ?hls.height,
             audio_only = job.audio_only,
-            "downloading HLS variant via ffmpeg",
+            "downloading HLS variant",
         );
-        return run_hls_download(&ffmpeg_bin, &staging, &job, hls, abort, timeout, tx).await;
+        // Live captures stay on direct ffmpeg (stop-and-keep needs its
+        // SIGTERM finalizing); VOD captures go through yt-dlp, whose
+        // native fragment handling (retries, keys, audio merging)
+        // beats a hand-rolled ffmpeg invocation.
+        if job.is_live {
+            return run_hls_ffmpeg(&ffmpeg_bin, &staging, &job, hls, abort, timeout, tx).await;
+        }
+        return run_hls_ytdlp(
+            &youtube_bin,
+            &ffmpeg_bin,
+            &staging,
+            &job,
+            abort,
+            timeout,
+            tx,
+        )
+        .await;
     }
     let Some(audio_sel) = audio_sel else {
         return Err(VideoError::unavailable_detail(&video.formats));
@@ -2554,12 +2497,30 @@ async fn stop_hls_capture(
     adopt_hls_output(&out_path, &dest, &staging).await
 }
 
-/// Download one HLS variant with ffmpeg (`-c copy`: the variant
+/// yt-dlp `-f` spec for one HLS attempt over the page URL (yt-dlp
+/// re-resolves and merges itself). Height dominates like the picker;
+/// no codec filter, so a weird page can never fail on sorting. A
+/// pinned muxed id may gain a redundant second audio track via `+ba`,
+/// which players ignore — always pairing audio beats risking silence.
+fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> String {
+    if audio_only {
+        return "ba/b".to_string();
+    }
+    if let Some(id) = pinned.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("{id}+ba/b");
+    }
+    match quality_height(quality) {
+        Some(h) => format!("bv[height<={h}]+ba/bv*[height<={h}]+ba/b"),
+        None => "bv+ba/bv*+ba/b".to_string(),
+    }
+}
+
+/// Record one live HLS variant with ffmpeg (`-c copy`: the variant
 /// playlist, segment requests and any playlist keys are ffmpeg's
-/// business). No resume — every attempt wipes staging and restarts —
-/// and no merge phase: the output file is final. Returns the final
-/// size, or `None` when aborted.
-async fn run_hls_download(
+/// business). Live rows stop-and-keep via SIGTERM finalizing; VOD rows
+/// go through [`run_hls_ytdlp`] instead. Returns the final size, or
+/// `None` when a VOD attempt aborts.
+async fn run_hls_ffmpeg(
     ffmpeg: &Path,
     staging: &Path,
     job: &VideoJob,
@@ -2578,14 +2539,7 @@ async fn run_hls_download(
     // Master playlists resolve to a height-appropriate variant plus its
     // audio rendition when separate; anything else passes through as today's
     // single input.
-    let mut input = resolve_hls_input(
-        &hls.url,
-        &hls.headers,
-        &job.user_agent,
-        hls.height,
-        hls.bandwidth_bps,
-    )
-    .await;
+    let mut input = resolve_hls_input(&hls.url, &hls.headers, &job.user_agent, hls.height).await;
     // Page-level fallback: the master named no audio, but the page
     // lists an audio-only HLS rendition beside its video variants.
     if input.audio.is_none() {
@@ -2635,19 +2589,12 @@ async fn run_hls_download(
         .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
     // Drain both pipes concurrently: an unread pipe stalls ffmpeg once
     // full, and the tail diagnoses failures. Progress reports byte
-    // amounts with unknown total, like length-less engine rows.
+    // amounts with unknown total, like length-less engine rows (live
+    // streams are unbounded, so no block map applies).
     let tx_p = tx.clone();
-    // Block map for parity with engine rows: mark the completed piece
-    // prefix as bytes land. Estimates can overshoot (live windows,
-    // peak-vs-average bitrate); overruns are ignored downstream.
-    let map_total = input.total_bytes;
-    if let Some(total) = map_total {
-        tx.send(EngineMsg::SegmentsInit { total }).ok();
-    }
-    let map_piece = map_total.map(crate::download::piece_len);
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let (mut sent, mut have, mut piece_done) = (0u64, 0u64, 0u64);
+        let (mut sent, mut have) = (0u64, 0u64);
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(n) = parse_progress_size(&line) {
                 have = have.max(n);
@@ -2660,13 +2607,6 @@ async fn run_hls_download(
                         upload_bps: 0,
                     })
                     .ok();
-                    if let Some(piece) = map_piece {
-                        let done_idx = have / piece;
-                        while piece_done < done_idx {
-                            tx_p.send(EngineMsg::PieceDone(piece_done)).ok();
-                            piece_done += 1;
-                        }
-                    }
                 }
             }
         }
@@ -2754,6 +2694,294 @@ async fn run_hls_download(
         return Err(VideoError::part_failed(detail));
     }
     adopt_hls_output(&out_path, &job.dest, staging).await
+}
+
+/// Parse a byte size from yt-dlp progress (`~50.00MiB`, `10.5K`, `3B`).
+/// Binary and decimal suffixes both occur across versions.
+fn parse_ytdlp_size(raw: &str) -> Option<u64> {
+    let raw = raw.trim().trim_start_matches('~');
+    let split = raw
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.'))
+        .map(|(i, _)| i)
+        .unwrap_or(raw.len());
+    let number: f64 = raw[..split].parse().ok()?;
+    if !number.is_finite() || number < 0.0 {
+        return None;
+    }
+    let factor = match raw[split..].trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((number * factor) as u64)
+}
+
+/// One parsed yt-dlp `--newline` download line: completion fraction
+/// plus the stated total when the line carries one (`of X`).
+fn parse_ytdlp_progress(line: &str) -> Option<(f64, Option<u64>)> {
+    let rest = line.strip_prefix("[download]")?.trim();
+    let mut words = rest.split_whitespace();
+    let pct: f64 = words.next()?.strip_suffix('%')?.parse().ok()?;
+    if !(0.0..=100.0).contains(&pct) {
+        return None;
+    }
+    let mut total = None;
+    let words: Vec<&str> = words.collect();
+    if let Some(of) = words.iter().position(|w| *w == "of")
+        && let Some(size) = words.get(of + 1)
+    {
+        total = parse_ytdlp_size(size);
+    }
+    Some((pct / 100.0, total))
+}
+
+/// Whether a `--newline` line announces a merge/extract phase.
+fn is_ytdlp_merge_line(line: &str) -> bool {
+    line.starts_with("[Merger]") || line.starts_with("[ExtractAudio]")
+}
+
+/// Final path from `--print after_move:filepath`: a bare absolute
+/// path line (every other stdout line carries a `[tag]` prefix).
+fn parse_ytdlp_after_move(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    (!trimmed.is_empty() && !trimmed.starts_with('[') && trimmed.starts_with('/'))
+        .then_some(trimmed)
+}
+
+/// Newly completed piece indices as byte progress grows against a
+/// known total. Shared by the HLS progress tasks so the byte→cell
+/// math stays unit-tested in one place.
+fn piece_marks(piece_len: u64, marked: &mut u64, downloaded: u64) -> Vec<u64> {
+    let mut out = Vec::new();
+    if piece_len == 0 {
+        return out;
+    }
+    while *marked < downloaded / piece_len {
+        out.push(*marked);
+        *marked += 1;
+    }
+    out
+}
+
+/// SIGKILL a spawned downloader and the ffmpeg it may have started:
+/// both run in a dedicated process group (`process_group(0)` at
+/// spawn), so one killpg reaps the tree instead of orphaning ffmpeg
+/// mid-merge.
+fn kill_tree(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // SAFETY: constant signal number; ESRCH (already dead) is harmless.
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+/// The finished file of one yt-dlp attempt: the `after_move` path
+/// when it landed under staging, else the largest non-temp file.
+/// Temp suffixes (parts, metadata sidecars) never qualify.
+fn discover_ytdlp_output(staging: &Path, after_move: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = after_move
+        && let Ok(canonical) = std::fs::canonicalize(path)
+        && canonical.starts_with(staging)
+        && canonical.is_file()
+    {
+        return Some(canonical);
+    }
+    std::fs::read_dir(staging)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && !matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("part" | "ytdl" | "temp" | "tmp" | "frag")
+                )
+        })
+        .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+}
+
+/// One VOD HLS attempt through the yt-dlp binary: native fragment
+/// handling (retries, parallel fragments, keys) plus merging and
+/// audio extraction, with Grab parsing `--newline` progress. No
+/// resume sidecar of its own — `.part` files in staging resume across
+/// attempts instead. Returns the final size, or `None` when aborted.
+async fn run_hls_ytdlp(
+    youtube_bin: &Path,
+    ffmpeg_bin: &Path,
+    staging: &Path,
+    job: &VideoJob,
+    abort: oneshot::Receiver<()>,
+    timeout: Duration,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+) -> Result<Option<u64>, VideoError> {
+    use crate::download::EngineMsg;
+    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    tokio::fs::create_dir_all(staging)
+        .await
+        .map_err(VideoError::staging)?;
+    let spec = hls_format_spec(&job.quality, job.video_format_id.as_deref(), job.audio_only);
+    let mut cmd = tokio::process::Command::new(youtube_bin);
+    cmd.arg("--no-playlist")
+        .arg("--newline")
+        .arg("-f")
+        .arg(&spec)
+        .arg("-o")
+        .arg(staging.join("grab-hls.%(ext)s"))
+        .arg("--ffmpeg-location")
+        .arg(ffmpeg_bin.parent().unwrap_or_else(|| Path::new("/usr/bin")))
+        .arg("--retries")
+        .arg(job.tries.max(1).to_string())
+        .arg("--print")
+        .arg("after_move:filepath");
+    if job.audio_only {
+        cmd.arg("--extract-audio").arg("--audio-format").arg("m4a");
+    } else {
+        cmd.arg("--merge-output-format").arg("mp4");
+    }
+    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
+        cmd.arg(format!("--cookies-from-browser={spec}"));
+    }
+    if !job.user_agent.is_empty() {
+        cmd.arg("--user-agent").arg(&job.user_agent);
+    }
+    cmd.arg(&job.page_url);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    // Progress lines may land on either stream depending on version;
+    // parse both, collect the log tail for failure diagnostics.
+    let tx_p = tx.clone();
+    let progress = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
+        let mut after_move = None::<String>;
+        let mut merged = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if is_ytdlp_merge_line(&line) && !merged {
+                merged = true;
+                tx_p.send(EngineMsg::Phase(gettext("Merging…"))).ok();
+            } else if let Some(path) = parse_ytdlp_after_move(&line) {
+                after_move = Some(path.to_string());
+            } else if let Some((frac, total)) = parse_ytdlp_progress(&line) {
+                if let Some(t) = total {
+                    if max_total.is_none() {
+                        if t > 0 {
+                            tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
+                        }
+                    } else if Some(t) != max_total {
+                        // New file (second format leg): restart the map on
+                        // the new total instead of mixing scales.
+                        tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
+                        marked = 0;
+                    }
+                    max_total = Some(t.max(max_total.unwrap_or(0)));
+                }
+                if let Some(t) = max_total
+                    && t > 0
+                {
+                    let have = max_dl.max((frac * t as f64) as u64);
+                    max_dl = have;
+                    for idx in piece_marks(crate::download::piece_len(t), &mut marked, have) {
+                        tx_p.send(EngineMsg::PieceDone(idx)).ok();
+                    }
+                }
+                tx_p.send(EngineMsg::Progress {
+                    downloaded: max_dl,
+                    total: max_total,
+                    uploaded: 0,
+                    upload_bps: 0,
+                })
+                .ok();
+            }
+        }
+        (max_dl, max_total, after_move)
+    });
+    let logs = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 8192 {
+                        tail.drain(..tail.len() - 8192);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
+    let status = tokio::select! {
+        biased;
+        _ = abort => {
+            kill_tree(&mut child);
+            let _ = child.wait().await;
+            progress.abort();
+            logs.abort();
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            return Ok(None);
+        }
+        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                kill_tree(&mut child);
+                progress.abort();
+                logs.abort();
+                return Err(VideoError::runtime(&e));
+            }
+            Err(_) => {
+                kill_tree(&mut child);
+                progress.abort();
+                logs.abort();
+                return Err(VideoError::part_failed("timed out"));
+            }
+        },
+    };
+    let (mut _downloaded, _total, after_move) = progress.await.unwrap_or_default();
+    let log_tail = logs.await.unwrap_or_default();
+    if !status.success() {
+        let detail = log_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("yt-dlp reported failure")
+            .trim()
+            .to_string();
+        return Err(VideoError::part_failed(detail));
+    }
+    let final_tmp = discover_ytdlp_output(staging, after_move.as_deref());
+    let Some(final_tmp) = final_tmp else {
+        return Err(VideoError::part_failed("no output file produced"));
+    };
+    // Atomic claim into place (EXDEV-safe, no clobber).
+    match crate::download::rename_noreplace(&final_tmp, &job.dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(VideoError::exists());
+        }
+        Err(e) => return Err(VideoError::combine(&e)),
+    }
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    Ok(file_len(&job.dest))
 }
 
 #[cfg(test)]
