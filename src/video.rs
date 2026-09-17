@@ -971,14 +971,10 @@ pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
         let replace = match best.get(&h) {
             None => true,
             Some(cur) => {
-                let cur_avc = cur
-                    .codec_info
-                    .video_codec
-                    .as_deref()
-                    .is_some_and(|c| c.starts_with("avc1"));
-                let new_avc = vcodec.starts_with("avc1");
-                (new_avc && !cur_avc)
-                    || (new_avc == cur_avc
+                let cur_rank = codec_rank(cur.codec_info.video_codec.as_deref().unwrap_or("none"));
+                let new_rank = codec_rank(vcodec);
+                (new_rank < cur_rank)
+                    || (new_rank == cur_rank
                         && filesize_of(f).unwrap_or(0) > filesize_of(cur).unwrap_or(0))
             }
         };
@@ -1012,6 +1008,24 @@ pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
     out
 }
 
+/// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
+/// AV1 wins ties at the same height, then VP9, HEVC, AVC1, anything
+/// else. Older codecs are only dropped in favor of newer ones — never
+/// at the cost of resolution, and never into an empty list.
+fn codec_rank(vcodec: &str) -> u8 {
+    let c = vcodec.to_ascii_lowercase();
+    if c.starts_with("av01") || c.starts_with("av1") {
+        0
+    } else if c.starts_with("vp9") {
+        1
+    } else if c.starts_with("hev1") || c.starts_with("hvc1") || c.starts_with("h265") {
+        2
+    } else if c.starts_with("avc1") || c.starts_with("h264") {
+        3
+    } else {
+        4
+    }
+}
 /// Find one format by id, accepting only what the pipeline can fetch.
 /// `None` covers unknown ids and HLS/DRM/missing-URL formats alike: the
 /// caller falls back to the quality preset.
@@ -1393,10 +1407,12 @@ pub async fn run_video_download(
         return Err(VideoError::fetch("empty response"));
     };
 
-    // Select streams: AVC1 default for compat (VP9/AV1 need no merge but
-    // play back on fewer targets), best audio. Rejections (HLS/DRM/missing
-    // URL) degrade candidates to absent here; the plan below decides
-    // between split, single-file and audio-only from what's fetchable.
+    // Select streams: newest codec first (AV1, then VP9/HEVC/AVC1 —
+    // same ranking as yt-dlp's `+vcodec:av01` sort), best audio. Older
+    // codecs stay as automatic fallback, never a failure. Rejections
+    // (HLS/DRM/missing URL) degrade candidates to absent here; the plan
+    // below decides between split, single-file and audio-only from
+    // what's fetchable.
     // A pinned format id (dialog pick) wins over the preset; when it
     // vanishes from fresh metadata the preset takes over again instead
     // of failing the row.
@@ -1412,7 +1428,7 @@ pub async fn run_video_download(
             video
                 .select_video_format(
                     selector_for_quality(&job.quality),
-                    VideoCodecPreference::AVC1,
+                    VideoCodecPreference::AV1,
                 )
                 .and_then(|f| StreamSel::from_format(f).ok())
         })
@@ -1420,7 +1436,7 @@ pub async fn run_video_download(
         video
             .select_video_format(
                 selector_for_quality(&job.quality),
-                VideoCodecPreference::AVC1,
+                VideoCodecPreference::AV1,
             )
             .and_then(|f| StreamSel::from_format(f).ok())
     };

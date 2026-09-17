@@ -944,6 +944,15 @@ fn video_format_options_lists_best_per_height() {
             false
         ),
         test_format_full(
+            "v720-av01",
+            "av01.0.08M.08",
+            "none",
+            Some(720),
+            Some(60_000_000),
+            "https",
+            false
+        ),
+        test_format_full(
             "a-only",
             "none",
             "opus",
@@ -981,14 +990,25 @@ fn video_format_options_lists_best_per_height() {
         ),
     ]));
     let opts = video_format_options(&video);
-    // 1080p prefers AVC1 over bigger VP9; audio-only, HLS, DRM and muxed
-    // never list; tallest first.
+    // Newest codec wins each height (AV1 over AVC1 at 720p despite the
+    // smaller file, VP9 over AVC1 at 1080p); audio-only, HLS, DRM and
+    // muxed never list; tallest first.
     assert_eq!(
         opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
-        ["v1080-avc", "v720", "v360-vp9"]
+        ["v1080-vp9", "v720-av01", "v360-vp9"]
     );
-    assert_eq!(opts[0].label, "1080p · avc1 · 180.0 MB");
+    assert_eq!(opts[0].label, "1080p · vp9 · 200.0 MB");
     assert_eq!(opts[0].height, 1080);
+    assert_eq!(opts[1].label, "720p · av01 · 60.0 MB");
+}
+
+#[test]
+fn codec_rank_orders_newest_first() {
+    assert!(codec_rank("av01.0.08M.08") < codec_rank("vp9"));
+    assert!(codec_rank("VP9") < codec_rank("hev1.1.6.L93"));
+    assert!(codec_rank("hvc1") < codec_rank("avc1.640028"));
+    assert!(codec_rank("avc1.640028") < codec_rank("theora"));
+    assert_eq!(codec_rank("av1"), codec_rank("av01.0.05M.08"));
 }
 
 #[test]
