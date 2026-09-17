@@ -300,6 +300,7 @@ fn serde_page_round_trip() {
         expires_at: Some(1_700_000_000),
         quality: "720p".into(),
         audio_only: true,
+        is_live: false,
         video_format_id: Some("137".into()),
     };
     let json = serde_json::to_string(&src).unwrap();
@@ -321,6 +322,7 @@ fn serde_page_old_json_gets_defaults() {
             expires_at: None,
             quality: "1080p".into(),
             audio_only: false,
+            is_live: false,
             video_format_id: None,
         }
     );
@@ -686,6 +688,7 @@ fn pipeline_reports_missing_tools() {
         timeout_secs: 5,
         user_agent: "test".into(),
         video_format_id: None,
+        is_live: false,
         cookies_browser: "none".into(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -711,6 +714,7 @@ fn test_video_info(page_url: &str) -> VideoInfo {
         page_url: page_url.into(),
         expires_at: None,
         formats: vec![],
+        is_live: false,
     }
 }
 
@@ -1132,6 +1136,78 @@ fn picker_lists_hls_gap_heights() {
 }
 
 #[test]
+fn video_info_carries_live_flag() {
+    let mut video = test_video(serde_json::json!([]));
+    assert!(!VideoInfo::from(&video, "https://x.com/u/status/1").is_live);
+    video.is_live = Some(true);
+    assert!(VideoInfo::from(&video, "https://x.com/u/status/1").is_live);
+}
+
+#[cfg(unix)]
+#[test]
+fn terminate_ffmpeg_graceful_then_forced() {
+    crate::download::tokio_rt().block_on(async {
+        // A plain sleep dies on SIGTERM inside the grace period.
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(terminate_ffmpeg(&mut child, Duration::from_millis(500)).await);
+        // A TERM-ignoring sleep survives grace: SIGKILL fallback still
+        // reaps it, reporting not-graceful. Clean env (no BASH_ENV slow
+        // startup racing the signal) and a READY handshake (trap
+        // installed before we signal) keep this deterministic; exec
+        // carries the ignored disposition into sleep itself.
+        let mut child = tokio::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; echo READY; exec sleep 30"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use tokio::io::AsyncBufReadExt as _;
+            let mut line = String::new();
+            tokio::io::BufReader::new(child.stdout.as_mut().unwrap())
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            assert_eq!(line.trim(), "READY");
+        }
+        assert!(!terminate_ffmpeg(&mut child, Duration::from_millis(200)).await);
+    });
+}
+
+#[test]
+fn adopt_hls_output_moves_or_rejects_empty() {
+    crate::download::tokio_rt().block_on(async {
+        let dir = std::env::temp_dir().join(format!("grab-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let staging = dir.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        // Empty capture fails instead of stranding an empty Done row.
+        let empty = staging.join("hls.mp4");
+        std::fs::write(&empty, b"").unwrap();
+        let dest = dir.join("out.mp4");
+        assert!(adopt_hls_output(&empty, &dest, &staging).await.is_err());
+        assert!(!staging.exists());
+        assert!(!dest.exists());
+        // Real capture moves with content; source gone.
+        std::fs::create_dir_all(&staging).unwrap();
+        let full = staging.join("hls.mp4");
+        std::fs::write(&full, b"0123456789").unwrap();
+        let size = adopt_hls_output(&full, &dest, &staging)
+            .await
+            .expect("adopt");
+        assert_eq!(size, Some(10));
+        assert!(!full.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"0123456789");
+        let _ = std::fs::remove_dir_all(&dir);
+    });
+}
+
+#[test]
 fn codec_rank_orders_newest_first() {
     assert!(codec_rank("av01.0.08M.08") < codec_rank("vp9"));
     assert!(codec_rank("VP9") < codec_rank("hev1.1.6.L93"));
@@ -1193,6 +1269,7 @@ fn video_source_page_carries_format_pin() {
         expires_at: None,
         quality: "1080p".into(),
         audio_only: false,
+        is_live: false,
         video_format_id: Some("137".into()),
     };
     let json = serde_json::to_string(&src).unwrap();

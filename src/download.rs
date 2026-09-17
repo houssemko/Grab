@@ -1704,6 +1704,11 @@ pub struct DownloadManager {
     /// dropped) from pause/park/cancel paths so the worker stops its
     /// extractor streams promptly; the pump tail also drops them.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
+    /// Rows currently capturing a live stream. Pause/cancel/park only
+    /// signal these (no task abort, no status preset): the worker
+    /// finalizes the partial and its message drives the row to Done.
+    /// Set per attempt in `spawn_video`; dropped on terminal messages.
+    live_rows: RefCell<std::collections::HashSet<u64>>,
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
@@ -1743,6 +1748,7 @@ impl DownloadManager {
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
+            live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
         });
         // Live preferences: raising the download limit must wake queued
@@ -1842,6 +1848,12 @@ impl DownloadManager {
     /// Video-page source staged for a row, if any.
     pub fn video_source(&self, id: u64) -> Option<crate::video::VideoSource> {
         self.video_sources.borrow().get(&id).cloned()
+    }
+
+    /// Whether the row is currently capturing a live stream (stop-and-keep
+    /// applies: pausing/cancelling finalizes instead of discarding).
+    pub fn is_live_video(&self, id: u64) -> bool {
+        self.live_rows.borrow().contains(&id)
     }
 
     /// Validate, dedupe and queue a download, starting it when a slot is free.
@@ -1967,9 +1979,7 @@ impl DownloadManager {
         page_url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
-        quality: &str,
-        audio_only: bool,
-        video_format_id: Option<&str>,
+        choices: crate::video::VideoChoices,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         if !crate::video::is_video_page(&url) {
@@ -1992,7 +2002,7 @@ impl DownloadManager {
                     })
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
-        item.set_detail(if audio_only {
+        item.set_detail(if choices.audio_only {
             gettext("Waiting to resolve audio…")
         } else {
             gettext("Waiting to resolve media…")
@@ -2003,9 +2013,10 @@ impl DownloadManager {
                 page_url: url,
                 media_url: None,
                 expires_at: None,
-                quality: quality.to_string(),
-                audio_only,
-                video_format_id: video_format_id.map(|s| s.to_string()),
+                quality: choices.quality,
+                audio_only: choices.audio_only,
+                is_live: choices.is_live,
+                video_format_id: choices.video_format_id,
             },
         );
         Ok(self.insert(item))
@@ -2182,11 +2193,19 @@ impl DownloadManager {
             page_url,
             quality,
             audio_only,
+            is_live,
             video_format_id,
             ..
         }) = self.video_source(item.id())
         {
-            return self.spawn_video(item, page_url, quality, audio_only, video_format_id);
+            return self.spawn_video(
+                item,
+                page_url,
+                quality,
+                audio_only,
+                video_format_id,
+                is_live,
+            );
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
@@ -2580,6 +2599,7 @@ impl DownloadManager {
             }
             this.running.borrow_mut().remove(&id);
             this.video_abort.borrow_mut().remove(&id);
+            this.live_rows.borrow_mut().remove(&id);
             if this.draining.get() {
                 return;
             }
@@ -2673,6 +2693,7 @@ impl DownloadManager {
         quality: String,
         audio_only: bool,
         video_format_id: Option<String>,
+        is_live: bool,
     ) {
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
@@ -2681,6 +2702,13 @@ impl DownloadManager {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
         // Overwrite any stale sender: its task is dead or guarded stale.
         self.video_abort.borrow_mut().insert(id, abort_tx);
+        // Live rows finalize in the worker on stop: track them so
+        // pause/cancel/park signal without aborting or presetting.
+        if is_live {
+            self.live_rows.borrow_mut().insert(id);
+        } else {
+            self.live_rows.borrow_mut().remove(&id);
+        }
         let opts = DownloadOptions::from_settings(&self.settings);
         let job = crate::video::VideoJob {
             item_id: id,
@@ -2692,6 +2720,7 @@ impl DownloadManager {
             timeout_secs: opts.timeout.max(1) as u64,
             user_agent: opts.user_agent.clone(),
             video_format_id,
+            is_live,
             cookies_browser: self.settings.cookies_browser(),
         };
         let handle = tokio_rt().spawn(async move {
@@ -2751,6 +2780,14 @@ impl DownloadManager {
 
     /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
+        if self.live_rows.borrow().contains(&id) {
+            // Live captures finalize in the worker: signal it and let
+            // its Finished flip the row to Done. Aborting the task or
+            // presetting Paused would drop the recording or strand it.
+            // The pump tail frees the slot on completion.
+            self.stop_video_worker(id);
+            return;
+        }
         self.stop_video_worker(id);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
@@ -2864,8 +2901,13 @@ impl DownloadManager {
 
     /// Stop the engine for `id`, keeping file, bitmap and progress, and
     /// mark it queued. Unlike pause the row yields its slot; unlike cancel
-    /// nothing is deleted and progress is kept.
+    /// nothing is deleted and progress is kept. Live rows only signal:
+    /// the worker finalizes and its message completes the row.
     fn park(&self, id: u64) {
+        if self.live_rows.borrow().contains(&id) {
+            self.stop_video_worker(id);
+            return;
+        }
         self.stop_video_worker(id);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
@@ -2927,11 +2969,17 @@ impl DownloadManager {
     }
 
     fn cancel_inner(&self, id: u64, keep_partial: bool) {
+        // Live rows keep what's recorded (Stop, not Cancel): signal the
+        // worker and skip the task abort plus the Cancelled preset, so
+        // its Finished still lands. Discard via explicit row removal.
+        let live = self.live_rows.borrow().contains(&id);
         self.stop_video_worker(id);
-        if let Some(handle) = self.running.borrow().get(&id) {
-            handle.abort();
+        if !live {
+            if let Some(handle) = self.running.borrow().get(&id) {
+                handle.abort();
+            }
+            self.running.borrow_mut().remove(&id);
         }
-        self.running.borrow_mut().remove(&id);
         self.pending_names.borrow_mut().remove(&id);
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         self.torrent_pieces.borrow_mut().remove(&id);
@@ -2948,8 +2996,10 @@ impl DownloadManager {
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
                 crate::torrent::forget_download(id);
             }
-            item.set_status(DownloadStatus::Cancelled);
-            item.set_detail(item.status().label());
+            if !live {
+                item.set_status(DownloadStatus::Cancelled);
+                item.set_detail(item.status().label());
+            }
         }
     }
 

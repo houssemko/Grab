@@ -640,9 +640,12 @@ fn enqueue_video_spawns_and_fails_without_tools() {
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("My Video.mp4"),
-            "1080p",
-            false,
-            None,
+            crate::video::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+            },
         )
         .expect("video enqueue");
     let id = item.id();
@@ -676,9 +679,12 @@ fn enqueue_video_rejects_direct_url() {
                 "https://example.com/f.iso",
                 None,
                 None,
-                "1080p",
-                false,
-                None
+                crate::video::VideoChoices {
+                    quality: "1080p".to_string(),
+                    audio_only: false,
+                    video_format_id: None,
+                    is_live: false,
+                },
             )
             .is_err()
     );
@@ -701,9 +707,12 @@ fn video_source_survives_restore_and_retry() {
                 "https://vimeo.com/123456",
                 Some(&dest),
                 Some("Clip.mp4"),
-                "720p",
-                true,
-                None,
+                crate::video::VideoChoices {
+                    quality: "720p".to_string(),
+                    audio_only: true,
+                    video_format_id: None,
+                    is_live: false,
+                },
             )
             .expect("video enqueue");
         // Persisted with the Page marker (not silently dropped).
@@ -752,6 +761,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 expires_at: None,
                 quality: "1080p".into(),
                 audio_only: false,
+                is_live: false,
                 video_format_id: None,
             }),
         }],
@@ -787,9 +797,12 @@ fn unremove_restores_video_source() {
             "https://vimeo.com/123456",
             Some(&dest),
             Some("Clip.mp4"),
-            "720p",
-            false,
-            None,
+            crate::video::VideoChoices {
+                quality: "720p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+            },
         )
         .expect("video enqueue");
     let id = item.id();
@@ -835,9 +848,12 @@ fn queue_file_never_carries_cookies() {
             "https://vimeo.com/123456",
             Some("/tmp/dl"),
             Some("Clip.mp4"),
-            "1080p",
-            false,
-            None,
+            crate::video::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+            },
         )
         .expect("video enqueue");
     // Drain the spawned worker (fails fast without tools) so no woken pump
