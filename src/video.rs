@@ -837,6 +837,52 @@ pub fn clean_staging(dir: &Path) {
 /// forever; the error path (with Retry) is strictly more useful.
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
+/// Fill in object fields the bundled yt-dlp binary omits but the crate's
+/// model demands. Without this, one sparse object (today: a thumbnail
+/// without `preference`/`id`) fails the entire preview parse.
+fn sanitize_video_json(value: &mut serde_json::Value) {
+    if let Some(thumbs) = value.get_mut("thumbnails").and_then(|t| t.as_array_mut()) {
+        for thumb in thumbs.iter_mut() {
+            if let Some(obj) = thumb.as_object_mut() {
+                obj.entry("preference").or_insert(serde_json::json!(0));
+                obj.entry("id").or_insert(serde_json::json!(""));
+            }
+        }
+    }
+}
+
+/// Fetch one page's `--dump-single-json` through the crate's [`Executor`]
+/// (same spawn/timeout/output semantics as its extractors) with exactly
+/// the arguments its default extractors use, then parse leniently (see
+/// [`sanitize_video_json`]). Used instead of the crate's
+/// `fetch_video_infos`, whose strict model breaks whenever the binary's
+/// JSON gains or drops a field.
+async fn fetch_video_page(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    timeout: Duration,
+) -> Result<Video, VideoError> {
+    let mut args = vec![
+        "--no-progress".to_string(),
+        "--dump-single-json".to_string(),
+    ];
+    if let Some(spec) = cookies_browser_spec(cookies_browser) {
+        args.push(format!("--cookies-from-browser={spec}"));
+    }
+    args.push(url.to_string());
+    let executor = yt_dlp::executor::Executor::new(youtube_bin, args, timeout);
+    let output = executor.execute().await.map_err(VideoError::fetch)?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&output.stdout).map_err(VideoError::fetch)?;
+    sanitize_video_json(&mut value);
+    let mut video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
+    for format in &mut video.formats {
+        format.video_id = Some(video.id.clone());
+    }
+    Ok(video)
+}
+
 /// Extract metadata for one video page. The media URLs inside the returned
 /// [`VideoInfo`] are only passed on to the download step; the *page URL* is
 /// what survives restarts.
@@ -850,19 +896,19 @@ pub async fn fetch_video_infos(
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         let out = staging_root();
         std::fs::create_dir_all(&out).map_err(VideoError::staging)?;
-        let mut builder = Downloader::builder(libs, out);
-        if let Some(spec) = cookies_browser_spec(&cookies_browser) {
-            builder = builder.with_cookies_from_browser(spec);
-        }
-        let downloader = builder.build().await.map_err(VideoError::fetch)?;
         let video = match tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
-            downloader.fetch_video_infos(&url),
+            fetch_video_page(
+                &libs.youtube,
+                &url,
+                &cookies_browser,
+                Duration::from_secs(300),
+            ),
         )
         .await
         {
             Ok(Ok(video)) => video,
-            Ok(Err(e)) => return Err(VideoError::fetch(&e)),
+            Ok(Err(e)) => return Err(e),
             Err(_) => {
                 return Err(VideoError::fetch(gettext("the lookup timed out")));
             }
@@ -1299,10 +1345,12 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // The downloader timeout covers extractor calls AND the ffmpeg merge:
-    // a full-length merge on a slow CPU dwarfs any network timeout, so
-    // never go below the crate default (the user's setting extends it).
+    // The downloader timeout covers the ffmpeg merge: a full-length
+    // merge on a slow CPU dwarfs any network timeout, so never go below
+    // the crate default (the user's setting extends it). Metadata uses
+    // the crate's extractor timeout via [`fetch_video_page`].
     let timeout = Duration::from_secs(job.timeout_secs.max(300));
+    let youtube_bin = libs.youtube.clone();
     let mut builder = Downloader::builder(libs, staging.clone()).with_timeout(timeout);
     if !job.user_agent.is_empty() {
         builder = builder.with_user_agent(job.user_agent.clone());
@@ -1317,12 +1365,19 @@ pub async fn run_video_download(
         tx.send(EngineMsg::Phase(text)).ok();
     };
 
-    // Resolve (with retries): the extractor cache already drops expired
-    // format URLs, so a cached hit is safe to download from.
+    // Resolve (with retries, always fresh: without a cache backend every
+    // attempt re-extracts, so expired format URLs never survive a retry).
     phase(gettext("Resolving video…"));
     let mut video: Option<Video> = None;
     for attempt in 0..job.tries.max(1) {
-        match downloader.fetch_video_infos(&job.page_url).await {
+        match fetch_video_page(
+            &youtube_bin,
+            &job.page_url,
+            &job.cookies_browser,
+            Duration::from_secs(300),
+        )
+        .await
+        {
             Ok(v) => {
                 video = Some(v);
                 break;
@@ -1331,7 +1386,7 @@ pub async fn run_video_download(
                 tracing::debug!("video resolve failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
             }
-            Err(e) => return Err(VideoError::fetch(&e)),
+            Err(e) => return Err(e),
         }
     }
     let Some(video) = video else {
