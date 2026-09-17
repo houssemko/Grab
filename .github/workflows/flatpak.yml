@@ -6,7 +6,7 @@ name: Flatpak bundle
 # the release. No local bundle step remains in the release process.
 on:
   release:
-    types: [published]
+    types: [published, created]
   workflow_dispatch:
     inputs:
       tag:

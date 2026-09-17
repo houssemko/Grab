@@ -9,7 +9,7 @@ name: Prebuilt tarball
 # not an accepted vendor payload.
 on:
   release:
-    types: [published]
+    types: [published, created]
   workflow_dispatch:
     inputs:
       tag:

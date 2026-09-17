@@ -2087,7 +2087,12 @@ pub async fn run_video_download(
     }
     // Authenticated extraction for gated pages via the browser profile;
     // the part downloads reuse the extractor-resolved headers as before.
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
+    // XDG-resolved cookie database path (see [`resolve_cookies_db_path`]);
+    // falls back to `--cookies-from-browser` when the host profile wasn't
+    // found on disk (e.g. browser not installed / profile missing).
+    if let Some(cookies) = resolve_cookies_db_path(&job.cookies_browser) {
+        builder = builder.with_cookies(cookies);
+    } else if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
         builder = builder.with_cookies_from_browser(spec);
     }
     let downloader = builder.build().await.map_err(VideoError::fetch)?;
@@ -2914,7 +2919,12 @@ async fn run_hls_ytdlp(
     } else {
         cmd.arg("--merge-output-format").arg("mp4");
     }
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
+    // XDG-resolved cookie database path (see [`resolve_cookies_db_path`]);
+    // falls back to `--cookies-from-browser` when the host profile wasn't
+    // found on disk (e.g. browser not installed / profile missing).
+    if let Some(cookies) = resolve_cookies_db_path(&job.cookies_browser) {
+        cmd.arg("--cookies").arg(&cookies);
+    } else if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
         cmd.arg(format!("--cookies-from-browser={spec}"));
     }
     if !job.user_agent.is_empty() {
