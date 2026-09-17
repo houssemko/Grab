@@ -1013,3 +1013,19 @@ msgstr ""
 #: src/video.rs:354
 msgid "unclassified"
 msgstr ""
+
+#: src/preferences.rs:461
+msgid "Preferred video codec"
+msgstr ""
+
+#: src/video.rs:1229
+msgid "Newest first"
+msgstr ""
+
+#: src/video.rs:1229
+msgid "Most compatible"
+msgstr ""
+
+#: src/preferences.rs:462
+msgid "Newest codecs or widest playback"
+msgstr ""

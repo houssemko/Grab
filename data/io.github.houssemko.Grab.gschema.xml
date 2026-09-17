@@ -109,6 +109,11 @@
       <summary>Audio-only video downloads</summary>
       <description>Download only the audio track for video-page links.</description>
     </key>
+    <key name="video-codec-priority" type="s">
+      <default>'newest'</default>
+      <summary>Preferred video codec</summary>
+      <description>Newest first prefers AV1, then VP9, HEVC and H.264; most compatible prefers H.264 first for players without newer decoders.</description>
+    </key>
     <key name="cookies-browser" type="s">
       <default>'none'</default>
       <summary>Browser for video page cookies</summary>

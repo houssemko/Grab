@@ -411,7 +411,7 @@ pub struct VideoInfo {
 }
 
 impl VideoInfo {
-    fn from(v: &Video, fallback_page: &str) -> Self {
+    fn from(v: &Video, fallback_page: &str, newest_first: bool) -> Self {
         let page_url = v
             .webpage_url
             .as_deref()
@@ -431,7 +431,7 @@ impl VideoInfo {
             duration_string: v.duration_string.clone(),
             page_url,
             expires_at,
-            formats: video_format_options(v),
+            formats: video_format_options(v, newest_first),
             is_live: v.is_live.unwrap_or(false),
         }
     }
@@ -1079,6 +1079,7 @@ pub async fn fetch_video_infos(
     libs: Libraries,
     url: String,
     cookies_browser: String,
+    newest_first: bool,
 ) -> Result<VideoInfo, VideoError> {
     let handle = crate::download::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
@@ -1102,7 +1103,7 @@ pub async fn fetch_video_infos(
                 return Err(VideoError::fetch(gettext("the lookup timed out")));
             }
         };
-        Ok::<_, VideoError>(VideoInfo::from(&video, &url))
+        Ok::<_, VideoError>(VideoInfo::from(&video, &url, newest_first))
     });
     match handle.await {
         Ok(r) => r,
@@ -1137,7 +1138,7 @@ fn fmt_video_bytes(n: u64) -> String {
 /// HLS variants fill heights with no direct stream (the worker pulls
 /// those via ffmpeg); muxed files stay on the automatic path, which
 /// already adopts them. Audio-only formats never appear here.
-pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
+pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoFormatOption> {
     use std::collections::HashMap;
     let mut best: HashMap<u32, &Format> = HashMap::new();
     for f in &video.formats {
@@ -1161,8 +1162,11 @@ pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
         let replace = match best.get(&h) {
             None => true,
             Some(cur) => {
-                let cur_rank = codec_rank(cur.codec_info.video_codec.as_deref().unwrap_or("none"));
-                let new_rank = codec_rank(vcodec);
+                let cur_rank = codec_rank(
+                    cur.codec_info.video_codec.as_deref().unwrap_or("none"),
+                    newest_first,
+                );
+                let new_rank = codec_rank(vcodec, newest_first);
                 (new_rank < cur_rank)
                     || (new_rank == cur_rank
                         && filesize_of(f).unwrap_or(0) > filesize_of(cur).unwrap_or(0))
@@ -1215,11 +1219,38 @@ pub fn video_format_options(video: &Video) -> Vec<VideoFormatOption> {
     out
 }
 
+/// Codec priority modes for the `video-codec-priority` setting.
+pub const CODEC_PRIORITY_NEWEST: &str = "newest";
+pub const CODEC_PRIORITY_COMPATIBLE: &str = "compatible";
+pub const CODEC_PRIORITY_VALUES: &[&str] = &[CODEC_PRIORITY_NEWEST, CODEC_PRIORITY_COMPATIBLE];
+
+/// Translated combo labels, index-aligned with [`CODEC_PRIORITY_VALUES`].
+pub fn codec_priority_labels() -> Vec<String> {
+    vec![gettext("Newest first"), gettext("Most compatible")]
+}
+
+/// Combo index for a stored priority value. Unknown values fall back
+/// to newest (the historical behavior).
+pub fn codec_priority_index(value: &str) -> usize {
+    CODEC_PRIORITY_VALUES
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(0)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to newest.
+pub fn codec_priority_value(index: usize) -> &'static str {
+    CODEC_PRIORITY_VALUES
+        .get(index)
+        .copied()
+        .unwrap_or(CODEC_PRIORITY_NEWEST)
+}
+
 /// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
 /// AV1 wins ties at the same height, then VP9, HEVC, AVC1, anything
 /// else. Older codecs are only dropped in favor of newer ones — never
 /// at the cost of resolution, and never into an empty list.
-fn codec_rank(vcodec: &str) -> u8 {
+fn codec_rank_newest(vcodec: &str) -> u8 {
     let c = vcodec.to_ascii_lowercase();
     if c.starts_with("av01") || c.starts_with("av1") {
         0
@@ -1231,6 +1262,44 @@ fn codec_rank(vcodec: &str) -> u8 {
         3
     } else {
         4
+    }
+}
+
+/// Compatibility-first rank for players without HEVC/AV1 decoders
+/// (the common Linux gap): H.264 first, then VP9 (software-decoded
+/// everywhere), HEVC, AV1, anything else.
+fn codec_rank_compatible(vcodec: &str) -> u8 {
+    let c = vcodec.to_ascii_lowercase();
+    if c.starts_with("avc1") || c.starts_with("h264") {
+        0
+    } else if c.starts_with("vp9") {
+        1
+    } else if c.starts_with("hev1") || c.starts_with("hvc1") || c.starts_with("h265") {
+        2
+    } else if c.starts_with("av01") || c.starts_with("av1") {
+        3
+    } else {
+        4
+    }
+}
+
+/// Rank one codec under the stored priority mode.
+pub(crate) fn codec_rank(vcodec: &str, newest_first: bool) -> u8 {
+    if newest_first {
+        codec_rank_newest(vcodec)
+    } else {
+        codec_rank_compatible(vcodec)
+    }
+}
+
+/// Extractor codec preference matching the priority mode: the crate
+/// falls back to all formats when the preferred codec is absent, so
+/// this never fails a row by itself.
+pub(crate) fn codec_preference(newest_first: bool) -> VideoCodecPreference {
+    if newest_first {
+        VideoCodecPreference::AV1
+    } else {
+        VideoCodecPreference::AVC1
     }
 }
 /// One HLS manifest variant for the ffmpeg fallback path: owned
@@ -1964,6 +2033,9 @@ pub struct VideoJob {
     /// Whether the page is currently live. A live HLS capture finalizes
     /// and keeps its partial on stop instead of discarding it.
     pub is_live: bool,
+    /// Newest codecs first (AV1 over AVC1). False prefers compatible
+    /// H.264 for players without newer decoders.
+    pub newest_codecs: bool,
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
@@ -2076,7 +2148,7 @@ pub async fn run_video_download(
             video
                 .select_video_format(
                     selector_for_quality(&job.quality),
-                    VideoCodecPreference::AV1,
+                    codec_preference(job.newest_codecs),
                 )
                 .and_then(|f| StreamSel::from_format(f).ok())
         })
@@ -2084,7 +2156,7 @@ pub async fn run_video_download(
         video
             .select_video_format(
                 selector_for_quality(&job.quality),
-                VideoCodecPreference::AV1,
+                codec_preference(job.newest_codecs),
             )
             .and_then(|f| StreamSel::from_format(f).ok())
     };

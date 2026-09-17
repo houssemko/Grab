@@ -2721,6 +2721,7 @@ impl DownloadManager {
             user_agent: opts.user_agent.clone(),
             video_format_id,
             is_live,
+            newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
         };
         let handle = tokio_rt().spawn(async move {
