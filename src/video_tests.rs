@@ -689,6 +689,7 @@ fn pipeline_reports_missing_tools() {
         user_agent: "test".into(),
         video_format_id: None,
         is_live: false,
+        newest_codecs: true,
         cookies_browser: "none".into(),
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -993,7 +994,7 @@ fn video_format_options_lists_best_per_height() {
             false
         ),
     ]));
-    let opts = video_format_options(&video);
+    let opts = video_format_options(&video, true);
     // Newest codec wins each height (AV1 over AVC1 at 720p despite the
     // smaller file, VP9 over AVC1 at 1080p); audio-only, HLS, DRM and
     // muxed never list; tallest first.
@@ -1292,7 +1293,7 @@ fn picker_lists_hls_gap_heights() {
             false
         ),
     ]));
-    let opts = video_format_options(&video);
+    let opts = video_format_options(&video, true);
     assert_eq!(
         opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
         ["h1080", "v720"]
@@ -1303,9 +1304,9 @@ fn picker_lists_hls_gap_heights() {
 #[test]
 fn video_info_carries_live_flag() {
     let mut video = test_video(serde_json::json!([]));
-    assert!(!VideoInfo::from(&video, "https://x.com/u/status/1").is_live);
+    assert!(!VideoInfo::from(&video, "https://x.com/u/status/1", true).is_live);
     video.is_live = Some(true);
-    assert!(VideoInfo::from(&video, "https://x.com/u/status/1").is_live);
+    assert!(VideoInfo::from(&video, "https://x.com/u/status/1", true).is_live);
 }
 
 #[cfg(unix)]
@@ -1374,11 +1375,32 @@ fn adopt_hls_output_moves_or_rejects_empty() {
 
 #[test]
 fn codec_rank_orders_newest_first() {
-    assert!(codec_rank("av01.0.08M.08") < codec_rank("vp9"));
-    assert!(codec_rank("VP9") < codec_rank("hev1.1.6.L93"));
-    assert!(codec_rank("hvc1") < codec_rank("avc1.640028"));
-    assert!(codec_rank("avc1.640028") < codec_rank("theora"));
-    assert_eq!(codec_rank("av1"), codec_rank("av01.0.05M.08"));
+    assert!(codec_rank("av01.0.08M.08", true) < codec_rank("vp9", true));
+    assert!(codec_rank("VP9", true) < codec_rank("hev1.1.6.L93", true));
+    assert!(codec_rank("hvc1", true) < codec_rank("avc1.640028", true));
+    assert!(codec_rank("avc1.640028", true) < codec_rank("theora", true));
+    assert_eq!(codec_rank("av1", true), codec_rank("av01.0.05M.08", true));
+}
+
+#[test]
+fn codec_rank_compatible_prefers_h264() {
+    use yt_dlp::model::selector::VideoCodecPreference;
+    assert!(codec_rank("avc1.640028", false) < codec_rank("vp9", false));
+    assert!(codec_rank("VP9", false) < codec_rank("hev1.1.6.L93", false));
+    assert!(codec_rank("hvc1", false) < codec_rank("av01.0.08M.08", false));
+    assert!(codec_rank("av01.0.08M.08", false) < codec_rank("theora", false));
+    assert_eq!(
+        codec_priority_index("compatible"),
+        1,
+        "unknown values fall back to newest, not compatible"
+    );
+    assert_eq!(codec_priority_index("mystery"), 0);
+    assert_eq!(codec_priority_value(9), CODEC_PRIORITY_NEWEST);
+    assert!(matches!(
+        codec_preference(false),
+        VideoCodecPreference::AVC1
+    ));
+    assert!(matches!(codec_preference(true), VideoCodecPreference::AV1));
 }
 
 #[test]
@@ -1392,7 +1414,7 @@ fn video_format_options_empty_without_fetchable_video() {
         "https",
         false
     ),]));
-    assert!(video_format_options(&video).is_empty());
+    assert!(video_format_options(&video, true).is_empty());
 }
 
 #[test]

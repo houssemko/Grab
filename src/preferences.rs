@@ -455,6 +455,38 @@ pub fn show(
             );
         }
     });
+    let codec_labels = crate::video::codec_priority_labels();
+    let codec_refs: Vec<&str> = codec_labels.iter().map(String::as_str).collect();
+    let video_codec = adw::ComboRow::builder()
+        .title(gettext("Preferred video codec"))
+        .subtitle(gettext("Newest codecs or widest playback"))
+        .model(&gtk4::StringList::new(&codec_refs))
+        .build();
+    video_codec
+        .set_selected(crate::video::codec_priority_index(&settings.video_codec_priority()) as u32);
+    video_quality_group.add(&video_codec);
+    {
+        let row = video_codec.downgrade();
+        settings.connect_changed(
+            Some(crate::settings::key::VIDEO_CODEC_PRIORITY),
+            move |s, _| {
+                if let Some(row) = row.upgrade() {
+                    row.set_selected(crate::video::codec_priority_index(
+                        &s.string(crate::settings::key::VIDEO_CODEC_PRIORITY),
+                    ) as u32);
+                }
+            },
+        );
+    }
+    video_codec.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::VIDEO_CODEC_PRIORITY,
+                crate::video::codec_priority_value(row.selected() as usize),
+            );
+        }
+    });
     let video_audio = adw::SwitchRow::builder()
         .title(gettext("Audio only"))
         .subtitle(gettext("New media downloads skip the video track"))

@@ -1617,6 +1617,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                     libs,
                     url.clone(),
                     settings_b.cookies_browser(),
+                    settings_b.video_codec_newest(),
                 )
                 .await
                 {
