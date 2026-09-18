@@ -1532,483 +1532,6 @@ fn find_hls_format(formats: &[Format], id: &str) -> Option<HlsSel> {
         .and_then(HlsSel::from_format)
 }
 
-/// URL of an audio-only HLS format, when the page lists HLS audio
-/// beside (not inside) its video variants: used when the picked
-/// variant's own master names no audio rendition. Highest bitrate
-/// wins; subtitles masquerading as audio-less video never qualify.
-fn select_hls_audio_url(formats: &[Format]) -> Option<String> {
-    formats
-        .iter()
-        .filter(|f| {
-            f.protocol == Protocol::M3U8Native
-                && !matches!(f.has_drm, Some(DrmStatus::Yes))
-                && f.codec_info
-                    .video_codec
-                    .as_deref()
-                    .is_none_or(|c| c == "none")
-                && f.codec_info
-                    .audio_codec
-                    .as_deref()
-                    .is_some_and(|c| c != "none")
-        })
-        .filter_map(|f| {
-            f.download_info.url.clone().and_then(|url| {
-                if url.is_empty() {
-                    return None;
-                }
-                let bitrate = f.rates_info.total_rate.map(|r| r.into_inner() as i64);
-                Some((bitrate.unwrap_or(0), url))
-            })
-        })
-        .max_by_key(|(bitrate, _)| *bitrate)
-        .map(|(_, url)| url)
-}
-
-/// `-headers` value for ffmpeg: the extractor-resolved headers
-/// (variant and segment requests often need the same auth), with the
-/// configured user agent winning over the extractor's.
-fn ffmpeg_headers(headers: &HttpHeaders, user_agent: &str, referer: Option<&str>) -> String {
-    let ua = if user_agent.trim().is_empty() {
-        headers.user_agent.as_str()
-    } else {
-        user_agent.trim()
-    };
-    let mut out = String::new();
-    let mut pairs: Vec<(&str, &str)> = [
-        ("User-Agent", ua),
-        ("Accept", headers.accept.as_str()),
-        ("Accept-Language", headers.accept_language.as_str()),
-        ("Sec-Fetch-Mode", headers.sec_fetch_mode.as_str()),
-    ]
-    .into_iter()
-    .collect();
-    if let Some(referer) = referer {
-        pairs.push(("Referer", referer));
-    }
-    for (name, value) in pairs {
-        let value = value.trim();
-        // Reject embedded newlines like the reqwest side does
-        // (HeaderValue::from_str): extractor JSON controls these
-        // values, and a CR/LF would inject headers into ffmpeg.
-        if value.is_empty() || value.bytes().any(|b| b == b'\r' || b == b'\n') {
-            continue;
-        }
-        out.push_str(name);
-        out.push_str(": ");
-        out.push_str(value);
-        out.push_str("\r\n");
-    }
-    out
-}
-
-/// Total bytes written from one ffmpeg `-progress pipe:1` line
-/// (`total_size=N`). The pump renders byte amounts with unknown total,
-/// the same shape as length-less engine rows.
-fn parse_progress_size(line: &str) -> Option<u64> {
-    let (key, raw) = line.split_once('=')?;
-    if key.trim() != "total_size" {
-        return None;
-    }
-    raw.trim().parse().ok()
-}
-
-/// One variant (`EXT-X-STREAM-INF`) of an HLS master playlist.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HlsVariant {
-    uri: String,
-    height: Option<u32>,
-    audio_group: Option<String>,
-    /// Raw CODECS attribute: variants naming both an audio and a video
-    /// codec carry muxed segments, so no separate audio is needed.
-    codecs: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-/// One audio rendition (`EXT-X-MEDIA TYPE=AUDIO`) of a master playlist.
-struct HlsAudio {
-    group: String,
-    uri: Option<String>,
-    default: bool,
-}
-
-/// Split an HLS tag attribute list on commas outside quotes
-/// (`BANDWIDTH=123,RESOLUTION=640x360,AUDIO="a"`).
-fn split_hls_attrs(line: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
-    for (i, c) in line.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            ',' if !quoted => {
-                parts.push(line[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(line[start..].trim());
-    parts
-}
-
-/// Parse one `KEY=VALUE` attribute pair, unquoting the value.
-fn hls_attr(part: &str) -> Option<(&str, &str)> {
-    let (key, value) = part.split_once('=')?;
-    Some((key.trim(), value.trim().trim_matches('"')))
-}
-
-/// Height from a `RESOLUTION=WxH` value.
-fn hls_resolution_height(value: &str) -> Option<u32> {
-    value.split_once('x')?.1.parse().ok()
-}
-
-/// Whether a variant's CODECS list names an audio codec alongside
-/// video: such segments are muxed, so the variant needs no rendition.
-fn hls_codecs_have_audio(codecs: &str) -> bool {
-    let c = codecs.to_ascii_lowercase();
-    ["mp4a", "ac-3", "ec-3", "opus", "vorbis", "flac", "alac"]
-        .iter()
-        .any(|a| c.contains(a))
-}
-
-/// Join a playlist-relative URI against its base, carrying the base
-/// query string over when the reference has none (tokenized masters
-/// like Twitter's authenticate every URL with the same query — the
-/// same default yt-dlp applies via `variant_query`).
-fn join_hls_url(base: &url::Url, reference: &str) -> Option<url::Url> {
-    let mut url = base.join(reference).ok()?;
-    if url.query().is_none()
-        && let Some(query) = base.query()
-    {
-        url.set_query(Some(query));
-    }
-    Some(url)
-}
-
-/// Parse an HLS master playlist into variants + audio renditions,
-/// resolving relative URIs against the playlist URL. Returns `None`
-/// when the text is a media playlist (segments, no variants), which
-/// the caller downloads directly.
-fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec<HlsAudio>)> {
-    let mut variants = Vec::new();
-    let mut audios = Vec::new();
-    let mut pending: Option<HlsVariant> = None;
-    let mut is_master = false;
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        if let Some(rest) = line.strip_prefix("#EXT-X-STREAM-INF:") {
-            is_master = true;
-            let mut variant = HlsVariant {
-                uri: String::new(),
-                height: None,
-                audio_group: None,
-                codecs: None,
-            };
-            for part in split_hls_attrs(rest) {
-                match hls_attr(part) {
-                    Some(("RESOLUTION", v)) => variant.height = hls_resolution_height(v),
-                    Some(("AUDIO", v)) => variant.audio_group = Some(v.to_string()),
-                    Some(("CODECS", v)) => variant.codecs = Some(v.to_string()),
-                    _ => {}
-                }
-            }
-            pending = Some(variant);
-        } else if let Some(rest) = line.strip_prefix("#EXT-X-MEDIA:") {
-            let (mut kind, mut group, mut uri, mut default) = ("", "", None, false);
-            for part in split_hls_attrs(rest) {
-                match hls_attr(part) {
-                    Some(("TYPE", v)) => kind = v,
-                    Some(("GROUP-ID", v)) => group = v,
-                    Some(("URI", v)) => uri = Some(v.to_string()),
-                    Some(("DEFAULT", "YES")) => default = true,
-                    _ => {}
-                }
-            }
-            if kind == "AUDIO" && !group.is_empty() {
-                let uri = uri
-                    .and_then(|u| join_hls_url(base, &u))
-                    .map(|u| u.to_string());
-                audios.push(HlsAudio {
-                    group: group.to_string(),
-                    uri,
-                    default,
-                });
-            }
-        } else if !line.starts_with('#')
-            && let Some(mut variant) = pending.take()
-            && let Some(uri) = join_hls_url(base, line)
-        {
-            variant.uri = uri.to_string();
-            variants.push(variant);
-        }
-    }
-    if !is_master {
-        return None;
-    }
-    Some((variants, audios))
-}
-
-/// Concrete ffmpeg inputs for one HLS capture: the video playlist
-/// plus, when the variant carries separate audio, its rendition URL.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct HlsInput {
-    video: String,
-    audio: Option<String>,
-    /// Page Referer for ffmpeg's `-headers`: hotlink-guarded CDNs
-    /// reject segment requests without it. Only the yt-dlp resolve
-    /// path provides one (the raw dump carries per-format and
-    /// video-level `http_headers` that never survive typed parsing).
-    referer: Option<String>,
-}
-
-/// Pick the variant for a height cap (smallest at or above, else
-/// tallest — the same rule as [`select_hls_format`]), preferring
-/// variants that actually carry audio, and attach their rendition.
-fn pick_hls_variant(
-    variants: &[HlsVariant],
-    audios: &[HlsAudio],
-    want: Option<u32>,
-) -> Option<HlsInput> {
-    let mut cands: Vec<&HlsVariant> = variants.iter().filter(|v| !v.uri.is_empty()).collect();
-    if cands.is_empty() {
-        return None;
-    }
-    // Sounding variants first, then shortest: a video downloads with
-    // audio, so certainty beats an exact height-cap fit. Proven audio
-    // (CODECS names it, or the group is defined — a group without URI
-    // is muxed in the variant) outranks assumed-muxed (no AUDIO tag),
-    // which outranks dangling group references.
-    let audio_score = |v: &HlsVariant| {
-        if v.codecs.as_deref().is_some_and(hls_codecs_have_audio) {
-            0
-        } else {
-            match &v.audio_group {
-                None => 1,
-                Some(group) if audios.iter().any(|a| &a.group == group) => 0,
-                Some(_) => 2,
-            }
-        }
-    };
-    cands.sort_by_key(|v| (audio_score(v), v.height.unwrap_or(0)));
-    let pick = match want {
-        // Sounding variants first even against the cap: a shorter
-        // variant with audio beats silent height-fit.
-        Some(h) => cands
-            .iter()
-            .filter(|v| audio_score(v) < 2)
-            .find(|v| v.height.is_some_and(|x| x >= h))
-            .or_else(|| cands.iter().find(|v| v.height.is_some_and(|x| x >= h)))
-            .or_else(|| cands.iter().max_by_key(|v| v.height.unwrap_or(0)))
-            .cloned(),
-        None => cands
-            .iter()
-            .filter(|v| audio_score(v) < 2)
-            .max_by_key(|v| v.height.unwrap_or(0))
-            .or_else(|| cands.iter().max_by_key(|v| v.height.unwrap_or(0)))
-            .cloned(),
-    }?;
-    // DEFAULT-marked rendition first, like a player would auto-select.
-    let audio = pick.audio_group.as_deref().and_then(|group| {
-        audios
-            .iter()
-            .filter(|a| a.group == group && a.uri.is_some())
-            .min_by_key(|a| !a.default)
-            .and_then(|a| a.uri.clone())
-    });
-    Some(HlsInput {
-        video: pick.uri.clone(),
-        audio,
-        referer: None,
-    })
-}
-
-/// Request headers for playlist fetches: extractor-resolved headers
-/// with the configured user agent winning. Empty values are skipped.
-fn hls_request_headers(headers: &HttpHeaders, user_agent: &str) -> reqwest::header::HeaderMap {
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-    let ua = if user_agent.trim().is_empty() {
-        headers.user_agent.as_str()
-    } else {
-        user_agent.trim()
-    };
-    let mut map = HeaderMap::new();
-    for (name, value) in [
-        ("user-agent", ua),
-        ("accept", headers.accept.as_str()),
-        ("accept-language", headers.accept_language.as_str()),
-        ("sec-fetch-mode", headers.sec_fetch_mode.as_str()),
-    ] {
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(name.as_bytes()),
-            HeaderValue::from_str(value),
-        ) {
-            map.insert(name, value);
-        }
-    }
-    map
-}
-
-/// Resolve what ffmpeg should open for one HLS format URL: when the URL
-/// is a master playlist, pick the height-appropriate variant (plus its
-/// audio rendition, if separate); otherwise — media playlist, fetch
-/// failure, anything unexpected — hand ffmpeg the URL untouched, which
-/// is exactly today's behavior.
-///
-/// Resolution prefers `yt-dlp --dump-single-json` over the hand-rolled
-/// master-text parse below: variant choice, audio groups, tokenized
-/// URLs and keys stay maintained upstream, and the dump's raw
-/// `http_headers` supply the page Referer that typed parsing drops.
-/// The text parse remains as the fallback for masters yt-dlp chokes
-/// on but the lenient local parser tolerates.
-/// Fetch one playlist as text: `None` on any network, status or
-/// body failure. Callers fall back to handing ffmpeg the URL blind.
-async fn fetch_playlist_text(
-    client: &reqwest::Client,
-    url: &str,
-    headers: &HttpHeaders,
-    user_agent: &str,
-) -> Option<String> {
-    match client
-        .get(url)
-        .headers(hls_request_headers(headers, user_agent))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => resp.text().await.ok(),
-        _ => None,
-    }
-}
-
-/// Referer for one resolved variant URL from a raw dump: the format's
-/// own `http_headers` first, else the video-level ones (TikTok sets it
-/// at video level for web extracts). CR/LF values are rejected — a
-/// hostile page must never inject ffmpeg headers.
-fn extract_referer(value: &serde_json::Value, format_url: &str) -> Option<String> {
-    fn get(value: &serde_json::Value) -> Option<String> {
-        let referer = value.get("http_headers")?.get("Referer")?.as_str()?;
-        if referer.is_empty() || referer.bytes().any(|b| b == b'\r' || b == b'\n') {
-            return None;
-        }
-        Some(referer.to_string())
-    }
-    value
-        .get("formats")?
-        .as_array()?
-        .iter()
-        .find(|f| f.get("url").and_then(|u| u.as_str()) == Some(format_url))
-        .and_then(get)
-        .or_else(|| get(value))
-}
-
-/// Pick live inputs from a `--dump-single-json` value over a master
-/// (or variant) URL: height-appropriate HLS variant, page-level HLS
-/// audio beside it, and the Referer. Pure for tests. `None` when the
-/// dump carries no HLS variant — the caller falls back to the
-/// master-text parse, then to handing ffmpeg the URL blind.
-fn live_input_from_dump(value: &serde_json::Value, want: Option<u32>) -> Option<HlsInput> {
-    let formats: Vec<Format> = value
-        .get("formats")
-        .and_then(|f| serde_json::from_value(f.clone()).ok())?;
-    let hls = select_hls_format(&formats, want)?;
-    Some(HlsInput {
-        video: hls.url.clone(),
-        audio: select_hls_audio_url(&formats),
-        referer: extract_referer(value, &hls.url),
-    })
-}
-
-/// Master resolution through the yt-dlp binary: full cookie/header
-/// context, upstream-maintained variant parsing. `None` on any spawn,
-/// timeout, exit-status, parse or selection failure.
-async fn resolve_hls_input_ytdlp(
-    youtube_bin: &Path,
-    url: &str,
-    cookies_browser: &str,
-    user_agent: &str,
-    want: Option<u32>,
-) -> Option<HlsInput> {
-    let mut args = vec![
-        "--no-progress".to_string(),
-        "--dump-single-json".to_string(),
-    ];
-    args.extend(ytdlp_identity_args(cookies_browser, Some(user_agent), url));
-    let mut cmd = tokio::process::Command::new(youtube_bin);
-    cmd.args(&args);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().ok()?;
-    let stdout = child.stdout.take()?;
-    let drain = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut buf = Vec::new();
-        let mut reader = tokio::io::BufReader::new(stdout);
-        reader.read_to_end(&mut buf).await.ok();
-        buf
-    });
-    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            kill_tree(&mut child);
-            let _ = child.wait().await;
-            return None;
-        }
-    };
-    let stdout = drain.await.unwrap_or_default();
-    if !status.success() {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&stdout)).ok()?;
-    live_input_from_dump(&value, want)
-}
-
-async fn resolve_hls_input(
-    youtube_bin: &Path,
-    url: &str,
-    headers: &HttpHeaders,
-    user_agent: &str,
-    cookies_browser: &str,
-    want: Option<u32>,
-) -> HlsInput {
-    let fallback = || HlsInput {
-        video: url.to_string(),
-        audio: None,
-        referer: None,
-    };
-    if let Some(input) =
-        resolve_hls_input_ytdlp(youtube_bin, url, cookies_browser, user_agent, want).await
-    {
-        return input;
-    }
-    let Ok(base) = url::Url::parse(url) else {
-        return fallback();
-    };
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .ok();
-    let Some(client) = client else {
-        return fallback();
-    };
-    let Some(text) = fetch_playlist_text(&client, url, headers, user_agent).await else {
-        return fallback();
-    };
-    if !text.contains("#EXT-X-STREAM-INF") {
-        return fallback();
-    }
-    let Some((variants, audios)) = parse_hls_master(&text, &base) else {
-        return fallback();
-    };
-    pick_hls_variant(&variants, &audios, want).unwrap_or_else(fallback)
-}
-
 /// Find one format by id, accepting only what the pipeline can fetch.
 /// `None` covers unknown ids and HLS/DRM/missing-URL formats alike: the
 /// caller falls back to the quality preset.
@@ -2583,19 +2106,13 @@ pub async fn run_video_download(
         job.newest_codecs,
         job.item_id,
     );
-    if let Some(mut hls) = hls_sel {
+    if let Some(hls) = hls_sel {
         // An abort that fired during resolve means stop-before-start:
         // for live rows there is deliberately no pauser preset waiting
         // on a message, so report instead of going quiet (the pump tail
         // would fail the row either way — this names the cause).
         if job.is_live && abort.try_recv().is_ok() {
             return Err(VideoError::interrupted());
-        }
-        // Page-level audio rendition as last resort: the variant's own
-        // master may name no audio while the page lists HLS audio beside
-        // its video variants.
-        if hls.fallback_audio.is_none() {
-            hls.fallback_audio = select_hls_audio_url(&video.formats);
         }
         tracing::info!(
             item_id = job.item_id,
@@ -2604,17 +2121,16 @@ pub async fn run_video_download(
             audio_only = job.audio_only,
             "downloading HLS variant",
         );
-        // Live captures stay on direct ffmpeg (stop-and-keep needs its
-        // SIGTERM finalizing); VOD captures go through yt-dlp, whose
-        // native fragment handling (retries, keys, audio merging)
-        // beats a hand-rolled ffmpeg invocation.
+        // Live captures go through yt-dlp with a kill-safe MPEG-TS
+        // container (variant choice, keys, retries upstream; Stop is
+        // kill + adopt + remux, no grace-period finalizing); VOD
+        // captures go through yt-dlp's standard HLS path.
         if job.is_live {
-            return run_hls_ffmpeg(
-                &ffmpeg_bin,
+            return run_live_ytdlp(
                 &youtube_bin,
+                &ffmpeg_bin,
                 &staging,
                 &job,
-                hls,
                 abort,
                 timeout,
                 tx,
@@ -3005,71 +2521,6 @@ async fn finish_merge(
     Ok(final_bytes.unwrap_or(0))
 }
 
-/// Ask ffmpeg to stop gracefully: SIGTERM finalizes the container so
-/// the partial plays, unlike SIGKILL. Escalates to SIGKILL after
-/// `grace`, then waits out the exit either way. Returns whether the
-/// process exited on its own accord — only then is the file adoptable.
-async fn terminate_ffmpeg(child: &mut tokio::process::Child, grace: Duration) -> bool {
-    if let Some(pid) = child.id() {
-        // SAFETY: constant signal number; ESRCH (already dead) is harmless.
-        unsafe {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-    }
-    if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-        return true;
-    }
-    child.kill().await.ok();
-    let _ = child.wait().await;
-    false
-}
-
-/// Move a finished HLS capture into place. Captures that never got
-/// data (stopped before the first segment) fail instead of stranding
-/// an empty Done row.
-async fn adopt_hls_output(
-    out: &Path,
-    dest: &Path,
-    staging: &Path,
-) -> Result<Option<u64>, VideoError> {
-    if file_len(out).unwrap_or(0) == 0 {
-        let _ = tokio::fs::remove_dir_all(staging).await;
-        return Err(VideoError::part_failed("nothing recorded"));
-    }
-    // Atomic claim into place (EXDEV-safe, no clobber).
-    match crate::download::rename_noreplace(out, dest) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(VideoError::exists());
-        }
-        Err(e) => return Err(VideoError::combine(&e)),
-    }
-    let _ = tokio::fs::remove_dir_all(staging).await;
-    Ok(file_len(dest))
-}
-
-/// Stop a live HLS capture and keep what's recorded: terminate
-/// gracefully, then adopt the partial if it finalized. Used for both
-/// user stops and timeouts on live rows — a stalled or stopped live
-/// capture still yields playable media instead of nothing.
-async fn stop_hls_capture(
-    child: &mut tokio::process::Child,
-    progress: tokio::task::JoinHandle<u64>,
-    logs: tokio::task::JoinHandle<String>,
-    out_path: PathBuf,
-    dest: PathBuf,
-    staging: PathBuf,
-) -> Result<Option<u64>, VideoError> {
-    let exited_clean = terminate_ffmpeg(child, Duration::from_secs(10)).await;
-    progress.abort();
-    let _ = logs.await;
-    if !exited_clean {
-        let _ = tokio::fs::remove_dir_all(&staging).await;
-        return Err(VideoError::part_failed("nothing recorded"));
-    }
-    adopt_hls_output(&out_path, &dest, &staging).await
-}
-
 /// yt-dlp argv for one split part: exact format id, exact output path.
 /// Pure for tests: flags, inputs and the end-of-options separator are
 /// pinned here, not in assertion-hostile spawn code.
@@ -3273,114 +2724,211 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
     }
 }
 
-/// Record one live HLS variant with ffmpeg (`-c copy`: the variant
-/// playlist, segment requests and any playlist keys are ffmpeg's
-/// business). Live rows stop-and-keep via SIGTERM finalizing; VOD rows
-/// go through [`run_hls_ytdlp`] instead. Returns the final size, or
-/// `None` when a VOD attempt aborts.
-#[allow(clippy::too_many_arguments)]
-async fn run_hls_ffmpeg(
-    ffmpeg: &Path,
+/// yt-dlp argv for a live capture: height-capped (or pinned) format in
+/// a kill-safe MPEG-TS container, endless fragment retries bounded by
+/// our timeout. No `--live-from-start` (record-now means the live
+/// edge; from-start is experimental and YouTube/Twitch-only) and no
+/// `--wait-for-video` (an unbounded wait loop is not a download
+/// attempt). Pure for tests.
+fn live_capture_argv(job: &VideoJob, out: &Path) -> Vec<String> {
+    let mut args = vec![
+        "--no-playlist".to_string(),
+        "--newline".to_string(),
+        "-f".to_string(),
+        hls_format_spec(&job.quality, job.video_format_id.as_deref(), job.audio_only),
+        "--hls-use-mpegts".to_string(),
+        "--fragment-retries".to_string(),
+        "infinite".to_string(),
+        "--retries".to_string(),
+        job.tries.max(1).to_string(),
+        "-o".to_string(),
+        out.to_string_lossy().into_owned(),
+    ];
+    args.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        Some(job.user_agent.as_str()),
+        &job.page_url,
+    ));
+    args
+}
+
+/// ffmpeg argv remuxing a stopped live capture (MPEG-TS bytes, possibly
+/// still in the `.part` shell) into the finished file: stream-copy with
+/// faststart for progressive playback. Pure for tests.
+fn live_remux_argv(ts_path: &Path, dest: &Path, audio_only: bool, with_bsf: bool) -> Vec<String> {
+    let mut argv = vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-nostats".to_string(),
+        "-i".to_string(),
+        ts_path.to_string_lossy().into_owned(),
+    ];
+    if audio_only {
+        argv.extend(["-map".to_string(), "0:a?".to_string()]);
+    } else {
+        argv.extend(["-map".to_string(), "0".to_string()]);
+    }
+    argv.extend([
+        "-dn".to_string(),
+        "-ignore_unknown".to_string(),
+        "-c".to_string(),
+        "copy".to_string(),
+    ]);
+    // TS almost always carries ADTS AAC, which MP4/M4A containers
+    // reject without the fixup (mirroring yt-dlp's own FixupM3u8
+    // line); anything else remuxes on the bare retry.
+    if with_bsf {
+        argv.extend(["-bsf:a".to_string(), "aac_adtstoasc".to_string()]);
+    }
+    argv.extend([
+        "-movflags".to_string(),
+        "+faststart".to_string(),
+        "--".to_string(),
+        dest.to_string_lossy().into_owned(),
+    ]);
+    argv
+}
+
+/// Remux a stopped live capture into place. Failures surface ffmpeg's
+/// own last line.
+async fn remux_live_capture(
+    ffmpeg_bin: &Path,
+    ts_path: &Path,
+    dest: &Path,
+    audio_only: bool,
+    timeout: Duration,
+) -> Result<(), VideoError> {
+    for with_bsf in [true, false] {
+        let mut cmd = tokio::process::Command::new(ffmpeg_bin);
+        cmd.args(live_remux_argv(ts_path, dest, audio_only, with_bsf));
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
+        }
+        let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
+        let logs = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut reader = tokio::io::BufReader::new(stderr);
+            let mut tail = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        tail.extend_from_slice(&buf[..n]);
+                        if tail.len() > 8192 {
+                            tail.drain(..tail.len() - 8192);
+                        }
+                    }
+                }
+            }
+            String::from_utf8_lossy(&tail).into_owned()
+        });
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                kill_tree(&mut child);
+                let _ = logs.await;
+                return Err(VideoError::runtime(&e));
+            }
+            Err(_) => {
+                kill_tree(&mut child);
+                let _ = child.wait().await;
+                let _ = logs.await;
+                return Err(VideoError::part_failed("timed out finalizing"));
+            }
+        };
+        let log_tail = logs.await.unwrap_or_default();
+        if status.success() {
+            return Ok(());
+        }
+        let detail = log_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("ffmpeg reported failure")
+            .trim()
+            .to_string();
+        if with_bsf {
+            tracing::info!(error = %detail, "live remux without bsf, retrying bare");
+            continue;
+        }
+        return Err(VideoError::combine(detail));
+    }
+    unreachable!("bsf retry always returns");
+}
+
+/// One live capture through the yt-dlp binary: variant choice, audio
+/// rendition, keys and fragment retries are yt-dlp's; the MPEG-TS
+/// container keeps every kill point playable, so Stop is kill, adopt
+/// and remux instead of grace-period finalizing.
+///
+/// Stalled captures yield their partial like before; an empty capture
+/// fails. Returns the final size.
+async fn run_live_ytdlp(
     youtube_bin: &Path,
+    ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
-    hls: HlsSel,
     abort: oneshot::Receiver<()>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
-    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
-    let _ = tokio::fs::remove_dir_all(staging).await;
+    use tokio::io::AsyncBufReadExt as _;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    let out_path = staging.join(if job.audio_only { "hls.m4a" } else { "hls.mp4" });
-    // Master playlists resolve to a height-appropriate variant plus its
-    // audio rendition when separate; anything else passes through as today's
-    // single input.
-    let mut input = resolve_hls_input(
-        youtube_bin,
-        &hls.url,
-        &hls.headers,
-        &job.user_agent,
-        &job.cookies_browser,
-        hls.height,
-    )
-    .await;
-    // Page-level fallback: the master named no audio, but the page
-    // lists an audio-only HLS rendition beside its video variants.
-    if input.audio.is_none() {
-        input.audio.clone_from(&hls.fallback_audio);
-    }
-    let mut cmd = tokio::process::Command::new(ffmpeg);
-    cmd.arg("-hide_banner")
-        .arg("-loglevel")
-        .arg("warning")
-        .arg("-nostats")
-        .arg("-progress")
-        .arg("pipe:1");
-    let headers = ffmpeg_headers(&hls.headers, &job.user_agent, input.referer.as_deref());
-    // `-headers` is per-input: it must precede each `-i` it covers.
-    let input_arg = |cmd: &mut tokio::process::Command, url: &str| {
-        if !headers.is_empty() {
-            cmd.arg("-headers").arg(&headers);
-        }
-        cmd.arg("-i").arg(url);
-    };
-    if job.audio_only {
-        // Audio rendition alone when split (skips the video segments),
-        // else the variant with video dropped.
-        input_arg(&mut cmd, input.audio.as_deref().unwrap_or(&input.video));
-        cmd.arg("-vn");
-    } else if let Some(audio) = &input.audio {
-        input_arg(&mut cmd, &input.video);
-        input_arg(&mut cmd, audio);
-        cmd.arg("-map").arg("0:v:0").arg("-map").arg("1:a:0");
-    } else {
-        input_arg(&mut cmd, &input.video);
-    }
-    cmd.arg("-c")
-        .arg("copy")
-        .arg(&out_path)
-        .stdin(std::process::Stdio::null())
+    let ext = if job.audio_only { "m4a" } else { "mp4" };
+    let out = staging.join(format!("live.{ext}"));
+    let mut cmd = tokio::process::Command::new(youtube_bin);
+    cmd.args(live_capture_argv(job, &out));
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(VideoError::runtime)?;
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| VideoError::runtime("ffmpeg gave no progress pipe"))?;
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
     let stderr = child
         .stderr
         .take()
-        .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
-    // Drain both pipes concurrently: an unread pipe stalls ffmpeg once
-    // full, and the tail diagnoses failures. Progress reports byte
-    // amounts with unknown total, like length-less engine rows (live
-    // streams are unbounded, so no block map applies).
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
     let tx_p = tx.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let (mut sent, mut have) = (0u64, 0u64);
+        let mut have = 0u64;
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(n) = parse_progress_size(&line) {
-                have = have.max(n);
-                if have.saturating_sub(sent) >= PROGRESS_GRANULARITY {
-                    sent = have;
-                    tx_p.send(EngineMsg::Progress {
-                        downloaded: have,
-                        total: None,
-                        uploaded: 0,
-                        upload_bps: 0,
-                    })
-                    .ok();
+            if let Some((frac, total)) = parse_ytdlp_progress(&line) {
+                if let Some(t) = total {
+                    have = have.max((frac * t as f64) as u64);
                 }
+                tx_p.send(EngineMsg::Progress {
+                    downloaded: have,
+                    total: None,
+                    uploaded: 0,
+                    upload_bps: 0,
+                })
+                .ok();
             }
         }
         have
     });
     let logs = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
         let mut buf = [0u8; 4096];
@@ -3397,71 +2945,65 @@ async fn run_hls_ffmpeg(
         }
         String::from_utf8_lossy(&tail).into_owned()
     });
-    let live = job.is_live;
-    let status = tokio::select! {
+    tokio::select! {
         biased;
         _ = abort => {
-            if live {
-                // Live captures keep what's recorded (see
-                // stop_hls_capture); VOD attempts just stop.
-                return stop_hls_capture(
-                    &mut child,
-                    progress,
-                    logs,
-                    out_path,
-                    job.dest.clone(),
-                    staging.to_path_buf(),
-                )
-                .await;
-            }
-            child.kill().await.ok();
+            kill_tree(&mut child);
             let _ = child.wait().await;
-            progress.abort();
-            logs.abort();
-            let _ = tokio::fs::remove_dir_all(staging).await;
-            return Ok(None);
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
-            Ok(Ok(status)) => status,
+            Ok(Ok(_)) => {}
             Ok(Err(e)) => {
-                child.kill().await.ok();
+                kill_tree(&mut child);
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
                 // A stalled live capture still yields what it got.
-                if live {
-                    return stop_hls_capture(
-                        &mut child,
-                        progress,
-                        logs,
-                        out_path,
-                        job.dest.clone(),
-                        staging.to_path_buf(),
-                    )
-                    .await;
-                }
-                child.kill().await.ok();
-                progress.abort();
-                logs.abort();
-                return Err(VideoError::part_failed("timed out"));
+                kill_tree(&mut child);
+                let _ = child.wait().await;
             }
         },
-    };
+    }
     let _ = progress.await;
     let log_tail = logs.await.unwrap_or_default();
-    if !status.success() {
+    // Whatever stopped the capture — user stop, stall, stream end, or
+    // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
+    // renames the `.part` shell on clean completion, so prefer the
+    // finished name and fall back to the shell.
+    let part = out.with_extension(format!("{ext}.part"));
+    let src = [out.clone(), part]
+        .into_iter()
+        .find(|p| file_len(p).is_some_and(|n| n > 0));
+    let Some(src) = src else {
+        // Startup failure: surface yt-dlp's line, not a generic miss.
         let detail = log_tail
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
-            .unwrap_or("ffmpeg reported failure")
+            .unwrap_or("nothing recorded")
             .trim()
             .to_string();
+        let _ = tokio::fs::remove_dir_all(staging).await;
         return Err(VideoError::part_failed(detail));
+    };
+    tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
+    let final_tmp = staging.join(format!("final.{ext}"));
+    if let Err(e) = remux_live_capture(ffmpeg_bin, &src, &final_tmp, job.audio_only, timeout).await
+    {
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Err(e);
     }
-    adopt_hls_output(&out_path, &job.dest, staging).await
+    match crate::download::rename_noreplace(&final_tmp, &job.dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(VideoError::exists());
+        }
+        Err(e) => return Err(VideoError::combine(&e)),
+    }
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    Ok(file_len(&job.dest))
 }
 
 /// Parse a byte size from yt-dlp progress (`~50.00MiB`, `10.5K`, `3B`).

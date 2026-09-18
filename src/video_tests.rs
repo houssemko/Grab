@@ -1079,103 +1079,6 @@ fn hls_selection_prefers_capped_height() {
 }
 
 #[test]
-fn ffmpeg_headers_passthrough() {
-    let headers = yt_dlp::model::format::HttpHeaders {
-        user_agent: "Extractor/1".into(),
-        accept: "*/*".into(),
-        accept_language: "".into(),
-        sec_fetch_mode: "no-cors".into(),
-    };
-    // Caller UA wins; empty values are skipped; lines are CRLF.
-    assert_eq!(
-        ffmpeg_headers(&headers, "Grab/1", None),
-        "User-Agent: Grab/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\n"
-    );
-    assert_eq!(
-        ffmpeg_headers(&headers, "", None),
-        "User-Agent: Extractor/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\n"
-    );
-    // A resolved page Referer rides along for hotlink-guarded CDNs.
-    assert_eq!(
-        ffmpeg_headers(&headers, "Grab/1", Some("https://www.tiktok.com/")),
-        "User-Agent: Grab/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\nReferer: https://www.tiktok.com/\r\n"
-    );
-    let bare = yt_dlp::model::format::HttpHeaders {
-        user_agent: "".into(),
-        accept: "".into(),
-        accept_language: "".into(),
-        sec_fetch_mode: "".into(),
-    };
-    assert_eq!(ffmpeg_headers(&bare, "", None), "");
-    assert_eq!(
-        ffmpeg_headers(&bare, "", Some("https://www.tiktok.com/")),
-        "Referer: https://www.tiktok.com/\r\n"
-    );
-}
-
-#[test]
-fn ffmpeg_progress_reports_total_size() {
-    assert_eq!(parse_progress_size("total_size=1048576"), Some(1048576));
-    assert_eq!(parse_progress_size("total_size=0"), Some(0));
-    assert_eq!(parse_progress_size("out_time_ms=123456"), None);
-    assert_eq!(parse_progress_size("progress=end"), None);
-    assert_eq!(parse_progress_size("total_size=abc"), None);
-    assert_eq!(parse_progress_size("garbage"), None);
-}
-
-#[test]
-fn hls_master_parses_variants_and_audio() {
-    let base = url::Url::parse("https://cdn.example/vid/master.m3u8").unwrap();
-    let text = "#EXTM3U\n\
-        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"en\",URI=\"audio.m3u8\"\n\
-        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",NAME=\"es\",DEFAULT=YES,URI=\"audio-es.m3u8\"\n\
-        #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO=\"aac\"\n\
-        low.m3u8\n\
-        #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS=\"mp4a.40.2,avc1.640028\"\n\
-        mid-muxed.m3u8\n\
-        #EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,AUDIO=\"aac\"\n\
-        /abs/hi.m3u8\n\
-        #EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x2160\n\
-        ultra.m3u8\n";
-    let (variants, audios) = parse_hls_master(text, &base).expect("master");
-    assert_eq!(variants.len(), 4);
-    assert_eq!(variants[0].height, Some(360));
-    assert_eq!(variants[0].uri, "https://cdn.example/vid/low.m3u8");
-    assert_eq!(variants[1].uri, "https://cdn.example/vid/mid-muxed.m3u8");
-    assert!(
-        variants[1]
-            .codecs
-            .as_deref()
-            .is_some_and(|c| c.contains("mp4a"))
-    );
-    assert_eq!(variants[2].uri, "https://cdn.example/abs/hi.m3u8");
-    assert_eq!(variants[3].audio_group, None);
-    assert_eq!(audios.len(), 2);
-    assert_eq!(
-        audios[0].uri.as_deref(),
-        Some("https://cdn.example/vid/audio.m3u8")
-    );
-    // Height cap takes the smallest sounding variant at or above, with
-    // CODECS-muxed winning ties; the DEFAULT rendition is selected.
-    let pick = pick_hls_variant(&variants, &audios, Some(720)).expect("pick");
-    assert_eq!(pick.video, "https://cdn.example/vid/mid-muxed.m3u8");
-    assert_eq!(pick.audio, None);
-    let hi = pick_hls_variant(&variants, &audios, Some(1080)).expect("hi");
-    assert_eq!(hi.video, "https://cdn.example/abs/hi.m3u8");
-    assert_eq!(
-        hi.audio.as_deref(),
-        Some("https://cdn.example/vid/audio-es.m3u8")
-    );
-    let best = pick_hls_variant(&variants, &audios, None).expect("best");
-    assert_eq!(best.video, "https://cdn.example/vid/ultra.m3u8");
-    assert_eq!(best.audio, None);
-    assert!(pick_hls_variant(&[], &audios, Some(720)).is_none());
-    // Media playlists (segments, no variants) pass through untouched.
-    let media = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nseg0.ts\n#EXT-X-ENDLIST\n";
-    assert!(parse_hls_master(media, &base).is_none());
-}
-
-#[test]
 fn explicit_nulls_parse_to_defaults() {
     // TikTok shape: explicit nulls where the model wants maps/arrays.
     let mut nulls = serde_json::json!({
@@ -1189,26 +1092,6 @@ fn explicit_nulls_parse_to_defaults() {
     let nulls_video: Video = serde_json::from_value(nulls).expect("nulls parse");
     assert!(nulls_video.formats.is_empty());
     assert!(nulls_video.thumbnails.is_empty());
-}
-
-#[test]
-fn hls_joins_carry_master_query() {
-    // Tokenized masters (Twitter) authenticate every URL with the same
-    // query: relative references inherit it, absolute ones keep theirs.
-    let base = url::Url::parse("https://cdn.example/vid/master.m3u8?tag=12").unwrap();
-    assert_eq!(
-        join_hls_url(&base, "low.m3u8").unwrap().as_str(),
-        "https://cdn.example/vid/low.m3u8?tag=12"
-    );
-    assert_eq!(
-        join_hls_url(&base, "/abs/hi.m3u8?tag=34").unwrap().as_str(),
-        "https://cdn.example/abs/hi.m3u8?tag=34"
-    );
-    let plain = url::Url::parse("https://cdn.example/vid/master.m3u8").unwrap();
-    assert_eq!(
-        join_hls_url(&plain, "low.m3u8").unwrap().as_str(),
-        "https://cdn.example/vid/low.m3u8"
-    );
 }
 
 #[test]
@@ -1319,69 +1202,6 @@ fn video_info_carries_live_flag() {
 }
 
 #[cfg(unix)]
-#[test]
-fn terminate_ffmpeg_graceful_then_forced() {
-    crate::download::tokio_rt().block_on(async {
-        // A plain sleep dies on SIGTERM inside the grace period.
-        let mut child = tokio::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        assert!(terminate_ffmpeg(&mut child, Duration::from_millis(500)).await);
-        // A TERM-ignoring sleep survives grace: SIGKILL fallback still
-        // reaps it, reporting not-graceful. Clean env (no BASH_ENV slow
-        // startup racing the signal) and a READY handshake (trap
-        // installed before we signal) keep this deterministic; exec
-        // carries the ignored disposition into sleep itself.
-        let mut child = tokio::process::Command::new("sh")
-            .args(["-c", "trap '' TERM; echo READY; exec sleep 30"])
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        {
-            use tokio::io::AsyncBufReadExt as _;
-            let mut line = String::new();
-            tokio::io::BufReader::new(child.stdout.as_mut().unwrap())
-                .read_line(&mut line)
-                .await
-                .unwrap();
-            assert_eq!(line.trim(), "READY");
-        }
-        assert!(!terminate_ffmpeg(&mut child, Duration::from_millis(200)).await);
-    });
-}
-
-#[test]
-fn adopt_hls_output_moves_or_rejects_empty() {
-    crate::download::tokio_rt().block_on(async {
-        let dir = std::env::temp_dir().join(format!("grab-adopt-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let staging = dir.join("staging");
-        std::fs::create_dir_all(&staging).unwrap();
-        // Empty capture fails instead of stranding an empty Done row.
-        let empty = staging.join("hls.mp4");
-        std::fs::write(&empty, b"").unwrap();
-        let dest = dir.join("out.mp4");
-        assert!(adopt_hls_output(&empty, &dest, &staging).await.is_err());
-        assert!(!staging.exists());
-        assert!(!dest.exists());
-        // Real capture moves with content; source gone.
-        std::fs::create_dir_all(&staging).unwrap();
-        let full = staging.join("hls.mp4");
-        std::fs::write(&full, b"0123456789").unwrap();
-        let size = adopt_hls_output(&full, &dest, &staging)
-            .await
-            .expect("adopt");
-        assert_eq!(size, Some(10));
-        assert!(!full.exists());
-        assert_eq!(std::fs::read(&dest).unwrap(), b"0123456789");
-        let _ = std::fs::remove_dir_all(&dir);
-    });
-}
-
 #[test]
 fn codec_rank_orders_newest_first() {
     assert!(codec_rank("av01.0.08M.08", true) < codec_rank("vp9", true));
@@ -2428,135 +2248,6 @@ fn identity_args_order_and_trim() {
     );
 }
 
-// ── live resolution via yt-dlp dump ──────────────────────────────────
-
-/// Canned `--dump-single-json` over an HLS master: two variants, a
-/// page-level HLS audio rendition, and a video-level Referer.
-fn master_dump_json() -> serde_json::Value {
-    serde_json::json!({
-        "id": "live",
-        "title": "Live",
-        "http_headers": {"Referer": "https://www.tiktok.com/"},
-        "formats": [
-            {
-                "format": "h480",
-                "format_id": "h480",
-                "protocol": "m3u8_native",
-                "ext": "mp4",
-                "url": "https://cdn.example/v480.m3u8",
-                "vcodec": "avc1",
-                "acodec": "mp4a.40.2",
-                "height": 480,
-                "http_headers": {},
-            },
-            {
-                "format": "h1080",
-                "format_id": "h1080",
-                "protocol": "m3u8_native",
-                "ext": "mp4",
-                "url": "https://cdn.example/v1080.m3u8",
-                "vcodec": "avc1",
-                "acodec": "mp4a.40.2",
-                "height": 1080,
-                "http_headers": {},
-            },
-            {
-                "format": "haudio",
-                "format_id": "haudio",
-                "protocol": "m3u8_native",
-                "ext": "m4a",
-                "url": "https://cdn.example/a.m3u8",
-                "vcodec": "none",
-                "acodec": "mp4a.40.2",
-                "http_headers": {},
-            },
-        ],
-    })
-}
-
-#[test]
-fn live_input_from_dump_picks_height_and_referer() {
-    let value = master_dump_json();
-    let input = live_input_from_dump(&value, Some(720)).expect("resolves");
-    assert_eq!(input.video, "https://cdn.example/v1080.m3u8");
-    assert_eq!(input.audio.as_deref(), Some("https://cdn.example/a.m3u8"));
-    assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
-    // No cap takes the tallest; no variants at all stays unresolved.
-    let tall = live_input_from_dump(&value, None).expect("resolves");
-    assert_eq!(tall.video, "https://cdn.example/v1080.m3u8");
-    let direct = test_video(serde_json::json!([test_format_full(
-        "v",
-        "avc1",
-        "none",
-        Some(720),
-        None,
-        "https",
-        false
-    ),]));
-    let direct_value = serde_json::to_value(&direct).unwrap();
-    assert!(live_input_from_dump(&direct_value, Some(720)).is_none());
-}
-
-#[test]
-fn extract_referer_prefers_format_level() {
-    let mut value = master_dump_json();
-    assert_eq!(
-        extract_referer(&value, "https://cdn.example/v480.m3u8").as_deref(),
-        Some("https://www.tiktok.com/")
-    );
-    // Format-level wins over video-level.
-    value["formats"][0]["http_headers"] = serde_json::json!({"Referer": "https://page.example/"});
-    assert_eq!(
-        extract_referer(&value, "https://cdn.example/v480.m3u8").as_deref(),
-        Some("https://page.example/")
-    );
-    // Unknown URLs fall back to video-level; CR/LF values are rejected.
-    assert_eq!(
-        extract_referer(&value, "https://cdn.example/nope.m3u8").as_deref(),
-        Some("https://www.tiktok.com/")
-    );
-    value["http_headers"] = serde_json::json!({"Referer": "https://evil.example/\r\nX: 1"});
-    assert!(extract_referer(&value, "https://cdn.example/nope.m3u8").is_none());
-    value.as_object_mut().unwrap().remove("http_headers");
-    value["formats"][0]["http_headers"] = serde_json::json!({});
-    assert!(extract_referer(&value, "https://cdn.example/v480.m3u8").is_none());
-}
-
-#[test]
-fn resolve_hls_input_prefers_binary_dump() {
-    // Fake yt-dlp emitting the canned dump: resolution, audio and
-    // Referer all come from the binary, no playlist fetch involved.
-    let dir = std::env::temp_dir().join(format!("grab-fakeresolve-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("dump.json"), master_dump_json().to_string()).unwrap();
-    let bin = dir.join("fake-ytdlp");
-    std::fs::write(&bin, "#!/bin/sh\ncat \"$(dirname \"$0\")/dump.json\"\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let headers = yt_dlp::model::format::HttpHeaders {
-        user_agent: "".into(),
-        accept: "".into(),
-        accept_language: "".into(),
-        sec_fetch_mode: "".into(),
-    };
-    let input = crate::download::tokio_rt().block_on(resolve_hls_input(
-        &bin,
-        "https://cdn.example/master.m3u8",
-        &headers,
-        "Grab-test/1.0",
-        "none",
-        Some(720),
-    ));
-    assert_eq!(input.video, "https://cdn.example/v1080.m3u8");
-    assert_eq!(input.audio.as_deref(), Some("https://cdn.example/a.m3u8"));
-    assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 // ── best-overall muxed vs HLS ────────────────────────────────────────
 
 /// Direct muxed files top out below the tallest HLS variant (the
@@ -2674,4 +2365,199 @@ fn default_quality_index_preselects() {
         })
         .collect::<Vec<_>>();
     assert_eq!(default_quality_index(&odd, "720p"), 2);
+}
+
+// ── yt-dlp live capture ──────────────────────────────────────────────
+
+fn live_test_job() -> VideoJob {
+    VideoJob {
+        item_id: 1,
+        page_url: "https://x.com/u/status/1".into(),
+        quality: "720p".into(),
+        audio_only: false,
+        dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
+        tries: 3,
+        timeout_secs: 60,
+        user_agent: "Grab-test/1.0".into(),
+        video_format_id: None,
+        is_live: true,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+    }
+}
+
+#[test]
+fn live_argv_prefers_pinned_spec_in_mpegts() {
+    let job = live_test_job();
+    let out = std::path::Path::new("/tmp/staging/live.mp4");
+    let argv = live_capture_argv(&job, out);
+    // Height-capped spec, kill-safe container, endless fragments.
+    let f = argv.iter().position(|a| a == "-f").expect("has -f");
+    assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
+    assert!(argv.contains(&"--hls-use-mpegts".to_string()));
+    assert!(
+        argv.windows(2)
+            .any(|w| w == ["--fragment-retries", "infinite"])
+    );
+    // No live-from-start (record-now means the live edge) and no
+    // unbounded wait loop.
+    assert!(!argv.iter().any(|a| a == "--live-from-start"));
+    assert!(!argv.iter().any(|a| a == "--wait-for-video"));
+    let o = argv.iter().position(|a| a == "-o").expect("has -o");
+    assert_eq!(argv[o + 1], "/tmp/staging/live.mp4");
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
+    // Pins ride along; audio-only rows take the audio leg.
+    let mut pinned = live_test_job();
+    pinned.video_format_id = Some("h720".into());
+    let argv = live_capture_argv(&pinned, out);
+    let f = argv.iter().position(|a| a == "-f").expect("has -f");
+    assert_eq!(argv[f + 1], "h720+ba/b");
+    let mut audio = live_test_job();
+    audio.audio_only = true;
+    let argv = live_capture_argv(&audio, std::path::Path::new("/tmp/staging/live.m4a"));
+    let f = argv.iter().position(|a| a == "-f").expect("has -f");
+    assert_eq!(argv[f + 1], "ba/b");
+}
+
+#[test]
+fn live_remux_argv_copies_with_fixup() {
+    // Video: map everything, stream-copy, ADTS fixup, faststart.
+    let argv = live_remux_argv(
+        std::path::Path::new("/tmp/st/live.mp4.part"),
+        std::path::Path::new("/tmp/st/final.mp4"),
+        false,
+        true,
+    );
+    assert!(argv.windows(2).any(|w| w == ["-map", "0"]));
+    assert!(argv.windows(2).any(|w| w == ["-c", "copy"]));
+    assert!(argv.windows(2).any(|w| w == ["-bsf:a", "aac_adtstoasc"]));
+    assert!(argv.windows(2).any(|w| w == ["-movflags", "+faststart"]));
+    assert!(!argv.iter().any(|a| a == "-vn"));
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "/tmp/st/final.mp4");
+    // Audio-only maps audio alone; the bare retry drops the filter.
+    let argv = live_remux_argv(
+        std::path::Path::new("/tmp/st/live.m4a.part"),
+        std::path::Path::new("/tmp/st/final.m4a"),
+        true,
+        false,
+    );
+    assert!(argv.windows(2).any(|w| w == ["-map", "0:a?"]));
+    assert!(!argv.iter().any(|a| a == "-bsf:a"));
+}
+
+/// Fake yt-dlp for live: emits one progress line, writes the `.part`
+/// shell (or fails barren for the stale-URL case).
+fn fake_ytdlp_live(dir: &std::path::Path, fail: bool) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-live");
+    std::fs::write(
+        &bin,
+        if fail {
+            "#!/bin/sh\necho \"ERROR: [Video] 1: Got error 404\" >&2\nexit 1\n"
+        } else {
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "[download] 3.0% of 100.00B in 00:00"
+printf 'tsbytes' > "$out.part"
+exit 0
+"#
+        },
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Fake ffmpeg remux: copies its `-i` input to the trailing output.
+fn fake_ffmpeg_copy(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ffmpeg-copy");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+input=""
+prev=""
+last=""
+for a in "$@"; do
+    if [ "$prev" = "-i" ]; then input="$a"; fi
+    prev="$a"
+    last="$a"
+done
+cat "$input" > "$last"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn live_capture_adopts_part_and_remuxes() {
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    // Natural end (fake exits 0) with a `.part` shell: adopted,
+    // remuxed, delivered.
+    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
+    assert!(!staging.exists(), "staging cleaned");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn live_capture_empty_fails_with_detail() {
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, true);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    match res {
+        Err(e) => assert!(e.to_string().contains("404"), "yt-dlp line surfaces: {e}"),
+        ok => panic!("expected failure, got {ok:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

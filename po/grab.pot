@@ -1029,3 +1029,7 @@ msgstr ""
 #: src/preferences.rs:462
 msgid "Newest codecs or widest playback"
 msgstr ""
+
+#: src/video.rs
+msgid "Finalizing…"
+msgstr ""
