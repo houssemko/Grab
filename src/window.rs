@@ -839,7 +839,7 @@ pub fn build_window(
     add_btn.update_property(&[gtk4::accessible::Property::Label(&gettext("New Download"))]);
     {
         let m = Rc::clone(&manager);
-        add_btn.connect_clicked(move |_| show_add_dialog(m.clone()));
+        add_btn.connect_clicked(move |_| show_add_dialog(m.clone(), None));
     }
     header.pack_end(&add_btn);
 
@@ -857,7 +857,7 @@ pub fn build_window(
     empty.set_child(Some(&empty_add));
     {
         let m = Rc::clone(&manager);
-        empty_add.connect_clicked(move |_| show_add_dialog(m.clone()));
+        empty_add.connect_clicked(move |_| show_add_dialog(m.clone(), None));
     }
     stack.add_named(&empty, Some("empty"));
 
@@ -1375,7 +1375,10 @@ fn show_video_error(v: &VideoStep, message: &str) {
     v.error.set_visible(true);
 }
 
-pub fn show_add_dialog(manager: Rc<DownloadManager>) {
+/// New-download dialog, optionally pre-filled (drag-and-drop / Open With
+/// hands a URL in; the normal lookup flow then takes over, including
+/// video-page detection, so drops never bypass the media pipeline).
+pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("New Download"))
         .build();
@@ -2234,6 +2237,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     }
 
     present_dialog(&dialog);
+
+    // Dropped/opened URLs land here pre-filled: setting the text fires
+    // the same changed → debounce → lookup chain as typing, so video
+    // pages resolve through the media pipeline (the clipboard read
+    // below stands down on non-empty fields by itself).
+    if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
+        && let Ok(normalized) = crate::download::normalize_url(url)
+    {
+        url_row.set_text(&normalized);
+    }
 
     // Keyboard-first: focus lands in the URL field so typing starts a
     // download with no tab stops (same pattern as the rename dialog).
