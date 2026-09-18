@@ -3406,3 +3406,41 @@ fn direct_mode_ignores_proxy_env() {
     cleanup(&server, &dir);
     drop(_env);
 }
+
+#[test]
+fn proxy_argv_precedes_end_of_options() {
+    // optparse treats everything after `--` positionally: a `--proxy`
+    // placed there would download as a second URL. Proxied argv must
+    // flag before the separator on every builder.
+    let proxy = proxy_opts("manual", "socks5", "127.0.0.1", 9050)
+        .proxy_config()
+        .expect("valid")
+        .expect("proxied");
+    let job = crate::video::VideoJob {
+        item_id: 1,
+        page_url: "https://x.com/u/status/1".into(),
+        quality: "best".into(),
+        audio_only: false,
+        dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
+        tries: 3,
+        timeout_secs: 60,
+        user_agent: String::new(),
+        video_format_id: None,
+        is_live: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        proxy: Some(proxy),
+    };
+    for argv in [
+        crate::video::part_download_argv(&job, "v", std::path::Path::new("/tmp/x.mp4")),
+        crate::video::live_capture_argv(&job, "h", std::path::Path::new("/tmp/x.mp4")),
+    ] {
+        let flag = argv
+            .iter()
+            .position(|a| a == "--proxy")
+            .expect("proxy flag");
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        assert!(flag < sep, "{argv:?}");
+        assert_eq!(argv[flag + 1], "socks5h://127.0.0.1:9050");
+    }
+}
