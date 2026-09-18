@@ -1088,12 +1088,17 @@ fn ffmpeg_headers_passthrough() {
     };
     // Caller UA wins; empty values are skipped; lines are CRLF.
     assert_eq!(
-        ffmpeg_headers(&headers, "Grab/1"),
+        ffmpeg_headers(&headers, "Grab/1", None),
         "User-Agent: Grab/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\n"
     );
     assert_eq!(
-        ffmpeg_headers(&headers, ""),
+        ffmpeg_headers(&headers, "", None),
         "User-Agent: Extractor/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\n"
+    );
+    // A resolved page Referer rides along for hotlink-guarded CDNs.
+    assert_eq!(
+        ffmpeg_headers(&headers, "Grab/1", Some("https://www.tiktok.com/")),
+        "User-Agent: Grab/1\r\nAccept: */*\r\nSec-Fetch-Mode: no-cors\r\nReferer: https://www.tiktok.com/\r\n"
     );
     let bare = yt_dlp::model::format::HttpHeaders {
         user_agent: "".into(),
@@ -1101,7 +1106,11 @@ fn ffmpeg_headers_passthrough() {
         accept_language: "".into(),
         sec_fetch_mode: "".into(),
     };
-    assert_eq!(ffmpeg_headers(&bare, ""), "");
+    assert_eq!(ffmpeg_headers(&bare, "", None), "");
+    assert_eq!(
+        ffmpeg_headers(&bare, "", Some("https://www.tiktok.com/")),
+        "Referer: https://www.tiktok.com/\r\n"
+    );
 }
 
 #[test]
@@ -2417,4 +2426,131 @@ fn identity_args_order_and_trim() {
         argv,
         vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
     );
+// ── live resolution via yt-dlp dump ──────────────────────────────────
+
+/// Canned `--dump-single-json` over an HLS master: two variants, a
+/// page-level HLS audio rendition, and a video-level Referer.
+fn master_dump_json() -> serde_json::Value {
+    serde_json::json!({
+        "id": "live",
+        "title": "Live",
+        "http_headers": {"Referer": "https://www.tiktok.com/"},
+        "formats": [
+            {
+                "format": "h480",
+                "format_id": "h480",
+                "protocol": "m3u8_native",
+                "ext": "mp4",
+                "url": "https://cdn.example/v480.m3u8",
+                "vcodec": "avc1",
+                "acodec": "mp4a.40.2",
+                "height": 480,
+                "http_headers": {},
+            },
+            {
+                "format": "h1080",
+                "format_id": "h1080",
+                "protocol": "m3u8_native",
+                "ext": "mp4",
+                "url": "https://cdn.example/v1080.m3u8",
+                "vcodec": "avc1",
+                "acodec": "mp4a.40.2",
+                "height": 1080,
+                "http_headers": {},
+            },
+            {
+                "format": "haudio",
+                "format_id": "haudio",
+                "protocol": "m3u8_native",
+                "ext": "m4a",
+                "url": "https://cdn.example/a.m3u8",
+                "vcodec": "none",
+                "acodec": "mp4a.40.2",
+                "http_headers": {},
+            },
+        ],
+    })
+}
+
+#[test]
+fn live_input_from_dump_picks_height_and_referer() {
+    let value = master_dump_json();
+    let input = live_input_from_dump(&value, Some(720)).expect("resolves");
+    assert_eq!(input.video, "https://cdn.example/v1080.m3u8");
+    assert_eq!(input.audio.as_deref(), Some("https://cdn.example/a.m3u8"));
+    assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
+    // No cap takes the tallest; no variants at all stays unresolved.
+    let tall = live_input_from_dump(&value, None).expect("resolves");
+    assert_eq!(tall.video, "https://cdn.example/v1080.m3u8");
+    let direct = test_video(serde_json::json!([test_format_full(
+        "v",
+        "avc1",
+        "none",
+        Some(720),
+        None,
+        "https",
+        false
+    ),]));
+    let direct_value = serde_json::to_value(&direct).unwrap();
+    assert!(live_input_from_dump(&direct_value, Some(720)).is_none());
+}
+
+#[test]
+fn extract_referer_prefers_format_level() {
+    let mut value = master_dump_json();
+    assert_eq!(
+        extract_referer(&value, "https://cdn.example/v480.m3u8").as_deref(),
+        Some("https://www.tiktok.com/")
+    );
+    // Format-level wins over video-level.
+    value["formats"][0]["http_headers"] = serde_json::json!({"Referer": "https://page.example/"});
+    assert_eq!(
+        extract_referer(&value, "https://cdn.example/v480.m3u8").as_deref(),
+        Some("https://page.example/")
+    );
+    // Unknown URLs fall back to video-level; CR/LF values are rejected.
+    assert_eq!(
+        extract_referer(&value, "https://cdn.example/nope.m3u8").as_deref(),
+        Some("https://www.tiktok.com/")
+    );
+    value["http_headers"] = serde_json::json!({"Referer": "https://evil.example/\r\nX: 1"});
+    assert!(extract_referer(&value, "https://cdn.example/nope.m3u8").is_none());
+    value.as_object_mut().unwrap().remove("http_headers");
+    value["formats"][0]["http_headers"] = serde_json::json!({});
+    assert!(extract_referer(&value, "https://cdn.example/v480.m3u8").is_none());
+}
+
+#[test]
+fn resolve_hls_input_prefers_binary_dump() {
+    // Fake yt-dlp emitting the canned dump: resolution, audio and
+    // Referer all come from the binary, no playlist fetch involved.
+    let dir = std::env::temp_dir().join(format!("grab-fakeresolve-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("dump.json"), master_dump_json().to_string()).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(&bin, "#!/bin/sh\ncat \"$(dirname \"$0\")/dump.json\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let headers = yt_dlp::model::format::HttpHeaders {
+        user_agent: "".into(),
+        accept: "".into(),
+        accept_language: "".into(),
+        sec_fetch_mode: "".into(),
+    };
+    let input = crate::download::tokio_rt().block_on(resolve_hls_input(
+        &bin,
+        "https://cdn.example/master.m3u8",
+        &headers,
+        "Grab-test/1.0",
+        "none",
+        Some(720),
+    ));
+    assert_eq!(input.video, "https://cdn.example/v1080.m3u8");
+    assert_eq!(input.audio.as_deref(), Some("https://cdn.example/a.m3u8"));
+    assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
