@@ -1718,7 +1718,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             .set_selected(crate::video::default_quality_index(
                                 &v.formats,
                                 &settings_b.video_quality(),
-                                settings_b.video_codec_newest(),
                             ) as u32);
                         *info_b.borrow_mut() = Some(v);
                         show_video_ready(&step_b);
