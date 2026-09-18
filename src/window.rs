@@ -490,6 +490,28 @@ fn build_row(
         another_queued(manager, item),
         manager.is_live_video(item.id()),
     );
+    // Indeterminate activity runs on wall-clock, not progress ticks.
+    // Resolving ("Resolving media…") emits no property changes, so a
+    // pulse driven by refresh_row alone freezes on one frame — the
+    // reported hang. This tick advances only indeterminate bars
+    // (active with no fraction, or live) and dies with the row; real
+    // fractions keep rendering from progress notifies as before.
+    {
+        let bar = progress.downgrade();
+        let weak_item = item.downgrade();
+        let m = Rc::clone(manager);
+        glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
+            let (Some(bar), Some(it)) = (bar.upgrade(), weak_item.upgrade()) else {
+                return glib::ControlFlow::Break;
+            };
+            if it.status() == DownloadStatus::Downloading
+                && (m.is_live_video(it.id()) || it.progress() <= 0.0)
+            {
+                bar.pulse();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     {
         let m = Rc::clone(manager);
