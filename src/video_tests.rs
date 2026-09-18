@@ -2426,6 +2426,8 @@ fn identity_args_order_and_trim() {
         argv,
         vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
     );
+}
+
 // ── live resolution via yt-dlp dump ──────────────────────────────────
 
 /// Canned `--dump-single-json` over an HLS master: two variants, a

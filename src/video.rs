@@ -1906,15 +1906,7 @@ async fn resolve_hls_input_ytdlp(
         "--no-progress".to_string(),
         "--dump-single-json".to_string(),
     ];
-    if let Some(spec) = cookies_browser_spec(cookies_browser) {
-        args.push(format!("--cookies-from-browser={spec}"));
-    }
-    if !user_agent.trim().is_empty() {
-        args.push("--user-agent".to_string());
-        args.push(user_agent.trim().to_string());
-    }
-    args.push("--".to_string());
-    args.push(url.to_string());
+    args.extend(ytdlp_identity_args(cookies_browser, Some(user_agent), url));
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(&args);
     cmd.stdin(std::process::Stdio::null())
