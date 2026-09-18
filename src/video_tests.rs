@@ -2515,7 +2515,7 @@ fn live_capture_adopts_part_and_remuxes() {
     let staging = dir.join("staging");
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
     // Natural end (fake exits 0) with a `.part` shell: adopted,
     // remuxed, delivered.
@@ -2531,6 +2531,21 @@ fn live_capture_adopts_part_and_remuxes() {
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
     assert!(!staging.exists(), "staging cleaned");
+    // The row must leave Resolving the moment capture starts, even
+    // before any bytes flow.
+    let phases: Vec<String> = {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::download::EngineMsg::Phase(p) = msg {
+                out.push(p);
+            }
+        }
+        out
+    };
+    assert!(
+        phases.iter().any(|p| p.contains("Downloading")),
+        "phases seen: {phases:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
