@@ -2,10 +2,10 @@ name: Flatpak test bundle
 
 # On-demand test builds for local testing: builds Grab.flatpak from any
 # branch, tag, or SHA in CI and uploads it as a workflow artifact to
-# download. Nothing touches releases. Also runs automatically on pull
-# requests touching code, data, translations, or packaging. Always a full
-# pristine build (--force-clean, no SDK cache): validation must never
-# depend on what a previous run left behind.
+# download. Nothing touches releases. Manual dispatch only (no PR runs:
+# packaging validation happens on the release builds). Always a full
+# pristine build (--force-clean): validation must never depend on what
+# a previous run left behind. Only the SDK layer is cached.
 on:
   workflow_dispatch:
     inputs:
@@ -13,17 +13,6 @@ on:
         description: "Branch, tag, or SHA to build"
         required: false
         default: "main"
-  pull_request:
-    paths:
-      - "src/**"
-      - "data/**"
-      - "po/**"
-      - "build-aux/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "meson.build"
-      - ".github/workflows/flatpak-test.yml"
-      - ".github/workflows/flatpak-build.yml"
 
 # Same supersede rule as CI: a new push cancels the stale bundle build.
 # Manual dispatches (exact tags/SHAs) never cancel.
@@ -35,6 +24,5 @@ jobs:
   bundle:
     uses: ./.github/workflows/flatpak-build.yml
     with:
-      # Dispatch input when manually run, PR merge commit otherwise.
-      ref: ${{ inputs.ref || github.sha }}
+      ref: ${{ inputs.ref }}
       force-clean: true
