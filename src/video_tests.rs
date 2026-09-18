@@ -2958,3 +2958,281 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
     assert!(plan.audio_sel.is_some(), "split pairs with audio");
     assert!(!plan.audio_only, "split, never adoption");
 }
+
+#[test]
+fn finish_merge_conflicting_dest_reports_exists() {
+    // A foreign file appearing after intake dedupe must requeue with a
+    // fresh name: finish_merge reports exactly DEST_EXISTS, the part
+    // stays on disk (retryable), and the foreign dest is untouched.
+    let dir = std::env::temp_dir().join(format!("grab-fakeexists-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let apart = staging.join("a.m4a");
+    std::fs::write(&apart, b"audio-part").unwrap();
+    let dest = dir.join("song.m4a");
+    std::fs::write(&dest, b"foreign").unwrap();
+    let res = crate::download::tokio_rt().block_on(finish_merge(
+        std::path::Path::new("/nonexistent-ffmpeg"),
+        &staging,
+        None,
+        &apart,
+        &dest,
+        None,
+        "T",
+        std::time::Duration::from_secs(30),
+    ));
+    match res {
+        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS),
+        ok => panic!("expected DEST_EXISTS, got {ok:?}"),
+    }
+    assert_eq!(std::fs::read(&apart).unwrap(), b"audio-part");
+    assert_eq!(std::fs::read(&dest).unwrap(), b"foreign");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fetch_video_page_surfaces_stderr_tail() {
+    // Nonzero exit: the last non-blank stderr line becomes the detail,
+    // not a generic wrapper.
+    let dir = std::env::temp_dir().join(format!("grab-fakefail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho 'noise line' >&2\necho 'boom detail' >&2\necho '' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let res = crate::download::tokio_rt().block_on(fetch_video_page(
+        &bin,
+        "https://example.com/v",
+        "none",
+        std::time::Duration::from_secs(30),
+        None,
+    ));
+    match res {
+        Err(e) => assert!(e.to_string().contains("boom detail"), "{e}"),
+        ok => panic!("expected fetch error, got {ok:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn fetch_video_page_rejects_garbage_stdout() {
+    // Zero exit with non-JSON stdout: parse error, not a phantom video.
+    let dir = std::env::temp_dir().join(format!("grab-fakegarbage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(&bin, "#!/bin/sh\necho 'not json'\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let res = crate::download::tokio_rt().block_on(fetch_video_page(
+        &bin,
+        "https://example.com/v",
+        "none",
+        std::time::Duration::from_secs(30),
+        None,
+    ));
+    assert!(res.is_err(), "garbage stdout must not parse");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn part_binary_does_not_retry_ordinary_errors() {
+    // Only stale-id ("not available") earns the fallback second spawn;
+    // a 403-style failure returns after exactly one attempt.
+    let dir = std::env::temp_dir().join(format!("grab-fakeyt-403-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+spec=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    if [ "$prev" = "-f" ]; then spec="$a"; fi
+    prev="$a"
+done
+echo "$@" >> "$out.argv.log"
+echo "ERROR: [Video] 1: Unable to download: 403 Forbidden" >&2
+exit 1
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = dir.join("audio.m4a");
+    let report =
+        std::sync::Arc::new(|_: u64, _: u64| {}) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
+    let job = part_test_job();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_part_ytdlp(
+        &bin,
+        &job,
+        "v123",
+        "ba/b",
+        &out,
+        report,
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+    ));
+    assert!(res.is_err(), "got {res:?}");
+    let logged = std::fs::read_to_string(dir.join("audio.m4a.argv.log")).unwrap();
+    assert_eq!(logged.lines().count(), 1, "no fallback retry: {logged}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn part_binary_abort_stays_quiet() {
+    // Dropping the abort sender mid-attempt resolves Ok(None) — the
+    // caller (pauser/canceller) owns the row state, so no error.
+    let dir = std::env::temp_dir().join(format!("grab-fakeyt-abort-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(&bin, "#!/bin/sh\nsleep 60\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = dir.join("audio.m4a");
+    let report =
+        std::sync::Arc::new(|_: u64, _: u64| {}) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
+    let job = part_test_job();
+    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let handle = std::thread::spawn(move || {
+        crate::download::tokio_rt().block_on(run_part_ytdlp(
+            &bin,
+            &job,
+            "v123",
+            "ba/b",
+            &out,
+            report,
+            &mut abort_rx,
+            std::time::Duration::from_secs(30),
+        ))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    drop(abort_tx);
+    let res = handle.join().expect("thread joins");
+    assert!(matches!(res, Ok(None)), "abort is quiet, got {res:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sanitize_missing_codec_fields_still_parse() {
+    // A new sparse extractor omitting codec/container/height keys must
+    // parse like TikTok's: Unknown-typed, adoptable, never a row killer.
+    let mut value = serde_json::json!({
+        "id": "sparse1",
+        "title": "S",
+        "formats": [
+            {"format_id": "dl", "url": "https://cdn.example/dl.mp4"},
+        ],
+    });
+    sanitize_video_json(&mut value);
+    let video: yt_dlp::model::Video = serde_json::from_value(value).expect("sparse parses");
+    assert_eq!(video.formats.len(), 1);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
+    assert!(plan.audio_only);
+}
+
+#[test]
+fn plan_audio_only_ignores_hls_pin_deterministically() {
+    // Audio-only rows never run the HLS path: a stale HLS pin degrades
+    // to plain audio instead of resurrecting a video variant.
+    let video = x_like_video();
+    let plan = plan_streams(&video, "720p", true, Some("hls-720"), true, 1);
+    assert!(plan.hls_sel.is_none());
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_only);
+}
+
+#[test]
+fn resume_plan_unknown_total_resumes_bytes_on_disk() {
+    // No total to judge overlong against (live-adjacent/single-connection
+    // flows): bytes on disk mean resume, never a Fresh wipe.
+    let dir = test_manifest_dir("unknown-total");
+    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 49]).unwrap();
+    let dest = dir.join("Clip.mp4");
+    let m = test_manifest();
+    let mut q = test_query(Some(&m), &dir, &dest);
+    q.video_total = None;
+    q.audio_total = None;
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn apply_proxy_env_sets_nothing_when_direct() {
+    // A direct spawn must not inherit NO_PROXY from anywhere: only an
+    // explicit proxy sets it.
+    // Deterministic regardless of the ambient environment: a direct
+    // spawn must neither set nor inherit proxy routing. The spawn runs
+    // inside the runtime (tokio process needs a reactor context).
+    let out = crate::download::tokio_rt().block_on(async {
+        let mut cmd = tokio::process::Command::new("env");
+        cmd.env_remove("NO_PROXY").env_remove("no_proxy");
+        cmd.env_remove("HTTP_PROXY").env_remove("http_proxy");
+        cmd.env_remove("HTTPS_PROXY").env_remove("https_proxy");
+        cmd.env_remove("ALL_PROXY").env_remove("all_proxy");
+        apply_proxy_env(&mut cmd, None);
+        cmd.output().await.expect("env runs")
+    });
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.starts_with("NO_PROXY=") || l.starts_with("no_proxy=")),
+        "direct spawn leaks proxy env"
+    );
+}
+
+#[test]
+fn apply_proxy_env_stamps_no_proxy_when_proxied() {
+    let proxy = crate::download::DownloadOptions {
+        tries: 3,
+        timeout: 30,
+        limit_rate: String::new(),
+        user_agent: String::new(),
+        connections: 4,
+        proxy_mode: "manual".into(),
+        proxy_type: "socks5".into(),
+        proxy_host: "127.0.0.1".into(),
+        proxy_port: 9050,
+        cookies_browser: String::new(),
+    }
+    .proxy_config()
+    .expect("well-formed")
+    .expect("proxied");
+    let out = crate::download::tokio_rt().block_on(async {
+        let mut cmd = tokio::process::Command::new("env");
+        cmd.env_remove("NO_PROXY").env_remove("no_proxy");
+        apply_proxy_env(&mut cmd, Some(&proxy));
+        cmd.output().await.expect("env runs")
+    });
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines().any(|l| l.starts_with("NO_PROXY=")),
+        "proxied spawn missing NO_PROXY"
+    );
+}

@@ -3527,3 +3527,68 @@ fn stamp_request_sends_self_origin_referer() {
     .unwrap();
     assert_eq!(built.headers()["referer"], "https://example.com");
 }
+
+#[test]
+fn cookies_export_failure_means_plain_requests() {
+    // A failing export (bad profile, locked browser) degrades to None —
+    // plain requests — instead of bricking authed downloads. Distinct
+    // browser name: the roundtrip test's cached jar must not leak in.
+    let dir = std::env::temp_dir().join(format!("grab-fakecookies-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp-cookies");
+    std::fs::write(&bin, "#!/bin/sh\necho 'locked profile' >&2\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let jar = crate::download::tokio_rt().block_on(crate::cookies::jar_for_browser(
+        "chrome",
+        &bin,
+        "https://example.com/v",
+    ));
+    assert!(jar.is_none(), "failed export degrades to plain");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn cookies_empty_export_still_returns_jar() {
+    // Logged-out profile (valid but empty export) is a usable answer:
+    // callers send no Cookie header and move on.
+    let dir = std::env::temp_dir().join(format!("grab-fakecookies-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp-cookies");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "--cookies" ]; then out="$a"; fi
+    prev="$a"
+done
+printf '# Netscape HTTP Cookie File\n' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let jar = crate::download::tokio_rt()
+        .block_on(crate::cookies::jar_for_browser(
+            "opera",
+            &bin,
+            "https://example.com/v",
+        ))
+        .expect("empty export is still an answer");
+    assert!(
+        crate::cookies::cookie_header_for(&jar, "https://example.com/v").is_none(),
+        "nothing in scope, no header"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -208,3 +208,58 @@ fn torrent_net_plan_http_proxy_stays_direct() {
     assert_eq!(plan.listen_port, 6881);
     assert_eq!(plan.socks_proxy, None);
 }
+
+#[test]
+fn stub_name_neutralizes_traversal() {
+    // Uplink attachment names are attacker-controlled: stems collapse
+    // to the final component, unsafe ones fall back to "torrent".
+    assert_eq!(stub_name_for_file("../../evil.torrent"), "evil");
+    assert_eq!(stub_name_for_file("subdir/name.torrent"), "name");
+    assert_eq!(stub_name_for_file("..."), "torrent");
+}
+
+#[test]
+fn output_folder_for_gates_hostile_names() {
+    // Multi-file folder names come from torrent metadata: traversal or
+    // absolute names fall back to the info-hash hex, never escape dest.
+    let dest = std::path::Path::new("/tmp/dl");
+    assert_eq!(
+        output_folder_for(dest, Some("../evil".into()), true, "abc123"),
+        dest.join("abc123")
+    );
+    assert_eq!(
+        output_folder_for(dest, Some("/abs".into()), true, "abc123"),
+        dest.join("abc123")
+    );
+    assert_eq!(
+        output_folder_for(dest, Some("Show.S01".into()), true, "abc123"),
+        dest.join("Show.S01")
+    );
+    // Single-file torrents always sit flat.
+    assert_eq!(
+        output_folder_for(dest, Some("../evil".into()), false, "abc123"),
+        dest.to_path_buf()
+    );
+}
+
+#[test]
+fn sweep_archives_keeps_referenced_only() {
+    use std::collections::HashSet;
+    let dir = std::env::temp_dir().join(format!("grab-sweep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let kept = dir.join("a.torrent");
+    let stale = dir.join("b.torrent");
+    let other = dir.join("notes.txt");
+    std::fs::write(&kept, b"a").unwrap();
+    std::fs::write(&stale, b"b").unwrap();
+    std::fs::write(&other, b"c").unwrap();
+    let referenced: HashSet<String> = [format!("torrent:{}", kept.to_string_lossy())]
+        .into_iter()
+        .collect();
+    sweep_archives_in(&dir, &referenced);
+    assert!(kept.exists());
+    assert!(!stale.exists());
+    assert!(other.exists(), "non-torrent files are never swept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
