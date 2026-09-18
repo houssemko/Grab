@@ -2121,6 +2121,15 @@ printf 'merged' > "$out"
 exit 0
 "#
         },
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
 // ── binary part downloads ────────────────────────────────────────────
 
 fn part_test_job() -> VideoJob {
@@ -2314,6 +2323,10 @@ fn fetch_video_page_parses_dump_json() {
         .expect("fake extract parses");
     assert_eq!(video.id, "abc");
     assert!(video.formats.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn part_binary_download_reports_progress() {
     let dir = std::env::temp_dir().join(format!("grab-fakeyt-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

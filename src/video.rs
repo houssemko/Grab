@@ -28,7 +28,6 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::oneshot;
-use yt_dlp::Downloader;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
 use yt_dlp::model::format::{Extension, Format, FormatType, HttpHeaders, Protocol};
 use yt_dlp::model::selector::{
@@ -2326,24 +2325,12 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // The downloader timeout covers the ffmpeg merge: a full-length
-    // merge on a slow CPU dwarfs any network timeout, so never go below
-    // the crate default (the user's setting extends it). Metadata uses
-    // the crate's extractor timeout via [`fetch_video_page`].
+    // Attempt timeout floor: a full-length merge on a slow CPU dwarfs
+    // any network timeout, so never go below the crate default (the
+    // user's setting extends it).
     let timeout = Duration::from_secs(job.timeout_secs.max(300));
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
-    let mut builder = Downloader::builder(libs, staging.clone()).with_timeout(timeout);
-    if !job.user_agent.is_empty() {
-        builder = builder.with_user_agent(job.user_agent.clone());
-    }
-    // Authenticated extraction for gated pages via the browser profile.
-    // (Part downloads go through the binary, which carries the
-    // extraction cookies and format headers itself.)
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
-        builder = builder.with_cookies_from_browser(spec);
-    }
-    let downloader = builder.build().await.map_err(VideoError::fetch)?;
     let phase = |text: String| {
         tx.send(EngineMsg::Phase(text)).ok();
     };
