@@ -2351,34 +2351,8 @@ fn test_options() -> Vec<VideoFormatOption> {
             id: format!("v{h}"),
             label: format!("{h}p"),
             height: *h,
-            rank: 0,
         })
         .collect()
-}
-
-fn test_mixed_options() -> Vec<VideoFormatOption> {
-    // Same heights as test_options but the tallest is HEVC: newest
-    // takes it anyway, compatible must not preselect it.
-    vec![
-        VideoFormatOption {
-            id: "hevc1080".into(),
-            label: "1080p · hevc".into(),
-            height: 1080,
-            rank: 2,
-        },
-        VideoFormatOption {
-            id: "avc720".into(),
-            label: "720p · avc1".into(),
-            height: 720,
-            rank: 0,
-        },
-        VideoFormatOption {
-            id: "avc480".into(),
-            label: "480p · avc1".into(),
-            height: 480,
-            rank: 0,
-        },
-    ]
 }
 
 #[test]
@@ -2386,16 +2360,16 @@ fn default_quality_index_preselects() {
     let opts = test_options();
     // Best (and empty listings) stay on the first row, which lists
     // tallest first.
-    assert_eq!(default_quality_index(&opts, "best", true), 0);
-    assert_eq!(default_quality_index(&[], "720p", true), 0);
+    assert_eq!(default_quality_index(&opts, "best"), 0);
+    assert_eq!(default_quality_index(&[], "720p"), 0);
     // Otherwise the closest listed height wins, 0-based.
-    assert_eq!(default_quality_index(&opts, "1080p", true), 0);
-    assert_eq!(default_quality_index(&opts, "720p", true), 1);
-    assert_eq!(default_quality_index(&opts, "480p", true), 2);
+    assert_eq!(default_quality_index(&opts, "1080p"), 0);
+    assert_eq!(default_quality_index(&opts, "720p"), 1);
+    assert_eq!(default_quality_index(&opts, "480p"), 2);
     // Between buckets the nearer height wins, ties go taller.
-    assert_eq!(default_quality_index(&opts, "2160p", true), 0);
+    assert_eq!(default_quality_index(&opts, "2160p"), 0);
     // Unknown stored values degrade like the extractor selector (1080p).
-    assert_eq!(default_quality_index(&opts, "mystery", true), 0);
+    assert_eq!(default_quality_index(&opts, "mystery"), 0);
     // Exact ties (odd extractor heights equidistant from the cap) go taller.
     let odd = [840u32, 600]
         .iter()
@@ -2403,24 +2377,9 @@ fn default_quality_index_preselects() {
             id: format!("v{h}"),
             label: format!("{h}p"),
             height: *h,
-            rank: 0,
         })
         .collect::<Vec<_>>();
-    assert_eq!(default_quality_index(&odd, "720p", true), 0);
-}
-
-#[test]
-fn default_quality_index_prefers_playable_when_compatible() {
-    // The diagnostic case: tallest row is HEVC, playable rows below.
-    // Newest preselects tallest; compatible preselects playable —
-    // in both Best and capped modes.
-    let opts = test_mixed_options();
-    assert_eq!(default_quality_index(&opts, "best", true), 0);
-    assert_eq!(default_quality_index(&opts, "best", false), 1);
-    assert_eq!(default_quality_index(&opts, "720p", true), 1);
-    assert_eq!(default_quality_index(&opts, "720p", false), 1);
-    assert_eq!(default_quality_index(&opts, "1080p", true), 0);
-    assert_eq!(default_quality_index(&opts, "1080p", false), 1);
+    assert_eq!(default_quality_index(&odd, "720p"), 0);
 }
 
 // ── yt-dlp live capture ──────────────────────────────────────────────
@@ -2844,174 +2803,4 @@ fn format_lines_survive_split_reads() {
     assert!(pending.is_empty(), "complete lines drain: {pending:?}");
     trace_format_lines(&mut pending, b"");
     assert!(pending.is_empty());
-}
-
-// ── compatible-mode adoption + pinnable single files ─────────────────
-
-/// Muxed choice must follow the codec mode: newest takes the tallest,
-/// compatible takes the most playable (TikTok bytevc1 dilemma).
-fn mixed_muxed_video() -> yt_dlp::model::Video {
-    test_video(serde_json::json!([
-        test_format_full(
-            "m720-avc",
-            "avc1.64001f",
-            "mp4a.40.2",
-            Some(720),
-            None,
-            "https",
-            false
-        ),
-        test_format_full(
-            "m1080-hevc",
-            "hev1.1.6.L93",
-            "mp4a.40.2",
-            Some(1080),
-            None,
-            "https",
-            false
-        ),
-    ]))
-}
-
-#[test]
-fn plan_muxed_adoption_follows_codec_mode() {
-    let video = mixed_muxed_video();
-    // Newest-first: tallest wins regardless of codec.
-    let plan = plan_streams(&video, "best", false, None, true, 1);
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m1080-hevc");
-    assert!(plan.audio_only);
-    // Compatible: the playable H.264 wins over taller HEVC.
-    let plan = plan_streams(&video, "best", false, None, false, 1);
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720-avc");
-    assert!(plan.audio_only);
-    // A cap both modes respect when it already matches playable.
-    let plan = plan_streams(&video, "720p", false, None, true, 1);
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720-avc");
-}
-
-#[test]
-fn plan_muxed_compatible_prefers_playable_past_the_cap() {
-    // Only HEVC fits the cap: compatible still takes playable H.264
-    // past it rather than landing an unplayable file.
-    let video = test_video(serde_json::json!([
-        test_format_full(
-            "m1080-avc",
-            "avc1.640028",
-            "mp4a.40.2",
-            Some(1080),
-            None,
-            "https",
-            false
-        ),
-        test_format_full(
-            "m720-hevc",
-            "hev1.1.6.L93",
-            "mp4a.40.2",
-            Some(720),
-            None,
-            "https",
-            false
-        ),
-    ]));
-    let plan = plan_streams(&video, "720p", false, None, false, 1);
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m1080-avc");
-    assert!(plan.audio_only);
-    // Newest keeps the cap rule: smallest at or above.
-    let plan = plan_streams(&video, "720p", false, None, true, 1);
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720-hevc");
-}
-
-#[test]
-fn codec_rank_places_bytecodecs() {
-    use yt_dlp::model::selector::VideoCodecPreference;
-    // bytevc1 is ByteDance HEVC; bytevc2 (custom VVC) ranks below
-    // even unknown codecs but still qualifies.
-    assert_eq!(
-        codec_rank("bytevc1", true),
-        codec_rank("hev1.1.6.L93", true)
-    );
-    assert_eq!(
-        codec_rank("bytevc1", false),
-        codec_rank("hev1.1.6.L93", false)
-    );
-    assert!(codec_rank("bytevc2", true) > codec_rank("theora", true));
-    assert!(codec_rank("bytevc2", false) > codec_rank("theora", false));
-    assert!(matches!(
-        codec_preference(false),
-        VideoCodecPreference::AVC1
-    ));
-}
-
-#[test]
-fn dialog_lists_adoptable_single_files() {
-    // Muxed and sparse containers list beside splits (ByteDance HEVC
-    // displays as what it is); audio-only never does.
-    let video = test_video(serde_json::json!([
-        test_format_full(
-            "m720",
-            "bytevc1",
-            "mp4a.40.2",
-            Some(720),
-            None,
-            "https",
-            false
-        ),
-        test_format_full("music", "none", "mp4a.40.2", None, None, "https", false),
-    ]));
-    let sparse = serde_json::json!({
-        "format": "dl",
-        "format_id": "dl",
-        "protocol": "https",
-        "ext": "mp4",
-        "height": 1080,
-        "url": "https://cdn.example/dl.mp4",
-        "http_headers": {},
-    });
-    let mut video = video;
-    video.formats.push(serde_json::from_value(sparse).unwrap());
-    let opts = video_format_options(&video, false);
-    let ids: Vec<&str> = opts.iter().map(|o| o.id.as_str()).collect();
-    assert!(ids.contains(&"m720"), "muxed lists: {ids:?}");
-    assert!(ids.contains(&"dl"), "sparse lists: {ids:?}");
-    assert!(!ids.contains(&"music"), "audio never lists: {ids:?}");
-    let m720 = opts.iter().find(|o| o.id == "m720").unwrap();
-    assert!(
-        m720.label.starts_with("720p · hevc"),
-        "label: {}",
-        m720.label
-    );
-}
-
-#[test]
-fn plan_pinned_single_file_adopts_untouched() {
-    // An explicit muxed pin adopts directly — no split, no merge, and
-    // no HLS override second-guessing the choice, even with a taller
-    // variant beside it.
-    let mut video = mixed_muxed_video();
-    video.formats.push(
-        serde_json::from_value(test_format_full(
-            "hls-1080",
-            "avc1.640028",
-            "mp4a.40.2",
-            Some(1080),
-            None,
-            "m3u8_native",
-            false,
-        ))
-        .unwrap(),
-    );
-    let plan = plan_streams(&video, "best", false, Some("m720-avc"), true, 1);
-    assert!(plan.video_sel.is_none());
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720-avc");
-    assert!(plan.audio_only);
-    assert!(plan.hls_sel.is_none(), "explicit pin beats the override");
-}
-
-#[test]
-fn plan_pinned_sparse_adopts_untouched() {
-    let video = tiktok_like_video();
-    let plan = plan_streams(&video, "best", false, Some("dl"), true, 1);
-    assert!(plan.video_sel.is_none());
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
-    assert!(plan.audio_only);
 }
