@@ -18,8 +18,8 @@ use std::{
 use gettextrs::gettext;
 use gtk4::glib;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ListenerOptions, ManagedTorrent,
-    Session, SessionOptions, TorrentStatsState, api::TorrentIdOrHash,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ConnectionOptions, ListenerOptions,
+    ManagedTorrent, Session, SessionOptions, TorrentStatsState, api::TorrentIdOrHash,
 };
 use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
@@ -392,11 +392,53 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     }
 }
 
+/// Network plan for one torrent add, resolved from settings at spawn.
+/// A SOCKS5 proxy takes over TCP peers and HTTP trackers — but the engine
+/// cannot proxy DHT (UDP), inbound connections, or UDP trackers, so those
+/// go dark instead of leaking around the tunnel. HTTP(S) proxies can't be
+/// used at all: passthrough. Pure for tests.
+pub(crate) struct TorrentNetPlan {
+    pub dht: bool,
+    pub listen_port: i32,
+    pub trackers: Option<Vec<String>>,
+    pub socks_proxy: Option<String>,
+}
+
+pub(crate) fn plan_torrent_net(
+    dht: bool,
+    listen_port: i32,
+    trackers: Option<Vec<String>>,
+    proxy: Option<&crate::download::ResolvedProxy>,
+) -> TorrentNetPlan {
+    let Some(url) = proxy.and_then(|p| p.torrent_socks_url()) else {
+        return TorrentNetPlan {
+            dht,
+            listen_port,
+            trackers,
+            socks_proxy: None,
+        };
+    };
+    let trackers = trackers
+        .map(|ts| {
+            ts.into_iter()
+                .filter(|t| t.starts_with("http://") || t.starts_with("https://"))
+                .collect::<Vec<_>>()
+        })
+        .filter(|ts| !ts.is_empty());
+    TorrentNetPlan {
+        dht: false,
+        listen_port: 0,
+        trackers,
+        socks_proxy: Some(url),
+    }
+}
+
 async fn ensure_session(
     dht: bool,
     peer_limit: Option<usize>,
     download_bps: Option<u64>,
     listen_port: i32,
+    socks_proxy: Option<String>,
 ) -> Result<Arc<Session>, String> {
     SESSION
         .get_or_try_init(|| async {
@@ -405,6 +447,16 @@ async fn ensure_session(
             let mut opts = SessionOptions::default();
             if !dht {
                 opts.dht = None;
+            }
+            // SOCKS5 carries outgoing TCP peers (and HTTP trackers via the
+            // session client); creation-scoped like DHT/listener below, so
+            // proxy edits apply to sessions created after them — same rule
+            // as every other network toggle here.
+            if let Some(proxy_url) = socks_proxy {
+                opts.connect = Some(ConnectionOptions {
+                    proxy_url: Some(proxy_url),
+                    ..Default::default()
+                });
             }
             // The session struct carries no live setter for this: it applies
             // here and per add below, so new downloads pick up edits.
@@ -611,6 +663,9 @@ pub(crate) struct TorrentJob {
     /// Extra tracker URLs from preferences (per-add, so edits apply to new
     /// downloads without restarting the engine).
     pub trackers: Option<Vec<String>>,
+    /// SOCKS5 proxy URL for the engine session (planned at spawn: DHT,
+    /// listener and UDP trackers already forced off alongside).
+    pub socks_proxy: Option<String>,
     /// Pre-chosen file indices for multi-file torrents (intake dialog).
     pub only_files: Option<Vec<usize>>,
     /// Intake recorded a collision-proof subfolder as dest: use it
@@ -632,6 +687,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         download_bps,
         listen_port,
         trackers,
+        socks_proxy,
         only_files,
         dest_is_final,
         tx,
@@ -739,14 +795,15 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             false
         }
     };
-    let session = match ensure_session(dht, peer_limit, download_bps, listen_port).await {
-        Ok(s) => s,
-        Err(e) => {
-            ACTIVE.lock().await.remove(&id);
-            fail(e);
-            return;
-        }
-    };
+    let session =
+        match ensure_session(dht, peer_limit, download_bps, listen_port, socks_proxy).await {
+            Ok(s) => s,
+            Err(e) => {
+                ACTIVE.lock().await.remove(&id);
+                fail(e);
+                return;
+            }
+        };
     if resumed {
         if let Some(h) = ACTIVE.lock().await.get(&id).and_then(|a| a.handle.clone()) {
             let _ = session.clone().unpause(&h).await;

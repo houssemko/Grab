@@ -121,3 +121,90 @@ fn trackers_split_and_schemeless_dropped() {
         ])
     );
 }
+
+fn manual_proxy(ptype: &str) -> Option<crate::download::ResolvedProxy> {
+    crate::download::DownloadOptions {
+        tries: 3,
+        timeout: 30,
+        limit_rate: String::new(),
+        user_agent: String::new(),
+        connections: 4,
+        proxy_mode: "manual".into(),
+        proxy_type: ptype.into(),
+        proxy_host: "127.0.0.1".into(),
+        proxy_port: 9050,
+        cookies_browser: String::new(),
+    }
+    .proxy_config()
+    .expect("well-formed manual proxy")
+}
+
+#[test]
+fn torrent_socks_url_accepts_only_socks() {
+    // socks5h normalizes to the exact scheme librqbit demands.
+    let socks = manual_proxy("socks5").expect("proxied");
+    assert_eq!(
+        socks.torrent_socks_url().as_deref(),
+        Some("socks5://127.0.0.1:9050")
+    );
+    // HTTP(S) proxies have no engine peer path: direct, never fail.
+    let http = manual_proxy("http").expect("proxied");
+    assert_eq!(http.torrent_socks_url(), None);
+}
+
+#[test]
+fn torrent_net_plan_direct_passthrough() {
+    let trackers = Some(vec![
+        "udp://tracker.example:80".to_string(),
+        "https://tracker.example/announce".to_string(),
+    ]);
+    let plan = plan_torrent_net(true, 6881, trackers.clone(), None);
+    assert!(plan.dht);
+    assert_eq!(plan.listen_port, 6881);
+    assert_eq!(plan.trackers, trackers);
+    assert_eq!(plan.socks_proxy, None);
+}
+
+#[test]
+fn torrent_net_plan_socks_darkens_unproxyable() {
+    let socks = manual_proxy("socks5");
+    let plan = plan_torrent_net(
+        true,
+        6881,
+        Some(vec![
+            "udp://tracker.example:80".to_string(),
+            "https://tracker.example/announce".to_string(),
+        ]),
+        socks.as_ref(),
+    );
+    // DHT, listener and UDP trackers would leak around the tunnel.
+    assert!(!plan.dht);
+    assert_eq!(plan.listen_port, 0);
+    assert_eq!(
+        plan.trackers,
+        Some(vec!["https://tracker.example/announce".to_string()])
+    );
+    assert_eq!(plan.socks_proxy.as_deref(), Some("socks5://127.0.0.1:9050"));
+}
+
+#[test]
+fn torrent_net_plan_socks_all_udp_trackers_means_none() {
+    let socks = manual_proxy("socks5");
+    let plan = plan_torrent_net(
+        true,
+        6881,
+        Some(vec!["udp://tracker.example:80".to_string()]),
+        socks.as_ref(),
+    );
+    assert_eq!(plan.trackers, None);
+    assert!(plan.socks_proxy.is_some());
+}
+
+#[test]
+fn torrent_net_plan_http_proxy_stays_direct() {
+    let http = manual_proxy("http");
+    let plan = plan_torrent_net(true, 6881, None, http.as_ref());
+    assert!(plan.dht);
+    assert_eq!(plan.listen_port, 6881);
+    assert_eq!(plan.socks_proxy, None);
+}

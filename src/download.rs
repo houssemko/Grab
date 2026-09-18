@@ -455,6 +455,23 @@ pub(crate) struct ResolvedProxy {
     cache_key: String,
 }
 
+impl ResolvedProxy {
+    /// SOCKS5 URL for the torrent engine: librqbit's `proxy_url` demands
+    /// exactly the `socks5://` scheme, so the remote-resolving `socks5h://`
+    /// form normalizes down. Peer addresses arrive as IPs (trackers, PEX —
+    /// DHT is off under proxy), so no hostname resolution happens on the
+    /// peer path at all. HTTP(S) proxies yield `None`: the engine has no
+    /// HTTP-CONNECT peer path, so those torrents stay direct instead of
+    /// failing.
+    pub fn torrent_socks_url(&self) -> Option<String> {
+        let rest = self
+            .cli_url
+            .strip_prefix("socks5h://")
+            .or_else(|| self.cli_url.strip_prefix("socks5://"))?;
+        Some(format!("socks5://{rest}"))
+    }
+}
+
 /// Loopback bypass applied when no ignore list is configured: exits
 /// cannot reach the user's own machine, so proxying localhost only
 /// breaks local services.
@@ -3026,10 +3043,28 @@ impl DownloadManager {
         let _ = std::fs::create_dir_all(&dest);
         let settings = &self.settings;
         let seed_finished = settings.torrent_seed_finished();
-        let dht = settings.torrent_dht();
         let peer_limit = crate::torrent::peer_limit_of(settings);
         let download_bps = parse_rate(settings.speed_limit().trim());
         let trackers = crate::torrent::parse_trackers(&settings.torrent_trackers());
+        // Invalid manual proxy fails loudly like every other engine: no
+        // silent direct torrent while the user asked for a tunnel.
+        let proxy = match crate::download::DownloadOptions::from_settings(settings).proxy_config() {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail(e);
+                self.changed();
+                return;
+            }
+        };
+        // SOCKS5 takes over TCP peers + HTTP trackers (DHT, listener and
+        // UDP trackers go dark alongside); anything else stays direct.
+        let net = crate::torrent::plan_torrent_net(
+            settings.torrent_dht(),
+            settings.torrent_listen_port(),
+            trackers,
+            proxy.as_ref(),
+        );
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
@@ -3059,11 +3094,12 @@ impl DownloadManager {
             seed_finished,
             seed_ratio: settings.torrent_seed_ratio(),
             seed_time_min: settings.torrent_seed_time(),
-            dht,
+            dht: net.dht,
             peer_limit,
             download_bps,
-            listen_port: settings.torrent_listen_port(),
-            trackers,
+            listen_port: net.listen_port,
+            trackers: net.trackers,
+            socks_proxy: net.socks_proxy,
             only_files,
             dest_is_final,
             tx,

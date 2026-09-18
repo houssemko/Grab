@@ -190,6 +190,7 @@ pub fn show(
 
     let proxy_mode = adw::ComboRow::builder()
         .title(gettext("Proxy"))
+        .subtitle(gettext("Torrents follow SOCKS5 proxies only"))
         .subtitle(gettext(
             "Torrents bypass the proxy; update checks pause while one is set",
         ))
