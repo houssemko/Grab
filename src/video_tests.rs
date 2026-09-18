@@ -1003,9 +1003,9 @@ fn video_format_options_lists_best_per_height() {
         opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
         ["v1080-vp9", "v720-av01", "v360-vp9"]
     );
-    assert_eq!(opts[0].label, "1080p · vp9 · 200.0 MB");
+    assert_eq!(opts[0].label, "1080p · 200.0 MB");
     assert_eq!(opts[0].height, 1080);
-    assert_eq!(opts[1].label, "720p · av01 · 60.0 MB");
+    assert_eq!(opts[1].label, "720p · 60.0 MB");
 }
 
 #[test]
@@ -1196,7 +1196,7 @@ fn picker_lists_hls_gap_heights() {
         opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
         ["h1080", "v720"]
     );
-    assert_eq!(opts[0].label, "1080p · HLS");
+    assert_eq!(opts[0].label, "1080p");
 }
 
 #[test]
@@ -2976,8 +2976,13 @@ fn dialog_lists_adoptable_single_files() {
     assert!(!ids.contains(&"music"), "audio never lists: {ids:?}");
     let m720 = opts.iter().find(|o| o.id == "m720").unwrap();
     assert!(
-        m720.label.starts_with("720p · hevc"),
-        "label: {}",
+        m720.label.starts_with("720p"),
+        "resolution-only label: {}",
+        m720.label
+    );
+    assert!(
+        !m720.label.contains("?"),
+        "no codec placeholder may leak into labels: {}",
         m720.label
     );
 }
@@ -3014,4 +3019,31 @@ fn plan_pinned_sparse_adopts_untouched() {
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
     assert!(plan.audio_only);
+}
+
+#[test]
+fn dialog_labels_never_show_codec_placeholders() {
+    // x.com shapes: no codec fields at all. Labels must stay
+    // resolution-only — never "720p · ?".
+    let fmts = serde_json::json!([
+        {"format": "hls-720", "format_id": "hls-720", "protocol": "m3u8_native", "ext": "mp4",
+         "height": 720, "url": "https://x.example/v.m3u8", "http_headers": {}},
+        {"format": "direct-480", "format_id": "direct-480", "protocol": "https", "ext": "mp4",
+         "height": 480, "url": "https://x.example/v.mp4", "http_headers": {}},
+    ]);
+    let video = test_video(fmts);
+    let opts = video_format_options(&video, true);
+    assert!(!opts.is_empty());
+    for o in &opts {
+        assert!(
+            !o.label.contains("?"),
+            "label leaks placeholder: {}",
+            o.label
+        );
+        assert!(
+            o.label.starts_with(&format!("{}p", o.height)),
+            "resolution-only label: {}",
+            o.label
+        );
+    }
 }

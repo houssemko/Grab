@@ -1282,23 +1282,12 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
     let mut out: Vec<VideoFormatOption> = best
         .into_iter()
         .map(|(height, f)| {
-            // HLS variants show their transport, not a codec that
-            // ffmpeg — not the engine — will consume. ByteDance's
-            // `bytevc1` displays as what it is (HEVC).
-            let short = if f.protocol == Protocol::M3U8Native {
-                "HLS".to_string()
-            } else {
-                let vcodec = f.codec_info.video_codec.as_deref().unwrap_or("?");
-                let vcodec = if vcodec.to_ascii_lowercase().starts_with("bytevc1") {
-                    "hevc"
-                } else {
-                    vcodec
-                };
-                vcodec.split('.').next().unwrap_or("?").to_string()
-            };
+            // Resolution-only labels: codec strings are often missing
+            // (x.com lists none) and would render as "?" — the rank
+            // field already carries the codec choice internally.
             let label = match filesize_of(f) {
-                Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
-                None => format!("{height}p · {short}"),
+                Some(n) => format!("{height}p · {}", fmt_video_bytes(n)),
+                None => format!("{height}p"),
             };
             VideoFormatOption {
                 id: f.format_id.clone(),
