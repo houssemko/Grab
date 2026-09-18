@@ -2600,7 +2600,7 @@ fn live_capture_adopts_part_and_remuxes() {
         out
     };
     assert!(
-        phases.iter().any(|p| p.contains("Downloading")),
+        phases.iter().any(|p| p.contains("Recording")),
         "phases seen: {phases:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);

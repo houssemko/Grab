@@ -3029,17 +3029,41 @@ async fn run_live_ytdlp(
         .take()
         .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
     let tx_p = tx.clone();
+    // Recording indicator: live captures often emit no yt-dlp progress
+    // lines for long stretches, leaving the row stuck on "Resolving
+    // media…" while bytes land on disk. The growing output file is the
+    // truth — announce once it has bytes (capped: minutes of silence
+    // means the capture is dead and its own timeouts will fire).
+    {
+        let tx_rec = tx.clone();
+        let out_rec = out.clone();
+        tokio::spawn(async move {
+            for _ in 0..1200 {
+                if tokio::fs::metadata(&out_rec)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+                    > 0
+                {
+                    tx_rec.send(EngineMsg::Phase(gettext("Recording…"))).ok();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+    }
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let mut have = 0u64;
-        // Announce only once the downloader is past resolving: a parsed
-        // progress line means transfer, silence means fetching.
+        // Announce once recording is confirmed: a parsed progress line
+        // means transfer (same "Recording…" the file watcher sends, so
+        // whichever fires first wins and the second is a no-op).
         let mut announced = false;
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some((frac, total)) = parse_ytdlp_progress(&line) {
                 if !announced {
                     announced = true;
-                    tx_p.send(EngineMsg::Phase(gettext("Downloading…"))).ok();
+                    tx_p.send(EngineMsg::Phase(gettext("Recording…"))).ok();
                 }
                 if let Some(t) = total {
                     have = have.max((frac * t as f64) as u64);
