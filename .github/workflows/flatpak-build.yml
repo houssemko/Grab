@@ -29,6 +29,21 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      # The GNOME SDK/Platform are immutable per runtime version and
+      # would otherwise re-download (~1 min + GBs) on every pristine
+      # build. Only this layer is cached; the build itself stays
+      # --force-clean. `flatpak install` below stays as-is: on a cache
+      # hit it is a fast no-op (or small delta refresh).
+      - name: Cache GNOME SDK and Platform
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.cache/flatpak
+          key: flatpak-sdk-${{ runner.os }}-${{ hashFiles('build-aux/io.github.houssemko.Grab.json') }}
+          restore-keys: |
+            flatpak-sdk-${{ runner.os }}-
+
       - name: Install Flatpak tooling
         run: |
           sudo apt-get update -qq
