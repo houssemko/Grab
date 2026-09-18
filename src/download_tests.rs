@@ -3264,11 +3264,11 @@ fn normalize_no_proxy_entries() {
 
 #[test]
 fn cookies_parse_netscape_matrix() {
-    let text = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t9999999999\ttok\tse cret\nbadline\nshort\ta\tb\nsemi.example\tTRUE\t/\tFALSE\t1\tn\tv;w\n.empty\tTRUE\t/\tFALSE\t1\t\tv\n";
+    let text = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t9999999999\ttok\tse cret\n#HttpOnly_.secure.example\tTRUE\t/\tTRUE\t9999999999\ts\t1\nbadline\nshort\ta\tb\nsemi.example\tTRUE\t/\tFALSE\t1\tn\tv;w\n.empty\tTRUE\t/\tFALSE\t1\t\tv\n";
     let (jar, count) = crate::cookies::jar_from_export(text);
     // sid + tok survive; short lines, empty names and semicolon
     // values are dropped rather than sent mangled.
-    assert_eq!(count, 2);
+    assert_eq!(count, 3);
     let header =
         crate::cookies::cookie_header_for(&jar, "https://example.com/v").expect("in-scope cookies");
     let header = header.to_str().unwrap();
@@ -3278,6 +3278,22 @@ fn cookies_parse_netscape_matrix() {
     assert!(crate::cookies::cookie_header_for(&jar, "https://other.org/").is_none());
     let (empty, _) = crate::cookies::jar_from_export("# nothing here\n");
     assert!(crate::cookies::cookie_header_for(&empty, "https://example.com/").is_none());
+}
+
+#[test]
+fn cookies_secure_flag_is_scheme_aware() {
+    // Secure cookies ride https only, exactly like the browser and
+    // yt-dlp treat them; plain cookies ride both schemes identically.
+    let (jar, _) = crate::cookies::jar_from_export(
+        ".secure.example\tTRUE\t/\tTRUE\t9999999999\ts\t1\n.plain.example\tTRUE\t/\tFALSE\t9999999999\tp\t2\n",
+    );
+    let https = crate::cookies::cookie_header_for(&jar, "https://secure.example/v")
+        .expect("secure over https");
+    assert_eq!(https, "s=1");
+    assert!(crate::cookies::cookie_header_for(&jar, "http://secure.example/v").is_none());
+    let plain =
+        crate::cookies::cookie_header_for(&jar, "http://plain.example/v").expect("plain over http");
+    assert_eq!(plain, "p=2");
 }
 
 #[test]

@@ -51,7 +51,7 @@ fn parse_netscape_line(line: &str) -> Option<(String, String)> {
     let domain = fields.next()?.trim();
     fields.next()?; // subdomain flag
     fields.next()?; // path
-    fields.next()?; // secure flag
+    let secure = fields.next()?.trim();
     fields.next()?; // expiry
     let name = fields.next()?.trim();
     let value = fields.next()?.trim();
@@ -60,13 +60,20 @@ fn parse_netscape_line(line: &str) -> Option<(String, String)> {
     }
     // add_cookie_str takes Set-Cookie shape; the Domain attribute scopes
     // the cookie exactly like the jar file means it. Values with `;`
-    // would truncate and are skipped rather than sent mangled.
+    // would truncate and are skipped rather than sent mangled. The
+    // Secure flag is preserved so secure cookies stay https-only, like
+    // the browser and yt-dlp treat them.
     if value.contains(';') {
         return None;
     }
+    let secure = if secure.eq_ignore_ascii_case("TRUE") {
+        "; Secure"
+    } else {
+        ""
+    };
     Some((
         domain.to_string(),
-        format!("{name}={value}; Domain={domain}"),
+        format!("{name}={value}; Domain={domain}{secure}"),
     ))
 }
 
