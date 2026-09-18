@@ -29,7 +29,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::oneshot;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
-use yt_dlp::model::format::{Extension, Format, FormatType, HttpHeaders, Protocol};
+use yt_dlp::model::format::{Extension, Format, FormatType, Protocol};
 use yt_dlp::model::selector::{
     AudioCodecPreference, AudioQuality, VideoCodecPreference, VideoQuality,
 };
@@ -1386,24 +1386,18 @@ pub(crate) fn codec_preference(newest_first: bool) -> VideoCodecPreference {
         VideoCodecPreference::AVC1
     }
 }
-/// One HLS manifest variant for the ffmpeg fallback path: owned
-/// values, like [`StreamSel`]. ffmpeg resolves the variant playlist
-/// (and segment keys) itself.
+/// One HLS manifest variant selected by the planner: the exact
+/// format id runners pin, plus its height for caps and logging.
 #[derive(Debug, Clone)]
 struct HlsSel {
     format_id: String,
-    url: String,
-    headers: HttpHeaders,
     height: Option<u32>,
-    /// Separate audio rendition URL when the page lists audio-only HLS
-    /// formats: used when the variant's own master names no audio.
-    /// Set after selection; [`HlsSel::from_format`] leaves it empty.
-    fallback_audio: Option<String>,
 }
 
 impl HlsSel {
     /// Build from an extractor format: manifest protocol, DRM-free,
-    /// with a playlist URL.
+    /// with a playlist URL. The URL itself is validated but not
+    /// stored — runners re-resolve by id.
     fn from_format(f: &Format) -> Option<Self> {
         if f.protocol != Protocol::M3U8Native {
             return None;
@@ -1411,12 +1405,10 @@ impl HlsSel {
         if matches!(f.has_drm, Some(DrmStatus::Yes)) {
             return None;
         }
+        f.download_info.url.clone().filter(|u| !u.is_empty())?;
         Some(Self {
             format_id: f.format_id.clone(),
-            url: f.download_info.url.clone().filter(|u| !u.is_empty())?,
-            headers: f.download_info.http_headers.clone(),
             height: f.video_resolution.height.filter(|&h| h > 0),
-            fallback_audio: None,
         })
     }
 }
@@ -2040,8 +2032,10 @@ pub struct VideoJob {
 }
 
 /// Progress reports are throttled to this many bytes between row updates:
-/// per-chunk reports would churn the UI for no visible gain.
-const PROGRESS_GRANULARITY: u64 = 65536;
+/// per-chunk reports would churn the UI for no visible gain, but the bar
+/// must still feel live on slow links (HIG: indeterminate-or-smooth,
+/// never a frozen bar).
+const PROGRESS_GRANULARITY: u64 = 16384;
 
 /// Run one attempt: resolve → download parts → merge → rename into place.
 /// Returns the final size, or `None` when aborted (the pauser/canceller
@@ -2966,15 +2960,19 @@ async fn run_live_ytdlp(
         .stderr
         .take()
         .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
-    // The row reads "Resolving media…" until bytes flow; say so now so
-    // a silent extraction or fragment-retry wait never looks wedged.
-    tx.send(EngineMsg::Phase(gettext("Downloading…"))).ok();
     let tx_p = tx.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let mut have = 0u64;
+        // Announce only once the downloader is past resolving: a parsed
+        // progress line means transfer, silence means fetching.
+        let mut announced = false;
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some((frac, total)) = parse_ytdlp_progress(&line) {
+                if !announced {
+                    announced = true;
+                    tx_p.send(EngineMsg::Phase(gettext("Downloading…"))).ok();
+                }
                 if let Some(t) = total {
                     have = have.max((frac * t as f64) as u64);
                 }
@@ -3220,6 +3218,56 @@ fn discover_ytdlp_output(staging: &Path, after_move: Option<&str>) -> Option<Pat
 /// resume sidecar of its own — `.part` files in staging resume across
 /// attempts instead. Returns the final size, or `None` when aborted.
 #[allow(clippy::too_many_arguments)]
+/// yt-dlp argv for one VOD HLS capture: the planner-pinned variant id
+/// (never re-delegated to yt-dlp's sort, whose ie_pref/quality/source
+/// tiebreaks can shadow height), merge/extract post-processing, then
+/// proxy/identity. Pure for tests like the part/live builders (same
+/// `--`-before-URL ordering rule).
+pub(crate) fn hls_download_argv(
+    job: &VideoJob,
+    hls_format_id: &str,
+    ffmpeg_bin: &Path,
+    staging: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "--no-playlist".to_string(),
+        "--newline".to_string(),
+        "-f".to_string(),
+        hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only),
+        "-o".to_string(),
+        staging
+            .join("grab-hls.%(ext)s")
+            .to_string_lossy()
+            .into_owned(),
+        "--ffmpeg-location".to_string(),
+        ffmpeg_bin
+            .parent()
+            .unwrap_or_else(|| Path::new("/usr/bin"))
+            .to_string_lossy()
+            .into_owned(),
+        "--retries".to_string(),
+        job.tries.max(1).to_string(),
+        "--print".to_string(),
+        "after_move:filepath".to_string(),
+    ];
+    if job.audio_only {
+        args.push("--extract-audio".to_string());
+        args.push("--audio-format".to_string());
+        args.push("m4a".to_string());
+    } else {
+        args.push("--merge-output-format".to_string());
+        args.push("mp4".to_string());
+    }
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
+    args.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        Some(job.user_agent.as_str()),
+        &job.page_url,
+    ));
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn run_hls_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,
@@ -3235,39 +3283,8 @@ async fn run_hls_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    // The planner already picked the exact variant: pin it rather than
-    // re-delegating to yt-dlp's sort (whose ie_pref/quality/source
-    // tiebreaks can shadow height). The dialog pin feeds the same
-    // parameter when it resolved.
-    let spec = hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only);
     let mut cmd = tokio::process::Command::new(youtube_bin);
-    cmd.arg("--no-playlist")
-        .arg("--newline")
-        .arg("-f")
-        .arg(&spec)
-        .arg("-o")
-        .arg(staging.join("grab-hls.%(ext)s"))
-        .arg("--ffmpeg-location")
-        .arg(ffmpeg_bin.parent().unwrap_or_else(|| Path::new("/usr/bin")))
-        .arg("--retries")
-        .arg(job.tries.max(1).to_string())
-        .arg("--print")
-        .arg("after_move:filepath");
-    if job.audio_only {
-        cmd.arg("--extract-audio").arg("--audio-format").arg("m4a");
-    } else {
-        cmd.arg("--merge-output-format").arg("mp4");
-    }
-    for arg in proxy_cli_args(job.proxy.as_ref()) {
-        cmd.arg(arg);
-    }
-    for arg in ytdlp_identity_args(
-        &job.cookies_browser,
-        Some(job.user_agent.as_str()),
-        &job.page_url,
-    ) {
-        cmd.arg(arg);
-    }
+    cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, staging));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

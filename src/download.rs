@@ -98,6 +98,12 @@ mod imp {
         pub status: Cell<DownloadStatus>,
         #[property(get, set)]
         pub progress: Cell<f64>,
+        /// Bytes have flowed at least once this attempt chain. Activity
+        /// indicators (spinner, "Downloading" phase) key off this, never
+        /// off engine liveness: resolving/fetching must not look like
+        /// downloading. Reset on every spawn.
+        #[property(get, set)]
+        pub started: Cell<bool>,
         #[property(get, set)]
         pub detail: RefCell<String>,
         /// Engine's real output folder for torrents (magnets land in
@@ -1104,7 +1110,9 @@ async fn attempt_multi(
                         tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                     }
                 }
-                if last_sent.elapsed() >= Duration::from_millis(100) {
+                // ~20fps row updates: smooth determinate motion per HIG;
+                // each tick is one label render on a handful of rows.
+                if last_sent.elapsed() >= Duration::from_millis(50) {
                     rate = live_rate_limit();
                     ctx.tx
                         .send(EngineMsg::Progress {
@@ -1376,7 +1384,9 @@ async fn attempt_once(
                     tokio::time::sleep(Duration::from_secs_f64(wait)).await;
                 }
             }
-            if last_sent.elapsed() >= Duration::from_millis(100) {
+            // ~20fps row updates: smooth determinate motion per HIG;
+            // each tick is one label render on a handful of rows.
+            if last_sent.elapsed() >= Duration::from_millis(50) {
                 rate = live_rate_limit();
                 ctx.tx
                     .send(EngineMsg::Progress {
@@ -2634,6 +2644,7 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         item.set_status(DownloadStatus::Downloading);
+        item.set_started(false);
         let host = url::Url::parse(&item.url())
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
@@ -2693,6 +2704,12 @@ impl DownloadManager {
                     } => {
                         if item.status() != DownloadStatus::Downloading {
                             continue;
+                        }
+                        // Bytes-gate all activity indicators: the spinner
+                        // and "Downloading" phase must mean transfer, not
+                        // a live engine still resolving.
+                        if downloaded > 0 {
+                            item.set_started(true);
                         }
                         let (d0, tb) = match base {
                             Some((d0, tb)) if downloaded >= d0 => (d0, tb),
@@ -3060,6 +3077,7 @@ impl DownloadManager {
         }));
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
+        item.set_started(false);
         item.set_detail(gettext("Starting torrent…"));
         self.changed();
         self.pump(item, id, generation, rx);
@@ -3139,6 +3157,7 @@ impl DownloadManager {
         });
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
+        item.set_started(false);
         item.set_detail(if audio_only {
             gettext("Resolving audio…")
         } else {

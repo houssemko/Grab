@@ -1063,16 +1063,17 @@ fn hls_selection_prefers_capped_height() {
     // Selections carry the format id so runners pin the exact variant
     // instead of re-delegating to yt-dlp's sort.
     let sel = select_hls_format(&formats, Some(720)).expect("hls");
-    assert_eq!(sel.url, "https://cdn.example/h1080");
     assert_eq!(sel.format_id, "h1080");
     assert_eq!(
-        select_hls_format(&formats, Some(2160)).expect("hls").url,
-        "https://cdn.example/h1080"
+        select_hls_format(&formats, Some(2160))
+            .expect("hls")
+            .format_id,
+        "h1080"
     );
     // Best takes the tallest; https entries never select as HLS.
     assert_eq!(
-        select_hls_format(&formats, None).expect("hls").url,
-        "https://cdn.example/h1080"
+        select_hls_format(&formats, None).expect("hls").format_id,
+        "h1080"
     );
     assert!(select_hls_format(&[], Some(720)).is_none());
     assert_eq!(
@@ -1880,17 +1881,23 @@ fn hls_selection_ignores_extractor_order() {
     ]))
     .unwrap();
     assert_eq!(
-        select_hls_format(&formats, Some(720)).expect("hls").url,
-        "https://cdn.example/h720"
+        select_hls_format(&formats, Some(720))
+            .expect("hls")
+            .format_id,
+        "h720"
     );
     assert_eq!(
-        select_hls_format(&formats, Some(480)).expect("hls").url,
-        "https://cdn.example/h480"
+        select_hls_format(&formats, Some(480))
+            .expect("hls")
+            .format_id,
+        "h480"
     );
     // Above every variant still takes the tallest.
     assert_eq!(
-        select_hls_format(&formats, Some(2160)).expect("hls").url,
-        "https://cdn.example/h1080"
+        select_hls_format(&formats, Some(2160))
+            .expect("hls")
+            .format_id,
+        "h1080"
     );
 }
 

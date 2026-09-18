@@ -92,7 +92,7 @@ fn refresh_row(
     } else {
         w.progress.set_fraction(frac);
     }
-    w.spinner.set_visible(active);
+    w.spinner.set_visible(active && item.started());
     w.detail.set_text(&item.detail());
 
     let running = matches!(

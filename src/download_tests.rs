@@ -913,6 +913,14 @@ fn error_banner_ignores_cancelled() {
 }
 
 #[test]
+fn fresh_rows_start_unstarted() {
+    // Activity indicators key off bytes, never engine liveness.
+    let item = DownloadItem::new(1, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+    assert!(!item.started());
+    assert_eq!(item.progress(), 0.0);
+}
+
+#[test]
 fn formats_amounts() {
     assert_eq!(format_amounts(0, 1024), "0 B of 1.0 KB");
     assert_eq!(
@@ -2115,6 +2123,10 @@ fn manager_pause_resume_cancel() {
         if std::fs::read(&path).unwrap() != payload {
             fail("bytes differ");
         }
+        assert!(
+            item.started(),
+            "bytes flowed, so activity indicators must be armed"
+        );
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
         if !ranges.lines().any(|l| l.starts_with("bytes=")) {
             fail("resume never sent a Range request (206 path untested)");
@@ -3223,6 +3235,11 @@ fn proxy_manual_rejects_garbage_loudly() {
     );
     assert!(
         proxy_opts("manual", "socks5", "127.0.0.1", 65536)
+            .proxy_config()
+            .is_err()
+    );
+    assert!(
+        proxy_opts("manual", "socks5", "127.0.0.1", -1)
             .proxy_config()
             .is_err()
     );
