@@ -2335,7 +2335,7 @@ fn plan_tie_keeps_direct_muxed() {
 // ── default combo selection ──────────────────────────────────────────
 
 fn test_options() -> Vec<VideoFormatOption> {
-    [480u32, 720, 1080]
+    [1080u32, 720, 480]
         .iter()
         .map(|h| VideoFormatOption {
             id: format!("v{h}"),
@@ -2348,19 +2348,20 @@ fn test_options() -> Vec<VideoFormatOption> {
 #[test]
 fn default_quality_index_preselects() {
     let opts = test_options();
-    // Best (and empty listings) stay on "Best match".
+    // Best (and empty listings) stay on the first row, which lists
+    // tallest first.
     assert_eq!(default_quality_index(&opts, "best"), 0);
     assert_eq!(default_quality_index(&[], "720p"), 0);
-    // Otherwise the closest listed height wins (combo index 1-based).
-    assert_eq!(default_quality_index(&opts, "1080p"), 3);
-    assert_eq!(default_quality_index(&opts, "720p"), 2);
-    assert_eq!(default_quality_index(&opts, "480p"), 1);
+    // Otherwise the closest listed height wins, 0-based.
+    assert_eq!(default_quality_index(&opts, "1080p"), 0);
+    assert_eq!(default_quality_index(&opts, "720p"), 1);
+    assert_eq!(default_quality_index(&opts, "480p"), 2);
     // Between buckets the nearer height wins, ties go taller.
-    assert_eq!(default_quality_index(&opts, "2160p"), 3);
+    assert_eq!(default_quality_index(&opts, "2160p"), 0);
     // Unknown stored values degrade like the extractor selector (1080p).
-    assert_eq!(default_quality_index(&opts, "mystery"), 3);
+    assert_eq!(default_quality_index(&opts, "mystery"), 0);
     // Exact ties (odd extractor heights equidistant from the cap) go taller.
-    let odd = [600u32, 840]
+    let odd = [840u32, 600]
         .iter()
         .map(|h| VideoFormatOption {
             id: format!("v{h}"),
@@ -2368,7 +2369,7 @@ fn default_quality_index_preselects() {
             height: *h,
         })
         .collect::<Vec<_>>();
-    assert_eq!(default_quality_index(&odd, "720p"), 2);
+    assert_eq!(default_quality_index(&odd, "720p"), 0);
 }
 
 // ── yt-dlp live capture ──────────────────────────────────────────────
