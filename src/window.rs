@@ -2058,14 +2058,21 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         } else {
                             Some(typed.as_str())
                         };
-                        // The fallback quality always comes from live
-                        // preferences; the exact pick (if any) rides along.
-                        let quality = m.settings().video_quality();
-                        let format_id = formats
-                            .borrow()
-                            .get(step2.quality.selected() as usize)
-                            .cloned()
-                            .flatten();
+                        // The fallback quality follows the picked format's
+                        // height, so a dropped pin still degrades to the
+                        // chosen height; "Best match" (index 0) keeps the
+                        // live global preference. The combo lists Best
+                        // match first, then the info formats in order.
+                        let selected = step2.quality.selected() as usize;
+                        let format_id = formats.borrow().get(selected).cloned().flatten();
+                        let quality = match selected {
+                            0 => m.settings().video_quality(),
+                            i => v
+                                .formats
+                                .get(i - 1)
+                                .map(|opt| crate::video::quality_for_height(opt.height).to_string())
+                                .unwrap_or_else(|| m.settings().video_quality()),
+                        };
                         match m.enqueue_video(
                             &v.page_url,
                             Some(&dd.borrow()),

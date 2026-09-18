@@ -1766,3 +1766,192 @@ fn user_installed_tools_win_over_bundle() {
     drop(_env);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── stream planning (selection gating) ───────────────────────────────
+
+/// TikTok shape: sparse mp4 with neither codec field (typed Unknown,
+/// invisible to every crate selector) beside a separate music track.
+fn tiktok_like_video() -> yt_dlp::model::Video {
+    let sparse_mp4 = serde_json::json!({
+        "format": "dl",
+        "format_id": "dl",
+        "protocol": "https",
+        "ext": "mp4",
+        "url": "https://cdn.example/dl.mp4",
+        "http_headers": {},
+    });
+    test_video(serde_json::json!([
+        sparse_mp4,
+        test_format_full("music", "none", "mp4a.40.2", None, None, "https", false),
+    ]))
+}
+
+/// x.com shape: muxed direct mp4s (AudioVideo type, invisible to the
+/// video-only selector) beside HLS variants.
+fn x_like_video() -> yt_dlp::model::Video {
+    test_video(serde_json::json!([
+        test_format_full(
+            "http-320",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(320),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "http-720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "hls-720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]))
+}
+
+#[test]
+fn plan_adopts_unknown_video_despite_separate_audio() {
+    // The TikTok gating bug: both fallbacks keyed off audio absence, so
+    // the music track suppressed them and only the music survived.
+    let video = tiktok_like_video();
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_pinned_hls_wins_over_muxed_adoption() {
+    // The x.com shadowing bug: the pin was dropped by the HTTPS-only
+    // lookup and the muxed adoption then vetoed the HLS path.
+    let video = x_like_video();
+    let plan = plan_streams(&video, "720p", false, Some("hls-720"), true, 1);
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_sel.is_none());
+    assert!(!plan.audio_only);
+    let hls = plan.hls_sel.expect("pinned hls");
+    assert_eq!(hls.height, Some(720));
+}
+
+#[test]
+fn plan_muxed_only_still_adopts_without_pin() {
+    // No pin, no splits: the muxed file adopts as before (precedence
+    // over the HLS preset is unchanged).
+    let video = x_like_video();
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-320");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_stale_hls_pin_degrades_to_muxed_adoption() {
+    // A vanished HLS pin behaves like no pin: preset, then adoption.
+    let video = x_like_video();
+    let plan = plan_streams(&video, "1080p", false, Some("gone"), true, 1);
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-320");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_splits_stay_split() {
+    let video = test_video(serde_json::json!([
+        test_format_full("v", "avc1.640028", "none", Some(1080), None, "https", false),
+        test_format_full("a", "none", "mp4a.40.2", None, None, "https", false),
+    ]));
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert_eq!(plan.video_sel.expect("video").format_id, "v");
+    assert_eq!(plan.audio_sel.expect("audio").format_id, "a");
+    assert!(!plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_satisfied_audio_only_request_untouched() {
+    // A fulfilled audio-only request keeps its track even when a muxed
+    // file is also listed: adoption must not swap it out.
+    let video = test_video(serde_json::json!([
+        test_format_full("a", "none", "mp4a.40.2", None, None, "https", false),
+        test_format_full(
+            "m",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "https",
+            false
+        ),
+    ]));
+    let plan = plan_streams(&video, "1080p", true, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert_eq!(plan.audio_sel.expect("audio").format_id, "a");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_hls_preset_still_serves_hls_only_pages() {
+    let video = test_video(serde_json::json!([
+        test_format_full(
+            "h480",
+            "avc1",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]));
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_sel.is_none());
+    assert!(!plan.audio_only);
+    assert_eq!(plan.hls_sel.expect("preset hls").height, Some(1080));
+}
+
+// ── quality for height ───────────────────────────────────────────────
+
+#[test]
+fn quality_for_height_buckets() {
+    assert_eq!(quality_for_height(2160), "2160p");
+    assert_eq!(quality_for_height(1440), "1440p");
+    assert_eq!(quality_for_height(1080), "1080p");
+    assert_eq!(quality_for_height(720), "720p");
+    assert_eq!(quality_for_height(480), "480p");
+    // Odd extractor heights round to the closest bucket (ties up), and
+    // everything outside clamps — so the result is always a recognized
+    // stored value, never a silent 1080p fallback.
+    assert_eq!(quality_for_height(632), "720p");
+    assert_eq!(quality_for_height(900), "1080p");
+    assert_eq!(quality_for_height(100), "480p");
+    assert_eq!(quality_for_height(5000), "2160p");
+    for h in [240, 360, 480, 720, 1080, 1440, 2160] {
+        assert!(
+            VIDEO_QUALITY_VALUES.contains(&quality_for_height(h)),
+            "bucket for {h}"
+        );
+    }
+}
