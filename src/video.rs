@@ -916,6 +916,31 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
+/// Shared trailing argv for every yt-dlp spawn: browser cookies, user
+/// agent, then the page URL behind `--`. One helper so identity flags
+/// can never drift between extraction, parts, HLS and live-resolve
+/// spawns (or let a hostile URL parse as a flag). `None` user agent
+/// keeps today's extraction behavior (yt-dlp default UA there).
+pub(crate) fn ytdlp_identity_args(
+    cookies_browser: &str,
+    user_agent: Option<&str>,
+    page_url: &str,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(spec) = cookies_browser_spec(cookies_browser) {
+        args.push(format!("--cookies-from-browser={spec}"));
+    }
+    if let Some(ua) = user_agent.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--user-agent".to_string());
+        args.push(ua.to_string());
+    }
+    // `--` before the page URL: option parsing ends here, so a hostile
+    // or malformed URL can never be read as a flag.
+    args.push("--".to_string());
+    args.push(page_url.to_string());
+    args
+}
+
 /// Shared root for extraction scratch space.
 pub fn staging_root() -> PathBuf {
     std::env::temp_dir().join("grab-video")
@@ -1054,13 +1079,7 @@ async fn fetch_video_page(
         "--no-progress".to_string(),
         "--dump-single-json".to_string(),
     ];
-    if let Some(spec) = cookies_browser_spec(cookies_browser) {
-        args.push(format!("--cookies-from-browser={spec}"));
-    }
-    // `--` before the page URL: option parsing ends here, so a hostile
-    // or malformed URL can never be read as a flag.
-    args.push("--".to_string());
-    args.push(url.to_string());
+    args.extend(ytdlp_identity_args(cookies_browser, None, url));
     // Spawned directly (tokio + timeout) rather than through the
     // crate's executor: same semantics — concurrent pipe drain,
     // timeout kill, nonzero exit as error — with the failure detail
@@ -2018,7 +2037,6 @@ struct StreamSel {
     format_id: String,
     ext: String,
     url: String,
-    headers: HttpHeaders,
     size: Option<u64>,
     /// Whether the stream carries an audio track (muxed files do).
     has_audio: bool,
@@ -2045,7 +2063,6 @@ impl StreamSel {
                 .url
                 .clone()
                 .ok_or_else(VideoError::unavailable)?,
-            headers: f.download_info.http_headers.clone(),
             size: filesize_of(f),
             has_audio: f
                 .codec_info
@@ -2881,15 +2898,11 @@ fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
         "--retries".to_string(),
         job.tries.max(1).to_string(),
     ];
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
-        args.push(format!("--cookies-from-browser={spec}"));
-    }
-    if !job.user_agent.is_empty() {
-        args.push("--user-agent".to_string());
-        args.push(job.user_agent.clone());
-    }
-    args.push("--".to_string());
-    args.push(job.page_url.clone());
+    args.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        Some(job.user_agent.as_str()),
+        &job.page_url,
+    ));
     args
 }
 
@@ -3401,16 +3414,13 @@ async fn run_hls_ytdlp(
     } else {
         cmd.arg("--merge-output-format").arg("mp4");
     }
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
-        cmd.arg(format!("--cookies-from-browser={spec}"));
+    for arg in ytdlp_identity_args(
+        &job.cookies_browser,
+        Some(job.user_agent.as_str()),
+        &job.page_url,
+    ) {
+        cmd.arg(arg);
     }
-    if !job.user_agent.is_empty() {
-        cmd.arg("--user-agent").arg(&job.user_agent);
-    }
-    // `--` before the page URL: option parsing ends here, so a hostile
-    // or malformed URL can never be read as a flag.
-    cmd.arg("--");
-    cmd.arg(&job.page_url);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
