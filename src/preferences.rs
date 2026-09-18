@@ -190,7 +190,7 @@ pub fn show(
 
     let proxy_mode = adw::ComboRow::builder()
         .title(gettext("Proxy"))
-        .subtitle(gettext("Torrents and update checks bypass the proxy"))
+        .subtitle(gettext("Torrents follow SOCKS5 proxies only"))
         .build();
     {
         let labels = crate::download::proxy_mode_labels();

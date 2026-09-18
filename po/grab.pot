@@ -1035,7 +1035,7 @@ msgid "Proxy"
 msgstr ""
 
 #: src/preferences.rs
-msgid "Torrents and update checks bypass the proxy"
+msgid "Torrents follow SOCKS5 proxies only"
 msgstr ""
 
 #: src/preferences.rs
