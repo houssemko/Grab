@@ -1059,10 +1059,11 @@ fn hls_selection_prefers_capped_height() {
     ]))
     .unwrap();
     // Closest at or above the cap; tallest when capped above all.
-    assert_eq!(
-        select_hls_format(&formats, Some(720)).expect("hls").url,
-        "https://cdn.example/h1080"
-    );
+    // Selections carry the format id so runners pin the exact variant
+    // instead of re-delegating to yt-dlp's sort.
+    let sel = select_hls_format(&formats, Some(720)).expect("hls");
+    assert_eq!(sel.url, "https://cdn.example/h1080");
+    assert_eq!(sel.format_id, "h1080");
     assert_eq!(
         select_hls_format(&formats, Some(2160)).expect("hls").url,
         "https://cdn.example/h1080"
@@ -1073,7 +1074,10 @@ fn hls_selection_prefers_capped_height() {
         "https://cdn.example/h1080"
     );
     assert!(select_hls_format(&[], Some(720)).is_none());
-    assert!(find_hls_format(&formats, "h480").is_some());
+    assert_eq!(
+        find_hls_format(&formats, "h480").expect("pin").format_id,
+        "h480"
+    );
     assert!(find_hls_format(&formats, "https").is_none());
     assert!(find_hls_format(&formats, "gone").is_none());
 }
@@ -2387,13 +2391,15 @@ fn live_test_job() -> VideoJob {
 }
 
 #[test]
-fn live_argv_prefers_pinned_spec_in_mpegts() {
+fn live_argv_pins_planner_id_in_mpegts() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/live.mp4");
-    let argv = live_capture_argv(&job, out);
-    // Height-capped spec, kill-safe container, endless fragments.
+    // The planner-resolved id rides along verbatim: yt-dlp's sort never
+    // gets a second vote (its ie_pref/quality/source tiebreaks can
+    // shadow height).
+    let argv = live_capture_argv(&job, "h1080", out);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
-    assert_eq!(argv[f + 1], "bv*[height<=720]+ba/b");
+    assert_eq!(argv[f + 1], "h1080+ba/b");
     assert!(argv.contains(&"--hls-use-mpegts".to_string()));
     assert!(
         argv.windows(2)
@@ -2410,12 +2416,16 @@ fn live_argv_prefers_pinned_spec_in_mpegts() {
     // Pins ride along; audio-only rows take the audio leg.
     let mut pinned = live_test_job();
     pinned.video_format_id = Some("h720".into());
-    let argv = live_capture_argv(&pinned, out);
+    let argv = live_capture_argv(&pinned, "h720", out);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "h720+ba/b");
     let mut audio = live_test_job();
     audio.audio_only = true;
-    let argv = live_capture_argv(&audio, std::path::Path::new("/tmp/staging/live.m4a"));
+    let argv = live_capture_argv(
+        &audio,
+        "haudio",
+        std::path::Path::new("/tmp/staging/live.m4a"),
+    );
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "ba/b");
 }
@@ -2524,6 +2534,7 @@ fn live_capture_adopts_part_and_remuxes() {
         &fake_ff,
         &staging,
         &job,
+        "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
@@ -2566,6 +2577,7 @@ fn live_capture_empty_fails_with_detail() {
         &fake_ff,
         &staging,
         &job,
+        "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
@@ -2625,6 +2637,7 @@ fn live_capture_stale_staging_never_adopts() {
         &fake_ff,
         &staging,
         &job,
+        "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
         tx,
@@ -2658,6 +2671,7 @@ fn live_capture_abort_adopts_partial() {
             &fake_ff,
             &staging,
             &job,
+            "h1080",
             abort_rx,
             std::time::Duration::from_secs(30),
             tx,
@@ -2669,5 +2683,83 @@ fn live_capture_abort_adopts_partial() {
         "abort must complete Done, got {res:?}"
     );
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"partial");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp for VOD HLS: logs argv, expands the `-o` template's
+/// `%(ext)s`, writes bytes there (what discover adopts).
+fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "$@" >> "$(dirname "$out").argv.log"
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn vod_hls_pins_planner_variant_id() {
+    // Best-match with no dialog pin must still download the planner's
+    // pick verbatim — never yt-dlp's sort order.
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls(&dir);
+    let staging = dir.join("staging");
+    let job = VideoJob {
+        item_id: 1,
+        page_url: "https://x.com/u/status/1".into(),
+        quality: "best".into(),
+        audio_only: false,
+        dest: dir.join("v.mp4"),
+        tries: 3,
+        timeout_secs: 60,
+        user_agent: "Grab-test/1.0".into(),
+        video_format_id: None,
+        is_live: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
+    let logged = std::fs::read_to_string(dir.join("staging.argv.log")).unwrap();
+    let f = logged
+        .split_whitespace()
+        .position(|a| a == "-f")
+        .expect("has -f");
+    assert_eq!(
+        logged.split_whitespace().nth(f + 1).expect("spec"),
+        "h1080+ba/b",
+        "{logged}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

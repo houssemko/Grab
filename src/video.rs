@@ -1386,6 +1386,7 @@ pub(crate) fn codec_preference(newest_first: bool) -> VideoCodecPreference {
 /// (and segment keys) itself.
 #[derive(Debug, Clone)]
 struct HlsSel {
+    format_id: String,
     url: String,
     headers: HttpHeaders,
     height: Option<u32>,
@@ -1406,6 +1407,7 @@ impl HlsSel {
             return None;
         }
         Some(Self {
+            format_id: f.format_id.clone(),
             url: f.download_info.url.clone().filter(|u| !u.is_empty())?,
             headers: f.download_info.http_headers.clone(),
             height: f.video_resolution.height.filter(|&h| h > 0),
@@ -2131,6 +2133,7 @@ pub async fn run_video_download(
                 &ffmpeg_bin,
                 &staging,
                 &job,
+                &hls.format_id,
                 abort,
                 timeout,
                 tx,
@@ -2142,6 +2145,7 @@ pub async fn run_video_download(
             &ffmpeg_bin,
             &staging,
             &job,
+            &hls.format_id,
             abort,
             timeout,
             tx,
@@ -2730,12 +2734,12 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
 /// edge; from-start is experimental and YouTube/Twitch-only) and no
 /// `--wait-for-video` (an unbounded wait loop is not a download
 /// attempt). Pure for tests.
-fn live_capture_argv(job: &VideoJob, out: &Path) -> Vec<String> {
+fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<String> {
     let mut args = vec![
         "--no-playlist".to_string(),
         "--newline".to_string(),
         "-f".to_string(),
-        hls_format_spec(&job.quality, job.video_format_id.as_deref(), job.audio_only),
+        hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only),
         "--hls-use-mpegts".to_string(),
         "--fragment-retries".to_string(),
         "infinite".to_string(),
@@ -2873,11 +2877,13 @@ async fn remux_live_capture(
 ///
 /// Stalled captures yield their partial like before; an empty capture
 /// fails. Returns the final size.
+#[allow(clippy::too_many_arguments)]
 async fn run_live_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    hls_format_id: &str,
     abort: oneshot::Receiver<()>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
@@ -2894,7 +2900,7 @@ async fn run_live_ytdlp(
     let ext = if job.audio_only { "m4a" } else { "mp4" };
     let out = staging.join(format!("live.{ext}"));
     let mut cmd = tokio::process::Command::new(youtube_bin);
-    cmd.args(live_capture_argv(job, &out));
+    cmd.args(live_capture_argv(job, hls_format_id, &out));
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -3141,11 +3147,13 @@ fn discover_ytdlp_output(staging: &Path, after_move: Option<&str>) -> Option<Pat
 /// audio extraction, with Grab parsing `--newline` progress. No
 /// resume sidecar of its own — `.part` files in staging resume across
 /// attempts instead. Returns the final size, or `None` when aborted.
+#[allow(clippy::too_many_arguments)]
 async fn run_hls_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    hls_format_id: &str,
     abort: oneshot::Receiver<()>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
@@ -3155,7 +3163,11 @@ async fn run_hls_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    let spec = hls_format_spec(&job.quality, job.video_format_id.as_deref(), job.audio_only);
+    // The planner already picked the exact variant: pin it rather than
+    // re-delegating to yt-dlp's sort (whose ie_pref/quality/source
+    // tiebreaks can shadow height). The dialog pin feeds the same
+    // parameter when it resolved.
+    let spec = hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only);
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.arg("--no-playlist")
         .arg("--newline")
