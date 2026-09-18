@@ -109,9 +109,16 @@ async fn export_cookies(
     page_url: &str,
     timeout: Duration,
 ) -> Option<String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = crate::video::staging_root();
     let _ = std::fs::create_dir_all(&dir);
-    let path: PathBuf = dir.join(format!("grab-cookies-{}.txt", std::process::id()));
+    // Unique per attempt: concurrent exports must never share a path.
+    let path: PathBuf = dir.join(format!(
+        "grab-cookies-{}-{}.txt",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -170,12 +177,13 @@ pub(crate) async fn jar_for_browser(
     {
         return Some(cached.jar.clone());
     }
-    // Ask yt-dlp for the browser *name* the way our spawns do: the
-    // setting may carry a resolved `browser:/profile` spec.
-    let spec = cookies_browser.split(':').next().unwrap_or(cookies_browser);
-    let text = export_cookies(youtube_bin, spec, page_url, Duration::from_secs(120)).await?;
+    // Same resolved spec the download spawns use (`browser:/profile`
+    // dir): exporting by bare name could authenticate as a different
+    // profile than the downloads.
+    let spec = crate::video::cookies_browser_spec(cookies_browser)?;
+    let text = export_cookies(youtube_bin, &spec, page_url, Duration::from_secs(120)).await?;
     let (jar, count) = jar_from_export(&text);
-    tracing::debug!(browser = spec, cookies = count, "exported browser cookies");
+    tracing::debug!(cookies = count, "exported browser cookies");
     jar_cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
