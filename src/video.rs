@@ -1478,11 +1478,10 @@ fn format_height(formats: &[Format], id: &str) -> Option<u32> {
         .find(|f| f.format_id == id)
         .and_then(|f| f.video_resolution.height.filter(|&h| h > 0))
 }
-/// Default combo selection for a fresh resolve: "Best match" (index
-/// 0) when the preference is Best, else the listed height closest to
-/// the preferred one (ties go taller). The combo lists Best first,
-/// then the options in order — so the preference preselects a row
-/// instead of masquerading as Best match. Pure for tests.
+/// Default combo selection for a fresh resolve: index into `formats`
+/// (tallest first) closest to the preference. `"best"` and empty
+/// listings resolve to row 0; ties go taller, then earlier. Pure for
+/// tests.
 pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> usize {
     let want = match quality_height(quality) {
         None => return 0,
@@ -1491,8 +1490,7 @@ pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> us
     formats
         .iter()
         .enumerate()
-        .map(|(i, opt)| (i + 1, opt.height))
-        .min_by_key(|(_, h)| (h.abs_diff(want), std::cmp::Reverse(*h)))
+        .min_by_key(|(i, opt)| (opt.height.abs_diff(want), std::cmp::Reverse(opt.height), *i))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -2472,11 +2470,13 @@ async fn run_merge_ffmpeg(
         use tokio::io::AsyncReadExt as _;
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
@@ -2654,12 +2654,14 @@ async fn run_part_attempt(
     let logs = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             use tokio::io::AsyncReadExt as _;
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
@@ -2865,11 +2867,13 @@ async fn remux_live_capture(
             use tokio::io::AsyncReadExt as _;
             let mut reader = tokio::io::BufReader::new(stderr);
             let mut tail = Vec::new();
+            let mut pending = String::new();
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        trace_format_lines(&mut pending, &buf[..n]);
                         tail.extend_from_slice(&buf[..n]);
                         if tail.len() > 8192 {
                             tail.drain(..tail.len() - 8192);
@@ -2988,11 +2992,13 @@ async fn run_live_ytdlp(
         use tokio::io::AsyncReadExt as _;
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
@@ -3132,6 +3138,27 @@ fn piece_marks(piece_len: u64, marked: &mut u64, downloaded: u64) -> Vec<u64> {
         *marked += 1;
     }
     out
+}
+
+/// Trace yt-dlp's selected-format line (`[info] … Downloading N
+/// format(s): …`) as it streams past: on success it names what
+/// actually downloaded (audit our pick against yt-dlp's sort and
+/// id aliasing); on failure the tail below still carries the error.
+/// `pending` carries a line split across 4 KiB reads.
+fn trace_format_lines(pending: &mut String, chunk: &[u8]) {
+    pending.push_str(&String::from_utf8_lossy(chunk));
+    while let Some(pos) = pending.find('\n') {
+        let line: String = pending.drain(..=pos).collect();
+        let line = line.trim_end();
+        if is_format_selection_line(line) {
+            tracing::info!("{line}");
+        }
+    }
+}
+
+/// Whether a yt-dlp stderr line announces the selected formats.
+fn is_format_selection_line(line: &str) -> bool {
+    line.contains("Downloading ") && line.contains("format(s)")
 }
 
 /// SIGKILL a spawned downloader and the ffmpeg it may have started:
@@ -3308,11 +3335,13 @@ async fn run_hls_ytdlp(
     let logs = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
