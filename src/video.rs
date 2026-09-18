@@ -1520,19 +1520,25 @@ fn select_hls_audio_url(formats: &[Format]) -> Option<String> {
 /// `-headers` value for ffmpeg: the extractor-resolved headers
 /// (variant and segment requests often need the same auth), with the
 /// configured user agent winning over the extractor's.
-fn ffmpeg_headers(headers: &HttpHeaders, user_agent: &str) -> String {
+fn ffmpeg_headers(headers: &HttpHeaders, user_agent: &str, referer: Option<&str>) -> String {
     let ua = if user_agent.trim().is_empty() {
         headers.user_agent.as_str()
     } else {
         user_agent.trim()
     };
     let mut out = String::new();
-    for (name, value) in [
+    let mut pairs: Vec<(&str, &str)> = [
         ("User-Agent", ua),
         ("Accept", headers.accept.as_str()),
         ("Accept-Language", headers.accept_language.as_str()),
         ("Sec-Fetch-Mode", headers.sec_fetch_mode.as_str()),
-    ] {
+    ]
+    .into_iter()
+    .collect();
+    if let Some(referer) = referer {
+        pairs.push(("Referer", referer));
+    }
+    for (name, value) in pairs {
         let value = value.trim();
         // Reject embedded newlines like the reqwest side does
         // (HeaderValue::from_str): extractor JSON controls these
@@ -1700,6 +1706,11 @@ fn parse_hls_master(text: &str, base: &url::Url) -> Option<(Vec<HlsVariant>, Vec
 struct HlsInput {
     video: String,
     audio: Option<String>,
+    /// Page Referer for ffmpeg's `-headers`: hotlink-guarded CDNs
+    /// reject segment requests without it. Only the yt-dlp resolve
+    /// path provides one (the raw dump carries per-format and
+    /// video-level `http_headers` that never survive typed parsing).
+    referer: Option<String>,
 }
 
 /// Pick the variant for a height cap (smallest at or above, else
@@ -1759,6 +1770,7 @@ fn pick_hls_variant(
     Some(HlsInput {
         video: pick.uri.clone(),
         audio,
+        referer: None,
     })
 }
 
@@ -1797,6 +1809,13 @@ fn hls_request_headers(headers: &HttpHeaders, user_agent: &str) -> reqwest::head
 /// audio rendition, if separate); otherwise — media playlist, fetch
 /// failure, anything unexpected — hand ffmpeg the URL untouched, which
 /// is exactly today's behavior.
+///
+/// Resolution prefers `yt-dlp --dump-single-json` over the hand-rolled
+/// master-text parse below: variant choice, audio groups, tokenized
+/// URLs and keys stay maintained upstream, and the dump's raw
+/// `http_headers` supply the page Referer that typed parsing drops.
+/// The text parse remains as the fallback for masters yt-dlp chokes
+/// on but the lenient local parser tolerates.
 /// Fetch one playlist as text: `None` on any network, status or
 /// body failure. Callers fall back to handing ffmpeg the URL blind.
 async fn fetch_playlist_text(
@@ -1816,16 +1835,119 @@ async fn fetch_playlist_text(
     }
 }
 
+/// Referer for one resolved variant URL from a raw dump: the format's
+/// own `http_headers` first, else the video-level ones (TikTok sets it
+/// at video level for web extracts). CR/LF values are rejected — a
+/// hostile page must never inject ffmpeg headers.
+fn extract_referer(value: &serde_json::Value, format_url: &str) -> Option<String> {
+    fn get(value: &serde_json::Value) -> Option<String> {
+        let referer = value.get("http_headers")?.get("Referer")?.as_str()?;
+        if referer.is_empty() || referer.bytes().any(|b| b == b'\r' || b == b'\n') {
+            return None;
+        }
+        Some(referer.to_string())
+    }
+    value
+        .get("formats")?
+        .as_array()?
+        .iter()
+        .find(|f| f.get("url").and_then(|u| u.as_str()) == Some(format_url))
+        .and_then(get)
+        .or_else(|| get(value))
+}
+
+/// Pick live inputs from a `--dump-single-json` value over a master
+/// (or variant) URL: height-appropriate HLS variant, page-level HLS
+/// audio beside it, and the Referer. Pure for tests. `None` when the
+/// dump carries no HLS variant — the caller falls back to the
+/// master-text parse, then to handing ffmpeg the URL blind.
+fn live_input_from_dump(value: &serde_json::Value, want: Option<u32>) -> Option<HlsInput> {
+    let formats: Vec<Format> = value
+        .get("formats")
+        .and_then(|f| serde_json::from_value(f.clone()).ok())?;
+    let hls = select_hls_format(&formats, want)?;
+    Some(HlsInput {
+        video: hls.url.clone(),
+        audio: select_hls_audio_url(&formats),
+        referer: extract_referer(value, &hls.url),
+    })
+}
+
+/// Master resolution through the yt-dlp binary: full cookie/header
+/// context, upstream-maintained variant parsing. `None` on any spawn,
+/// timeout, exit-status, parse or selection failure.
+async fn resolve_hls_input_ytdlp(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    user_agent: &str,
+    want: Option<u32>,
+) -> Option<HlsInput> {
+    let mut args = vec![
+        "--no-progress".to_string(),
+        "--dump-single-json".to_string(),
+    ];
+    if let Some(spec) = cookies_browser_spec(cookies_browser) {
+        args.push(format!("--cookies-from-browser={spec}"));
+    }
+    if !user_agent.trim().is_empty() {
+        args.push("--user-agent".to_string());
+        args.push(user_agent.trim().to_string());
+    }
+    args.push("--".to_string());
+    args.push(url.to_string());
+    let mut cmd = tokio::process::Command::new(youtube_bin);
+    cmd.args(&args);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let drain = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = Vec::new();
+        let mut reader = tokio::io::BufReader::new(stdout);
+        reader.read_to_end(&mut buf).await.ok();
+        buf
+    });
+    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+        Ok(Ok(status)) => status,
+        _ => {
+            kill_tree(&mut child);
+            let _ = child.wait().await;
+            return None;
+        }
+    };
+    let stdout = drain.await.unwrap_or_default();
+    if !status.success() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&stdout)).ok()?;
+    live_input_from_dump(&value, want)
+}
+
 async fn resolve_hls_input(
+    youtube_bin: &Path,
     url: &str,
     headers: &HttpHeaders,
     user_agent: &str,
+    cookies_browser: &str,
     want: Option<u32>,
 ) -> HlsInput {
     let fallback = || HlsInput {
         video: url.to_string(),
         audio: None,
+        referer: None,
     };
+    if let Some(input) =
+        resolve_hls_input_ytdlp(youtube_bin, url, cookies_browser, user_agent, want).await
+    {
+        return input;
+    }
     let Ok(base) = url::Url::parse(url) else {
         return fallback();
     };
@@ -2416,7 +2538,17 @@ pub async fn run_video_download(
         // native fragment handling (retries, keys, audio merging)
         // beats a hand-rolled ffmpeg invocation.
         if job.is_live {
-            return run_hls_ffmpeg(&ffmpeg_bin, &staging, &job, hls, abort, timeout, tx).await;
+            return run_hls_ffmpeg(
+                &ffmpeg_bin,
+                &youtube_bin,
+                &staging,
+                &job,
+                hls,
+                abort,
+                timeout,
+                tx,
+            )
+            .await;
         }
         return run_hls_ytdlp(
             &youtube_bin,
@@ -3079,8 +3211,10 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
 /// business). Live rows stop-and-keep via SIGTERM finalizing; VOD rows
 /// go through [`run_hls_ytdlp`] instead. Returns the final size, or
 /// `None` when a VOD attempt aborts.
+#[allow(clippy::too_many_arguments)]
 async fn run_hls_ffmpeg(
     ffmpeg: &Path,
+    youtube_bin: &Path,
     staging: &Path,
     job: &VideoJob,
     hls: HlsSel,
@@ -3098,7 +3232,15 @@ async fn run_hls_ffmpeg(
     // Master playlists resolve to a height-appropriate variant plus its
     // audio rendition when separate; anything else passes through as today's
     // single input.
-    let mut input = resolve_hls_input(&hls.url, &hls.headers, &job.user_agent, hls.height).await;
+    let mut input = resolve_hls_input(
+        youtube_bin,
+        &hls.url,
+        &hls.headers,
+        &job.user_agent,
+        &job.cookies_browser,
+        hls.height,
+    )
+    .await;
     // Page-level fallback: the master named no audio, but the page
     // lists an audio-only HLS rendition beside its video variants.
     if input.audio.is_none() {
@@ -3111,7 +3253,7 @@ async fn run_hls_ffmpeg(
         .arg("-nostats")
         .arg("-progress")
         .arg("pipe:1");
-    let headers = ffmpeg_headers(&hls.headers, &job.user_agent);
+    let headers = ffmpeg_headers(&hls.headers, &job.user_agent, input.referer.as_deref());
     // `-headers` is per-input: it must precede each `-i` it covers.
     let input_arg = |cmd: &mut tokio::process::Command, url: &str| {
         if !headers.is_empty() {
