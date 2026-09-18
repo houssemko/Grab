@@ -691,6 +691,7 @@ fn pipeline_reports_missing_tools() {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
@@ -1979,6 +1980,7 @@ fn part_test_job() -> VideoJob {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        proxy: None,
     }
 }
 
@@ -2152,6 +2154,7 @@ fn fetch_video_page_parses_dump_json() {
             "https://example.com/v",
             "none",
             std::time::Duration::from_secs(30),
+            None,
         ))
         .expect("fake extract parses");
     assert_eq!(video.id, "abc");
@@ -2387,6 +2390,7 @@ fn live_test_job() -> VideoJob {
         is_live: true,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        proxy: None,
     }
 }
 
@@ -2736,6 +2740,7 @@ fn vod_hls_pins_planner_variant_id() {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();

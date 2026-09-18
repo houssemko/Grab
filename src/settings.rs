@@ -14,6 +14,10 @@ pub mod key {
     pub const RETRIES: &str = "retries";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
+    pub const PROXY_MODE: &str = "proxy-mode";
+    pub const PROXY_TYPE: &str = "proxy-type";
+    pub const PROXY_HOST: &str = "proxy-host";
+    pub const PROXY_PORT: &str = "proxy-port";
     pub const KEEP_SERVER_DATE: &str = "keep-server-date";
     pub const SHOW_NOTIFICATIONS: &str = "show-notifications";
     pub const NOTIFY_BACKGROUND: &str = "notify-background";
@@ -61,6 +65,18 @@ impl AppSettings {
     }
     pub fn user_agent(&self) -> String {
         self.0.string(key::USER_AGENT).to_string()
+    }
+    pub fn proxy_mode(&self) -> String {
+        self.0.string(key::PROXY_MODE).to_string()
+    }
+    pub fn proxy_type(&self) -> String {
+        self.0.string(key::PROXY_TYPE).to_string()
+    }
+    pub fn proxy_host(&self) -> String {
+        self.0.string(key::PROXY_HOST).to_string()
+    }
+    pub fn proxy_port(&self) -> i32 {
+        self.0.int(key::PROXY_PORT)
     }
     pub fn keep_server_date(&self) -> bool {
         self.0.boolean(key::KEEP_SERVER_DATE)

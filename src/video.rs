@@ -1074,6 +1074,7 @@ async fn fetch_video_page(
     url: &str,
     cookies_browser: &str,
     timeout: Duration,
+    fetch_proxy: Option<&crate::download::ResolvedProxy>,
 ) -> Result<Video, VideoError> {
     let mut args = vec![
         "--no-progress".to_string(),
@@ -1086,6 +1087,7 @@ async fn fetch_video_page(
     // taken from stderr instead of a wrapped crate error.
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(&args);
+    apply_proxy_env(&mut cmd, fetch_proxy);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -1159,6 +1161,7 @@ pub async fn fetch_video_infos(
     url: String,
     cookies_browser: String,
     newest_first: bool,
+    fetch_proxy: Option<crate::download::ResolvedProxy>,
 ) -> Result<VideoInfo, VideoError> {
     let handle = crate::download::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
@@ -1172,6 +1175,7 @@ pub async fn fetch_video_infos(
                 &url,
                 &cookies_browser,
                 Duration::from_secs(300),
+                fetch_proxy.as_ref(),
             ),
         )
         .await
@@ -1491,6 +1495,28 @@ pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> us
         .min_by_key(|(_, h)| (h.abs_diff(want), std::cmp::Reverse(*h)))
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// `--proxy` argv for one yt-dlp spawn. Empty when direct.
+pub(crate) fn proxy_cli_args(proxy: Option<&crate::download::ResolvedProxy>) -> Vec<String> {
+    match proxy.map(|p| p.cli_url.as_str()) {
+        Some(url) => vec!["--proxy".to_string(), url.to_string()],
+        None => Vec::new(),
+    }
+}
+
+/// NO_PROXY env for one yt-dlp spawn. Set only when proxied; yt-dlp
+/// honors it on a best-effort basis for the bypass list.
+pub(crate) fn apply_proxy_env(
+    cmd: &mut tokio::process::Command,
+    proxy: Option<&crate::download::ResolvedProxy>,
+) {
+    if let Some(p) = proxy
+        && !p.no_proxy_env.is_empty()
+    {
+        cmd.env("NO_PROXY", &p.no_proxy_env)
+            .env("no_proxy", &p.no_proxy_env);
+    }
 }
 
 /// Stored quality value to a height cap: `None` (Best) takes the
@@ -2009,6 +2035,9 @@ pub struct VideoJob {
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
+    /// Proxy resolved at spawn time (`None` = direct). yt-dlp spawns
+    /// take `--proxy` plus NO_PROXY from it.
+    pub proxy: Option<crate::download::ResolvedProxy>,
 }
 
 /// Progress reports are throttled to this many bytes between row updates:
@@ -2067,6 +2096,7 @@ pub async fn run_video_download(
             &job.page_url,
             &job.cookies_browser,
             Duration::from_secs(300),
+            job.proxy.as_ref(),
         )
         .await
         {
@@ -2544,6 +2574,7 @@ fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
         Some(job.user_agent.as_str()),
         &job.page_url,
     ));
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
     args
 }
 
@@ -2581,12 +2612,14 @@ async fn run_part_attempt(
     youtube_bin: &Path,
     argv: &[String],
     report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
+    proxy: Option<&crate::download::ResolvedProxy>,
     abort: &mut oneshot::Receiver<()>,
     timeout: Duration,
 ) -> Result<Option<()>, VideoError> {
     use tokio::io::AsyncBufReadExt as _;
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(argv);
+    apply_proxy_env(&mut cmd, proxy);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2694,7 +2727,16 @@ async fn run_part_ytdlp(
 ) -> Result<Option<()>, VideoError> {
     for (i, spec) in [spec_primary, spec_fallback].iter().enumerate() {
         let argv = part_download_argv(job, spec, out_path);
-        match run_part_attempt(youtube_bin, &argv, Arc::clone(&report), abort, timeout).await {
+        match run_part_attempt(
+            youtube_bin,
+            &argv,
+            Arc::clone(&report),
+            job.proxy.as_ref(),
+            abort,
+            timeout,
+        )
+        .await
+        {
             Ok(done) => return Ok(done),
             Err(e) if i == 0 && is_format_unavailable(&e.to_string()) => {
                 tracing::info!(
@@ -2753,6 +2795,7 @@ fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<Str
         Some(job.user_agent.as_str()),
         &job.page_url,
     ));
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
     args
 }
 
@@ -2901,6 +2944,7 @@ async fn run_live_ytdlp(
     let out = staging.join(format!("live.{ext}"));
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(live_capture_argv(job, hls_format_id, &out));
+    apply_proxy_env(&mut cmd, job.proxy.as_ref());
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -3193,6 +3237,10 @@ async fn run_hls_ytdlp(
     ) {
         cmd.arg(arg);
     }
+    for arg in proxy_cli_args(job.proxy.as_ref()) {
+        cmd.arg(arg);
+    }
+    apply_proxy_env(&mut cmd, job.proxy.as_ref());
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

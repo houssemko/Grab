@@ -1037,3 +1037,87 @@ msgstr ""
 #: src/video.rs
 msgid "Downloading…"
 msgstr ""
+
+#: src/preferences.rs
+msgid "Proxy"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Torrents and update checks bypass the proxy"
+msgstr ""
+
+#: src/preferences.rs
+msgid "System"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Manual"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Off"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Manual proxy"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Type"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Host"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Port"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Update checks are skipped while a proxy is configured"
+msgstr ""
+
+#: src/download.rs
+msgid "Proxy host is empty"
+msgstr ""
+
+#: src/download.rs
+msgid "Proxy port is out of range (1–65535)"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Proxy mode"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "System honors the desktop proxy settings; manual uses the proxy below; direct disables proxying. Applies to newly started downloads; torrents always go direct."
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Proxy type"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "One of http, https or socks5. SOCKS5 resolves names remotely."
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Proxy host"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Proxy hostname or address, e.g. 127.0.0.1 for a local Tor forwarder."
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Proxy port"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Proxy port, e.g. 9050 for Tor."
+msgstr ""
+
+#: src/download.rs
+msgid "Unknown proxy type: {t}"
+msgstr ""

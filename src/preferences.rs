@@ -186,6 +186,104 @@ pub fn show(
         .build();
     net_group.add(&keep_date);
 
+    let proxy_mode = adw::ComboRow::builder()
+        .title(gettext("Proxy"))
+        .subtitle(gettext("Torrents and update checks bypass the proxy"))
+        .build();
+    {
+        let labels = crate::download::proxy_mode_labels();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        proxy_mode.set_model(Some(&gtk4::StringList::new(&refs)));
+    }
+    proxy_mode.set_selected(crate::download::proxy_mode_index(&settings.proxy_mode()) as u32);
+    net_group.add(&proxy_mode);
+    {
+        let row = proxy_mode.downgrade();
+        settings.connect_changed(Some(crate::settings::key::PROXY_MODE), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                row.set_selected(crate::download::proxy_mode_index(
+                    &s.string(crate::settings::key::PROXY_MODE),
+                ) as u32);
+            }
+        });
+    }
+    let proxy_group = adw::PreferencesGroup::builder()
+        .title(gettext("Manual proxy"))
+        .build();
+    let proxy_type = adw::ComboRow::builder().title(gettext("Type")).build();
+    {
+        let labels = crate::download::proxy_type_labels();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        proxy_type.set_model(Some(&gtk4::StringList::new(&refs)));
+    }
+    proxy_type.set_selected(crate::download::proxy_type_index(&settings.proxy_type()) as u32);
+    proxy_group.add(&proxy_type);
+    {
+        let row = proxy_type.downgrade();
+        settings.connect_changed(Some(crate::settings::key::PROXY_TYPE), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                row.set_selected(crate::download::proxy_type_index(
+                    &s.string(crate::settings::key::PROXY_TYPE),
+                ) as u32);
+            }
+        });
+    }
+    proxy_type.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::PROXY_TYPE,
+                crate::download::proxy_type_value(row.selected() as usize),
+            );
+        }
+    });
+    let proxy_host = adw::EntryRow::builder().title(gettext("Host")).build();
+    settings
+        .bind(crate::settings::key::PROXY_HOST, &proxy_host, "text")
+        .build();
+    proxy_group.add(&proxy_host);
+    let proxy_port = adw::SpinRow::builder()
+        .title(gettext("Port"))
+        .adjustment(&gtk4::Adjustment::new(9050.0, 1.0, 65535.0, 1.0, 10.0, 0.0))
+        .build();
+    settings
+        .bind(crate::settings::key::PROXY_PORT, &proxy_port, "value")
+        .build();
+    proxy_group.add(&proxy_port);
+    // The manual rows only exist in manual mode; the group hides
+    // otherwise so System/Direct stay one clean row.
+    fn sync_proxy_group(group: &gtk4::glib::WeakRef<adw::PreferencesGroup>, manual: bool) {
+        if let Some(group) = group.upgrade() {
+            group.set_visible(manual);
+        }
+    }
+    {
+        let group = proxy_group.downgrade();
+        settings.connect_changed(Some(crate::settings::key::PROXY_MODE), move |s, _| {
+            sync_proxy_group(
+                &group,
+                s.string(crate::settings::key::PROXY_MODE).as_str()
+                    == crate::download::PROXY_MODE_MANUAL,
+            );
+        });
+    }
+    proxy_mode.connect_selected_notify({
+        let s = settings.clone();
+        let group = proxy_group.downgrade();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::PROXY_MODE,
+                crate::download::proxy_mode_value(row.selected() as usize),
+            );
+            sync_proxy_group(&group, s.proxy_mode() == crate::download::PROXY_MODE_MANUAL);
+        }
+    });
+    sync_proxy_group(
+        &proxy_group.downgrade(),
+        settings.proxy_mode() == crate::download::PROXY_MODE_MANUAL,
+    );
+    net_page.add(&proxy_group);
+
     let notif_group = adw::PreferencesGroup::builder()
         .title(gettext("Notifications"))
         .build();
@@ -604,6 +702,7 @@ pub fn show(
             btn.set_label(&gettext("How to Install"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
         }
+        let settings_b = settings.clone();
         video_tools_btn.connect_clicked(move |_| {
             if !crate::video::in_flatpak() {
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
@@ -624,11 +723,31 @@ pub fn show(
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
                 let dialog_b = dialog_weak.clone();
                 let action_b = action.clone();
+                let settings_c = settings_b.clone();
                 btn.set_sensitive(false);
                 spin.set_visible(true);
                 spin.start();
                 row.set_subtitle(&gettext("Checking for updates…"));
                 gtk4::glib::spawn_future_local(async move {
+                    // The update probe cannot go through the proxy, so a
+                    // proxied check would leak the machine IP to GitHub:
+                    // skip loudly instead of checking direct.
+                    let proxied = crate::download::DownloadOptions::from_settings(&settings_c)
+                        .proxy_config()
+                        .map(|p| p.is_some())
+                        .unwrap_or(false);
+                    if proxied {
+                        if dialog_b.upgrade().is_none() {
+                            return;
+                        }
+                        spin_b.stop();
+                        spin_b.set_visible(false);
+                        row_b.set_subtitle(&gettext(
+                            "Update checks are skipped while a proxy is configured",
+                        ));
+                        btn_b.set_sensitive(true);
+                        return;
+                    }
                     let current = gio::spawn_blocking(|| {
                         crate::video::resolve_libraries()
                             .ok()
