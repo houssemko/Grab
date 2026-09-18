@@ -1241,8 +1241,8 @@ fn fmt_video_bytes(n: u64) -> String {
     }
 }
 
-/// Listable video-only formats for one video: best per height, tallest
-/// first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
+/// Listable video-only formats for one video: best per height (codec
+/// rank, then filesize), tallest first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
 /// HLS variants fill heights with no direct stream (the worker pulls
 /// those via ffmpeg); muxed files stay on the automatic path, which
 /// already adopts them. Audio-only formats never appear here.
@@ -1303,14 +1303,23 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
             let short = if f.protocol == Protocol::M3U8Native {
                 "HLS".to_string()
             } else {
-                f.codec_info
-                    .video_codec
-                    .as_deref()
-                    .unwrap_or("?")
+                // Remote extractor string in a plain-text row: allowlist
+                // to label-safe chars so bidi overrides, newlines or
+                // oversized values can't spoof the dropdown.
+                let raw = f.codec_info.video_codec.as_deref().unwrap_or("?");
+                let clean: String = raw
                     .split('.')
                     .next()
                     .unwrap_or("?")
-                    .to_string()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '+')
+                    .take(16)
+                    .collect();
+                if clean.is_empty() {
+                    "?".to_string()
+                } else {
+                    clean
+                }
             };
             let label = match filesize_of(f) {
                 Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
@@ -2780,7 +2789,15 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
     if audio_only {
         return "ba/b".to_string();
     }
-    if let Some(id) = pinned.map(str::trim).filter(|s| !s.is_empty()) {
+    // Pinned ids are remote extractor strings: allowlist to selector-safe
+    // chars so a hostile id can't widen the yt-dlp format set (`,`, `[]`,
+    // `()` all change set semantics). Anything else falls through to the
+    // height rule below instead of failing the row.
+    if let Some(id) = pinned.map(str::trim).filter(|s| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
+    }) {
         return format!("{id}+ba/b");
     }
     match quality_height(quality) {
