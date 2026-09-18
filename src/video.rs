@@ -2775,13 +2775,6 @@ async fn run_hls_ffmpeg(
     }
     cmd.arg("-c")
         .arg("copy")
-        // Fragmented MP4: every fragment self-synchronizes, so joins
-        // and encoder discontinuities in endless live windows can't
-        // drift audio away from video — and a killed capture stays
-        // playable. A regular moov-at-end file would go out of sync
-        // and be unrecoverable on hard kill alike.
-        .arg("-movflags")
-        .arg("frag_keyframe+empty_moov")
         .arg(&out_path)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
