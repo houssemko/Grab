@@ -2836,17 +2836,17 @@ async fn remux_live_capture(
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
                 kill_tree(&mut child);
-                let _ = logs.await;
+                join_drain(logs).await;
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
                 kill_tree(&mut child);
                 let _ = child.wait().await;
-                let _ = logs.await;
+                join_drain(logs).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
             }
         };
-        let log_tail = logs.await.unwrap_or_default();
+        let log_tail = join_drain(logs).await.unwrap_or_default();
         if status.success() {
             return Ok(());
         }
@@ -2907,6 +2907,9 @@ async fn run_live_ytdlp(
         .stderr
         .take()
         .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    // The row reads "Resolving media…" until bytes flow; say so now so
+    // a silent extraction or fragment-retry wait never looks wedged.
+    tx.send(EngineMsg::Phase(gettext("Downloading…"))).ok();
     let tx_p = tx.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -2966,8 +2969,8 @@ async fn run_live_ytdlp(
             }
         },
     }
-    let _ = progress.await;
-    let log_tail = logs.await.unwrap_or_default();
+    let _ = join_drain(progress).await;
+    let log_tail = join_drain(logs).await.unwrap_or_default();
     // Whatever stopped the capture — user stop, stall, stream end, or
     // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
     // renames the `.part` shell on clean completion, so prefer the
@@ -3086,6 +3089,21 @@ fn kill_tree(child: &mut tokio::process::Child) {
         // SAFETY: constant signal number; ESRCH (already dead) is harmless.
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+
+/// Join a pipe-drain task with a grace period: a dead child can leave
+/// orphaned grandchildren holding the pipes (ffmpeg spawned by yt-dlp),
+/// and awaiting them bare would hang forever. Falls back to aborting.
+async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T> {
+    let abort = task.abort_handle();
+    tokio::select! {
+        biased;
+        done = task => done.ok(),
+        _ = tokio::time::sleep(Duration::from_secs(5)) => {
+            abort.abort();
+            None
         }
     }
 }

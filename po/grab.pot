@@ -1033,3 +1033,7 @@ msgstr ""
 #: src/video.rs
 msgid "Finalizing…"
 msgstr ""
+
+#: src/video.rs
+msgid "Downloading…"
+msgstr ""
