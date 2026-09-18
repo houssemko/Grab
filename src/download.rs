@@ -3031,6 +3031,15 @@ impl DownloadManager {
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.cancel_inner(id, true);
         self.epoch.borrow_mut().remove(&id);
+        // Video rows stage split parts under staging_dir(id): drop them
+        // with the row. Pause/cancel keep them for resume; remove and
+        // delete never resume (an Undo'd row re-extracts fresh URLs and
+        // restarts), so orphaned parts would otherwise sit in /tmp until
+        // reboot. Live rows are exempt: their worker was only signaled,
+        // not aborted, and its finalize path cleans up after itself.
+        if !self.live_rows.borrow().contains(&id) && self.video_sources.borrow().contains_key(&id) {
+            crate::video::clean_staging(&crate::video::staging_dir(id));
+        }
         // The snapshot carries the source for Undo; the live map drops it
         // with the row (cancel keeps it, remove doesn't).
         self.video_sources.borrow_mut().remove(&id);

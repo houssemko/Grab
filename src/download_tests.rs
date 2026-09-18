@@ -3073,3 +3073,79 @@ fn piece_bitmap_prefers_segment_then_torrent_then_bytes() {
     manager.torrent_pieces.borrow_mut().insert(8, haves.clone());
     assert_eq!(manager.piece_bitmap(8), haves);
 }
+
+#[test]
+fn remove_cleans_video_staging() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-staging");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 910_000 + std::process::id() as u64;
+    let dir = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("video.mp4"), b"partial").unwrap();
+    let item = DownloadItem::new(id, "https://x.com/u/status/1", "v.mp4", "/tmp/dl");
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::video::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+        },
+    );
+    manager.remove(id);
+    assert!(!dir.exists(), "staged parts must go with the row");
+}
+
+#[test]
+fn remove_keeps_live_staging_for_finalize() {
+    // Live rows are only signaled on remove, not aborted: the worker's
+    // own finalize path owns staging cleanup, so remove must not race it.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-live-staging");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 920_000 + std::process::id() as u64;
+    let dir = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let item = DownloadItem::new(id, "https://x.com/u/status/1", "v.mp4", "/tmp/dl");
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::video::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: true,
+            video_format_id: None,
+        },
+    );
+    manager.live_rows.borrow_mut().insert(id);
+    manager.remove(id);
+    assert!(dir.exists(), "live finalize still owns staging");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn remove_leaves_plain_rows_staging_alone() {
+    // Non-video rows never stage: no video source, no cleanup attempt.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-plain");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 930_000 + std::process::id() as u64;
+    let dir = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let item = DownloadItem::new(id, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+    manager.store().append(&item);
+    manager.remove(id);
+    assert!(dir.exists(), "plain rows must not trigger staging cleanup");
+    let _ = std::fs::remove_dir_all(&dir);
+}
