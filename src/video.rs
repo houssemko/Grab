@@ -28,7 +28,6 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::oneshot;
-use yt_dlp::Downloader;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
 use yt_dlp::model::format::{Extension, Format, FormatType, HttpHeaders, Protocol};
 use yt_dlp::model::selector::{
@@ -1062,10 +1061,69 @@ async fn fetch_video_page(
     // or malformed URL can never be read as a flag.
     args.push("--".to_string());
     args.push(url.to_string());
-    let executor = yt_dlp::executor::Executor::new(youtube_bin, args, timeout);
-    let output = executor.execute().await.map_err(VideoError::fetch)?;
+    // Spawned directly (tokio + timeout) rather than through the
+    // crate's executor: same semantics — concurrent pipe drain,
+    // timeout kill, nonzero exit as error — with the failure detail
+    // taken from stderr instead of a wrapped crate error.
+    let mut cmd = tokio::process::Command::new(youtube_bin);
+    cmd.args(&args);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(VideoError::fetch)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| VideoError::fetch("yt-dlp gave no output pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::fetch("yt-dlp gave no log pipe"))?;
+    // Drain both pipes concurrently: `--dump-single-json` output is
+    // megabytes, and an unread pipe would stall yt-dlp once full.
+    fn drain(
+        stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    ) -> tokio::task::JoinHandle<Vec<u8>> {
+        tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut buf = Vec::new();
+            let mut reader = tokio::io::BufReader::new(stream);
+            reader.read_to_end(&mut buf).await.ok();
+            buf
+        })
+    }
+    let out_task = drain(stdout);
+    let err_task = drain(stderr);
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            kill_tree(&mut child);
+            return Err(VideoError::fetch(&e));
+        }
+        Err(_) => {
+            kill_tree(&mut child);
+            let _ = child.wait().await;
+            return Err(VideoError::fetch(gettext("the lookup timed out")));
+        }
+    };
+    let stdout = out_task.await.unwrap_or_default();
+    let stderr = err_task.await.unwrap_or_default();
+    if !status.success() {
+        let detail = String::from_utf8_lossy(&stderr)
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("yt-dlp reported failure")
+            .trim()
+            .to_string();
+        return Err(VideoError::fetch(detail));
+    }
     let mut value: serde_json::Value =
-        serde_json::from_str(&output.stdout).map_err(VideoError::fetch)?;
+        serde_json::from_str(&String::from_utf8_lossy(&stdout)).map_err(VideoError::fetch)?;
     sanitize_video_json(&mut value);
     let mut video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
     for format in &mut video.formats {
@@ -2267,24 +2325,12 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // The downloader timeout covers the ffmpeg merge: a full-length
-    // merge on a slow CPU dwarfs any network timeout, so never go below
-    // the crate default (the user's setting extends it). Metadata uses
-    // the crate's extractor timeout via [`fetch_video_page`].
+    // Attempt timeout floor: a full-length merge on a slow CPU dwarfs
+    // any network timeout, so never go below the crate default (the
+    // user's setting extends it).
     let timeout = Duration::from_secs(job.timeout_secs.max(300));
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
-    let mut builder = Downloader::builder(libs, staging.clone()).with_timeout(timeout);
-    if !job.user_agent.is_empty() {
-        builder = builder.with_user_agent(job.user_agent.clone());
-    }
-    // Authenticated extraction for gated pages via the browser profile.
-    // (Part downloads go through the binary, which carries the
-    // extraction cookies and format headers itself.)
-    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
-        builder = builder.with_cookies_from_browser(spec);
-    }
-    let downloader = builder.build().await.map_err(VideoError::fetch)?;
     let phase = |text: String| {
         tx.send(EngineMsg::Phase(text)).ok();
     };
@@ -2573,12 +2619,14 @@ pub async fn run_video_download(
             phase(gettext("Merging…"));
         }
         finish_merge(
-            &downloader,
+            &ffmpeg_bin,
             &staging,
             vpart.as_deref(),
             &apart,
             &job.dest,
             video_sel.as_ref().map(|s| s.ext.as_str()),
+            &video.title,
+            timeout,
         )
         .await
         .map(Some)
@@ -2590,21 +2638,143 @@ pub async fn run_video_download(
 
 /// Merge verified parts and rename the result into place. Audio-only rows
 /// adopt the audio part directly (no ffmpeg round-trip).
+/// Audio codec for the merge: stream-copy when the container takes
+/// the part's codec, AAC re-encode otherwise. Ported from the crate's
+/// `audio_codec_for_mux` (whose `audio_codec_hint` was always `None`
+/// at our call site), kept as a pure function so the matrix stays
+/// unit-tested.
+fn merge_audio_codec(audio_ext: &str, output_ext: &str) -> &'static str {
+    let is_aac = matches!(audio_ext, "m4a" | "aac");
+    let is_opus = matches!(audio_ext, "webm" | "opus" | "ogg");
+    match output_ext {
+        "mp4" | "m4a" | "mov" if is_aac => "copy",
+        "webm" if is_opus => "copy",
+        // Matroska supports any codec natively
+        "mkv" | "mka" => "copy",
+        _ => "aac",
+    }
+}
+
+/// ffmpeg argv merging split parts: `-i` audio first (so `0:a` is the
+/// audio part), stream-copy video, title embedded in the same pass.
+/// Pure for tests: inputs, mapping and the end-of-options separator
+/// are pinned here, not in assertion-hostile spawn code.
+fn merge_argv(audio_part: &Path, video_part: &Path, out: &Path, title: &str) -> Vec<String> {
+    let ext = |p: &Path| {
+        p.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+    };
+    vec![
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "warning".to_string(),
+        "-nostats".to_string(),
+        "-i".to_string(),
+        audio_part.to_string_lossy().into_owned(),
+        "-i".to_string(),
+        video_part.to_string_lossy().into_owned(),
+        "-map".to_string(),
+        "0:a".to_string(),
+        "-map".to_string(),
+        "1:v".to_string(),
+        "-c:v".to_string(),
+        "copy".to_string(),
+        "-c:a".to_string(),
+        merge_audio_codec(&ext(audio_part), &ext(out)).to_string(),
+        "-metadata".to_string(),
+        format!("title={title}"),
+        "--".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Run the merge through ffmpeg directly: same command the crate's
+/// combine step built, minus the builder round-trip — and failures now
+/// surface ffmpeg's own last line instead of a wrapped crate error.
+async fn run_merge_ffmpeg(
+    ffmpeg_bin: &Path,
+    audio_part: &Path,
+    video_part: &Path,
+    out: &Path,
+    title: &str,
+    timeout: Duration,
+) -> Result<(), VideoError> {
+    let mut cmd = tokio::process::Command::new(ffmpeg_bin);
+    cmd.args(merge_argv(audio_part, video_part, out, title));
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
+    let logs = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 8192 {
+                        tail.drain(..tail.len() - 8192);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => {
+            kill_tree(&mut child);
+            let _ = logs.await;
+            return Err(VideoError::runtime(&e));
+        }
+        Err(_) => {
+            kill_tree(&mut child);
+            let _ = logs.await;
+            return Err(VideoError::part_failed("timed out merging"));
+        }
+    };
+    let log_tail = logs.await.unwrap_or_default();
+    if !status.success() {
+        let detail = log_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("ffmpeg reported failure")
+            .trim()
+            .to_string();
+        return Err(VideoError::combine(detail));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn finish_merge(
-    downloader: &Downloader,
+    ffmpeg_bin: &Path,
     staging: &Path,
     vpart: Option<&Path>,
     apart: &Path,
     dest: &Path,
     video_ext: Option<&str>,
+    title: &str,
+    timeout: Duration,
 ) -> Result<u64, VideoError> {
     let final_tmp: PathBuf = match (vpart, video_ext) {
         (Some(v), Some(ext)) => {
             let muxed = staging.join(format!("muxed.{ext}"));
-            downloader
-                .combine_audio_and_video_to_path(apart, v, &muxed)
-                .await
-                .map_err(VideoError::combine)?;
+            run_merge_ffmpeg(ffmpeg_bin, apart, v, &muxed, title, timeout).await?;
             muxed
         }
         // Audio-only: the part already is the finished file (container

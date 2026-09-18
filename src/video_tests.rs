@@ -2060,6 +2060,76 @@ fn hls_selection_ignores_extractor_order() {
     );
 }
 
+// ── direct ffmpeg merge ──────────────────────────────────────────────
+
+#[test]
+fn merge_audio_codec_matrix() {
+    // Mirrors the crate's audio_codec_for_mux without its builder.
+    assert_eq!(merge_audio_codec("m4a", "mp4"), "copy");
+    assert_eq!(merge_audio_codec("aac", "mp4"), "copy");
+    assert_eq!(merge_audio_codec("webm", "webm"), "copy");
+    assert_eq!(merge_audio_codec("opus", "webm"), "copy");
+    assert_eq!(merge_audio_codec("mka", "mka"), "copy");
+    assert_eq!(merge_audio_codec("webm", "mkv"), "copy");
+    // Opus into MP4 (the YouTube split case) re-encodes to AAC.
+    assert_eq!(merge_audio_codec("webm", "mp4"), "aac");
+    assert_eq!(merge_audio_codec("ogg", "mp4"), "aac");
+}
+
+#[test]
+fn merge_argv_maps_audio_first() {
+    let argv = merge_argv(
+        std::path::Path::new("/tmp/st/audio.webm"),
+        std::path::Path::new("/tmp/st/video.mp4"),
+        std::path::Path::new("/tmp/st/muxed.mp4"),
+        "Some Title",
+    );
+    let inputs: Vec<&str> = argv
+        .windows(2)
+        .filter(|w| w[0] == "-i")
+        .map(|w| w[1].as_str())
+        .collect();
+    assert_eq!(inputs, ["/tmp/st/audio.webm", "/tmp/st/video.mp4"]);
+    assert!(argv.windows(2).any(|w| w == ["-map", "0:a"]));
+    assert!(argv.windows(2).any(|w| w == ["-map", "1:v"]));
+    assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]));
+    assert!(argv.windows(2).any(|w| w == ["-c:a", "aac"]));
+    assert!(argv.contains(&"title=Some Title".to_string()));
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "/tmp/st/muxed.mp4");
+}
+
+fn fake_ffmpeg_merge(dir: &std::path::Path, fail: bool) -> std::path::PathBuf {
+    let bin = dir.join("fake-ffmpeg");
+    std::fs::write(
+        &bin,
+        if fail {
+            r#"#!/bin/sh
+echo "[out#0/mp4] Invalid data found when processing input" >&2
+exit 1
+"#
+        } else {
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "--" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "$@" >> "$out.argv.log"
+printf 'merged' > "$out"
+exit 0
+"#
+        },
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
 // ── binary part downloads ────────────────────────────────────────────
 
 fn part_test_job() -> VideoJob {
@@ -2170,6 +2240,90 @@ exit 0
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     bin
+}
+
+#[test]
+fn merge_binary_combines_and_reports_failure() {
+    let dir = std::env::temp_dir().join(format!("grab-fakemerge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ffmpeg_merge(&dir, false);
+    let (apart, vpart, out) = (dir.join("a.webm"), dir.join("v.mp4"), dir.join("muxed.mp4"));
+    std::fs::write(&apart, b"a").unwrap();
+    std::fs::write(&vpart, b"v").unwrap();
+    let res = crate::download::tokio_rt().block_on(run_merge_ffmpeg(
+        &fake,
+        &apart,
+        &vpart,
+        &out,
+        "T",
+        std::time::Duration::from_secs(30),
+    ));
+    assert!(matches!(res, Ok(())), "got {res:?}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"merged");
+
+    let fail = fake_ffmpeg_merge(&dir, true);
+    let res = crate::download::tokio_rt().block_on(run_merge_ffmpeg(
+        &fail,
+        &apart,
+        &vpart,
+        &dir.join("muxed2.mp4"),
+        "T",
+        std::time::Duration::from_secs(30),
+    ));
+    match res {
+        Err(e) => assert!(
+            e.to_string().contains("Invalid data found"),
+            "real ffmpeg message surfaces: {e}"
+        ),
+        ok => panic!("expected combine error, got {ok:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── extraction spawn (no crate executor) ─────────────────────────────
+
+#[test]
+fn fetch_video_page_parses_dump_json() {
+    // Fake yt-dlp emitting --dump-single-json bytes: proves the direct
+    // spawn, concurrent drain and parse path without network.
+    let dir = std::env::temp_dir().join(format!("grab-fakeextract-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("info.json"),
+        serde_json::json!({
+            "id": "abc",
+            "title": "T",
+            "age_limit": 0,
+            "live_status": "not_live",
+            "playable_in_embed": true,
+            "extractor": "generic",
+            "extractor_key": "Generic",
+            "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+            "formats": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(&bin, "#!/bin/sh\ncat \"$(dirname \"$0\")/info.json\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let video = crate::download::tokio_rt()
+        .block_on(fetch_video_page(
+            &bin,
+            "https://example.com/v",
+            "none",
+            std::time::Duration::from_secs(30),
+        ))
+        .expect("fake extract parses");
+    assert_eq!(video.id, "abc");
+    assert!(video.formats.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
