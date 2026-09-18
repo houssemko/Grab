@@ -1471,6 +1471,7 @@ fn format_height(formats: &[Format], id: &str) -> Option<u32> {
         .iter()
         .find(|f| f.format_id == id)
         .and_then(|f| f.video_resolution.height.filter(|&h| h > 0))
+}
 /// Default combo selection for a fresh resolve: "Best match" (index
 /// 0) when the preference is Best, else the listed height closest to
 /// the preferred one (ties go taller). The combo lists Best first,

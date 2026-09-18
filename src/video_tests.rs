@@ -2635,6 +2635,8 @@ fn plan_tie_keeps_direct_muxed() {
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.audio_only);
     assert!(plan.hls_sel.is_none());
+}
+
 // ── default combo selection ──────────────────────────────────────────
 
 fn test_options() -> Vec<VideoFormatOption> {
