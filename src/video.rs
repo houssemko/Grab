@@ -1203,6 +1203,10 @@ pub struct VideoFormatOption {
     pub id: String,
     pub label: String,
     pub height: u32,
+    /// Codec rank under the resolve-time mode (see [`codec_rank`]):
+    /// lets preselection prefer playable codecs without re-reading
+    /// codec strings.
+    pub rank: u8,
 }
 
 /// Human size for format labels. Decimal units, one fraction digit.
@@ -1300,6 +1304,10 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
                 id: f.format_id.clone(),
                 label,
                 height,
+                rank: codec_rank(
+                    f.codec_info.video_codec.as_deref().unwrap_or("none"),
+                    newest_first,
+                ),
             }
         })
         .collect();
@@ -1489,10 +1497,11 @@ fn select_muxed_format(
         .collect();
     // Newest-first keeps the height-cap rule (smallest at or above,
     // else tallest) with the codec breaking same-height ties. Most
-    // compatible ranks the codec first instead: a playable file beats
-    // a taller unplayable one, so the cap only filters, never promotes
-    // past a compatible codec — falling back to ignoring it rather
-    // than failing when nothing fits.
+    // compatible ranks the codec first instead: the best available
+    // rank wins outright, and the newest-style height rule applies
+    // inside it — so the cap never promotes a worse codec, and a
+    // playable file beats a taller unplayable one. Mirrors the dialog
+    // preselect, so dialog and download agree.
     if newest_first {
         cands.sort_by_key(|(f, h)| {
             (
@@ -1511,20 +1520,23 @@ fn select_muxed_format(
                 .and_then(|(f, _)| StreamSel::from_format(f).ok()),
         };
     }
-    cands.sort_by_key(|(f, h)| {
-        (
-            codec_rank(f.codec_info.video_codec.as_deref().unwrap_or("none"), false),
-            std::cmp::Reverse(*h),
-        )
-    });
-    let pick = match want {
-        Some(cap) => cands
-            .iter()
-            .find(|(_, h)| *h <= cap)
-            .or_else(|| cands.first()),
-        None => cands.first(),
+    let rank =
+        |f: &Format| codec_rank(f.codec_info.video_codec.as_deref().unwrap_or("none"), false);
+    let mut group: Vec<(&Format, u32)> = match cands.iter().map(|(f, _)| rank(f)).min() {
+        Some(best) => cands.into_iter().filter(|(f, _)| rank(f) == best).collect(),
+        None => Vec::new(),
     };
-    pick.and_then(|(f, _)| StreamSel::from_format(f).ok())
+    group.sort_by_key(|(_, h)| *h);
+    match want {
+        Some(cap) => group
+            .iter()
+            .find(|(_, h)| *h >= cap)
+            .or_else(|| group.last())
+            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
+        None => group
+            .last()
+            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
+    }
 }
 
 /// Height of one format id in fresh metadata, for comparing an
@@ -1535,19 +1547,71 @@ fn format_height(formats: &[Format], id: &str) -> Option<u32> {
         .find(|f| f.format_id == id)
         .and_then(|f| f.video_resolution.height.filter(|&h| h > 0))
 }
-/// Default combo selection for a fresh resolve: index into `formats`
-/// (tallest first) closest to the preference. `"best"` and empty
-/// listings resolve to row 0; ties go taller, then earlier. Pure for
-/// tests.
-pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> usize {
-    let want = match quality_height(quality) {
-        None => return 0,
-        Some(h) => h,
+/// Default combo selection: index into `formats` (tallest first).
+/// Newest-first takes the height closest to the preference (ties: newer
+/// codec, then earlier). Compatible takes the most playable codec
+/// first, then the newest-style height rule inside it — a playable file
+/// beats a taller unplayable one, mirroring the worker's muxed pick, so
+/// dialog and download agree. `"best"` takes the tallest (newest) or
+/// most playable (compatible); empty listings resolve to row 0. Pure
+/// for tests.
+pub fn default_quality_index(
+    formats: &[VideoFormatOption],
+    quality: &str,
+    newest_first: bool,
+) -> usize {
+    if formats.is_empty() {
+        return 0;
+    }
+    if newest_first {
+        let want = match quality_height(quality) {
+            None => {
+                return formats
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(i, opt)| {
+                        (
+                            opt.height,
+                            std::cmp::Reverse(opt.rank),
+                            std::cmp::Reverse(*i),
+                        )
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
+            Some(h) => h,
+        };
+        return formats
+            .iter()
+            .enumerate()
+            .min_by_key(|(i, opt)| {
+                (
+                    opt.height.abs_diff(want),
+                    opt.rank,
+                    std::cmp::Reverse(opt.height),
+                    *i,
+                )
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+    let pool: Vec<(usize, &VideoFormatOption)> = match quality_height(quality) {
+        None => formats.iter().enumerate().collect(),
+        Some(cap) => {
+            let in_cap: Vec<_> = formats
+                .iter()
+                .enumerate()
+                .filter(|(_, opt)| opt.height <= cap)
+                .collect();
+            if in_cap.is_empty() {
+                formats.iter().enumerate().collect()
+            } else {
+                in_cap
+            }
+        }
     };
-    formats
-        .iter()
-        .enumerate()
-        .min_by_key(|(i, opt)| (opt.height.abs_diff(want), std::cmp::Reverse(opt.height), *i))
+    pool.into_iter()
+        .min_by_key(|(i, opt)| (opt.rank, std::cmp::Reverse(opt.height), *i))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
