@@ -111,7 +111,7 @@ pub fn show(
     let connections = adw::SpinRow::builder()
         .title(gettext("Connections per download"))
         .subtitle(gettext(
-            "Parallel connections for large files (1 = single stream)",
+            "Parallel connections for large files (1 = single stream without probing)",
         ))
         .adjustment(&gtk4::Adjustment::new(4.0, 1.0, 16.0, 1.0, 1.0, 0.0))
         .build();

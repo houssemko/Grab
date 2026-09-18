@@ -305,7 +305,7 @@ msgid "Connections per download"
 msgstr ""
 
 #: src/preferences.rs:114
-msgid "Parallel connections for large files (1 = single stream)"
+msgid "Parallel connections for large files (1 = single stream without probing)"
 msgstr ""
 
 #: src/preferences.rs:119

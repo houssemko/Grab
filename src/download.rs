@@ -837,30 +837,40 @@ async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
         StartMode::Single => {
             single_loop(&ctx, &mut tries, None, false).await;
         }
-        StartMode::Fresh => match probe_ranges(
-            &ctx.client,
-            &ctx.url,
-            &ctx.opts,
-            ctx.cookies.as_ref(),
-            timeout,
-        )
-        .await
-        {
-            Ok(total) => {
-                if plan_pieces(total, connections).is_empty() {
-                    single_loop(&ctx, &mut tries, Some(total), true).await;
-                } else {
-                    ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
-                    if multi_loop(&ctx, total, None, connections, &mut tries).await {
-                        let mut single_tries = ctx.opts.tries.max(1);
-                        single_loop(&ctx, &mut single_tries, Some(total), false).await;
+        StartMode::Fresh => {
+            // Single connection skips probing outright: the probe's extra
+            // request consumes single-use token URLs, and one stream
+            // needs no total or range proof up front (completion is EOF,
+            // progress indeterminate).
+            if connections <= 1 {
+                single_loop(&ctx, &mut tries, None, true).await;
+                return;
+            }
+            match probe_ranges(
+                &ctx.client,
+                &ctx.url,
+                &ctx.opts,
+                ctx.cookies.as_ref(),
+                timeout,
+            )
+            .await
+            {
+                Ok(total) => {
+                    if plan_pieces(total, connections).is_empty() {
+                        single_loop(&ctx, &mut tries, Some(total), true).await;
+                    } else {
+                        ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
+                        if multi_loop(&ctx, total, None, connections, &mut tries).await {
+                            let mut single_tries = ctx.opts.tries.max(1);
+                            single_loop(&ctx, &mut single_tries, Some(total), false).await;
+                        }
                     }
                 }
+                Err(_) => {
+                    single_loop(&ctx, &mut tries, None, true).await;
+                }
             }
-            Err(_) => {
-                single_loop(&ctx, &mut tries, None, true).await;
-            }
-        },
+        }
         StartMode::Resume(st) => {
             let total = st.total;
             if multi_loop(&ctx, total, Some(st), connections, &mut tries).await {
@@ -1789,6 +1799,19 @@ pub(crate) fn stamp_request(
         && let Some(cookie) = crate::cookies::cookie_header_for(jar, url)
     {
         req = req.header("Cookie", cookie);
+    }
+    // Self-origin Referer: hotlink guards commonly accept the file's
+    // own origin (browsers always send *some* referrer context, we have
+    // none for pasted URLs). Reveals nothing the request doesn't
+    // already carry; page-specific allowlists still refuse, honestly.
+    if let Ok(parsed) = url.parse::<url::Url>()
+        && let Some(host) = parsed.host_str()
+    {
+        let mut origin = format!("{}://{host}", parsed.scheme());
+        if let Some(port) = parsed.port() {
+            origin.push_str(&format!(":{port}"));
+        }
+        req = req.header("Referer", origin);
     }
     req
 }

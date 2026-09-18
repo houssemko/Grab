@@ -3460,3 +3460,65 @@ fn proxy_argv_precedes_end_of_options() {
         assert_eq!(argv[flag + 1], "socks5h://127.0.0.1:9050");
     }
 }
+
+#[test]
+fn single_connection_skips_probe() {
+    // Single-use token URLs die on any pre-request: with one
+    // connection the engine must never probe, single GET only.
+    let (_lock, _loop) = test_locks();
+    let Fixture {
+        dir,
+        dl,
+        payload,
+        port,
+        server,
+    } = spawn_fixture("noprobe", "v.bin", 20_000, "0", &[], 45);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = FetchCtx {
+        client: http_client().clone(),
+        url: format!("http://127.0.0.1:{port}/v.bin"),
+        dest: dl.join("v.bin"),
+        opts: DownloadOptions {
+            timeout: 30,
+            ..Default::default()
+        },
+        cookies: None,
+        timeout: Duration::from_secs(30),
+        tx,
+    };
+    tokio_rt().block_on(run_download(ctx, 1, StartMode::Fresh));
+    let got = std::fs::read(dl.join("v.bin")).unwrap_or_default();
+    if got != payload {
+        abort(&server, "single-stream download must complete");
+    }
+    let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
+    assert!(
+        ranges.lines().all(|l| l == "full"),
+        "no Range request may precede the download: {ranges:?}"
+    );
+    cleanup(&server, &dir);
+}
+
+#[test]
+fn stamp_request_sends_self_origin_referer() {
+    // Hotlink guards commonly accept the file's own origin; the
+    // Referer carries scheme+host only, never path or query.
+    let built = stamp_request(
+        http_client().get("http://127.0.0.1:8080/a/b?token=secret"),
+        "",
+        None,
+        "http://127.0.0.1:8080/a/b?token=secret",
+    )
+    .build()
+    .unwrap();
+    assert_eq!(built.headers()["referer"], "http://127.0.0.1:8080");
+    let built = stamp_request(
+        http_client().get("https://example.com/v"),
+        "",
+        None,
+        "https://example.com/v",
+    )
+    .build()
+    .unwrap();
+    assert_eq!(built.headers()["referer"], "https://example.com");
+}
