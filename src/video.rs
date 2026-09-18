@@ -2884,6 +2884,10 @@ async fn run_live_ytdlp(
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
+    // Wipe first: a crashed run's `live.mp4` must never be adopted as a
+    // fresh capture that recorded nothing (same discipline the ffmpeg
+    // path had; yt-dlp resume state is per-attempt, not cross-attempt).
+    let _ = tokio::fs::remove_dir_all(staging).await;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;

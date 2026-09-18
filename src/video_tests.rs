@@ -2561,3 +2561,98 @@ fn live_capture_empty_fails_with_detail() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Fake yt-dlp for an abortable capture: records a partial immediately,
+/// then sleeps (simulating an ongoing live edge) until killed.
+fn fake_ytdlp_slow(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-slow");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "[download] 1.0% of 100.00B in 00:00"
+printf 'partial' > "$out.part"
+sleep 60
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn live_capture_stale_staging_never_adopts() {
+    // A crashed run's leftover must not pose as a fresh capture: the
+    // attempt wipes staging first, so a barren run fails instead of
+    // delivering stale bytes.
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-stale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("live.mp4"), b"stale").unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, true);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(res.is_err(), "barren run must fail, got {res:?}");
+    assert!(!job.dest.exists(), "stale bytes must not deliver");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn live_capture_abort_adopts_partial() {
+    // User stop mid-capture: the kill lands, the recorded partial is
+    // adopted and remuxed, the row completes Done.
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-abort-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_slow(&dir);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let res = crate::download::tokio_rt().block_on(async {
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let _ = abort_tx.send(());
+        });
+        run_live_ytdlp(
+            &fake_yt,
+            &fake_ff,
+            &staging,
+            &job,
+            abort_rx,
+            std::time::Duration::from_secs(30),
+            tx,
+        )
+        .await
+    });
+    assert!(
+        matches!(res, Ok(Some(_))),
+        "abort must complete Done, got {res:?}"
+    );
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"partial");
+    let _ = std::fs::remove_dir_all(&dir);
+}
