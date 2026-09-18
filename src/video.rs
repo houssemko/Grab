@@ -1464,6 +1464,14 @@ fn select_muxed_format(formats: &[Format], want: Option<u32>) -> Option<StreamSe
     }
 }
 
+/// Height of one format id in fresh metadata, for comparing an
+/// adopted single file against the HLS preset below.
+fn format_height(formats: &[Format], id: &str) -> Option<u32> {
+    formats
+        .iter()
+        .find(|f| f.format_id == id)
+        .and_then(|f| f.video_resolution.height.filter(|&h| h > 0))
+}
 /// Default combo selection for a fresh resolve: "Best match" (index
 /// 0) when the preference is Best, else the listed height closest to
 /// the preferred one (ties go taller). The combo lists Best first,
@@ -2037,7 +2045,9 @@ struct StreamPlan {
 ///    resolved, for satisfied audio-only requests, and when a video
 ///    request already holds both splits.
 /// 4. The HLS preset stays a last resort for rows with no direct audio
-///    (a muxed adoption above takes precedence when it found a file).
+///    (a muxed adoption above takes precedence when it found a file),
+///    except when the preset is taller yet within the cap: Best match
+///    means best across transports, not best direct file.
 fn plan_streams(
     video: &Video,
     quality: &str,
@@ -2093,6 +2103,10 @@ fn plan_streams(
     // so storyboards and manifests can never adopt here.
     let mut audio_only = audio_only_request;
     let mut single_adopted = false;
+    // Pre-adoption audio: restored if the HLS override below fires, so
+    // a shadowed adoption never leaks its single-part mode into the
+    // HLS path.
+    let pre_audio_sel = audio_sel.clone();
     if pinned_hls.is_none()
         && (audio_sel.is_none() || video_sel.is_none())
         && (!audio_only_request || audio_sel.is_none())
@@ -2135,11 +2149,39 @@ fn plan_streams(
     // directly fetchable, but manifest variants exist. A resolved pin
     // wins outright; otherwise the preset only runs when no direct
     // audio survived (a muxed adoption above takes precedence).
+    // Best-overall override: when the adoption took a muxed file
+    // shorter than an in-cap HLS variant (x.com direct files top out
+    // below the tallest variant), the variant wins — Best match must
+    // mean best across transports, not best direct file. Ties and
+    // over-cap variants keep the direct file.
+    let hls_preset = if audio_only_request {
+        None
+    } else {
+        select_hls_format(&video.formats, quality_height(quality))
+    };
+    let mut hls_wins = false;
+    if !audio_only_request
+        && pinned_hls.is_none()
+        && single_adopted
+        && let (Some(preset), Some(muxed_h)) = (
+            hls_preset.as_ref(),
+            audio_sel
+                .as_ref()
+                .and_then(|s| format_height(&video.formats, &s.format_id)),
+        )
+        && let Some(preset_h) = preset.height
+        && preset_h > muxed_h
+        && quality_height(quality).is_none_or(|cap| preset_h <= cap)
+    {
+        hls_wins = true;
+        audio_sel = pre_audio_sel;
+        audio_only = audio_only_request;
+    }
     let hls_sel: Option<HlsSel> = pinned_hls.or_else(|| {
-        if audio_sel.is_some() {
-            None
+        if hls_wins || audio_sel.is_none() {
+            hls_preset.clone()
         } else {
-            select_hls_format(&video.formats, quality_height(quality))
+            None
         }
     });
     StreamPlan {
