@@ -1195,7 +1195,9 @@ pub async fn fetch_video_infos(
     }
 }
 
-/// One video-only format, deduplicated and labeled for the dialog combo.
+/// One pinnable format, deduplicated and labeled for the dialog combo:
+/// a video-only split or an adoptable single file (muxed/unclassified),
+/// never audio-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VideoFormatOption {
     pub id: String,
@@ -1217,11 +1219,14 @@ fn fmt_video_bytes(n: u64) -> String {
     }
 }
 
-/// Listable video-only formats for one video: best per height, tallest
-/// first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
-/// HLS variants fill heights with no direct stream (the worker pulls
-/// those via ffmpeg); muxed files stay on the automatic path, which
-/// already adopts them. Audio-only formats never appear here.
+/// Listable formats for one video: best per height, tallest first.
+/// Only directly fetchable streams qualify (plain HTTPS, no DRM):
+/// video-only splits plus adoptable single files (muxed audio+video,
+/// or unclassified media in a video container — the worker adopts the
+/// pick directly instead of splitting). HLS variants fill heights with
+/// no direct stream (the worker pulls those via ffmpeg); muxed files
+/// stay on the automatic path, which already adopts them. Audio-only
+/// formats never appear here.
 pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoFormatOption> {
     use std::collections::HashMap;
     let mut best: HashMap<u32, &Format> = HashMap::new();
@@ -1233,11 +1238,10 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
             continue;
         }
         let vcodec = f.codec_info.video_codec.as_deref().unwrap_or("none");
-        if vcodec == "none" {
-            continue;
-        }
         let acodec = f.codec_info.audio_codec.as_deref().unwrap_or("none");
-        if acodec != "none" {
+        // Splits carry video only; anything else listable must adopt
+        // directly (single file, no merge counterpart needed).
+        if !(vcodec != "none" && acodec == "none") && !is_single_container(f) {
             continue;
         }
         let Some(h) = f.video_resolution.height.filter(|&h| h > 0) else {
@@ -1275,18 +1279,18 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
         .into_iter()
         .map(|(height, f)| {
             // HLS variants show their transport, not a codec that
-            // ffmpeg — not the engine — will consume.
+            // ffmpeg — not the engine — will consume. ByteDance's
+            // `bytevc1` displays as what it is (HEVC).
             let short = if f.protocol == Protocol::M3U8Native {
                 "HLS".to_string()
             } else {
-                f.codec_info
-                    .video_codec
-                    .as_deref()
-                    .unwrap_or("?")
-                    .split('.')
-                    .next()
-                    .unwrap_or("?")
-                    .to_string()
+                let vcodec = f.codec_info.video_codec.as_deref().unwrap_or("?");
+                let vcodec = if vcodec.to_ascii_lowercase().starts_with("bytevc1") {
+                    "hevc"
+                } else {
+                    vcodec
+                };
+                vcodec.split('.').next().unwrap_or("?").to_string()
             };
             let label = match filesize_of(f) {
                 Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
@@ -1333,17 +1337,25 @@ pub fn codec_priority_value(index: usize) -> &'static str {
 /// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
 /// AV1 wins ties at the same height, then VP9, HEVC, AVC1, anything
 /// else. Older codecs are only dropped in favor of newer ones — never
-/// at the cost of resolution, and never into an empty list.
+/// at the cost of resolution, and never into an empty list. `bytevc1`
+/// is ByteDance HEVC; `bytevc2` (custom VVC, unplayable anywhere
+/// mainstream) ranks below even unknown codecs but still qualifies.
 fn codec_rank_newest(vcodec: &str) -> u8 {
     let c = vcodec.to_ascii_lowercase();
     if c.starts_with("av01") || c.starts_with("av1") {
         0
     } else if c.starts_with("vp9") {
         1
-    } else if c.starts_with("hev1") || c.starts_with("hvc1") || c.starts_with("h265") {
+    } else if c.starts_with("hev1")
+        || c.starts_with("hvc1")
+        || c.starts_with("h265")
+        || c.starts_with("bytevc1")
+    {
         2
     } else if c.starts_with("avc1") || c.starts_with("h264") {
         3
+    } else if c.starts_with("bytevc2") {
+        5
     } else {
         4
     }
@@ -1358,10 +1370,16 @@ fn codec_rank_compatible(vcodec: &str) -> u8 {
         0
     } else if c.starts_with("vp9") {
         1
-    } else if c.starts_with("hev1") || c.starts_with("hvc1") || c.starts_with("h265") {
+    } else if c.starts_with("hev1")
+        || c.starts_with("hvc1")
+        || c.starts_with("h265")
+        || c.starts_with("bytevc1")
+    {
         2
     } else if c.starts_with("av01") || c.starts_with("av1") {
         3
+    } else if c.starts_with("bytevc2") {
+        5
     } else {
         4
     }
@@ -1449,7 +1467,26 @@ pub fn quality_for_height(height: u32) -> &'static str {
 /// quality cap survives: callers used to take the crate's
 /// `best_audio_video_format`, which is first-in-extractor-order (lowest
 /// first on x.com) regardless of the requested height.
-fn select_muxed_format(formats: &[Format], want: Option<u32>) -> Option<StreamSel> {
+/// Whether a format adopts directly as a finished single file: muxed
+/// audio+video, or unclassified media in a video container
+/// (TikTok-style sparse extractors). Storyboards, manifests and audio
+/// tracks can never adopt here.
+fn is_single_container(f: &Format) -> bool {
+    if f.format_type().is_audio_and_video() {
+        return true;
+    }
+    f.format_type() == FormatType::Unknown
+        && matches!(
+            f.download_info.ext,
+            Extension::Mp4 | Extension::Webm | Extension::Avi | Extension::Flv | Extension::Ts
+        )
+}
+
+fn select_muxed_format(
+    formats: &[Format],
+    want: Option<u32>,
+    newest_first: bool,
+) -> Option<StreamSel> {
     let mut cands: Vec<(&Format, u32)> = formats
         .iter()
         .filter(|f| f.format_type().is_audio_and_video())
@@ -1458,17 +1495,44 @@ fn select_muxed_format(formats: &[Format], want: Option<u32>) -> Option<StreamSe
             StreamSel::from_format(f).ok().map(|_| (f, h))
         })
         .collect();
-    cands.sort_by_key(|(_, h)| *h);
-    match want {
+    // Newest-first keeps the height-cap rule (smallest at or above,
+    // else tallest) with the codec breaking same-height ties. Most
+    // compatible ranks the codec first instead: a playable file beats
+    // a taller unplayable one, so the cap only filters, never promotes
+    // past a compatible codec — falling back to ignoring it rather
+    // than failing when nothing fits.
+    if newest_first {
+        cands.sort_by_key(|(f, h)| {
+            (
+                *h,
+                codec_rank(f.codec_info.video_codec.as_deref().unwrap_or("none"), true),
+            )
+        });
+        return match want {
+            Some(cap) => cands
+                .iter()
+                .find(|(_, h)| *h >= cap)
+                .or_else(|| cands.last())
+                .and_then(|(f, _)| StreamSel::from_format(f).ok()),
+            None => cands
+                .last()
+                .and_then(|(f, _)| StreamSel::from_format(f).ok()),
+        };
+    }
+    cands.sort_by_key(|(f, h)| {
+        (
+            codec_rank(f.codec_info.video_codec.as_deref().unwrap_or("none"), false),
+            std::cmp::Reverse(*h),
+        )
+    });
+    let pick = match want {
         Some(cap) => cands
             .iter()
-            .find(|(_, h)| *h >= cap)
-            .or_else(|| cands.last())
-            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
-        None => cands
-            .last()
-            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
-    }
+            .find(|(_, h)| *h <= cap)
+            .or_else(|| cands.first()),
+        None => cands.first(),
+    };
+    pick.and_then(|(f, _)| StreamSel::from_format(f).ok())
 }
 
 /// Height of one format id in fresh metadata, for comparing an
@@ -1640,6 +1704,22 @@ fn plan_streams(
             )
             .and_then(|f| StreamSel::from_format(f).ok())
     };
+    // Pinned single file (dialog-picked muxed or unclassified video
+    // container): adopt directly instead of splitting — a muxed pin
+    // through the split pipeline would merge garbage. HLS pins resolve
+    // above and never reach here (protocol-exclusive lookups).
+    let pinned_single: Option<StreamSel> = if audio_only_request || pinned_hls.is_some() {
+        None
+    } else if let Some(pinned) = video_format_id {
+        video
+            .formats
+            .iter()
+            .find(|f| f.format_id == pinned)
+            .filter(|f| is_single_container(f))
+            .and_then(|f| StreamSel::from_format(f).ok())
+    } else {
+        None
+    };
     let mut audio_sel: Option<StreamSel> = video
         .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
         .and_then(|f| StreamSel::from_format(f).ok());
@@ -1653,19 +1733,31 @@ fn plan_streams(
     // so storyboards and manifests can never adopt here.
     let mut audio_only = audio_only_request;
     let mut single_adopted = false;
+    // An explicit single-file pin wins over everything below: adopt it
+    // now, and keep the HLS override from second-guessing a chosen file.
+    let has_pinned_single = pinned_single.is_some();
+    if let Some(m) = pinned_single {
+        video_sel = None;
+        audio_sel = Some(m);
+        audio_only = true;
+        single_adopted = true;
+    }
     // Pre-adoption audio: restored if the HLS override below fires, so
     // a shadowed adoption never leaks its single-part mode into the
     // HLS path.
     let pre_audio_sel = audio_sel.clone();
     if pinned_hls.is_none()
+        && !has_pinned_single
         && (audio_sel.is_none() || video_sel.is_none())
         && (!audio_only_request || audio_sel.is_none())
     {
         let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
             // Height-aware: a bare "first muxed file" pick is lowest
             // first on extractors that list ascending (x.com), ignoring
-            // the requested quality entirely.
-            select_muxed_format(&video.formats, quality_height(quality))
+            // the requested quality entirely. Codec-aware too: the
+            // compatible mode must land a playable file, not the
+            // tallest HEVC one.
+            select_muxed_format(&video.formats, quality_height(quality), newest_codecs)
         });
         if let Some(m) = muxed {
             audio_sel = Some(m);
@@ -1678,18 +1770,33 @@ fn plan_streams(
         && video_sel.is_none()
         && (audio_sel.is_none() || !single_adopted)
     {
-        let unknown = video.formats.iter().find(|f| {
-            f.format_type() == FormatType::Unknown
-                && matches!(
-                    f.download_info.ext,
-                    Extension::Mp4
-                        | Extension::Webm
-                        | Extension::Avi
-                        | Extension::Flv
-                        | Extension::Ts
-                )
-                && StreamSel::from_format(f).is_ok()
-        });
+        // Codec-blind by necessity (no codec fields to rank), but
+        // height-capped like the muxed pick: smallest at or above the
+        // cap, else the tallest with a height, else first fetchable.
+        let mut unknowns: Vec<(&Format, u32)> = video
+            .formats
+            .iter()
+            .filter(|f| {
+                f.format_type() == FormatType::Unknown
+                    && is_single_container(f)
+                    && StreamSel::from_format(f).is_ok()
+            })
+            .map(|f| (f, f.video_resolution.height.filter(|&h| h > 0).unwrap_or(0)))
+            .collect();
+        unknowns.sort_by_key(|(_, h)| *h);
+        let unknown = match quality_height(quality) {
+            Some(cap) => unknowns
+                .iter()
+                .find(|(_, h)| *h >= cap)
+                .or_else(|| unknowns.iter().rfind(|(_, h)| *h > 0))
+                .or_else(|| unknowns.first())
+                .map(|(f, _)| *f),
+            None => unknowns
+                .iter()
+                .rfind(|(_, h)| *h > 0)
+                .or_else(|| unknowns.first())
+                .map(|(f, _)| *f),
+        };
         if let Some(m) = unknown.and_then(|m| StreamSel::from_format(m).ok()) {
             audio_sel = Some(m);
             audio_only = true;
@@ -1712,6 +1819,7 @@ fn plan_streams(
     let mut hls_wins = false;
     if !audio_only_request
         && pinned_hls.is_none()
+        && !has_pinned_single
         && single_adopted
         && let (Some(preset), Some(muxed_h)) = (
             hls_preset.as_ref(),
