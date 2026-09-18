@@ -1080,6 +1080,7 @@ async fn fetch_video_page(
         "--no-progress".to_string(),
         "--dump-single-json".to_string(),
     ];
+    args.extend(proxy_cli_args(fetch_proxy));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));
     // Spawned directly (tokio + timeout) rather than through the
     // crate's executor: same semantics — concurrent pipe drain,
@@ -2558,7 +2559,7 @@ async fn finish_merge(
 /// yt-dlp argv for one split part: exact format id, exact output path.
 /// Pure for tests: flags, inputs and the end-of-options separator are
 /// pinned here, not in assertion-hostile spawn code.
-fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
+pub(crate) fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
     let mut args = vec![
         "--no-playlist".to_string(),
         "--newline".to_string(),
@@ -2569,12 +2570,12 @@ fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
         "--retries".to_string(),
         job.tries.max(1).to_string(),
     ];
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
         Some(job.user_agent.as_str()),
         &job.page_url,
     ));
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
     args
 }
 
@@ -2778,7 +2779,7 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
 /// edge; from-start is experimental and YouTube/Twitch-only) and no
 /// `--wait-for-video` (an unbounded wait loop is not a download
 /// attempt). Pure for tests.
-fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<String> {
+pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<String> {
     let mut args = vec![
         "--no-playlist".to_string(),
         "--newline".to_string(),
@@ -2792,12 +2793,12 @@ fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<Str
         "-o".to_string(),
         out.to_string_lossy().into_owned(),
     ];
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
         Some(job.user_agent.as_str()),
         &job.page_url,
     ));
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
     args
 }
 
@@ -3257,14 +3258,14 @@ async fn run_hls_ytdlp(
     } else {
         cmd.arg("--merge-output-format").arg("mp4");
     }
+    for arg in proxy_cli_args(job.proxy.as_ref()) {
+        cmd.arg(arg);
+    }
     for arg in ytdlp_identity_args(
         &job.cookies_browser,
         Some(job.user_agent.as_str()),
         &job.page_url,
     ) {
-        cmd.arg(arg);
-    }
-    for arg in proxy_cli_args(job.proxy.as_ref()) {
         cmd.arg(arg);
     }
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
