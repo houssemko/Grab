@@ -1079,6 +1079,35 @@ fn sanitize_video_json(value: &mut serde_json::Value) {
                 entry.entry("format").or_insert(serde_json::json!(""));
                 entry.entry("format_id").or_insert(serde_json::json!(""));
                 entry.entry("http_headers").or_insert(serde_json::json!({}));
+                // Missing transport with an http(s) URL: plain HTTPS fetch
+                // is the only sane default — without it the format is
+                // invisible to every selector below.
+                if !entry.get("protocol").is_some_and(|v| v.is_string()) {
+                    let http = entry
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .is_some_and(|u| u.starts_with("http://") || u.starts_with("https://"));
+                    if http {
+                        entry.insert("protocol".to_string(), serde_json::json!("https"));
+                    }
+                }
+                if !entry.get("ext").is_some_and(|v| v.is_string()) {
+                    // Missing container with a telling URL: sparse
+                    // extractors sometimes omit `ext` while pointing at a
+                    // plain video file. Sniff the path suffix (containers
+                    // only, never manifests or storyboards) so the Unknown
+                    // fallback can still adopt instead of failing the row.
+                    let suffix = entry
+                        .get("url")
+                        .and_then(|u| u.as_str())
+                        .and_then(|u| u.split(['?', '#']).next())
+                        .and_then(|p| p.rsplit('.').next())
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
+                    if matches!(suffix.as_str(), "mp4" | "webm" | "avi" | "flv" | "ts") {
+                        entry.insert("ext".to_string(), serde_json::json!(suffix));
+                    }
+                }
                 if entry.contains_key("fragments") {
                     entry.insert("fragments".to_string(), serde_json::json!([]));
                 }
