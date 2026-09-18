@@ -179,7 +179,9 @@ pub fn show(
 
     let keep_date = adw::SwitchRow::builder()
         .title(gettext("Preserve server file dates"))
-        .subtitle(gettext("Downloaded files are dated when published, not when downloaded"))
+        .subtitle(gettext(
+            "Downloaded files are dated when published, not when downloaded",
+        ))
         .build();
     settings
         .bind(crate::settings::key::KEEP_SERVER_DATE, &keep_date, "active")
