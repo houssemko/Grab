@@ -1059,6 +1059,9 @@ async fn fetch_video_page(
     if let Some(spec) = cookies_browser_spec(cookies_browser) {
         args.push(format!("--cookies-from-browser={spec}"));
     }
+    // `--` before the page URL: option parsing ends here, so a hostile
+    // or malformed URL can never be read as a flag.
+    args.push("--".to_string());
     args.push(url.to_string());
     let executor = yt_dlp::executor::Executor::new(youtube_bin, args, timeout);
     let output = executor.execute().await.map_err(VideoError::fetch)?;
@@ -1374,7 +1377,10 @@ fn quality_height(value: &str) -> Option<u32> {
 /// cap, else the tallest available. Mirrors the crate's
 /// closest-at-or-above preset semantics.
 fn select_hls_format(formats: &[Format], want: Option<u32>) -> Option<HlsSel> {
-    let cands: Vec<HlsSel> = formats.iter().filter_map(HlsSel::from_format).collect();
+    let mut cands: Vec<HlsSel> = formats.iter().filter_map(HlsSel::from_format).collect();
+    // Extractor order is arbitrary: sort ascending so the capped match is
+    // genuinely the smallest height at or above it.
+    cands.sort_by_key(|s| s.height.unwrap_or(0));
     match want {
         Some(h) => cands
             .iter()
@@ -3020,6 +3026,9 @@ async fn run_hls_ytdlp(
     if !job.user_agent.is_empty() {
         cmd.arg("--user-agent").arg(&job.user_agent);
     }
+    // `--` before the page URL: option parsing ends here, so a hostile
+    // or malformed URL can never be read as a flag.
+    cmd.arg("--");
     cmd.arg(&job.page_url);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

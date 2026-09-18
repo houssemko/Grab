@@ -1955,3 +1955,55 @@ fn quality_for_height_buckets() {
         );
     }
 }
+
+// ── HLS candidate ordering ───────────────────────────────────────────
+
+#[test]
+fn hls_selection_ignores_extractor_order() {
+    // Tallest first (the order some extractors emit): the cap must still
+    // resolve to the smallest height at or above it, not the first
+    // qualifying entry.
+    let formats: Vec<yt_dlp::model::format::Format> = serde_json::from_value(serde_json::json!([
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h720",
+            "avc1",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h480",
+            "avc1",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]))
+    .unwrap();
+    assert_eq!(
+        select_hls_format(&formats, Some(720)).expect("hls").url,
+        "https://cdn.example/h720"
+    );
+    assert_eq!(
+        select_hls_format(&formats, Some(480)).expect("hls").url,
+        "https://cdn.example/h480"
+    );
+    // Above every variant still takes the tallest.
+    assert_eq!(
+        select_hls_format(&formats, Some(2160)).expect("hls").url,
+        "https://cdn.example/h1080"
+    );
+}
