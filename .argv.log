@@ -1,0 +1,2 @@
+--no-playlist --newline -f h1080+ba/b -o /tmp/grab-fakehls-157968/staging/grab-hls.%(ext)s --ffmpeg-location /usr/bin --retries 3 --print after_move:filepath --merge-output-format mp4 --user-agent Grab-test/1.0 -- https://x.com/u/status/1
+--no-playlist --newline -f h1080+ba/b -o /tmp/grab-fakehls-158301/staging/grab-hls.%(ext)s --ffmpeg-location /usr/bin --retries 3 --print after_move:filepath --merge-output-format mp4 --user-agent Grab-test/1.0 -- https://x.com/u/status/1
