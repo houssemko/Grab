@@ -1359,6 +1359,35 @@ pub fn quality_for_height(height: u32) -> &'static str {
         .unwrap_or("1080p")
 }
 
+/// Best muxed (audio+video) file for a height cap: smallest height at
+/// or above the cap, else the tallest available. Same semantics as
+/// [`select_hls_format`]. Only directly fetchable files qualify, so a
+/// DRM or link-less entry can never shadow a playable one — and the
+/// quality cap survives: callers used to take the crate's
+/// `best_audio_video_format`, which is first-in-extractor-order (lowest
+/// first on x.com) regardless of the requested height.
+fn select_muxed_format(formats: &[Format], want: Option<u32>) -> Option<StreamSel> {
+    let mut cands: Vec<(&Format, u32)> = formats
+        .iter()
+        .filter(|f| f.format_type().is_audio_and_video())
+        .filter_map(|f| {
+            let h = f.video_resolution.height.filter(|&h| h > 0)?;
+            StreamSel::from_format(f).ok().map(|_| (f, h))
+        })
+        .collect();
+    cands.sort_by_key(|(_, h)| *h);
+    match want {
+        Some(cap) => cands
+            .iter()
+            .find(|(_, h)| *h >= cap)
+            .or_else(|| cands.last())
+            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
+        None => cands
+            .last()
+            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
+    }
+}
+
 /// Stored quality value to a height cap: `None` (Best) takes the
 /// tallest variant available.
 fn quality_height(value: &str) -> Option<u32> {
@@ -1789,7 +1818,8 @@ struct StreamPlan {
 ///    dropped and then shadowed by the muxed adoption below (x.com
 ///    VODs: direct mp4s are muxed, so the combo lists HLS only).
 /// 2. Direct splits: pinned HTTPS id, else the quality preset.
-/// 3. Single-part adoption for a still-missing side: muxed files, then
+/// 3. Single-part adoption for a still-missing side: muxed files (at
+///    the requested height, not first-in-extractor-order), then
 ///    Unclassified video containers (TikTok-style sparse extractors).
 ///    Gated on the missing side — not on audio absence — because those
 ///    pages also list a separate audio track, which used to skip both
@@ -1858,10 +1888,10 @@ fn plan_streams(
         && (!audio_only_request || audio_sel.is_none())
     {
         let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
-            video
-                .best_audio_video_format()
-                .ok()
-                .and_then(|m| StreamSel::from_format(m).ok())
+            // Height-aware: a bare "first muxed file" pick is lowest
+            // first on extractors that list ascending (x.com), ignoring
+            // the requested quality entirely.
+            select_muxed_format(&video.formats, quality_height(quality))
         });
         if let Some(m) = muxed {
             audio_sel = Some(m);

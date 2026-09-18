@@ -1848,21 +1848,73 @@ fn plan_pinned_hls_wins_over_muxed_adoption() {
 #[test]
 fn plan_muxed_only_still_adopts_without_pin() {
     // No pin, no splits: the muxed file adopts as before (precedence
-    // over the HLS preset is unchanged).
+    // over the HLS preset is unchanged) — but at the requested height,
+    // not first-in-extractor-order.
     let video = x_like_video();
     let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-320");
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.audio_only);
     assert!(plan.hls_sel.is_none());
 }
 
 #[test]
+fn plan_muxed_adoption_honors_height_cap() {
+    // First-in-order used to win regardless of quality (x.com lists
+    // ascending, so Best match downloaded the lowest). Now the cap
+    // picks smallest-at-or-above, tallest when nothing qualifies.
+    let video = test_video(serde_json::json!([
+        test_format_full(
+            "m320",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(320),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "m720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "m1080",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "https",
+            false
+        ),
+    ]));
+    for (quality, want) in [
+        ("best", "m1080"),
+        ("1080p", "m1080"),
+        ("720p", "m720"),
+        ("480p", "m720"),
+    ] {
+        let plan = plan_streams(&video, quality, false, None, true, 1);
+        assert_eq!(
+            plan.audio_sel.expect("adopted").format_id,
+            want,
+            "quality {quality}"
+        );
+        assert!(plan.audio_only, "quality {quality}");
+    }
+}
+
+#[test]
 fn plan_stale_hls_pin_degrades_to_muxed_adoption() {
-    // A vanished HLS pin behaves like no pin: preset, then adoption.
+    // A vanished HLS pin behaves like no pin: preset, then adoption
+    // (at the dialog-picked height, not the lowest listing).
     let video = x_like_video();
     let plan = plan_streams(&video, "1080p", false, Some("gone"), true, 1);
-    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-320");
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.audio_only);
     assert!(plan.hls_sel.is_none());
 }
