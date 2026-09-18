@@ -282,6 +282,40 @@ fn clean_staging_removes_our_dir() {
     assert!(!dir.exists());
 }
 
+#[test]
+fn ensure_staging_dir_roundtrip_and_clean() {
+    let dir = staging_dir(u64::MAX - 8);
+    let canon = ensure_staging_dir(&dir).expect("fresh dir verifies");
+    assert!(
+        canon.starts_with(std::fs::canonicalize(staging_root()).unwrap()),
+        "{canon:?}"
+    );
+    clean_staging(&dir);
+    assert!(!dir.exists());
+    assert!(!canon.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_staging_dir_rejects_symlink_escape() {
+    // Pre-planted symlink at the predicted per-item path: creation
+    // follows it, but the canonical check must refuse the escape and
+    // write nothing through the link.
+    std::fs::create_dir_all(staging_root()).unwrap();
+    let outside = std::env::temp_dir().join("grab-video-escape-target");
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_file(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = staging_dir(u64::MAX - 7);
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let err = ensure_staging_dir(&link).expect_err("symlink escape must fail");
+    assert!(err.to_string().contains("escaped"), "{err}");
+    assert!(outside.read_dir().unwrap().next().is_none());
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
 // ── VideoSource serde round-trip ───────────────────────────────────────
 
 #[test]
@@ -2803,4 +2837,124 @@ fn format_lines_survive_split_reads() {
     assert!(pending.is_empty(), "complete lines drain: {pending:?}");
     trace_format_lines(&mut pending, b"");
     assert!(pending.is_empty());
+}
+
+#[test]
+fn hls_format_spec_rejects_hostile_pins() {
+    // A hostile pinned id must not widen the yt-dlp format set: `,`,
+    // `[]` and `()` all change set semantics. Rejected pins fall
+    // through to the height rule instead of failing the row.
+    assert_eq!(
+        hls_format_spec("1080p", Some("hls-99,hls-720"), false),
+        "bv*[height<=1080]+ba/b"
+    );
+    assert_eq!(
+        hls_format_spec("1080p", Some("best[height=1080]"), false),
+        "bv*[height<=1080]+ba/b"
+    );
+    assert_eq!(
+        hls_format_spec("1080p", Some("(hls-99)"), false),
+        "bv*[height<=1080]+ba/b"
+    );
+    // Dashes, underscores and colons are legitimate extractor id chars.
+    assert_eq!(
+        hls_format_spec("1080p", Some("hls-720_p:1"), false),
+        "hls-720_p:1+ba/b"
+    );
+}
+
+#[test]
+fn picker_label_sanitizes_remote_codec() {
+    // Extractor-controlled codec strings render as plain text but must
+    // not spoof rows: bidi overrides, newlines and oversized values
+    // are stripped to label-safe chars (max 16).
+    let video = test_video(serde_json::json!([test_format_full(
+        "evil",
+        "avc1\u{202e}gnp8001\u{000a}FREE",
+        "none",
+        Some(720),
+        None,
+        "https",
+        false
+    ),]));
+    let opts = video_format_options(&video, true);
+    assert_eq!(opts.len(), 1);
+    assert_eq!(opts[0].label, "720p · avc1gnp8001FREE");
+    // Empty-after-filter degrades to the placeholder, never an empty tag.
+    let video = test_video(serde_json::json!([test_format_full(
+        "weird",
+        "...",
+        "none",
+        Some(720),
+        None,
+        "https",
+        false
+    ),]));
+    let opts = video_format_options(&video, true);
+    assert_eq!(opts[0].label, "720p · ?");
+}
+
+#[test]
+fn plan_unknown_adoption_is_first_match() {
+    // Restored semantics: the Unknown fallback takes the first
+    // fetchable video container in extractor order, not the tallest.
+    // Two sparse candidates pin that ordering down.
+    let video = test_video(serde_json::json!([
+        serde_json::json!({
+            "format": "low",
+            "format_id": "low",
+            "protocol": "https",
+            "ext": "mp4",
+            "url": "https://cdn.example/low.mp4",
+            "http_headers": {},
+        }),
+        serde_json::json!({
+            "format": "high",
+            "format_id": "high",
+            "protocol": "https",
+            "ext": "mp4",
+            "url": "https://cdn.example/high.mp4",
+            "http_headers": {},
+        }),
+        test_format_full("music", "none", "mp4a.40.2", None, None, "https", false),
+    ]));
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "low");
+    assert!(plan.audio_only);
+}
+
+#[test]
+fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
+    // Pins are not restricted to listed ids: a stale persisted pin to
+    // a fetchable-but-unlisted split (here v1080-avc loses the 1080
+    // slot to v1080-vp9 on the codec tie-break, so it never lists)
+    // resolves through find_usable_format as a split paired with
+    // audio — never an adoption, never a failure.
+    let video = test_video(serde_json::json!([
+        test_format_full("v1080-vp9", "vp9", "none", Some(1080), None, "https", false),
+        test_format_full(
+            "v1080-avc",
+            "avc1.640028",
+            "none",
+            Some(1080),
+            None,
+            "https",
+            false
+        ),
+        test_format_full("music", "none", "mp4a.40.2", None, None, "https", false),
+    ]));
+    let listed: Vec<String> = video_format_options(&video, true)
+        .iter()
+        .map(|o| o.id.clone())
+        .collect();
+    assert!(
+        !listed.contains(&"v1080-avc".to_string()),
+        "fixture must keep the pin unlisted: {listed:?}"
+    );
+    let plan = plan_streams(&video, "1080p", false, Some("v1080-avc"), true, 1);
+    let v = plan.video_sel.expect("stale pin resolves");
+    assert_eq!(v.format_id, "v1080-avc");
+    assert!(plan.audio_sel.is_some(), "split pairs with audio");
+    assert!(!plan.audio_only, "split, never adoption");
 }

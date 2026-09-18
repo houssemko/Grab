@@ -114,19 +114,48 @@ async fn export_cookies(
     let dir = crate::video::staging_root();
     let _ = std::fs::create_dir_all(&dir);
     // Unique per attempt: concurrent exports must never share a path.
-    let path: PathBuf = dir.join(format!(
-        "grab-cookies-{}-{}.txt",
-        std::process::id(),
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        // Owner-only from birth: cookie values must never sit
-        // world-readable, even briefly.
-        let _ = std::fs::write(&path, "");
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
+    // Created atomically (O_CREAT|O_EXCL, owner-only from birth): a
+    // pre-planted symlink at the predicted path fails here instead of
+    // diverting the cookie dump into an attacker-chosen file.
+    let path: PathBuf = loop {
+        let candidate: PathBuf = dir.join(format!(
+            "grab-cookies-{}-{}.txt",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&candidate)
+            {
+                Ok(_) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, "cookie export temp file failed");
+                    return None;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(_) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, "cookie export temp file failed");
+                    return None;
+                }
+            }
+        }
+    };
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.arg("--no-progress")
         .arg("--cookies-from-browser")

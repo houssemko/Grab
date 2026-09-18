@@ -952,11 +952,35 @@ pub fn staging_dir(item_id: u64) -> PathBuf {
     staging_root().join(item_id.to_string())
 }
 
+/// Create a staging dir and verify it really lives under Grab's staging
+/// root: `create_dir_all` follows symlinks, so a pre-planted link at the
+/// predicted path would otherwise redirect parts into attacker-chosen
+/// dirs. Returns the canonical path on success.
+pub fn ensure_staging_dir(dir: &Path) -> Result<PathBuf, VideoError> {
+    std::fs::create_dir_all(dir).map_err(VideoError::staging)?;
+    let canon = std::fs::canonicalize(dir).map_err(VideoError::staging)?;
+    let root = std::fs::canonicalize(staging_root()).map_err(VideoError::staging)?;
+    if canon.starts_with(&root) {
+        Ok(canon)
+    } else {
+        Err(VideoError::staging(gettext(
+            "staging directory escaped its root",
+        )))
+    }
+}
+
 /// Remove a staging dir. Guarded: never deletes anything outside Grab's own
-/// staging root, so a buggy caller can't nuke user data.
+/// staging root, so a buggy caller can't nuke user data. Canonicalized on
+/// both sides so a symlinked root can't widen the guard either.
 pub fn clean_staging(dir: &Path) {
-    if dir.starts_with(staging_root()) {
-        let _ = std::fs::remove_dir_all(dir);
+    let (Ok(canon), Ok(root)) = (
+        std::fs::canonicalize(dir),
+        std::fs::canonicalize(staging_root()),
+    ) else {
+        return;
+    };
+    if canon.starts_with(&root) {
+        let _ = std::fs::remove_dir_all(canon);
     }
 }
 
@@ -1168,7 +1192,7 @@ pub async fn fetch_video_infos(
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         let out = staging_root();
-        std::fs::create_dir_all(&out).map_err(VideoError::staging)?;
+        ensure_staging_dir(&out)?;
         let video = match tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
             fetch_video_page(
@@ -1217,8 +1241,8 @@ fn fmt_video_bytes(n: u64) -> String {
     }
 }
 
-/// Listable video-only formats for one video: best per height, tallest
-/// first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
+/// Listable video-only formats for one video: best per height (codec
+/// rank, then filesize), tallest first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
 /// HLS variants fill heights with no direct stream (the worker pulls
 /// those via ffmpeg); muxed files stay on the automatic path, which
 /// already adopts them. Audio-only formats never appear here.
@@ -1279,14 +1303,23 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
             let short = if f.protocol == Protocol::M3U8Native {
                 "HLS".to_string()
             } else {
-                f.codec_info
-                    .video_codec
-                    .as_deref()
-                    .unwrap_or("?")
+                // Remote extractor string in a plain-text row: allowlist
+                // to label-safe chars so bidi overrides, newlines or
+                // oversized values can't spoof the dropdown.
+                let raw = f.codec_info.video_codec.as_deref().unwrap_or("?");
+                let clean: String = raw
                     .split('.')
                     .next()
                     .unwrap_or("?")
-                    .to_string()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '+')
+                    .take(16)
+                    .collect();
+                if clean.is_empty() {
+                    "?".to_string()
+                } else {
+                    clean
+                }
             };
             let label = match filesize_of(f) {
                 Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
@@ -2051,9 +2084,7 @@ pub async fn run_video_download(
     use crate::download::EngineMsg;
 
     let staging = staging_dir(job.item_id);
-    tokio::fs::create_dir_all(&staging)
-        .await
-        .map_err(VideoError::staging)?;
+    ensure_staging_dir(&staging)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
     tracing::info!(
@@ -2758,7 +2789,15 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
     if audio_only {
         return "ba/b".to_string();
     }
-    if let Some(id) = pinned.map(str::trim).filter(|s| !s.is_empty()) {
+    // Pinned ids are remote extractor strings: allowlist to selector-safe
+    // chars so a hostile id can't widen the yt-dlp format set (`,`, `[]`,
+    // `()` all change set semantics). Anything else falls through to the
+    // height rule below instead of failing the row.
+    if let Some(id) = pinned.map(str::trim).filter(|s| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
+    }) {
         return format!("{id}+ba/b");
     }
     match quality_height(quality) {
