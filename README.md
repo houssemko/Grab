@@ -5,12 +5,27 @@ A download manager for GNOME. Built with GTK 4 and libadwaita.
 ## Screenshots
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="screenshots/dark-main.png">
-    <img src="screenshots/light-main.png" alt="Grab main window with active downloads" width="720">
-  </picture>
+  <img src="screenshots/light-active.png" alt="Grab main window with a live capture and a torrent downloading" width="720">
   <br>
-  <em>Active downloads with per-segment progress maps</em>
+  <em>Active downloads: indeterminate live capture plus segmented torrent with block map</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/dark-active.png" alt="Grab main window in dark mode with active and queued sections" width="720">
+  <br>
+  <em>Active and queued sections with expanded segment map (dark mode)</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/light-dialog-vod.png" alt="Media details dialog for a YouTube video with quality picker" width="720">
+  <br>
+  <em>Media details: quality picker with per-format sizes</em>
+</p>
+
+<p align="center">
+  <img src="screenshots/light-dialog-live.png" alt="Media details dialog for a Twitch live stream with HLS format" width="720">
+  <br>
+  <em>Media details for a live stream: HLS variant picker</em>
 </p>
 
 <p align="center">
