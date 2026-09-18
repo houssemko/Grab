@@ -2638,6 +2638,12 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         item.set_status(DownloadStatus::Downloading);
+        // Every attempt starts indeterminate: retries and resumes may
+        // carry a stale fraction, which would otherwise freeze as a
+        // determinate bar through the whole connecting phase (the row
+        // pulses while progress is zero; the engine publishes real
+        // fractions on its first tick).
+        item.set_progress(0.0);
         let host = url::Url::parse(&item.url())
             .ok()
             .and_then(|u| u.host_str().map(|h| h.to_string()))
@@ -3064,6 +3070,9 @@ impl DownloadManager {
         }));
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
+        // Attempts start indeterminate (see spawn): stale fractions must
+        // not freeze as determinate bars through "Starting torrent…".
+        item.set_progress(0.0);
         item.set_detail(gettext("Starting torrent…"));
         self.changed();
         self.pump(item, id, generation, rx);
@@ -3143,6 +3152,10 @@ impl DownloadManager {
         });
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
+        // Attempts start indeterminate (see spawn): a retried row may
+        // carry its old fraction, which would otherwise sit frozen
+        // through the whole "Resolving media…" phase.
+        item.set_progress(0.0);
         item.set_detail(if audio_only {
             gettext("Resolving audio…")
         } else {
