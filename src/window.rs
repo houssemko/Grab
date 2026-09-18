@@ -75,6 +75,15 @@ fn another_queued(manager: &DownloadManager, item: &crate::download::DownloadIte
     n > 1 || (n == 1 && item.status() != DownloadStatus::Queued)
 }
 
+/// Whether a row's bar is indeterminate: active with no fraction to
+/// fill (live captures never report a total; resolving rows sit at
+/// zero), so the wall-clock tick advances it instead of progress
+/// notifies. Pure for tests — the only pulse logic allowed outside
+/// build_row's tick.
+pub(crate) fn should_pulse(status: DownloadStatus, is_live: bool, progress: f64) -> bool {
+    status == DownloadStatus::Downloading && (is_live || progress <= 0.0)
+}
+
 fn refresh_row(
     item: &crate::download::DownloadItem,
     w: &RowWidgets,
@@ -86,10 +95,10 @@ fn refresh_row(
     // Unbounded work has no fraction to fill with: live captures never
     // report a total, and any row whose total is still unknown sits at
     // zero. HIG prescribes indeterminate activity there instead of a
-    // frozen empty bar, advanced on every progress tick.
-    if active && (is_live || frac <= 0.0) {
-        w.progress.pulse();
-    } else {
+    // frozen empty bar — advanced solely by the per-row wall-clock tick
+    // in build_row, never here: progress ticks arrive ~20/sec during
+    // transfer and would otherwise double the animation cadence.
+    if !should_pulse(item.status(), is_live, frac) {
         w.progress.set_fraction(frac);
     }
     w.spinner.set_visible(active && item.started());
@@ -504,9 +513,7 @@ fn build_row(
             let (Some(bar), Some(it)) = (bar.upgrade(), weak_item.upgrade()) else {
                 return glib::ControlFlow::Break;
             };
-            if it.status() == DownloadStatus::Downloading
-                && (m.is_live_video(it.id()) || it.progress() <= 0.0)
-            {
+            if should_pulse(it.status(), m.is_live_video(it.id()), it.progress()) {
                 bar.pulse();
             }
             glib::ControlFlow::Continue
@@ -2477,3 +2484,7 @@ pub(crate) fn show_torrent_files_dialog(
     // present standalone like the no-window fallback above.
     dialog.present(None::<&gtk4::Window>);
 }
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod tests;
