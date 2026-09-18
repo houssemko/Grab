@@ -35,7 +35,6 @@ use yt_dlp::model::selector::{
     AudioCodecPreference, AudioQuality, VideoCodecPreference, VideoQuality,
 };
 use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
-use yt_dlp::{DownloadPriority, DownloadStatus as YtDownloadStatus};
 
 /// Values for the `video-quality` GSettings key and the per-item quality
 /// stored on [`VideoSource::Page`]. Index-aligned with the ComboRow models
@@ -2279,8 +2278,9 @@ pub async fn run_video_download(
     if !job.user_agent.is_empty() {
         builder = builder.with_user_agent(job.user_agent.clone());
     }
-    // Authenticated extraction for gated pages via the browser profile;
-    // the part downloads reuse the extractor-resolved headers as before.
+    // Authenticated extraction for gated pages via the browser profile.
+    // (Part downloads go through the binary, which carries the
+    // extraction cookies and format headers itself.)
     if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
         builder = builder.with_cookies_from_browser(spec);
     }
@@ -2485,54 +2485,59 @@ pub async fn run_video_download(
         }
     };
 
-    let mgr = downloader.download_manager().clone();
-    // NOTE: Grab's speed limit does not apply here — the crate's download
-    // manager exposes no rate knob, so parts run unthrottled. Retries and
-    // timeouts still follow the user's settings.
+    // NOTE: Grab's speed limit does not apply here — parts run
+    // unthrottled. Retries and timeouts still follow the user's settings.
     let vpart: Option<PathBuf> = video_sel
         .as_ref()
         .map(|s| part_path(&staging, "video", &s.ext));
     let apart: PathBuf = part_path(&staging, "audio", &audio_sel.ext);
-    let mut ids: Vec<u64> = Vec::new();
+    // Parts download through the yt-dlp binary (see run_part_ytdlp),
+    // not the crate's fetch manager: only the binary keeps the
+    // extraction cookies and full format headers that hotlink-guarded
+    // CDNs require.
+    let single = vpart.is_none();
     if !have_parts {
-        if let Some(v) = &video_sel {
+        if let Some(v) = video_sel.as_ref() {
             let path = vpart
                 .clone()
                 .unwrap_or_else(|| part_path(&staging, "video", &v.ext));
-            let id = mgr
-                .enqueue_with_progress_and_headers(
-                    v.url.as_str(),
-                    path,
-                    Some(DownloadPriority::Normal),
-                    make_cb(Arc::clone(&v_done), Arc::clone(&a_done)),
-                    Some(v.headers.clone()),
-                )
-                .await;
-            ids.push(id);
-        }
-        let id = mgr
-            .enqueue_with_progress_and_headers(
-                audio_sel.url.as_str(),
-                apart.clone(),
-                Some(DownloadPriority::Normal),
-                make_cb(Arc::clone(&a_done), Arc::clone(&v_done)),
-                Some(audio_sel.headers.clone()),
+            let report = Arc::new(make_cb(Arc::clone(&v_done), Arc::clone(&a_done)))
+                as Arc<dyn Fn(u64, u64) + Send + Sync>;
+            let done = run_part_ytdlp(
+                &youtube_bin,
+                &job,
+                &v.format_id,
+                &part_fallback_spec(&job.quality, true, false),
+                &path,
+                report,
+                &mut abort,
+                timeout,
             )
-            .await;
-        ids.push(id);
+            .await?;
+            if done.is_none() {
+                return Ok(None);
+            }
+        }
+        let report = Arc::new(make_cb(Arc::clone(&a_done), Arc::clone(&v_done)))
+            as Arc<dyn Fn(u64, u64) + Send + Sync>;
+        let done = run_part_ytdlp(
+            &youtube_bin,
+            &job,
+            &audio_sel.format_id,
+            &part_fallback_spec(&job.quality, false, job.audio_only || !single),
+            &apart,
+            report,
+            &mut abort,
+            timeout,
+        )
+        .await?;
+        if done.is_none() {
+            return Ok(None);
+        }
     }
 
     let work = async {
         if !have_parts {
-            for id in &ids {
-                match mgr.wait_for_completion(*id).await {
-                    Some(YtDownloadStatus::Completed) => {}
-                    Some(YtDownloadStatus::Failed { reason }) => {
-                        return Err(VideoError::part_failed(&reason));
-                    }
-                    _ => return Err(VideoError::interrupted()),
-                }
-            }
             // Measure reality, not the plan: a zero-byte "completed" part
             // must fail now, or the retry would combine empties forever.
             let video_bytes = vpart.as_ref().and_then(|p| file_len(p)).unwrap_or(0);
@@ -2578,15 +2583,9 @@ pub async fn run_video_download(
         .await
         .map(Some)
     };
-    tokio::select! {
-        r = work => r,
-        _ = abort => {
-            for id in &ids {
-                mgr.cancel(*id).await;
-            }
-            Ok(None)
-        }
-    }
+    // No outer abort arm: the part downloads own the (single, shared)
+    // abort receiver and map it to quiet `Ok(None)` themselves.
+    work.await
 }
 
 /// Merge verified parts and rename the result into place. Audio-only rows
@@ -2696,6 +2695,195 @@ async fn stop_hls_capture(
         return Err(VideoError::part_failed("nothing recorded"));
     }
     adopt_hls_output(&out_path, &dest, &staging).await
+}
+
+/// yt-dlp argv for one split part: exact format id, exact output path.
+/// Pure for tests: flags, inputs and the end-of-options separator are
+/// pinned here, not in assertion-hostile spawn code.
+fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
+    let mut args = vec![
+        "--no-playlist".to_string(),
+        "--newline".to_string(),
+        "-f".to_string(),
+        spec.to_string(),
+        "-o".to_string(),
+        out.to_string_lossy().into_owned(),
+        "--retries".to_string(),
+        job.tries.max(1).to_string(),
+    ];
+    if let Some(spec) = cookies_browser_spec(&job.cookies_browser) {
+        args.push(format!("--cookies-from-browser={spec}"));
+    }
+    if !job.user_agent.is_empty() {
+        args.push("--user-agent".to_string());
+        args.push(job.user_agent.clone());
+    }
+    args.push("--".to_string());
+    args.push(job.page_url.clone());
+    args
+}
+
+/// Fallback `-f` spec when the selected id is unknown to yt-dlp's fresh
+/// extract (ids can rotate between the dialog resolve and this
+/// attempt): same height semantics as the planner, resolved inside the
+/// binary. Audio legs stay audio (`ba/b` degrades to best-single only
+/// when no audio track exists); adopted single files degrade to
+/// best-single instead of drifting into an audio-only track.
+fn part_fallback_spec(quality: &str, video_part: bool, prefer_audio: bool) -> String {
+    if video_part {
+        return match quality_height(quality) {
+            Some(h) => format!("bv*[height<={h}]"),
+            None => "bv*".to_string(),
+        };
+    }
+    if prefer_audio {
+        "ba/b".to_string()
+    } else {
+        "b".to_string()
+    }
+}
+
+/// Whether a failure tail means the `-f` id didn't resolve (worth one
+/// fallback-spec retry) rather than a fetch failure (not worth one).
+fn is_format_unavailable(detail: &str) -> bool {
+    detail.to_lowercase().contains("not available")
+}
+
+/// One part attempt: spawn, parse `--newline` progress, collect the log
+/// tail. `Ok(None)` is a user abort (the caller stays quiet); timeouts
+/// and fetch failures are errors.
+#[allow(clippy::too_many_arguments)]
+async fn run_part_attempt(
+    youtube_bin: &Path,
+    argv: &[String],
+    report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
+    abort: &mut oneshot::Receiver<()>,
+    timeout: Duration,
+) -> Result<Option<()>, VideoError> {
+    use tokio::io::AsyncBufReadExt as _;
+    let mut cmd = tokio::process::Command::new(youtube_bin);
+    cmd.args(argv);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    let progress = tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        let (mut have, mut total) = (0u64, 0u64);
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some((frac, t)) = parse_ytdlp_progress(&line) {
+                if let Some(t) = t {
+                    total = total.max(t);
+                }
+                if total > 0 {
+                    have = have.max((frac * total as f64) as u64);
+                    report(have, total);
+                }
+            }
+        }
+    });
+    let logs = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            use tokio::io::AsyncReadExt as _;
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 8192 {
+                        tail.drain(..tail.len() - 8192);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
+    let status = tokio::select! {
+        biased;
+        _ = &mut *abort => {
+            kill_tree(&mut child);
+            let _ = child.wait().await;
+            progress.abort();
+            logs.abort();
+            return Ok(None);
+        }
+        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
+            Ok(Ok(status)) => status,
+            Ok(Err(e)) => {
+                kill_tree(&mut child);
+                progress.abort();
+                logs.abort();
+                return Err(VideoError::runtime(&e));
+            }
+            Err(_) => {
+                kill_tree(&mut child);
+                progress.abort();
+                logs.abort();
+                return Err(VideoError::part_failed("timed out"));
+            }
+        },
+    };
+    let _ = progress.await;
+    let log_tail = logs.await.unwrap_or_default();
+    if !status.success() {
+        let detail = log_tail
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("yt-dlp reported failure")
+            .trim()
+            .to_string();
+        return Err(VideoError::part_failed(detail));
+    }
+    Ok(Some(()))
+}
+
+/// Download one split part through the yt-dlp binary: extraction,
+/// cookies and format headers stay in one process, so
+/// hotlink-protected CDNs (TikTok's `tt_chain_token` + Referer
+/// package) authorize exactly as they do for yt-dlp CLI. A stale
+/// format id gets one fallback-spec retry before the attempt fails.
+#[allow(clippy::too_many_arguments)]
+async fn run_part_ytdlp(
+    youtube_bin: &Path,
+    job: &VideoJob,
+    spec_primary: &str,
+    spec_fallback: &str,
+    out_path: &Path,
+    report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
+    abort: &mut oneshot::Receiver<()>,
+    timeout: Duration,
+) -> Result<Option<()>, VideoError> {
+    for (i, spec) in [spec_primary, spec_fallback].iter().enumerate() {
+        let argv = part_download_argv(job, spec, out_path);
+        match run_part_attempt(youtube_bin, &argv, Arc::clone(&report), abort, timeout).await {
+            Ok(done) => return Ok(done),
+            Err(e) if i == 0 && is_format_unavailable(&e.to_string()) => {
+                tracing::info!(
+                    item_id = job.item_id,
+                    spec = spec_primary,
+                    "part format gone, retrying with fallback spec"
+                );
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("fallback loop always returns");
 }
 
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (yt-dlp
