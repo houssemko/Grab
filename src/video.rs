@@ -3234,7 +3234,12 @@ fn is_format_selection_line(line: &str) -> bool {
 /// mid-merge.
 fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
-        // SAFETY: constant signal number; ESRCH (already dead) is harmless.
+        // Deliberately unconditional: the group outlives its leader by
+        // design (ffmpeg grandchildren), so an exited child still leaves
+        // a group worth signaling — a try_wait gate here would orphan
+        // ffmpeg on every abort-after-exit. The pid-reuse race (recycled
+        // pid that is also a group leader) needs churn no desktop hits.
+        // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
         unsafe {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }

@@ -209,6 +209,27 @@ pub struct TorrentFileEntry {
 
 /// Parse `.torrent` bytes into a display list for the file picker.
 /// Byte-string path components are lossy-converted; lengths are exact.
+/// Display form of a torrent entry path: entry bytes are attacker
+/// input, so bidi overrides and controls are stripped (row spoofing)
+/// and the string is capped (dialog stretching). Selection is
+/// index-based, so this never affects which files download. Pure.
+fn sanitize_display_path(path: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    fn bidi(c: char) -> bool {
+        matches!(c, '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+    }
+    let mut out: String = path
+        .chars()
+        .filter(|c| !c.is_control() && !bidi(*c))
+        .take(MAX_CHARS + 1)
+        .collect();
+    if out.chars().count() > MAX_CHARS {
+        out = out.chars().take(MAX_CHARS).collect();
+        out.push('…');
+    }
+    out
+}
+
 pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>), String> {
     let meta =
         librqbit::torrent_from_bytes(bytes).map_err(|e| format!("Invalid torrent file: {e}"))?;
@@ -228,12 +249,13 @@ pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>)
                 .iter()
                 .map(|c| String::from_utf8_lossy(c.as_ref()).into_owned())
                 .collect();
-            let path = parts.join("/");
+            let raw = parts.join("/");
+            let shown = sanitize_display_path(&raw);
             entries.push(TorrentFileEntry {
-                path: if path.is_empty() {
+                path: if shown.is_empty() {
                     format!("file {i}")
                 } else {
-                    path
+                    shown
                 },
                 length: f.length,
             });

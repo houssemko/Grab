@@ -531,7 +531,16 @@ fn system_proxy() -> Option<ResolvedProxy> {
     let no_proxy = reqwest::NoProxy::from_string(&no_proxy_env);
     let host = |key: &str| s.string(key).trim().to_string();
     let port = |key: &str| s.int(key);
-    let valid = |h: &str, p: i32| !h.is_empty() && (1..=65535).contains(&p);
+    // Same host-safe rule as manual_proxy: dconf free text feeds URL
+    // construction, so anything outside host chars fails this leg (the
+    // lenient-system rule degrades to direct, never to a mangled URL).
+    let valid = |h: &str, p: i32| {
+        !h.is_empty()
+            && (1..=65535).contains(&p)
+            && h.chars().all(|c| {
+                c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')
+            })
+    };
     // SOCKS first: one remote-resolving tunnel covers every scheme,
     // which is also the Tor shape (system SOCKS host + port).
     let socks = host("socks-host");
@@ -612,6 +621,15 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     }
     if !(1..=65535).contains(&o.proxy_port) {
         return Err(gettext("Proxy port is out of range (1–65535)"));
+    }
+    // Free-text host feeds URL construction below (`http://{host}:{port}`):
+    // anything outside host-safe chars (`@`, `/`, `?`, `#`, whitespace…)
+    // would smuggle userinfo, paths or log splits into the proxy URL.
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+    {
+        return Err(gettext("Proxy host contains invalid characters"));
     }
     let no_proxy_env = LOOPBACK_BYPASS.to_string();
     let no_proxy = reqwest::NoProxy::from_string(&no_proxy_env);
@@ -2063,6 +2081,11 @@ async fn fetch_piece(
 }
 
 pub struct DownloadManager {
+    // Borrow discipline: RefCells are never held across `set_*` property
+    // notifies or `changed()` — GTK notifies re-enter through updater
+    // closures that take shared borrows, so any borrow_mut added inside
+    // a notify-reachable path panics at runtime with no compile-time
+    // guard. Keep borrows scoped to the smallest statement.
     store: gio::ListStore,
     settings: crate::settings::AppSettings,
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
@@ -3703,7 +3726,12 @@ impl DownloadManager {
     }
 
     fn queue_file() -> std::path::PathBuf {
-        if let Some(p) = std::env::var_os("GRAB_QUEUE_FILE") {
+        // Test seam only (debug builds run the suite against temp files):
+        // release builds always use the real location, so a crafted
+        // launcher environment can never redirect queue state.
+        if cfg!(debug_assertions)
+            && let Some(p) = std::env::var_os("GRAB_QUEUE_FILE")
+        {
             return std::path::PathBuf::from(p);
         }
         let mut dir = glib::user_data_dir();
