@@ -332,12 +332,12 @@ msgstr ""
 msgid "User agent (optional)"
 msgstr ""
 
-#: src/preferences.rs:181
-msgid "Keep server file date"
+#: src/preferences.rs
+msgid "Preserve server file dates"
 msgstr ""
 
-#: src/preferences.rs:182
-msgid "Use the Last-Modified header for finished files"
+#: src/preferences.rs
+msgid "Downloaded files are dated when published, not when downloaded"
 msgstr ""
 
 #: src/preferences.rs:190

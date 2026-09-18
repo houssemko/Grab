@@ -178,8 +178,10 @@ pub fn show(
     net_group.add(&ua);
 
     let keep_date = adw::SwitchRow::builder()
-        .title(gettext("Keep server file date"))
-        .subtitle(gettext("Use the Last-Modified header for finished files"))
+        .title(gettext("Preserve server file dates"))
+        .subtitle(gettext(
+            "Downloaded files are dated when published, not when downloaded",
+        ))
         .build();
     settings
         .bind(crate::settings::key::KEEP_SERVER_DATE, &keep_date, "active")
