@@ -1677,7 +1677,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             .quality
                             .set_model(Some(&gtk4::StringList::new(&refs)));
                         *formats_b.borrow_mut() = ids;
-                        step_b.quality.set_selected(0);
+                        step_b
+                            .quality
+                            .set_selected(crate::video::default_quality_index(
+                                &v.formats,
+                                &settings_b.video_quality(),
+                            ) as u32);
                         *info_b.borrow_mut() = Some(v);
                         show_video_ready(&step_b);
                         set_lookup_add(&lookup_add_b, true);
@@ -2058,15 +2063,17 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         } else {
                             Some(typed.as_str())
                         };
-                        // The fallback quality follows the picked format's
-                        // height, so a dropped pin still degrades to the
-                        // chosen height; "Best match" (index 0) keeps the
-                        // live global preference. The combo lists Best
-                        // match first, then the info formats in order.
+                        // "Best match" (index 0) means best available,
+                        // not the global preference: the preference
+                        // already preselected a row at resolve time.
+                        // Exact picks carry their height as the
+                        // fallback, so a dropped pin still degrades to
+                        // the chosen height. The combo lists Best match
+                        // first, then the info formats in order.
                         let selected = step2.quality.selected() as usize;
                         let format_id = formats.borrow().get(selected).cloned().flatten();
                         let quality = match selected {
-                            0 => m.settings().video_quality(),
+                            0 => "best".to_string(),
                             i => v
                                 .formats
                                 .get(i - 1)
