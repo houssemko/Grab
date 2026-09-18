@@ -1335,6 +1335,27 @@ impl HlsSel {
     }
 }
 
+/// Nearest stored quality bucket for an exact format height, so a
+/// dropped dialog pin degrades to the picked height instead of the
+/// global preference. Exact hits return themselves; anything between
+/// buckets rounds to the closest, ties up; heights outside every
+/// bucket clamp to the tallest/shortest. Every result is a recognized
+/// [`VIDEO_QUALITY_VALUES`] entry (never "best").
+pub fn quality_for_height(height: u32) -> &'static str {
+    const BUCKETS: &[(u32, &str)] = &[
+        (2160, "2160p"),
+        (1440, "1440p"),
+        (1080, "1080p"),
+        (720, "720p"),
+        (480, "480p"),
+    ];
+    BUCKETS
+        .iter()
+        .min_by_key(|(b, _)| (b.abs_diff(height), std::cmp::Reverse(*b)))
+        .map(|(_, v)| *v)
+        .unwrap_or("1080p")
+}
+
 /// Stored quality value to a height cap: `None` (Best) takes the
 /// tallest variant available.
 fn quality_height(value: &str) -> Option<u32> {
@@ -1745,6 +1766,144 @@ fn find_usable_format(formats: &[Format], id: &str) -> Option<StreamSel> {
         .and_then(|f| StreamSel::from_format(f).ok())
 }
 
+/// Planned streams for one attempt: direct splits, an adopted single
+/// file, or an HLS variant. Pure over the extracted metadata, so unit
+/// tests can pin the selection order without spawning tools.
+struct StreamPlan {
+    video_sel: Option<StreamSel>,
+    audio_sel: Option<StreamSel>,
+    audio_only: bool,
+    hls_sel: Option<HlsSel>,
+}
+
+/// Resolve which streams an attempt fetches, in priority order:
+///
+/// 1. A dialog-pinned HLS id resolves first. [`find_usable_format`]
+///    only accepts plain HTTPS, so without this the pin would be
+///    dropped and then shadowed by the muxed adoption below (x.com
+///    VODs: direct mp4s are muxed, so the combo lists HLS only).
+/// 2. Direct splits: pinned HTTPS id, else the quality preset.
+/// 3. Single-part adoption for a still-missing side: muxed files, then
+///    Unclassified video containers (TikTok-style sparse extractors).
+///    Gated on the missing side — not on audio absence — because those
+///    pages also list a separate audio track, which used to skip both
+///    fallbacks and keep only the music. Skipped once a pinned HLS
+///    resolved, for satisfied audio-only requests, and when a video
+///    request already holds both splits.
+/// 4. The HLS preset stays a last resort for rows with no direct audio
+///    (a muxed adoption above takes precedence when it found a file).
+fn plan_streams(
+    video: &Video,
+    quality: &str,
+    audio_only_request: bool,
+    video_format_id: Option<&str>,
+    newest_codecs: bool,
+    item_id: u64,
+) -> StreamPlan {
+    use yt_dlp::VideoSelection as _;
+    let pinned_hls: Option<HlsSel> = if audio_only_request {
+        None
+    } else {
+        video_format_id.and_then(|id| find_hls_format(&video.formats, id))
+    };
+    let mut video_sel: Option<StreamSel> = if audio_only_request {
+        None
+    } else if pinned_hls.is_some() {
+        // Explicit HLS pick: no direct selection and no fallback
+        // chatter — the HLS path below consumes the pin.
+        None
+    } else if let Some(pinned) = video_format_id {
+        find_usable_format(&video.formats, pinned).or_else(|| {
+            tracing::info!(
+                item_id,
+                pinned,
+                "pinned video format gone, falling back to preset"
+            );
+            video
+                .select_video_format(
+                    selector_for_quality(quality),
+                    codec_preference(newest_codecs),
+                )
+                .and_then(|f| StreamSel::from_format(f).ok())
+        })
+    } else {
+        video
+            .select_video_format(
+                selector_for_quality(quality),
+                codec_preference(newest_codecs),
+            )
+            .and_then(|f| StreamSel::from_format(f).ok())
+    };
+    let mut audio_sel: Option<StreamSel> = video
+        .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
+        .and_then(|f| StreamSel::from_format(f).ok());
+    // Muxed-only sources (one file, both tracks — archive.org, file
+    // lockers): adopt the file directly instead of failing on the missing
+    // split counterpart. A downloaded track beats a failed row; the
+    // manifest records the effective single-part mode so retries agree.
+    // Unclassified last resort (TikTok-style sparse extractors): both
+    // codec fields missing leaves media typed Unknown — invisible to
+    // every selector above. Only video-container extensions qualify,
+    // so storyboards and manifests can never adopt here.
+    let mut audio_only = audio_only_request;
+    let mut single_adopted = false;
+    if pinned_hls.is_none()
+        && (audio_sel.is_none() || video_sel.is_none())
+        && (!audio_only_request || audio_sel.is_none())
+    {
+        let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
+            video
+                .best_audio_video_format()
+                .ok()
+                .and_then(|m| StreamSel::from_format(m).ok())
+        });
+        if let Some(m) = muxed {
+            audio_sel = Some(m);
+            audio_only = true;
+            single_adopted = true;
+        }
+    }
+    if pinned_hls.is_none()
+        && !audio_only_request
+        && video_sel.is_none()
+        && (audio_sel.is_none() || !single_adopted)
+    {
+        let unknown = video.formats.iter().find(|f| {
+            f.format_type() == FormatType::Unknown
+                && matches!(
+                    f.download_info.ext,
+                    Extension::Mp4
+                        | Extension::Webm
+                        | Extension::Avi
+                        | Extension::Flv
+                        | Extension::Ts
+                )
+                && StreamSel::from_format(f).is_ok()
+        });
+        if let Some(m) = unknown.and_then(|m| StreamSel::from_format(m).ok()) {
+            audio_sel = Some(m);
+            audio_only = true;
+        }
+    }
+    // HLS fallback (x.com VODs, live replays): nothing above is
+    // directly fetchable, but manifest variants exist. A resolved pin
+    // wins outright; otherwise the preset only runs when no direct
+    // audio survived (a muxed adoption above takes precedence).
+    let hls_sel: Option<HlsSel> = pinned_hls.or_else(|| {
+        if audio_sel.is_some() {
+            None
+        } else {
+            select_hls_format(&video.formats, quality_height(quality))
+        }
+    });
+    StreamPlan {
+        video_sel,
+        audio_sel,
+        audio_only,
+        hls_sel,
+    }
+}
+
 /// Map a stored quality value to the extractor selector. Unknown values
 /// fall back to 1080p (same fallback as the combo mapping).
 pub fn selector_for_quality(value: &str) -> VideoQuality {
@@ -2057,7 +2216,6 @@ pub async fn run_video_download(
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
-    use yt_dlp::VideoSelection as _;
 
     let staging = staging_dir(job.item_id);
     tokio::fs::create_dir_all(&staging)
@@ -2132,89 +2290,24 @@ pub async fn run_video_download(
     // codecs stay as automatic fallback, never a failure. Rejections
     // (HLS/DRM/missing URL) degrade candidates to absent here; the plan
     // below decides between split, single-file and audio-only from
-    // what's fetchable.
+    // what's fetchable (see [`plan_streams`] for the priority order:
+    // pinned HLS, direct splits, single-part adoption, HLS preset).
     // A pinned format id (dialog pick) wins over the preset; when it
     // vanishes from fresh metadata the preset takes over again instead
     // of failing the row.
-    let mut video_sel: Option<StreamSel> = if job.audio_only {
-        None
-    } else if let Some(pinned) = job.video_format_id.as_deref() {
-        find_usable_format(&video.formats, pinned).or_else(|| {
-            tracing::info!(
-                item_id = job.item_id,
-                pinned,
-                "pinned video format gone, falling back to preset"
-            );
-            video
-                .select_video_format(
-                    selector_for_quality(&job.quality),
-                    codec_preference(job.newest_codecs),
-                )
-                .and_then(|f| StreamSel::from_format(f).ok())
-        })
-    } else {
-        video
-            .select_video_format(
-                selector_for_quality(&job.quality),
-                codec_preference(job.newest_codecs),
-            )
-            .and_then(|f| StreamSel::from_format(f).ok())
-    };
-    let mut audio_sel: Option<StreamSel> = video
-        .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
-        .and_then(|f| StreamSel::from_format(f).ok());
-    // Muxed-only sources (one file, both tracks — archive.org, file
-    // lockers): adopt the file directly instead of failing on the missing
-    // split counterpart. A downloaded track beats a failed row; the
-    // manifest records the effective single-part mode so retries agree.
-    // Unclassified last resort (TikTok-style sparse extractors): both
-    // codec fields missing leaves media typed Unknown — invisible to
-    // every selector above. Only video-container extensions qualify,
-    // so storyboards and manifests can never adopt here.
-    let mut audio_only = job.audio_only;
-    if audio_sel.is_none() {
-        let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
-            video
-                .best_audio_video_format()
-                .ok()
-                .and_then(|m| StreamSel::from_format(m).ok())
-        });
-        if let Some(m) = muxed {
-            audio_sel = Some(m);
-            audio_only = true;
-        }
-    }
-    if audio_sel.is_none() {
-        let unknown = video.formats.iter().find(|f| {
-            f.format_type() == FormatType::Unknown
-                && matches!(
-                    f.download_info.ext,
-                    Extension::Mp4
-                        | Extension::Webm
-                        | Extension::Avi
-                        | Extension::Flv
-                        | Extension::Ts
-                )
-                && StreamSel::from_format(f).is_ok()
-        });
-        if let Some(m) = unknown.and_then(|m| StreamSel::from_format(m).ok()) {
-            audio_sel = Some(m);
-            audio_only = true;
-        }
-    }
-    // HLS fallback (x.com VODs, live replays): nothing above is
-    // directly fetchable, but manifest variants exist. VOD captures go
-    // through yt-dlp (variant/audio selection, retries, merging); live
-    // captures stay on direct ffmpeg for stop-and-keep. A dialog-pinned
-    // HLS id wins over the quality preset.
-    let hls_sel: Option<HlsSel> = if audio_sel.is_some() {
-        None
-    } else {
-        job.video_format_id
-            .as_deref()
-            .and_then(|id| find_hls_format(&video.formats, id))
-            .or_else(|| select_hls_format(&video.formats, quality_height(&job.quality)))
-    };
+    let StreamPlan {
+        video_sel,
+        audio_sel,
+        audio_only,
+        hls_sel,
+    } = plan_streams(
+        &video,
+        &job.quality,
+        job.audio_only,
+        job.video_format_id.as_deref(),
+        job.newest_codecs,
+        job.item_id,
+    );
     if let Some(mut hls) = hls_sel {
         // An abort that fired during resolve means stop-before-start:
         // for live rows there is deliberately no pauser preset waiting
