@@ -263,3 +263,19 @@ fn sweep_archives_keeps_referenced_only() {
     assert!(other.exists(), "non-torrent files are never swept");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn display_path_strips_spoof_chars() {
+    assert_eq!(
+        sanitize_display_path("dir/<b>file.iso</b>"),
+        "dir/<b>file.iso</b>"
+    );
+    assert_eq!(sanitize_display_path("a\u{202E}exe.pdf"), "aexe.pdf");
+    assert_eq!(sanitize_display_path("a\nb\tc"), "abc");
+    assert_eq!(sanitize_display_path("v\u{2066}ideo"), "video");
+    let long = "x".repeat(200);
+    let shown = sanitize_display_path(&long);
+    assert_eq!(shown.chars().count(), 121);
+    assert!(shown.ends_with('…'));
+    assert_eq!(sanitize_display_path(""), "");
+}

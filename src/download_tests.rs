@@ -3236,6 +3236,29 @@ fn proxy_manual_rejects_garbage_loudly() {
             .proxy_config()
             .is_err()
     );
+    // URL-smuggling hosts must fail, never build `http://a@b:port`.
+    for hostile in [
+        "proxy.lan@evil.com",
+        "proxy.lan/path",
+        "proxy.lan?x=1",
+        "proxy.lan#frag",
+        "proxy lan",
+        "proxy.lan\nX-Injected: 1",
+    ] {
+        assert!(
+            proxy_opts("manual", "http", hostile, 8080)
+                .proxy_config()
+                .is_err(),
+            "hostile host accepted: {hostile:?}"
+        );
+    }
+    // IPv6 literals and underscores stay valid (brackets required).
+    assert!(
+        proxy_opts("manual", "socks5", "[::1]", 9050)
+            .proxy_config()
+            .expect("valid")
+            .is_some()
+    );
     // HTTP covers both schemes on one URL.
     let proxy = proxy_opts("manual", "http", "proxy.lan", 8080)
         .proxy_config()
