@@ -2442,11 +2442,13 @@ async fn run_merge_ffmpeg(
         use tokio::io::AsyncReadExt as _;
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
@@ -2621,12 +2623,14 @@ async fn run_part_attempt(
     let logs = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             use tokio::io::AsyncReadExt as _;
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
@@ -2822,11 +2826,13 @@ async fn remux_live_capture(
             use tokio::io::AsyncReadExt as _;
             let mut reader = tokio::io::BufReader::new(stderr);
             let mut tail = Vec::new();
+            let mut pending = String::new();
             let mut buf = [0u8; 4096];
             loop {
                 match reader.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
+                        trace_format_lines(&mut pending, &buf[..n]);
                         tail.extend_from_slice(&buf[..n]);
                         if tail.len() > 8192 {
                             tail.drain(..tail.len() - 8192);
@@ -2944,11 +2950,13 @@ async fn run_live_ytdlp(
         use tokio::io::AsyncReadExt as _;
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);
@@ -3088,6 +3096,27 @@ fn piece_marks(piece_len: u64, marked: &mut u64, downloaded: u64) -> Vec<u64> {
         *marked += 1;
     }
     out
+}
+
+/// Trace yt-dlp's selected-format line (`[info] … Downloading N
+/// format(s): …`) as it streams past: on success it names what
+/// actually downloaded (audit our pick against yt-dlp's sort and
+/// id aliasing); on failure the tail below still carries the error.
+/// `pending` carries a line split across 4 KiB reads.
+fn trace_format_lines(pending: &mut String, chunk: &[u8]) {
+    pending.push_str(&String::from_utf8_lossy(chunk));
+    while let Some(pos) = pending.find('\n') {
+        let line: String = pending.drain(..=pos).collect();
+        let line = line.trim_end();
+        if is_format_selection_line(line) {
+            tracing::info!("{line}");
+        }
+    }
+}
+
+/// Whether a yt-dlp stderr line announces the selected formats.
+fn is_format_selection_line(line: &str) -> bool {
+    line.contains("Downloading ") && line.contains("format(s)")
 }
 
 /// SIGKILL a spawned downloader and the ffmpeg it may have started:
@@ -3260,11 +3289,13 @@ async fn run_hls_ytdlp(
     let logs = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
         let mut tail = Vec::new();
+        let mut pending = String::new();
         let mut buf = [0u8; 4096];
         loop {
             match reader.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
                     tail.extend_from_slice(&buf[..n]);
                     if tail.len() > 8192 {
                         tail.drain(..tail.len() - 8192);

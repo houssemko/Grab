@@ -2763,3 +2763,31 @@ fn vod_hls_pins_planner_variant_id() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn format_selection_line_detection() {
+    assert!(is_format_selection_line(
+        "[info] 1234567890: Downloading 1 format(s): h1080+ba/b"
+    ));
+    assert!(is_format_selection_line(
+        "[info] x: Downloading 2 format(s): 399+251"
+    ));
+    assert!(!is_format_selection_line(
+        "[download] 100% of 10MiB in 00:01"
+    ));
+    assert!(!is_format_selection_line("[info] Downloading video info"));
+    assert!(!is_format_selection_line(""));
+}
+
+#[test]
+fn format_lines_survive_split_reads() {
+    // A selection line split across 4 KiB reads still traces (no
+    // panic, no loss): drive the scanner the way the pumps do.
+    let mut pending = String::new();
+    trace_format_lines(&mut pending, b"[info] abc: Download");
+    assert_eq!(pending, "[info] abc: Download");
+    trace_format_lines(&mut pending, b"ing 1 format(s): h1\n[download] x\n");
+    assert!(pending.is_empty(), "complete lines drain: {pending:?}");
+    trace_format_lines(&mut pending, b"");
+    assert!(pending.is_empty());
+}
