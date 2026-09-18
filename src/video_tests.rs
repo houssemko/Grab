@@ -2121,6 +2121,108 @@ printf 'merged' > "$out"
 exit 0
 "#
         },
+// ── binary part downloads ────────────────────────────────────────────
+
+fn part_test_job() -> VideoJob {
+    VideoJob {
+        item_id: 1,
+        page_url: "https://x.com/u/status/1".into(),
+        quality: "720p".into(),
+        audio_only: false,
+        dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
+        tries: 3,
+        timeout_secs: 60,
+        user_agent: "Grab-test/1.0".into(),
+        video_format_id: None,
+        is_live: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+    }
+}
+
+#[test]
+fn part_argv_pins_format_output_and_page() {
+    let job = part_test_job();
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let argv = part_download_argv(&job, "hls-720", out);
+    // Exact id, exact output, page URL last behind `--`.
+    let f = argv.iter().position(|a| a == "-f").expect("has -f");
+    assert_eq!(argv[f + 1], "hls-720");
+    let o = argv.iter().position(|a| a == "-o").expect("has -o");
+    assert_eq!(argv[o + 1], "/tmp/staging/video.mp4");
+    assert_eq!(argv[argv.len() - 2], "--");
+    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
+    assert!(argv.contains(&"--newline".to_string()));
+    assert!(argv.contains(&"--no-playlist".to_string()));
+    let r = argv.iter().position(|a| a == "--retries").expect("retries");
+    assert_eq!(argv[r + 1], "3");
+    // User agent passes through; no browser cookies configured.
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--user-agent" && w[1] == "Grab-test/1.0")
+    );
+    assert!(!argv.iter().any(|a| a.starts_with("--cookies-from-browser")));
+}
+
+#[test]
+fn part_argv_forwards_browser_cookies() {
+    let mut job = part_test_job();
+    job.cookies_browser = "firefox".into();
+    let argv = part_download_argv(&job, "dl", std::path::Path::new("/tmp/staging/dl.mp4"));
+    assert!(
+        argv.iter()
+            .any(|a| a.starts_with("--cookies-from-browser=firefox"))
+    );
+}
+
+#[test]
+fn part_fallback_specs() {
+    assert_eq!(part_fallback_spec("720p", true, false), "bv*[height<=720]");
+    assert_eq!(part_fallback_spec("best", true, false), "bv*");
+    assert_eq!(part_fallback_spec("720p", false, true), "ba/b");
+    // Adopted single files degrade to best-single, never an audio-only
+    // track; genuine audio-only legs prefer audio.
+    assert_eq!(part_fallback_spec("720p", false, false), "b");
+}
+
+#[test]
+fn format_unavailable_detection() {
+    assert!(is_format_unavailable(
+        "ERROR: [Video] 1: Requested format is not available"
+    ));
+    assert!(!is_format_unavailable(
+        "ERROR: [Video] 1: Unable to download"
+    ));
+    assert!(!is_format_unavailable("HTTP Error 403: Forbidden"));
+}
+
+// ── binary part plumbing (fake yt-dlp) ───────────────────────────────
+
+/// Fake yt-dlp: logs argv beside the output, then either fails stale
+/// ids with the real unavailability message or emits one `--newline`
+/// progress line and writes 4 bytes to the `-o` path.
+fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+spec=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    if [ "$prev" = "-f" ]; then spec="$a"; fi
+    prev="$a"
+done
+echo "$@" >> "$out.argv.log"
+if [ "$spec" = "gone-id" ]; then
+    echo "ERROR: [Video] 1: Requested format is not available" >&2
+    exit 1
+fi
+echo "[download] 100.0% of 4.00B in 00:00"
+printf 'data' > "$out"
+exit 0
+"#,
     )
     .unwrap();
     #[cfg(unix)]
@@ -2212,5 +2314,71 @@ fn fetch_video_page_parses_dump_json() {
         .expect("fake extract parses");
     assert_eq!(video.id, "abc");
     assert!(video.formats.is_empty());
+fn part_binary_download_reports_progress() {
+    let dir = std::env::temp_dir().join(format!("grab-fakeyt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp(&dir);
+    let out = dir.join("video.mp4");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = {
+        let seen = std::sync::Arc::clone(&seen);
+        std::sync::Arc::new(move |d: u64, t: u64| {
+            seen.lock().unwrap().push((d, t));
+        }) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>
+    };
+    let job = part_test_job();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_part_ytdlp(
+        &fake,
+        &job,
+        "v123",
+        "bv*",
+        &out,
+        report,
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+    ));
+    assert!(matches!(res, Ok(Some(()))), "got {res:?}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"data");
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(|(d, t)| *d == 4 && *t == 4),
+        "progress reported: {seen:?}"
+    );
+    let logged = std::fs::read_to_string(dir.join("video.mp4.argv.log")).unwrap();
+    assert!(logged.contains("-f v123"), "{logged}");
+    assert!(logged.contains("-- https://x.com/u/status/1"), "{logged}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn part_binary_retries_stale_id_with_fallback_spec() {
+    let dir = std::env::temp_dir().join(format!("grab-fakeyt-fb-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp(&dir);
+    let out = dir.join("audio.m4a");
+    let report =
+        std::sync::Arc::new(|_: u64, _: u64| {}) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
+    let job = part_test_job();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_part_ytdlp(
+        &fake,
+        &job,
+        "gone-id",
+        "ba/b",
+        &out,
+        report,
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+    ));
+    assert!(matches!(res, Ok(Some(()))), "got {res:?}");
+    assert_eq!(std::fs::read(&out).unwrap(), b"data");
+    let logged = std::fs::read_to_string(dir.join("audio.m4a.argv.log")).unwrap();
+    let attempts: Vec<&str> = logged.lines().collect();
+    assert_eq!(attempts.len(), 2, "{logged}");
+    assert!(attempts[0].contains("-f gone-id"), "{logged}");
+    assert!(attempts[1].contains("-f ba/b"), "{logged}");
     let _ = std::fs::remove_dir_all(&dir);
 }
