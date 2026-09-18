@@ -83,10 +83,11 @@ fn refresh_row(
 ) {
     let frac = item.progress().clamp(0.0, 1.0);
     let active = item.status() == DownloadStatus::Downloading;
-    // Live captures are unbounded (no total exists), so a filling bar
-    // would lie frozen at zero: HIG prescribes indeterminate activity
-    // instead, advanced on every progress tick.
-    if active && is_live {
+    // Unbounded work has no fraction to fill with: live captures never
+    // report a total, and any row whose total is still unknown sits at
+    // zero. HIG prescribes indeterminate activity there instead of a
+    // frozen empty bar, advanced on every progress tick.
+    if active && (is_live || frac <= 0.0) {
         w.progress.pulse();
     } else {
         w.progress.set_fraction(frac);
