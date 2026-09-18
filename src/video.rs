@@ -1474,11 +1474,10 @@ fn format_height(formats: &[Format], id: &str) -> Option<u32> {
         .find(|f| f.format_id == id)
         .and_then(|f| f.video_resolution.height.filter(|&h| h > 0))
 }
-/// Default combo selection for a fresh resolve: "Best match" (index
-/// 0) when the preference is Best, else the listed height closest to
-/// the preferred one (ties go taller). The combo lists Best first,
-/// then the options in order — so the preference preselects a row
-/// instead of masquerading as Best match. Pure for tests.
+/// Default combo selection for a fresh resolve: index into `formats`
+/// (tallest first) closest to the preference. `"best"` and empty
+/// listings resolve to row 0; ties go taller, then earlier. Pure for
+/// tests.
 pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> usize {
     let want = match quality_height(quality) {
         None => return 0,
@@ -1487,8 +1486,7 @@ pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> us
     formats
         .iter()
         .enumerate()
-        .map(|(i, opt)| (i + 1, opt.height))
-        .min_by_key(|(_, h)| (h.abs_diff(want), std::cmp::Reverse(*h)))
+        .min_by_key(|(i, opt)| (opt.height.abs_diff(want), std::cmp::Reverse(opt.height), *i))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }

@@ -770,16 +770,8 @@ msgstr ""
 msgid "Revert to Title"
 msgstr ""
 
-#: src/window.rs:1372
-msgid "Best match follows your preferred quality"
-msgstr ""
-
-#. Rebuild the format picker from this resolve: Best
-#. match first (the preference applies to it), then
-#. the exact pinnable formats. Selection resets —
-#. a pin from another video must never carry over.
-#: src/window.rs:1373 src/window.rs:1643
-msgid "Best match"
+#: src/window.rs
+msgid "Uses your preferred quality"
 msgstr ""
 
 #: src/window.rs:1379
@@ -1036,4 +1028,8 @@ msgstr ""
 
 #: src/video.rs
 msgid "Downloading…"
+msgstr ""
+
+#: src/window.rs
+msgid "Automatic"
 msgstr ""

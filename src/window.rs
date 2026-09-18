@@ -82,8 +82,15 @@ fn refresh_row(
     is_live: bool,
 ) {
     let frac = item.progress().clamp(0.0, 1.0);
-    w.progress.set_fraction(frac);
     let active = item.status() == DownloadStatus::Downloading;
+    // Live captures are unbounded (no total exists), so a filling bar
+    // would lie frozen at zero: HIG prescribes indeterminate activity
+    // instead, advanced on every progress tick.
+    if active && is_live {
+        w.progress.pulse();
+    } else {
+        w.progress.set_fraction(frac);
+    }
     w.spinner.set_visible(active);
     w.detail.set_text(&item.detail());
 
@@ -1393,14 +1400,15 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     video_name.set_visible(false);
     video_revert_btn.set_visible(false);
     video_group.add(&video_name);
-    // Format picker, filled per video on resolve: row zero is always the
-    // automatic Best match (the quality preference applies to it), the
-    // rest are exact pinnable formats, tallest first. Starts with only
-    // Best match until the first lookup lands.
+    // Format picker, filled per video on resolve: exact pinnable
+    // formats, tallest first (the preference preselects the closest
+    // row). Starts with a single Automatic row — global preference,
+    // no pin — until the first lookup lands, and returns to it when a
+    // page lists nothing pinnable.
     let video_quality = adw::ComboRow::builder()
         .title(gettext("Media format"))
-        .subtitle(gettext("Best match follows your preferred quality"))
-        .model(&gtk4::StringList::new(&[gettext("Best match").as_str()]))
+        .subtitle(gettext("Uses your preferred quality"))
+        .model(&gtk4::StringList::new(&[gettext("Automatic").as_str()]))
         .build();
     video_quality.set_visible(false);
     video_group.add(&video_quality);
@@ -1445,8 +1453,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     });
     // Dialog-local choices, initialized from Preferences (not bound: a
     // queued row keeps the audio choice made here even if prefs change
-    // later). The format picker always opens on Best match; exact picks
-    // are per lookup, so nothing persists here.
+    // later). The format picker opens on the preference-preselected
+    // row; exact picks are per lookup, so nothing persists here.
     step.quality.set_selected(0);
     step.audio.set_active(manager.settings().video_audio_only());
     step.quality
@@ -1533,8 +1541,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
     let video_generation = Rc::new(Cell::new(0u64));
     let video_last_ok = Rc::new(RefCell::new(String::new()));
     let video_info = Rc::new(RefCell::new(None::<crate::video::VideoInfo>));
-    // Index-aligned with the format combo rows: row zero is Best match
-    // (no pin), the rest are exact format ids. Reset on every resolve.
+    // Index-aligned with the format combo rows: exact format ids, or
+    // a single `None` for the Automatic row. Reset on every resolve.
     let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
     // Set while the submit path re-arms the apply tick (touching the entry
     // text): the changed handler below must ignore that synthetic edit, or
@@ -1662,15 +1670,22 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             step_b.name.set_text(&base);
                         }
                         *last_b.borrow_mut() = url;
-                        // Rebuild the format picker from this resolve: Best
-                        // match first (the preference applies to it), then
-                        // the exact pinnable formats. Selection resets —
-                        // a pin from another video must never carry over.
-                        let mut labels = vec![gettext("Best match")];
-                        let mut ids: Vec<Option<String>> = vec![None];
+                        // Rebuild the format picker from this resolve:
+                        // exact pinnable formats, tallest first, with the
+                        // preference preselecting the closest row — or a
+                        // single Automatic row (global preference, no pin)
+                        // when the page lists nothing pinnable. Selection
+                        // resets — a pin from another video must never
+                        // carry over.
+                        let mut labels = Vec::new();
+                        let mut ids: Vec<Option<String>> = Vec::new();
                         for opt in &v.formats {
                             labels.push(opt.label.clone());
                             ids.push(Some(opt.id.clone()));
+                        }
+                        if labels.is_empty() {
+                            labels.push(gettext("Automatic"));
+                            ids.push(None);
                         }
                         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
                         step_b
@@ -2063,22 +2078,23 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         } else {
                             Some(typed.as_str())
                         };
-                        // "Best match" (index 0) means best available,
-                        // not the global preference: the preference
-                        // already preselected a row at resolve time.
-                        // Exact picks carry their height as the
-                        // fallback, so a dropped pin still degrades to
-                        // the chosen height. The combo lists Best match
-                        // first, then the info formats in order.
+                        // Exact picks pin the format and carry its height
+                        // as the fallback, so a dropped pin still
+                        // degrades to the chosen height. The Automatic
+                        // row (no pin: pre-resolve, or pages listing
+                        // nothing pinnable) falls back to the global
+                        // preference. The combo rows and the info
+                        // formats share one order.
                         let selected = step2.quality.selected() as usize;
                         let format_id = formats.borrow().get(selected).cloned().flatten();
-                        let quality = match selected {
-                            0 => "best".to_string(),
-                            i => v
+                        let quality = match format_id.clone() {
+                            Some(id) => v
                                 .formats
-                                .get(i - 1)
+                                .iter()
+                                .find(|opt| opt.id == id)
                                 .map(|opt| crate::video::quality_for_height(opt.height).to_string())
                                 .unwrap_or_else(|| m.settings().video_quality()),
+                            None => m.settings().video_quality(),
                         };
                         match m.enqueue_video(
                             &v.page_url,
