@@ -2405,6 +2405,29 @@ fn part_binary_retries_stale_id_with_fallback_spec() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── shared yt-dlp identity argv ──────────────────────────────────────
+
+#[test]
+fn identity_args_order_and_trim() {
+    // Cookies, trimmed UA, then `--` + page: identical for every spawn.
+    let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
+    assert_eq!(
+        argv,
+        vec![
+            "--user-agent".to_string(),
+            "Grab/1".to_string(),
+            "--".to_string(),
+            "https://x.com/u/status/1".to_string(),
+        ]
+    );
+    // Blank UA is omitted, never sent empty.
+    let argv = ytdlp_identity_args("none", None, "https://x.com/u/status/1");
+    assert_eq!(
+        argv,
+        vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
+    );
+}
+
 // ── live resolution via yt-dlp dump ──────────────────────────────────
 
 /// Canned `--dump-single-json` over an HLS master: two variants, a
