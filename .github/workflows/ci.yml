@@ -8,7 +8,23 @@ on:
     branches: [main]
   pull_request:
 
+# Rapid pushes supersede each other: cancel stale PR runs so only the
+# latest push burns CI minutes. Main pushes and releases never cancel.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Style-only signal in ~1 minute, no system deps: rustfmt needs
+  # neither the Fedora container nor the GTK stack.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
   check:
     runs-on: ubuntu-latest
     # ubuntu-latest ships GTK 4.14 / libadwaita 1.4, but the gtk4 (v4_18)
@@ -21,8 +37,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
-          components: rustfmt, clippy
-      - run: cargo fmt --check
+          components: clippy
       - run: cargo clippy --all-targets -- -D warnings
       # Serial: the suite shares one glib default MainContext across test
       # threads, and glib futures are bound to their spawning thread, so
