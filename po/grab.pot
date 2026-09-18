@@ -998,6 +998,10 @@ msgstr ""
 msgid "Stop recording"
 msgstr ""
 
+#: src/video.rs
+msgid "Recording…"
+msgstr ""
+
 #: src/window.rs:101
 msgid "Stop"
 msgstr ""
@@ -1036,7 +1040,6 @@ msgstr ""
 
 #: src/preferences.rs
 msgid "Torrents follow SOCKS5 proxies only"
-msgid "Torrents bypass the proxy; update checks pause while one is set"
 msgstr ""
 
 #: src/preferences.rs

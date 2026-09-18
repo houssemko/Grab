@@ -76,6 +76,14 @@ pub fn setup(app: &adw::Application) {
                     // magnet handler (x-scheme-handler/magnet); enqueue
                     // validates them the same way as pasted links.
                     if matches!(uri.scheme(), "http" | "https" | "magnet") {
+                        // Video pages take the dialog path (pre-filled):
+                        // plain enqueue would save the raw HTML page as a
+                        // file. The dialog's lookup flow then resolves
+                        // quality, liveness and choices as usual.
+                        if crate::video::is_video_page(uri.as_str()) {
+                            show_add_dialog(s.manager.clone(), Some(uri.as_str()));
+                            continue;
+                        }
                         if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
                             s.toasts.add_toast(adw::Toast::new(&e));
                         }
@@ -193,7 +201,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("add-download")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        show_add_dialog(s.manager.clone());
+                        show_add_dialog(s.manager.clone(), None);
                     }
                 })
                 .build()
