@@ -20,6 +20,7 @@
     "--talk-name=org.gtk.vfs.*",
     "--talk-name=org.freedesktop.secrets",
     "--filesystem=xdg-download",
+    "--filesystem=xdg-config/dconf:ro",
     "--filesystem=~/.config/BraveSoftware/Brave-Browser:ro",
     "--filesystem=~/.config/google-chrome:ro",
     "--filesystem=~/.config/chromium:ro",

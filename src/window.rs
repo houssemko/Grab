@@ -1621,11 +1621,27 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                 };
                 show_video_loading(&step_b);
                 set_lookup_add(&lookup_add_b, false);
+                // Invalid manual proxy fails the lookup loudly, matching
+                // the row behavior: no silent direct extraction.
+                let proxy = match crate::download::DownloadOptions::from_settings(&settings_b)
+                    .proxy_config()
+                {
+                    Ok(proxy) => proxy,
+                    Err(e) => {
+                        if generation_b.get() != my {
+                            return;
+                        }
+                        show_video_error(&step_b, &e);
+                        set_lookup_add(&lookup_add_b, true);
+                        return;
+                    }
+                };
                 match crate::video::fetch_video_infos(
                     libs,
                     url.clone(),
                     settings_b.cookies_browser(),
                     settings_b.video_codec_newest(),
+                    proxy,
                 )
                 .await
                 {

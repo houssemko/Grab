@@ -2406,13 +2406,14 @@ fn piece_rejects_changed_file_version() {
     } = spawn_fixture("verc", "v.bin", 300_000, "0", &[], 43);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = FetchCtx {
-        client: http_client(),
+        client: http_client().clone(),
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
             timeout: 30,
             ..Default::default()
         },
+        cookies: None,
         timeout: Duration::from_secs(30),
         tx,
     };
@@ -3148,4 +3149,260 @@ fn remove_leaves_plain_rows_staging_alone() {
     manager.remove(id);
     assert!(dir.exists(), "plain rows must not trigger staging cleanup");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn proxy_opts(mode: &str, ptype: &str, host: &str, port: i32) -> DownloadOptions {
+    DownloadOptions {
+        tries: 3,
+        timeout: 30,
+        limit_rate: String::new(),
+        user_agent: String::new(),
+        connections: 4,
+        proxy_mode: mode.into(),
+        proxy_type: ptype.into(),
+        proxy_host: host.into(),
+        proxy_port: port,
+        cookies_browser: String::new(),
+    }
+}
+
+#[test]
+fn proxy_direct_and_unknown_modes_go_direct() {
+    assert!(
+        proxy_opts("direct", "socks5", "127.0.0.1", 9050)
+            .proxy_config()
+            .expect("valid")
+            .is_none()
+    );
+    // Unknown values fail open like system (lenient stored-value rule):
+    // the system attempt itself never errors, whatever the desktop
+    // holds, so only well-formedness is asserted here.
+    assert!(
+        proxy_opts("mystery", "socks5", "127.0.0.1", 9050)
+            .proxy_config()
+            .is_ok()
+    );
+}
+
+#[test]
+fn proxy_manual_builds_remote_dns_socks() {
+    let proxy = proxy_opts("manual", "socks5", "127.0.0.1", 9050)
+        .proxy_config()
+        .expect("valid")
+        .expect("proxied");
+    // socks5h: names resolve remotely, never beside the tunnel.
+    assert_eq!(proxy.cli_url, "socks5h://127.0.0.1:9050");
+    assert!(proxy.no_proxy_env.contains("localhost"));
+    // Pooled clients key on the full config: identical configs share
+    // a pool entry, differing ones do not.
+    let again = proxy_opts("manual", "socks5", "127.0.0.1", 9050)
+        .proxy_config()
+        .expect("valid")
+        .expect("proxied");
+    assert_eq!(proxy.cache_key, again.cache_key);
+    let other = proxy_opts("manual", "socks5", "127.0.0.1", 9051)
+        .proxy_config()
+        .expect("valid")
+        .expect("proxied");
+    assert_ne!(proxy.cache_key, other.cache_key);
+    let _ = http_client_for(Some(&proxy));
+}
+
+#[test]
+fn proxy_manual_rejects_garbage_loudly() {
+    // A typo must fail the row, never leak direct.
+    assert!(
+        proxy_opts("manual", "socks5", "   ", 9050)
+            .proxy_config()
+            .is_err()
+    );
+    assert!(
+        proxy_opts("manual", "socks5", "127.0.0.1", 0)
+            .proxy_config()
+            .is_err()
+    );
+    assert!(
+        proxy_opts("manual", "socks5", "127.0.0.1", 65536)
+            .proxy_config()
+            .is_err()
+    );
+    assert!(
+        proxy_opts("manual", "gopher", "127.0.0.1", 9050)
+            .proxy_config()
+            .is_err()
+    );
+    // HTTP covers both schemes on one URL.
+    let proxy = proxy_opts("manual", "http", "proxy.lan", 8080)
+        .proxy_config()
+        .expect("valid")
+        .expect("proxied");
+    assert_eq!(proxy.cli_url, "http://proxy.lan:8080");
+}
+
+#[test]
+fn proxy_mode_and_type_mappings() {
+    assert_eq!(proxy_mode_index("manual"), 1);
+    assert_eq!(proxy_mode_index("mystery"), 0);
+    assert_eq!(proxy_mode_value(2), PROXY_MODE_DIRECT);
+    assert_eq!(proxy_mode_value(9), PROXY_MODE_SYSTEM);
+    assert_eq!(proxy_type_index("http"), 0);
+    assert_eq!(proxy_type_index("mystery"), 2);
+    assert_eq!(proxy_type_value(0), "http");
+    assert_eq!(proxy_type_value(9), "socks5");
+    assert_eq!(proxy_mode_labels().len(), 3);
+    assert_eq!(proxy_type_labels(), vec!["HTTP", "HTTPS", "SOCKS5"]);
+}
+
+#[test]
+fn normalize_no_proxy_entries() {
+    assert_eq!(
+        normalize_no_proxy(&["*.local".into(), ".example.com ".into(), "  ".into()]),
+        "local,example.com"
+    );
+    assert_eq!(normalize_no_proxy(&[]), "");
+}
+
+#[test]
+fn cookies_parse_netscape_matrix() {
+    let text = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t9999999999\ttok\tse cret\nbadline\nshort\ta\tb\nsemi.example\tTRUE\t/\tFALSE\t1\tn\tv;w\n.empty\tTRUE\t/\tFALSE\t1\t\tv\n";
+    let (jar, count) = crate::cookies::jar_from_export(text);
+    // sid + tok survive; short lines, empty names and semicolon
+    // values are dropped rather than sent mangled.
+    assert_eq!(count, 2);
+    let header =
+        crate::cookies::cookie_header_for(&jar, "https://example.com/v").expect("in-scope cookies");
+    let header = header.to_str().unwrap();
+    assert!(header.contains("sid=abc123"), "{header}");
+    assert!(header.contains("tok=se cret"), "{header}");
+    // Wrong domain and empty jar send nothing.
+    assert!(crate::cookies::cookie_header_for(&jar, "https://other.org/").is_none());
+    let (empty, _) = crate::cookies::jar_from_export("# nothing here\n");
+    assert!(crate::cookies::cookie_header_for(&empty, "https://example.com/").is_none());
+}
+
+#[test]
+fn cookies_stamp_request_headers() {
+    let (jar, _) =
+        crate::cookies::jar_from_export(".example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n");
+    let built = stamp_request(
+        http_client().get("https://example.com/v"),
+        "Grab-test/1.0",
+        Some(&jar),
+        "https://example.com/v",
+    )
+    .build()
+    .unwrap();
+    assert_eq!(built.headers()["user-agent"], "Grab-test/1.0");
+    assert_eq!(built.headers()["cookie"], "sid=abc123");
+    // No jar, no Cookie header (plain rows unchanged).
+    let built = stamp_request(
+        http_client().get("https://example.com/v"),
+        "",
+        None,
+        "https://example.com/v",
+    )
+    .build()
+    .unwrap();
+    assert!(!built.headers().contains_key("cookie"));
+    assert!(!built.headers().contains_key("user-agent"));
+}
+
+#[test]
+fn cookies_export_roundtrip() {
+    // Fake yt-dlp honoring `--cookies PATH`: proves the export glue
+    // (spec, temp file, parse) without a browser on the machine.
+    let dir = std::env::temp_dir().join(format!("grab-fakecookies-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp-cookies");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "--cookies" ]; then out="$a"; fi
+    prev="$a"
+done
+printf '.example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let jar = crate::download::tokio_rt()
+        .block_on(crate::cookies::jar_for_browser(
+            "firefox",
+            &bin,
+            "https://example.com/v",
+        ))
+        .expect("exported jar");
+    let header = crate::cookies::cookie_header_for(&jar, "https://sub.example.com/v")
+        .expect("subdomain in scope");
+    assert_eq!(header, "sid=abc123");
+    // The off switch never spawns.
+    let none = crate::download::tokio_rt().block_on(crate::cookies::jar_for_browser(
+        "none",
+        &bin,
+        "https://example.com/v",
+    ));
+    assert!(none.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn direct_mode_ignores_proxy_env() {
+    // Ambient HTTP_PROXY-style variables must never steer Direct rows:
+    // proxying is explicit settings or nothing.
+    let (_lock, _loop) = test_locks();
+    let Fixture {
+        dir,
+        dl,
+        payload,
+        port,
+        server,
+    } = spawn_fixture("noenv", "v.bin", 20_000, "0", &[], 44);
+    // SAFETY: serial suite; the guard below restores on all paths
+    // including panic unwinds.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: same serial-suite context as the setters.
+            unsafe {
+                std::env::remove_var("HTTP_PROXY");
+                std::env::remove_var("HTTPS_PROXY");
+                std::env::remove_var("ALL_PROXY");
+            }
+        }
+    }
+    unsafe {
+        std::env::set_var("HTTP_PROXY", "http://127.0.0.1:9");
+        std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:9");
+        std::env::set_var("ALL_PROXY", "http://127.0.0.1:9");
+    }
+    let _env = EnvGuard;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let ctx = FetchCtx {
+        client: http_client().clone(),
+        url: format!("http://127.0.0.1:{port}/v.bin"),
+        dest: dl.join("v.bin"),
+        opts: DownloadOptions {
+            timeout: 30,
+            ..Default::default()
+        },
+        cookies: None,
+        timeout: Duration::from_secs(30),
+        tx,
+    };
+    tokio_rt().block_on(run_download(ctx, 1, StartMode::Single));
+    let got = std::fs::read(dl.join("v.bin")).unwrap_or_default();
+    if got != payload {
+        abort(&server, "direct download must ignore proxy env");
+    }
+    cleanup(&server, &dir);
+    drop(_env);
 }

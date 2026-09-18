@@ -1,4 +1,5 @@
 mod application;
+mod cookies;
 mod download;
 mod install_help;
 mod preferences;

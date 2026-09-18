@@ -381,6 +381,258 @@ pub struct DownloadOptions {
     pub user_agent: String,
     /// Parallel range connections for large downloads (1 = single stream).
     pub connections: i32,
+    pub proxy_mode: String,
+    pub proxy_type: String,
+    pub proxy_host: String,
+    pub proxy_port: i32,
+    /// Raw browser-auth setting (`none` when off). The direct engine
+    /// exports it to a cookie jar once per attempt (see cookies.rs).
+    pub cookies_browser: String,
+}
+
+/// Proxy modes for the `proxy-mode` setting.
+pub const PROXY_MODE_SYSTEM: &str = "system";
+pub const PROXY_MODE_MANUAL: &str = "manual";
+pub const PROXY_MODE_DIRECT: &str = "direct";
+
+pub const PROXY_MODE_VALUES: &[&str] = &[PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL, PROXY_MODE_DIRECT];
+
+/// Translated combo labels, index-aligned with [`PROXY_MODE_VALUES`].
+pub fn proxy_mode_labels() -> Vec<String> {
+    vec![gettext("System"), gettext("Manual"), gettext("Off")]
+}
+
+/// Combo index for a stored mode value. Unknown values fall back to
+/// system (the default).
+pub fn proxy_mode_index(value: &str) -> usize {
+    PROXY_MODE_VALUES
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(0)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to system.
+pub fn proxy_mode_value(index: usize) -> &'static str {
+    PROXY_MODE_VALUES
+        .get(index)
+        .copied()
+        .unwrap_or(PROXY_MODE_SYSTEM)
+}
+
+pub const PROXY_TYPE_VALUES: &[&str] = &["http", "https", "socks5"];
+
+/// Protocol names are left untranslated, like codec labels.
+pub fn proxy_type_labels() -> Vec<String> {
+    vec![
+        "HTTP".to_string(),
+        "HTTPS".to_string(),
+        "SOCKS5".to_string(),
+    ]
+}
+
+/// Combo index for a stored type value. Unknown values fall back to SOCKS5.
+pub fn proxy_type_index(value: &str) -> usize {
+    PROXY_TYPE_VALUES
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(2)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to SOCKS5.
+pub fn proxy_type_value(index: usize) -> &'static str {
+    PROXY_TYPE_VALUES.get(index).copied().unwrap_or("socks5")
+}
+
+/// Proxy resolved for one attempt: reqwest interceptors for the direct
+/// engine, plus the CLI form for yt-dlp spawns.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedProxy {
+    proxies: Vec<reqwest::Proxy>,
+    /// Single URL for `--proxy` (SOCKS always remote-resolving).
+    pub cli_url: String,
+    /// Comma list for NO_PROXY env on yt-dlp spawns.
+    pub no_proxy_env: String,
+    cache_key: String,
+}
+
+/// Loopback bypass applied when no ignore list is configured: exits
+/// cannot reach the user's own machine, so proxying localhost only
+/// breaks local services.
+const LOOPBACK_BYPASS: &str = "localhost,127.0.0.1,::1";
+
+/// Host match for one ignore entry: exact or subdomain suffix, with a
+/// leading `*.`/`.` tolerated. Ports and CIDR ranges are out of scope.
+fn ignore_entry_normalized(pattern: &str) -> Option<String> {
+    let p = pattern.trim().trim_end_matches('.').to_lowercase();
+    let p = p.strip_prefix("*.").unwrap_or(&p);
+    let p = p.strip_prefix('.').unwrap_or(p);
+    if p.is_empty() {
+        return None;
+    }
+    Some(p.to_string())
+}
+
+/// Normalize a GNOME ignore-hosts list into plain domains for
+/// reqwest's NoProxy (suffix matching): `*.local` and `.local` both
+/// become `local`. Unparseable entries are dropped, never passed on.
+pub(crate) fn normalize_no_proxy(patterns: &[String]) -> String {
+    patterns
+        .iter()
+        .filter_map(|p| ignore_entry_normalized(p))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn system_proxy_settings() -> Option<gio::Settings> {
+    let source = gio::SettingsSchemaSource::default()?;
+    // Settings::new panics on a missing schema (non-GNOME systems, bare
+    // CI images): probe first so system mode degrades to direct there.
+    source.lookup("org.gnome.system.proxy", true)?;
+    Some(gio::Settings::new("org.gnome.system.proxy"))
+}
+
+/// Proxy from the desktop settings (`org.gnome.system.proxy`, manual
+/// mode). PAC (`auto`) is unsupported by design — executing remote
+/// proxy scripts is out of scope — as is a missing schema.
+fn system_proxy() -> Option<ResolvedProxy> {
+    use gtk4::gio::prelude::SettingsExt as _;
+    let s = system_proxy_settings()?;
+    if s.string("mode").as_str() != "manual" {
+        return None;
+    }
+    let ignore: Vec<String> = s
+        .strv("ignore-hosts")
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    let bypassed = normalize_no_proxy(&ignore);
+    let no_proxy_env = if bypassed.is_empty() {
+        LOOPBACK_BYPASS.to_string()
+    } else {
+        bypassed
+    };
+    let no_proxy = reqwest::NoProxy::from_string(&no_proxy_env);
+    let host = |key: &str| s.string(key).trim().to_string();
+    let port = |key: &str| s.int(key);
+    let valid = |h: &str, p: i32| !h.is_empty() && (1..=65535).contains(&p);
+    // SOCKS first: one remote-resolving tunnel covers every scheme,
+    // which is also the Tor shape (system SOCKS host + port).
+    let socks = host("socks-host");
+    if valid(&socks, port("socks-port")) {
+        let url = format!("socks5h://{}:{}", socks, port("socks-port"));
+        let proxy = reqwest::Proxy::all(url.clone()).ok()?.no_proxy(no_proxy);
+        return Some(ResolvedProxy {
+            proxies: vec![proxy],
+            cache_key: format!("{url}|{no_proxy_env}"),
+            cli_url: url,
+            no_proxy_env,
+        });
+    }
+    let http = host("http-host");
+    let https = host("https-host");
+    if s.boolean("use-same-proxy") && valid(&http, port("http-port")) {
+        let url = format!("http://{}:{}", http, port("http-port"));
+        let mk = |p: reqwest::Proxy| p.no_proxy(reqwest::NoProxy::from_string(&no_proxy_env));
+        let proxies = [
+            reqwest::Proxy::http(url.clone()),
+            reqwest::Proxy::https(url.clone()),
+        ]
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?
+        .into_iter()
+        .map(mk)
+        .collect();
+        return Some(ResolvedProxy {
+            proxies,
+            cache_key: format!("{url}|{no_proxy_env}"),
+            cli_url: url,
+            no_proxy_env,
+        });
+    }
+    // Split HTTP/HTTPS proxies: cover each scheme present. CLI gets the
+    // secure leg (the sensitive half); plain-HTTP direct fallback there
+    // is documented on the mode row.
+    let mut proxies = Vec::new();
+    if valid(&http, port("http-port")) {
+        proxies.push(
+            reqwest::Proxy::http(format!("http://{}:{}", http, port("http-port")))
+                .ok()?
+                .no_proxy(reqwest::NoProxy::from_string(&no_proxy_env)),
+        );
+    }
+    if valid(&https, port("https-port")) {
+        proxies.push(
+            reqwest::Proxy::https(format!("http://{}:{}", https, port("https-port")))
+                .ok()?
+                .no_proxy(reqwest::NoProxy::from_string(&no_proxy_env)),
+        );
+    }
+    if proxies.is_empty() {
+        return None;
+    }
+    let cli_url = if valid(&https, port("https-port")) {
+        format!("http://{}:{}", https, port("https-port"))
+    } else {
+        format!("http://{}:{}", http, port("http-port"))
+    };
+    Some(ResolvedProxy {
+        proxies,
+        cache_key: format!("{cli_url}|{no_proxy_env}"),
+        cli_url,
+        no_proxy_env,
+    })
+}
+
+/// Proxy from the manual settings. Unlike system resolution this is an
+/// explicit user demand: invalid values fail loudly instead of
+/// silently leaking direct, because a typo must never look like
+/// privacy.
+fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
+    let host = o.proxy_host.trim();
+    if host.is_empty() {
+        return Err(gettext("Proxy host is empty"));
+    }
+    if !(1..=65535).contains(&o.proxy_port) {
+        return Err(gettext("Proxy port is out of range (1–65535)"));
+    }
+    let no_proxy_env = LOOPBACK_BYPASS.to_string();
+    let no_proxy = reqwest::NoProxy::from_string(&no_proxy_env);
+    let (proxies, cli_url) = match o.proxy_type.as_str() {
+        "http" | "https" => {
+            let url = format!("http://{host}:{}", o.proxy_port);
+            let mk = |p: reqwest::Proxy| p.no_proxy(reqwest::NoProxy::from_string(&no_proxy_env));
+            let proxies = [
+                reqwest::Proxy::http(url.clone()),
+                reqwest::Proxy::https(url.clone()),
+            ]
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(mk)
+            .collect();
+            (proxies, url)
+        }
+        // SOCKS5 always remote-resolving: local DNS would leak every
+        // hostname around the tunnel.
+        "socks5" => {
+            let url = format!("socks5h://{host}:{}", o.proxy_port);
+            let proxy = reqwest::Proxy::all(url.clone())
+                .map_err(|e| e.to_string())?
+                .no_proxy(no_proxy);
+            (vec![proxy], url)
+        }
+        other => {
+            return Err(gettext("Unknown proxy type: {t}").replace("{t}", other));
+        }
+    };
+    Ok(Some(ResolvedProxy {
+        proxies,
+        cache_key: format!("{cli_url}|{no_proxy_env}"),
+        cli_url,
+        no_proxy_env,
+    }))
 }
 
 impl DownloadOptions {
@@ -392,6 +644,23 @@ impl DownloadOptions {
             limit_rate: s.speed_limit(),
             user_agent: sanitize_user_agent(&s.user_agent()),
             connections: s.connections(),
+            proxy_mode: s.proxy_mode(),
+            proxy_type: s.proxy_type(),
+            proxy_host: s.proxy_host(),
+            proxy_port: s.proxy_port(),
+            cookies_browser: s.cookies_browser(),
+        }
+    }
+
+    /// Proxy for this attempt. Manual misconfiguration fails loudly;
+    /// system resolution degrades to direct (missing schema, PAC mode,
+    /// empty hosts) since it is opportunistic, not demanded.
+    pub fn proxy_config(&self) -> Result<Option<ResolvedProxy>, String> {
+        match self.proxy_mode.as_str() {
+            PROXY_MODE_DIRECT => Ok(None),
+            PROXY_MODE_MANUAL => manual_proxy(self),
+            // System default and unknown values resolve opportunistically.
+            _ => Ok(system_proxy()),
         }
     }
 }
@@ -431,28 +700,59 @@ pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
 
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        // Bounded hops: a malicious server must not bounce the client
-        // around without limit. Downgrades are refused outright: no
-        // cookie or auth store is enabled, but a https→http bounce would
-        // still let a network attacker substitute the downloaded bytes.
-        // Only the URL + UA cross origins.
-        reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                let downgrade = attempt
-                    .previous()
-                    .last()
-                    .is_some_and(|u| u.scheme() == "https")
-                    && attempt.url().scheme() == "http";
-                if attempt.previous().len() > 5 || downgrade {
-                    attempt.stop()
-                } else {
-                    attempt.follow()
-                }
-            }))
-            .build()
-            .expect("http client")
-    })
+    CLIENT.get_or_init(|| client_builder().build().expect("http client"))
+}
+
+/// reqwest client honoring this attempt's proxy, sharing one pooled
+/// client per proxy config. Direct attempts keep the static client, so
+/// enabling a proxy never perturbs existing connection pools.
+pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> reqwest::Client {
+    let Some(proxy) = proxy else {
+        return http_client().clone();
+    };
+    static PROXIED: OnceLock<Mutex<std::collections::HashMap<String, reqwest::Client>>> =
+        OnceLock::new();
+    let cache = PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Some(client) = lock_recover(cache).get(&proxy.cache_key) {
+        return client.clone();
+    }
+    let mut builder = client_builder();
+    for p in &proxy.proxies {
+        builder = builder.proxy(p.clone());
+    }
+    let client = builder.build().expect("proxied http client");
+    lock_recover(cache).insert(proxy.cache_key.clone(), client.clone());
+    client
+}
+
+/// Shared builder: bounded hops, no downgrades (see [`http_client`]).
+fn client_builder() -> reqwest::ClientBuilder {
+    // Bounded hops: a malicious server must not bounce the client
+    // around without limit. Downgrades are refused outright: no
+    // cookie or auth store is enabled, but a https→http bounce would
+    // still let a network attacker substitute the downloaded bytes.
+    // Only the URL + UA cross origins.
+    //
+    // No ambient proxy either: reqwest would otherwise route through
+    // HTTP_PROXY-style env vars behind Direct mode's back. Proxying
+    // is always explicit here (settings or nothing).
+    // Automatic Referer is off for the same reason: cross-origin
+    // redirects must not leak full URLs (tokens included) as Referer.
+    reqwest::Client::builder()
+        .no_proxy()
+        .referer(false)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let downgrade = attempt
+                .previous()
+                .last()
+                .is_some_and(|u| u.scheme() == "https")
+                && attempt.url().scheme() == "http";
+            if attempt.previous().len() > 5 || downgrade {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
 }
 
 pub(crate) enum EngineMsg {
@@ -508,22 +808,44 @@ pub(crate) enum EngineMsg {
 /// Shared inputs for one download's engine task. Groups the params every
 /// attempt function needs instead of threading eight loose arguments.
 struct FetchCtx {
-    client: &'static reqwest::Client,
+    client: reqwest::Client,
     url: String,
     dest: std::path::PathBuf,
     opts: DownloadOptions,
+    /// Attempt-scoped browser cookie jar (`None` = setting off or
+    /// export unavailable). Resolved once per attempt, not per request.
+    cookies: Option<std::sync::Arc<reqwest::cookie::Jar>>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
 }
 
-async fn run_download(ctx: FetchCtx, connections: usize, mode: StartMode) {
+async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
     let timeout = Duration::from_secs(ctx.opts.timeout.max(1) as u64);
     let mut tries = ctx.opts.tries.max(1);
+    // One export per attempt: the browser profile may have changed
+    // since the last run, and jars are cheap next to downloads.
+    if !ctx.opts.cookies_browser.is_empty() && ctx.opts.cookies_browser != "none" {
+        let youtube_bin = crate::video::resolve_libraries()
+            .map(|libs| libs.youtube)
+            .ok();
+        if let Some(bin) = youtube_bin {
+            ctx.cookies =
+                crate::cookies::jar_for_browser(&ctx.opts.cookies_browser, &bin, &ctx.url).await;
+        }
+    }
     match mode {
         StartMode::Single => {
             single_loop(&ctx, &mut tries, None, false).await;
         }
-        StartMode::Fresh => match probe_ranges(ctx.client, &ctx.url, &ctx.opts, timeout).await {
+        StartMode::Fresh => match probe_ranges(
+            &ctx.client,
+            &ctx.url,
+            &ctx.opts,
+            ctx.cookies.as_ref(),
+            timeout,
+        )
+        .await
+        {
             Ok(total) => {
                 if plan_pieces(total, connections).is_empty() {
                     single_loop(&ctx, &mut tries, Some(total), true).await;
@@ -859,12 +1181,14 @@ async fn attempt_once(
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-        let mut req = ctx.client.get(&ctx.url);
+        let mut req = stamp_request(
+            ctx.client.get(&ctx.url),
+            &ctx.opts.user_agent,
+            ctx.cookies.as_ref(),
+            &ctx.url,
+        );
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
-        }
-        if !ctx.opts.user_agent.trim().is_empty() {
-            req = req.header("User-Agent", ctx.opts.user_agent.trim());
         }
         let resp = match tokio::time::timeout(
             ctx.timeout,
@@ -900,10 +1224,12 @@ async fn attempt_once(
             if claimed.is_none() && start > 0 && !restarted {
                 // Bare 416 (no usable Content-Range): ask for the length
                 // directly before deleting anything that might be complete.
-                let mut hreq = ctx.client.head(&ctx.url);
-                if !ctx.opts.user_agent.trim().is_empty() {
-                    hreq = hreq.header("User-Agent", ctx.opts.user_agent.trim());
-                }
+                let hreq = stamp_request(
+                    ctx.client.head(&ctx.url),
+                    &ctx.opts.user_agent,
+                    ctx.cookies.as_ref(),
+                    &ctx.url,
+                );
                 if let Ok(built) = hreq.build()
                     && let Ok(Ok(hresp)) =
                         tokio::time::timeout(ctx.timeout, ctx.client.execute(built)).await
@@ -1447,16 +1773,39 @@ enum StartMode {
 /// One `Range: bytes=0-0` round trip: proves range support AND yields the
 /// total (`Accept-Ranges` headers alone are unreliable). Any error means
 /// "fall back to single-stream", never a user-facing failure.
+/// Stamp one outbound request like the browser would: configured
+/// user agent plus this attempt's exported browser cookies, if any.
+/// Single choke point so a header can never reach some requests only.
+pub(crate) fn stamp_request(
+    mut req: reqwest::RequestBuilder,
+    user_agent: &str,
+    cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
+    url: &str,
+) -> reqwest::RequestBuilder {
+    if !user_agent.trim().is_empty() {
+        req = req.header("User-Agent", user_agent.trim());
+    }
+    if let Some(jar) = cookies
+        && let Some(cookie) = crate::cookies::cookie_header_for(jar, url)
+    {
+        req = req.header("Cookie", cookie);
+    }
+    req
+}
+
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
     opts: &DownloadOptions,
+    cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
     timeout: Duration,
 ) -> Result<u64, String> {
-    let mut req = client.get(url).header("Range", "bytes=0-0");
-    if !opts.user_agent.trim().is_empty() {
-        req = req.header("User-Agent", opts.user_agent.trim());
-    }
+    let req = stamp_request(
+        client.get(url).header("Range", "bytes=0-0"),
+        &opts.user_agent,
+        cookies,
+        url,
+    );
     let resp = match tokio::time::timeout(
         timeout,
         client.execute(req.build().map_err(|e| e.to_string())?),
@@ -1558,13 +1907,14 @@ async fn fetch_piece(
     use AttemptFail::{Changed, Retryable, Throttled};
     let mut last_err = Retryable(gettext("Empty response"));
     for _ in 0..PIECE_TRIES {
-        let mut req = ctx
-            .client
-            .get(&ctx.url)
-            .header("Range", format!("bytes={start}-{end}"));
-        if !ctx.opts.user_agent.trim().is_empty() {
-            req = req.header("User-Agent", ctx.opts.user_agent.trim());
-        }
+        let req = stamp_request(
+            ctx.client
+                .get(&ctx.url)
+                .header("Range", format!("bytes={start}-{end}")),
+            &ctx.opts.user_agent,
+            ctx.cookies.as_ref(),
+            &ctx.url,
+        );
         let built = match req.build() {
             Ok(r) => r,
             Err(e) => {
@@ -2238,11 +2588,23 @@ impl DownloadManager {
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(item.id(), generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        // Invalid manual proxy fails the row loudly here: silently
+        // routing direct would leak around an explicit user demand.
+        let proxy = match opts.proxy_config() {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail(e);
+                self.changed();
+                return;
+            }
+        };
         let ctx = FetchCtx {
-            client: http_client(),
+            client: http_client_for(proxy.as_ref()),
             url,
             dest,
             opts,
+            cookies: None,
             timeout,
             tx,
         };
@@ -2710,6 +3072,18 @@ impl DownloadManager {
             self.live_rows.borrow_mut().remove(&id);
         }
         let opts = DownloadOptions::from_settings(&self.settings);
+        // Invalid manual proxy fails the row loudly here, before any
+        // network happens: silently routing direct would leak around an
+        // explicit user demand.
+        let proxy = match opts.proxy_config() {
+            Ok(proxy) => proxy,
+            Err(e) => {
+                item.set_status(DownloadStatus::Failed);
+                item.set_detail(e);
+                self.changed();
+                return;
+            }
+        };
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
@@ -2723,6 +3097,7 @@ impl DownloadManager {
             is_live,
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
+            proxy,
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();

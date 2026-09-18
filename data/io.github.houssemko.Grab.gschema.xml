@@ -40,6 +40,26 @@
       <summary>User agent</summary>
       <description>Custom User-Agent header. Empty means the default.</description>
     </key>
+    <key name="proxy-mode" type="s">
+      <default>'system'</default>
+      <summary>Proxy mode</summary>
+      <description>System honors the desktop proxy settings; manual uses the proxy below; direct disables proxying. Applies to newly started downloads; torrents always go direct.</description>
+    </key>
+    <key name="proxy-type" type="s">
+      <default>'socks5'</default>
+      <summary>Proxy type</summary>
+      <description>One of http, https or socks5. SOCKS5 resolves names remotely.</description>
+    </key>
+    <key name="proxy-host" type="s">
+      <default>'127.0.0.1'</default>
+      <summary>Proxy host</summary>
+      <description>Proxy hostname or address, e.g. 127.0.0.1 for a local Tor forwarder.</description>
+    </key>
+    <key name="proxy-port" type="i">
+      <default>9050</default>
+      <summary>Proxy port</summary>
+      <description>Proxy port, e.g. 9050 for Tor.</description>
+    </key>
     <key name="keep-server-date" type="b">
       <default>false</default>
       <summary>Keep server file date</summary>
