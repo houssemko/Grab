@@ -39,6 +39,20 @@ jobs:
           flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub "org.gnome.Sdk//$RUNTIME" "org.freedesktop.Sdk.Extension.rust-stable//25.08"
 
+      # Same SDK layer cache as the Flatpak builds (immutable per
+      # runtime version), plus the cargo registry: `cargo vendor`
+      # below re-downloads every crate on each pristine run.
+      - name: Cache SDK and cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.local/share/flatpak
+            ~/.cache/flatpak
+            .cargo-home/registry
+          key: tarball-deps-${{ runner.os }}-${{ hashFiles('build-aux/io.github.houssemko.Grab.json', 'Cargo.lock') }}
+          restore-keys: |
+            tarball-deps-${{ runner.os }}-
+
       # Same offline-vendor trick as the Flatpak build, done by hand:
       # cargo vendor + a local source replacement, then meson install
       # into a staging dir. Everything runs inside the SDK sandbox.

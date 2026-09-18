@@ -2635,4 +2635,41 @@ fn plan_tie_keeps_direct_muxed() {
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.audio_only);
     assert!(plan.hls_sel.is_none());
+// ── default combo selection ──────────────────────────────────────────
+
+fn test_options() -> Vec<VideoFormatOption> {
+    [480u32, 720, 1080]
+        .iter()
+        .map(|h| VideoFormatOption {
+            id: format!("v{h}"),
+            label: format!("{h}p"),
+            height: *h,
+        })
+        .collect()
+}
+
+#[test]
+fn default_quality_index_preselects() {
+    let opts = test_options();
+    // Best (and empty listings) stay on "Best match".
+    assert_eq!(default_quality_index(&opts, "best"), 0);
+    assert_eq!(default_quality_index(&[], "720p"), 0);
+    // Otherwise the closest listed height wins (combo index 1-based).
+    assert_eq!(default_quality_index(&opts, "1080p"), 3);
+    assert_eq!(default_quality_index(&opts, "720p"), 2);
+    assert_eq!(default_quality_index(&opts, "480p"), 1);
+    // Between buckets the nearer height wins, ties go taller.
+    assert_eq!(default_quality_index(&opts, "2160p"), 3);
+    // Unknown stored values degrade like the extractor selector (1080p).
+    assert_eq!(default_quality_index(&opts, "mystery"), 3);
+    // Exact ties (odd extractor heights equidistant from the cap) go taller.
+    let odd = [600u32, 840]
+        .iter()
+        .map(|h| VideoFormatOption {
+            id: format!("v{h}"),
+            label: format!("{h}p"),
+            height: *h,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(default_quality_index(&odd, "720p"), 2);
 }

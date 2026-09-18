@@ -25,6 +25,12 @@ on:
       - ".github/workflows/flatpak-test.yml"
       - ".github/workflows/flatpak-build.yml"
 
+# Same supersede rule as CI: a new push cancels the stale bundle build.
+# Manual dispatches (exact tags/SHAs) never cancel.
+concurrency:
+  group: flatpak-test-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   bundle:
     uses: ./.github/workflows/flatpak-build.yml
