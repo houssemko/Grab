@@ -2248,6 +2248,215 @@ fn identity_args_order_and_trim() {
     );
 }
 
+// ── live resolution via yt-dlp dump ──────────────────────────────────
+
+/// Canned `--dump-single-json` over an HLS master: two variants, a
+/// page-level HLS audio rendition, and a video-level Referer.
+fn master_dump_json() -> serde_json::Value {
+    serde_json::json!({
+        "id": "live",
+        "title": "Live",
+        "http_headers": {"Referer": "https://www.tiktok.com/"},
+        "formats": [
+            {
+                "format": "h480",
+                "format_id": "h480",
+                "protocol": "m3u8_native",
+                "ext": "mp4",
+                "url": "https://cdn.example/v480.m3u8",
+                "vcodec": "avc1",
+                "acodec": "mp4a.40.2",
+                "height": 480,
+                "http_headers": {},
+            },
+            {
+                "format": "h1080",
+                "format_id": "h1080",
+                "protocol": "m3u8_native",
+                "ext": "mp4",
+                "url": "https://cdn.example/v1080.m3u8",
+                "vcodec": "avc1",
+                "acodec": "mp4a.40.2",
+                "height": 1080,
+                "http_headers": {},
+            },
+            {
+                "format": "haudio",
+                "format_id": "haudio",
+                "protocol": "m3u8_native",
+                "ext": "m4a",
+                "url": "https://cdn.example/a.m3u8",
+                "vcodec": "none",
+                "acodec": "mp4a.40.2",
+                "http_headers": {},
+            },
+        ],
+    })
+}
+
+#[test]
+fn live_input_from_dump_picks_height_and_referer() {
+    let value = master_dump_json();
+    let input = live_input_from_dump(&value, Some(720)).expect("resolves");
+    assert_eq!(input.video, "https://cdn.example/v1080.m3u8");
+    assert_eq!(input.audio.as_deref(), Some("https://cdn.example/a.m3u8"));
+    assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
+    // No cap takes the tallest; no variants at all stays unresolved.
+    let tall = live_input_from_dump(&value, None).expect("resolves");
+    assert_eq!(tall.video, "https://cdn.example/v1080.m3u8");
+    let direct = test_video(serde_json::json!([test_format_full(
+        "v",
+        "avc1",
+        "none",
+        Some(720),
+        None,
+        "https",
+        false
+    ),]));
+    let direct_value = serde_json::to_value(&direct).unwrap();
+    assert!(live_input_from_dump(&direct_value, Some(720)).is_none());
+}
+
+#[test]
+fn extract_referer_prefers_format_level() {
+    let mut value = master_dump_json();
+    assert_eq!(
+        extract_referer(&value, "https://cdn.example/v480.m3u8").as_deref(),
+        Some("https://www.tiktok.com/")
+    );
+    // Format-level wins over video-level.
+    value["formats"][0]["http_headers"] = serde_json::json!({"Referer": "https://page.example/"});
+    assert_eq!(
+        extract_referer(&value, "https://cdn.example/v480.m3u8").as_deref(),
+        Some("https://page.example/")
+    );
+    // Unknown URLs fall back to video-level; CR/LF values are rejected.
+    assert_eq!(
+        extract_referer(&value, "https://cdn.example/nope.m3u8").as_deref(),
+        Some("https://www.tiktok.com/")
+    );
+    value["http_headers"] = serde_json::json!({"Referer": "https://evil.example/\r\nX: 1"});
+    assert!(extract_referer(&value, "https://cdn.example/nope.m3u8").is_none());
+    value.as_object_mut().unwrap().remove("http_headers");
+    value["formats"][0]["http_headers"] = serde_json::json!({});
+    assert!(extract_referer(&value, "https://cdn.example/v480.m3u8").is_none());
+}
+
+#[test]
+fn resolve_hls_input_prefers_binary_dump() {
+    // Fake yt-dlp emitting the canned dump: resolution, audio and
+    // Referer all come from the binary, no playlist fetch involved.
+    let dir = std::env::temp_dir().join(format!("grab-fakeresolve-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("dump.json"), master_dump_json().to_string()).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(&bin, "#!/bin/sh\ncat \"$(dirname \"$0\")/dump.json\"\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let headers = yt_dlp::model::format::HttpHeaders {
+        user_agent: "".into(),
+        accept: "".into(),
+        accept_language: "".into(),
+        sec_fetch_mode: "".into(),
+    };
+    let input = crate::download::tokio_rt().block_on(resolve_hls_input(
+        &bin,
+        "https://cdn.example/master.m3u8",
+        &headers,
+        "Grab-test/1.0",
+        "none",
+        Some(720),
+    ));
+    assert_eq!(input.video, "https://cdn.example/v1080.m3u8");
+    assert_eq!(input.audio.as_deref(), Some("https://cdn.example/a.m3u8"));
+    assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── best-overall muxed vs HLS ────────────────────────────────────────
+
+/// Direct muxed files top out below the tallest HLS variant (the
+/// x.com shape that Best match undershot before the override).
+fn muxed_below_hls_video() -> yt_dlp::model::Video {
+    test_video(serde_json::json!([
+        test_format_full(
+            "m320",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(320),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "m720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "h480",
+            "avc1",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]))
+}
+
+#[test]
+fn plan_best_prefers_taller_hls_over_muxed() {
+    let video = muxed_below_hls_video();
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_sel.is_none(), "adoption yields to the variant");
+    assert!(!plan.audio_only);
+    assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
+}
+
+#[test]
+fn plan_cap_blocks_taller_hls() {
+    // Capped 720p: the 1080p variant exceeds the cap, so the direct
+    // 720p file stands.
+    let video = muxed_below_hls_video();
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+    // Capped 1080p: the variant is within cap and taller, so it wins.
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert!(plan.audio_sel.is_none());
+    assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
+}
+
+#[test]
+fn plan_tie_keeps_direct_muxed() {
+    // Equal heights: direct-file precedence is unchanged.
+    let video = x_like_video();
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
+
 // ── default combo selection ──────────────────────────────────────────
 
 fn test_options() -> Vec<VideoFormatOption> {
