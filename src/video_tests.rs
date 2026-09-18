@@ -2556,3 +2556,83 @@ fn resolve_hls_input_prefers_binary_dump() {
     assert_eq!(input.referer.as_deref(), Some("https://www.tiktok.com/"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ── best-overall muxed vs HLS ────────────────────────────────────────
+
+/// Direct muxed files top out below the tallest HLS variant (the
+/// x.com shape that Best match undershot before the override).
+fn muxed_below_hls_video() -> yt_dlp::model::Video {
+    test_video(serde_json::json!([
+        test_format_full(
+            "m320",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(320),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "m720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "https",
+            false
+        ),
+        test_format_full(
+            "h480",
+            "avc1",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]))
+}
+
+#[test]
+fn plan_best_prefers_taller_hls_over_muxed() {
+    let video = muxed_below_hls_video();
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_sel.is_none(), "adoption yields to the variant");
+    assert!(!plan.audio_only);
+    assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
+}
+
+#[test]
+fn plan_cap_blocks_taller_hls() {
+    // Capped 720p: the 1080p variant exceeds the cap, so the direct
+    // 720p file stands.
+    let video = muxed_below_hls_video();
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+    // Capped 1080p: the variant is within cap and taller, so it wins.
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
+    assert!(plan.audio_sel.is_none());
+    assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
+}
+
+#[test]
+fn plan_tie_keeps_direct_muxed() {
+    // Equal heights: direct-file precedence is unchanged.
+    let video = x_like_video();
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
+    assert!(plan.audio_only);
+    assert!(plan.hls_sel.is_none());
+}
