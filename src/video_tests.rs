@@ -282,6 +282,40 @@ fn clean_staging_removes_our_dir() {
     assert!(!dir.exists());
 }
 
+#[test]
+fn ensure_staging_dir_roundtrip_and_clean() {
+    let dir = staging_dir(u64::MAX - 8);
+    let canon = ensure_staging_dir(&dir).expect("fresh dir verifies");
+    assert!(
+        canon.starts_with(std::fs::canonicalize(staging_root()).unwrap()),
+        "{canon:?}"
+    );
+    clean_staging(&dir);
+    assert!(!dir.exists());
+    assert!(!canon.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn ensure_staging_dir_rejects_symlink_escape() {
+    // Pre-planted symlink at the predicted per-item path: creation
+    // follows it, but the canonical check must refuse the escape and
+    // write nothing through the link.
+    std::fs::create_dir_all(staging_root()).unwrap();
+    let outside = std::env::temp_dir().join("grab-video-escape-target");
+    let _ = std::fs::remove_dir_all(&outside);
+    let _ = std::fs::remove_file(&outside);
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = staging_dir(u64::MAX - 7);
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let err = ensure_staging_dir(&link).expect_err("symlink escape must fail");
+    assert!(err.to_string().contains("escaped"), "{err}");
+    assert!(outside.read_dir().unwrap().next().is_none());
+    let _ = std::fs::remove_file(&link);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
 // ── VideoSource serde round-trip ───────────────────────────────────────
 
 #[test]

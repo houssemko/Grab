@@ -1690,7 +1690,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                         // Pango markup, so escape: page URLs carry `&`
                         // query separators and titles carry anything.
                         let desc = match v.duration_string.as_deref().filter(|s| !s.is_empty()) {
-                            Some(d) => format!("{} • {d}", glib::markup_escape_text(&v.page_url)),
+                            Some(d) => format!(
+                                "{} • {}",
+                                glib::markup_escape_text(&v.page_url),
+                                glib::markup_escape_text(d)
+                            ),
                             None => glib::markup_escape_text(&v.page_url).to_string(),
                         };
                         step_b
