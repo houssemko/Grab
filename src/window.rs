@@ -1664,12 +1664,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>) {
                             return;
                         }
                         // Group header carries the identity (title + page);
-                        // rows below carry the choices.
+                        // rows below carry the choices. Both sinks parse
+                        // Pango markup, so escape: page URLs carry `&`
+                        // query separators and titles carry anything.
                         let desc = match v.duration_string.as_deref().filter(|s| !s.is_empty()) {
-                            Some(d) => format!("{} • {d}", v.page_url),
-                            None => v.page_url.clone(),
+                            Some(d) => format!("{} • {d}", glib::markup_escape_text(&v.page_url)),
+                            None => glib::markup_escape_text(&v.page_url).to_string(),
                         };
-                        step_b.group.set_title(&v.title);
+                        step_b
+                            .group
+                            .set_title(glib::markup_escape_text(&v.title).as_str());
                         step_b.group.set_description(Some(&desc));
                         // Seed the file name once: an explicit page-1 name
                         // wins, else the title default. Never clobbers an
