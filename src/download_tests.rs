@@ -3541,10 +3541,17 @@ fn proxy_argv_precedes_end_of_options() {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        subtitles: None,
         proxy: Some(proxy),
     };
     for argv in [
-        crate::video::part_download_argv(&job, "v", std::path::Path::new("/tmp/x.mp4")),
+        crate::video::part_download_argv(
+            &job,
+            "v",
+            std::path::Path::new("/tmp/x.mp4"),
+            false,
+            std::path::Path::new("/usr/bin/ffmpeg"),
+        ),
         crate::video::live_capture_argv(&job, "h", std::path::Path::new("/tmp/x.mp4")),
     ] {
         let flag = argv

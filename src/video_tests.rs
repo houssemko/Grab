@@ -723,6 +723,7 @@ fn pipeline_reports_missing_tools() {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        subtitles: None,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2022,6 +2023,7 @@ fn part_test_job() -> VideoJob {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        subtitles: None,
         proxy: None,
     }
 }
@@ -2030,7 +2032,13 @@ fn part_test_job() -> VideoJob {
 fn part_argv_pins_format_output_and_page() {
     let job = part_test_job();
     let out = std::path::Path::new("/tmp/staging/video.mp4");
-    let argv = part_download_argv(&job, "hls-720", out);
+    let argv = part_download_argv(
+        &job,
+        "hls-720",
+        out,
+        false,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
     // Exact id, exact output, page URL last behind `--`.
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "hls-720");
@@ -2054,7 +2062,13 @@ fn part_argv_pins_format_output_and_page() {
 fn part_argv_forwards_browser_cookies() {
     let mut job = part_test_job();
     job.cookies_browser = "firefox".into();
-    let argv = part_download_argv(&job, "dl", std::path::Path::new("/tmp/staging/dl.mp4"));
+    let argv = part_download_argv(
+        &job,
+        "dl",
+        std::path::Path::new("/tmp/staging/dl.mp4"),
+        false,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
     assert!(
         argv.iter()
             .any(|a| a.starts_with("--cookies-from-browser=firefox"))
@@ -2227,6 +2241,8 @@ fn part_binary_download_reports_progress() {
         "v123",
         "bv*",
         &out,
+        false,
+        std::path::Path::new("/usr/bin/ffmpeg"),
         report,
         &mut abort_rx,
         std::time::Duration::from_secs(30),
@@ -2261,6 +2277,8 @@ fn part_binary_retries_stale_id_with_fallback_spec() {
         "gone-id",
         "ba/b",
         &out,
+        false,
+        std::path::Path::new("/usr/bin/ffmpeg"),
         report,
         &mut abort_rx,
         std::time::Duration::from_secs(30),
@@ -2434,6 +2452,7 @@ fn live_test_job() -> VideoJob {
         is_live: true,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        subtitles: None,
         proxy: None,
     }
 }
@@ -2823,6 +2842,7 @@ fn vod_hls_pins_planner_variant_id() {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        subtitles: None,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2880,6 +2900,7 @@ fn vod_hls_refuses_existing_dest() {
         is_live: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
+        subtitles: None,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -3075,6 +3096,7 @@ fn finish_merge_conflicting_dest_reports_exists() {
         &dest,
         None,
         "T",
+        None,
         std::time::Duration::from_secs(30),
     ));
     match res {
@@ -3183,6 +3205,8 @@ exit 1
         "v123",
         "ba/b",
         &out,
+        false,
+        std::path::Path::new("/usr/bin/ffmpeg"),
         report,
         &mut abort_rx,
         std::time::Duration::from_secs(30),
@@ -3219,6 +3243,8 @@ fn part_binary_abort_stays_quiet() {
             "v123",
             "ba/b",
             &out,
+            false,
+            std::path::Path::new("/usr/bin/ffmpeg"),
             report,
             &mut abort_rx,
             std::time::Duration::from_secs(30),
@@ -3365,6 +3391,8 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
     let keep = [
         "Clip.mp4",
         "Clip.srt",
+        // Collected subtitle sidecars live outside the part namespace.
+        "Clip.en.srt",
         "Other.video.mp4",
         "Clip.video-notes.txt",
     ];
@@ -3375,6 +3403,9 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
         "Clip.audio.webm.part",
         "Clip.hls.mp4",
         "Clip.live.mp4.part",
+        // Stale sidecars beside part files are part-namespace litter.
+        "Clip.video.en.srt",
+        "Clip.hls.en.srt",
     ];
     for n in keep.iter().chain(drop.iter()) {
         std::fs::write(dir.join(n), b"x").unwrap();
@@ -3396,7 +3427,13 @@ fn download_builders_use_machine_progress_and_ignore_config() {
     let out = std::path::Path::new("/tmp/staging/video.mp4");
     let job = part_test_job();
     for argv in [
-        part_download_argv(&job, "v123", out),
+        part_download_argv(
+            &job,
+            "v123",
+            out,
+            false,
+            std::path::Path::new("/usr/bin/ffmpeg"),
+        ),
         live_capture_argv(&job, "h720", out),
         hls_download_argv(&job, "h720", std::path::Path::new("/usr/bin/ffmpeg"), out),
     ] {
@@ -3407,4 +3444,304 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .expect("template flag");
         assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
     }
+}
+// ── subtitle sidecars ────────────────────────────────────────────────
+
+#[test]
+fn part_argv_adds_subtitle_flags_when_requested() {
+    let mut job = part_test_job();
+    job.subtitles = Some("en".into());
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let argv = part_download_argv(
+        &job,
+        "hls-720",
+        out,
+        true,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
+    let sub = argv
+        .iter()
+        .position(|a| a == "--sub-langs")
+        .expect("--sub-langs");
+    assert_eq!(argv[sub + 1], "en");
+    assert!(argv.contains(&"--write-subs".to_string()));
+    assert!(argv.contains(&"--write-auto-subs".to_string()));
+    let conv = argv
+        .iter()
+        .position(|a| a == "--convert-subs")
+        .expect("--convert-subs");
+    assert_eq!(argv[conv + 1], "srt");
+    // Conversion points at Grab's resolved ffmpeg, not PATH (Flatpak).
+    let loc = argv
+        .iter()
+        .position(|a| a == "--ffmpeg-location")
+        .expect("--ffmpeg-location");
+    assert_eq!(argv[loc + 1], "/usr/bin");
+    // Flags must stay ahead of the `--` URL separator: anything after it
+    // is consumed by yt-dlp as an extra URL, never read as an option.
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(sub < sep && conv < sep && loc < sep, "{argv:?}");
+    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
+}
+
+#[test]
+fn part_argv_omits_subtitle_flags_when_not_requested() {
+    let mut job = part_test_job();
+    job.subtitles = Some("fr".into());
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let argv = part_download_argv(
+        &job,
+        "hls-720",
+        out,
+        false,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
+    assert_no_subtitle_tokens(&argv);
+    assert!(
+        !argv.iter().any(|a| a == "--ffmpeg-location"),
+        "no ffmpeg location without subs: {argv:?}"
+    );
+    let mut job = part_test_job();
+    job.subtitles = None;
+    let argv = part_download_argv(
+        &job,
+        "hls-720",
+        out,
+        true,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+    );
+    assert_no_subtitle_tokens(&argv);
+}
+
+#[test]
+fn leg_downloads_subs_matrix() {
+    // Only legs carrying video content take subtitles: the split video
+    // part, or an adopted single file. Audio parts, audio-only rows and
+    // rows without a configured language never do.
+    let mut job = part_test_job();
+    job.subtitles = Some("en".into());
+    // Split download: video leg yes, audio leg no.
+    assert!(leg_downloads_subs(&job, true, false));
+    assert!(!leg_downloads_subs(&job, false, false));
+    // Adopted single file (no split video part): the audio leg carries
+    // the whole video.
+    assert!(leg_downloads_subs(&job, false, true));
+    // Audio-only rows never take subtitles.
+    job.audio_only = true;
+    assert!(!leg_downloads_subs(&job, true, false));
+    assert!(!leg_downloads_subs(&job, false, true));
+    // No configured language: nothing anywhere.
+    job.audio_only = false;
+    job.subtitles = None;
+    assert!(!leg_downloads_subs(&job, true, false));
+    assert!(!leg_downloads_subs(&job, false, true));
+}
+
+#[test]
+fn hls_argv_takes_subtitles_unless_audio_only() {
+    let mut job = part_test_job();
+    job.quality = "best".into();
+    job.subtitles = Some("ar".into());
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let sub = argv
+        .iter()
+        .position(|a| a == "--sub-langs")
+        .expect("--sub-langs");
+    assert_eq!(argv[sub + 1], "ar");
+    assert!(argv.contains(&"--write-auto-subs".to_string()));
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(sub < sep, "subtitle flags must precede the URL separator");
+    // Audio-only HLS rows keep everything else but drop subtitles.
+    job.audio_only = true;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert_no_subtitle_tokens(&argv);
+    assert!(argv.contains(&"--extract-audio".to_string()));
+}
+
+#[test]
+fn live_capture_argv_never_takes_subtitles() {
+    // Captioning a live edge is not a download: even with a language
+    // configured, live captures must not pass subtitle flags.
+    let mut job = live_test_job();
+    job.subtitles = Some("en".into());
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert_no_subtitle_tokens(&argv);
+}
+
+#[test]
+fn subtitle_language_index_value_round_trip() {
+    assert_eq!(subtitle_language_index("off"), 0);
+    assert_eq!(subtitle_language_value(0), "off");
+    assert_eq!(subtitle_language_index("en"), 1);
+    assert_eq!(subtitle_language_value(1), "en");
+    assert_eq!(subtitle_language_index("zh"), 17);
+    assert_eq!(subtitle_language_value(17), "zh");
+    // Unknown settings fall back to English (the schema default); bad
+    // indexes fall back to English too.
+    assert_eq!(subtitle_language_index("xx"), 1);
+    assert_eq!(subtitle_language_index(""), 1);
+    assert_eq!(subtitle_language_value(99), "en");
+    assert_eq!(
+        subtitle_language_labels().len(),
+        SUBTITLE_LANGUAGE_VALUES.len()
+    );
+}
+
+/// Subtitle tokens that must never leak onto non-video legs. (HLS always
+/// carries `--ffmpeg-location` for its merge step, so it is excluded
+/// here; the part/live builders must not emit it without subs either.)
+const SUBTITLE_TOKENS: &[&str] = &[
+    "--write-subs",
+    "--sub-langs",
+    "--write-auto-subs",
+    "--convert-subs",
+];
+
+fn assert_no_subtitle_tokens(argv: &[String]) {
+    for t in SUBTITLE_TOKENS {
+        assert!(!argv.iter().any(|a| a == *t), "{t} leaked: {argv:?}");
+    }
+}
+
+#[test]
+fn subtitle_lang_active_allowlist() {
+    // The configured code resolves verbatim; `off`, empty and unknown
+    // codes (hand-edited dconf) resolve to off — never passed through
+    // to `--sub-langs` or the sidecar filename.
+    assert_eq!(subtitle_lang_active("en"), Some("en".to_string()));
+    assert_eq!(subtitle_lang_active("zh"), Some("zh".to_string()));
+    assert_eq!(subtitle_lang_active("off"), None);
+    assert_eq!(subtitle_lang_active(""), None);
+    assert_eq!(subtitle_lang_active("xx"), None);
+    assert_eq!(subtitle_lang_active(" "), None);
+    // Normalization: surrounding whitespace and case fold onto the list.
+    assert_eq!(subtitle_lang_active(" EN "), Some("en".to_string()));
+    // Regex-shaped values never reach yt-dlp (`--sub-langs` accepts
+    // patterns, so only exact allowlist hits pass).
+    assert_eq!(subtitle_lang_active("en,fr"), None);
+    assert_eq!(subtitle_lang_active("en.*"), None);
+}
+
+#[test]
+fn sidecar_path_for_cases() {
+    // yt-dlp drops `--write-subs` sidecars as `<out-stem>.<lang>.srt`
+    // beside the `-o` path; Grab keeps the same shape beside the dest.
+    assert_eq!(
+        sidecar_path_for(std::path::Path::new("/tmp/dl/Clip.video.mp4"), "en"),
+        std::path::Path::new("/tmp/dl/Clip.video.en.srt")
+    );
+    assert_eq!(
+        sidecar_path_for(std::path::Path::new("/tmp/dl/Clip.mp4"), "ar"),
+        std::path::Path::new("/tmp/dl/Clip.ar.srt")
+    );
+}
+
+#[test]
+fn finished_sidecars_escape_part_namespace() {
+    // Structural: a collected `<stem>.<lang>.srt` (allowlisted lang, no
+    // dots) can never match Grab's part infixes, so `clean_dest_parts`
+    // leaves finished sidecars alone for every offered language.
+    for lang in SUBTITLE_LANGUAGE_VALUES {
+        if *lang == "off" {
+            continue;
+        }
+        let name = format!("Clip.{lang}.srt");
+        assert!(!is_grab_part(&name, "Clip"), "{name} must not match");
+    }
+}
+
+#[test]
+fn collect_sidecar_moves_and_ignores_missing() {
+    let dir = std::env::temp_dir().join(format!("grab-sidecar-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("Clip.video.mp4");
+    let dest = dir.join("Clip.mp4");
+    std::fs::write(dir.join("Clip.video.en.srt"), b"subs").unwrap();
+    collect_sidecar(&sidecar_path_for(&out, "en"), &dest, "en");
+    assert_eq!(std::fs::read(dir.join("Clip.en.srt")).unwrap(), b"subs");
+    assert!(!dir.join("Clip.video.en.srt").exists());
+    // A page that published no subtitles: missing source is a quiet no-op.
+    collect_sidecar(&sidecar_path_for(&out, "fr"), &dest, "fr");
+    assert!(!dir.join("Clip.fr.srt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp for HLS that also drops an `en` sidecar beside the `-o`
+/// template (what the real binary does for `--write-subs`).
+fn fake_ytdlp_hls_subs(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-subs");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+stem="$(basename "$out" | sed 's/%(ext)s/mp4/')"
+side="$(printf '%s' "$stem" | sed 's/\.mp4$//').en.srt"
+printf 'subbytes' > "$(dirname "$out")/$side"
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_collects_sidecar_beside_finished_file() {
+    // End to end on the Critical path: the sidecar the binary drops as
+    // `<stem>.hls.en.srt` must be collected as `<stem>.en.srt` next to
+    // the claimed file — never orphaned under the part name.
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-subs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_subs(&dir);
+    let staging = dir.join("staging");
+    let job = VideoJob {
+        item_id: 1,
+        page_url: "https://x.com/u/status/1".into(),
+        quality: "best".into(),
+        audio_only: false,
+        dest: dir.join("v.mp4"),
+        tries: 3,
+        timeout_secs: 60,
+        user_agent: "Grab-test/1.0".into(),
+        video_format_id: None,
+        is_live: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        subtitles: Some("en".into()),
+        proxy: None,
+    };
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
+    assert_eq!(std::fs::read(dir.join("v.en.srt")).unwrap(), b"subbytes");
+    assert!(
+        !dir.join("v.hls.en.srt").exists(),
+        "part-namespaced sidecar must be collected, not orphaned"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -32,6 +32,7 @@ pub mod key {
     pub const VIDEO_QUALITY: &str = "video-quality";
     pub const VIDEO_AUDIO_ONLY: &str = "video-audio-only";
     pub const VIDEO_CODEC_PRIORITY: &str = "video-codec-priority";
+    pub const SUBTITLE_LANGUAGE: &str = "subtitle-language";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
@@ -123,6 +124,11 @@ impl AppSettings {
     }
     pub fn video_codec_newest(&self) -> bool {
         self.video_codec_priority() == crate::video::CODEC_PRIORITY_NEWEST
+    }
+    /// Stored subtitle language code; `"off"` when disabled. Resolved
+    /// to `Option` at spawn time via [`crate::video::subtitle_lang_active`].
+    pub fn subtitle_language(&self) -> String {
+        self.0.string(key::SUBTITLE_LANGUAGE).to_string()
     }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
