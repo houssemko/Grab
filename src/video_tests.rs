@@ -3822,3 +3822,50 @@ fn live_part_shell_announces_recording_and_is_swept() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn stem_reserved_in_matches_namespace_only() {
+    let names: Vec<String> = [
+        "Clip.video.mp4",
+        "Clip.video.mp4.part",
+        "Clip.audio.webm",
+        "Clip.hls.mp4",
+        "Clip.live.ts",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert!(stem_reserved_in(&names, "Clip"));
+    // Finished files, foreign stems, sidecars and lookalikes reserve nothing.
+    let clean: Vec<String> = [
+        "Clip.mp4",
+        "Other.video.mp4",
+        "Clip.en.srt",
+        "Clip.video-notes.txt",
+        "Clip.mp4.part",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    assert!(!stem_reserved_in(&clean, "Clip"));
+    assert!(!stem_reserved_in(&names, "Other"));
+    // Dot boundary: a longer stem sharing the prefix does not match.
+    assert!(!stem_reserved_in(&names, "Clippy"));
+    // Empty stems never match, even against dotfiles shaped like parts.
+    assert!(!stem_reserved_in(&[".video.mp4".to_string()], ""));
+    assert!(!stem_reserved_in(&[], "Clip"));
+}
+
+#[test]
+fn dir_file_names_snapshots_dir() {
+    let dir = std::env::temp_dir().join(format!("grab-dirnames-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.iso"), b"x").unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    let mut names = dir_file_names(&dir);
+    names.sort();
+    assert_eq!(names, vec!["a.iso".to_string(), "sub".to_string()]);
+    assert!(dir_file_names(&dir.join("missing-dir")).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

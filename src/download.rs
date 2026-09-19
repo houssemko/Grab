@@ -199,6 +199,16 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     }
 }
 
+/// File stem of a finished-name candidate (`Clip.mp4` → `Clip`,
+/// extensionless `README` → `README`); `""` when there is none, which
+/// never reserves (see `stem_reserved_in`).
+fn name_stem(name: &str) -> &str {
+    std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+}
+
 pub(crate) fn sane_filename(s: &str) -> bool {
     /// Explicit bidi controls (marks, embeddings/overrides, isolates).
     /// No std helper exists, so match the assigned ranges with escapes
@@ -2318,6 +2328,9 @@ impl DownloadManager {
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
+                // No part-namespace gate here: plain rows never reach
+                // `clean_dest_parts` (remove() only sweeps video rows),
+                // so their stems need no reservation.
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| {
@@ -2370,6 +2383,9 @@ impl DownloadManager {
                 let name = dedupe_filename(&base, |n| {
                     let p = std::path::Path::new(&dir).join(n);
                     p.exists()
+                        // Subfolder claims need no part-namespace gate (see
+                        // plain `enqueue` above): only video-row finished
+                        // names reserve stems.
                         || (0..self.store.n_items())
                             .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                             .any(|it| it.output_dir() == p.to_string_lossy())
@@ -2410,9 +2426,13 @@ impl DownloadManager {
             .map(|s| s.to_string())
             .unwrap_or_else(|| filename_from_url(&url));
         let name = shorten_filename(&name);
+        // One readdir per intake: the reservation probe below must not
+        // stat the download dir once per dedupe candidate.
+        let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
+                || crate::video::stem_reserved_in(&existing, name_stem(n))
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| {
@@ -2443,6 +2463,10 @@ impl DownloadManager {
 
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
     /// A validated piece bitmap resumes segmented instead of restarting.
+    /// Names restore verbatim (renaming would break resume identity and
+    /// recorded folders): a foreign part-namespaced file landing while
+    /// the app is closed is the accepted residual — live claims reserve
+    /// stems, restored ones predate the reservation.
     /// The video-page source (if any) is staged *before* insert so
     /// [`DownloadManager::start_next`] parks the row instead of spawning
     /// the HTTP engine on the watch page. A source whose page URL doesn't
@@ -2815,8 +2839,18 @@ impl DownloadManager {
                             if let Some(name) = pending {
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
+                                let existing =
+                                    crate::video::dir_file_names(std::path::Path::new(&dir));
                                 let taken = |n: &str| {
                                     std::path::Path::new(&dir).join(n).exists()
+                                        // Video engines never suggest today,
+                                        // but this is a generic finished-name
+                                        // claim: keep the reservation uniform
+                                        // across all of them.
+                                        || crate::video::stem_reserved_in(
+                                            &existing,
+                                            name_stem(n),
+                                        )
                                         || (0..this.store.n_items())
                                             .filter_map(|i| {
                                                 this.store.item(i).and_downcast::<DownloadItem>()
@@ -2913,12 +2947,15 @@ impl DownloadManager {
                         {
                             // A foreign file appeared at our path after
                             // dedupe: pick a fresh free name and requeue
-                            // instead of failing. The new name is free by
-                            // construction, so this terminates.
+                            // instead of failing. Fresh short of absurd
+                            // collision counts (dedupe caps at 9999), so
+                            // this terminates.
                             let dir = item.dest_dir().to_string();
                             let current = item.filename().to_string();
+                            let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
                             let new_name = dedupe_filename(&current, |n| {
                                 std::path::Path::new(&dir).join(n).exists()
+                                    || crate::video::stem_reserved_in(&existing, name_stem(n))
                                     || (0..this.store.n_items())
                                         .filter_map(|i| {
                                             this.store.item(i).and_downcast::<DownloadItem>()
