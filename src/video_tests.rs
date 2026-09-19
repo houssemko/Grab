@@ -3836,11 +3836,11 @@ fn stem_reserved_in_matches_namespace_only() {
     .map(|s| s.to_string())
     .collect();
     assert!(stem_reserved_in(&names, "Clip"));
-    // Finished files, foreign stems, sidecars and lookalikes reserve nothing.
+    // Finished files, foreign stems and lookalikes reserve nothing.
+    // (Sidecars live in the `subs` list below — they reserve by design.)
     let clean: Vec<String> = [
         "Clip.mp4",
         "Other.video.mp4",
-        "Clip.en.srt",
         "Clip.video-notes.txt",
         "Clip.mp4.part",
     ]
@@ -3854,6 +3854,21 @@ fn stem_reserved_in_matches_namespace_only() {
     // Empty stems never match, even against dotfiles shaped like parts.
     assert!(!stem_reserved_in(&[".video.mp4".to_string()], ""));
     assert!(!stem_reserved_in(&[], "Clip"));
+    // Subtitle sidecars reserve the stem (any offered language — the
+    // pref is global, and delete trashes every offered code); bare or
+    // unknown-code names do not.
+    let subs: Vec<String> = ["Clip.en.srt", "Clip.fr.srt"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(stem_reserved_in(&subs, "Clip"));
+    let bare: Vec<String> = ["Clip.srt", "Clip.eng.srt", "Clip.EN.srt"]
+        // "eng" is unknown *today*: if it ever joins the offered list,
+        // this case flips to reserving (correctly) — update then.
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(!stem_reserved_in(&bare, "Clip"));
 }
 
 #[test]
