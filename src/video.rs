@@ -1451,6 +1451,16 @@ pub(crate) fn subtitle_lang_active(raw: &str) -> Option<String> {
         .map(|v| v.to_string())
 }
 
+/// Offered subtitle languages that produce sidecars: the full list
+/// minus the `off` marker (the prefs UI uses the full list). Single
+/// source so writers and deleters cannot drift when codes change.
+pub(crate) fn subtitle_content_languages() -> impl Iterator<Item = &'static str> {
+    SUBTITLE_LANGUAGE_VALUES
+        .iter()
+        .copied()
+        .filter(|l| *l != "off")
+}
+
 /// Directory form of a resolved tool binary for `--ffmpeg-location`
 /// (yt-dlp wants the directory; Grab resolves the binary).
 fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
