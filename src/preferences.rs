@@ -587,24 +587,6 @@ pub fn show(
             );
         }
     });
-    let video_audio = adw::SwitchRow::builder()
-        .title(gettext("Audio only"))
-        .subtitle(gettext("New media downloads skip the video track"))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::VIDEO_AUDIO_ONLY,
-            &video_audio,
-            "active",
-        )
-        .build();
-    video_quality_group.add(&video_audio);
-    // Audio-only makes the quality row moot.
-    video_audio.connect_active_notify({
-        let row = video_quality.clone();
-        move |sw| row.set_sensitive(!sw.is_active())
-    });
-    video_quality.set_sensitive(!video_audio.is_active());
     let subtitle_labels = crate::video::subtitle_language_labels();
     let subtitle_refs: Vec<&str> = subtitle_labels.iter().map(String::as_str).collect();
     let subtitle_lang = adw::ComboRow::builder()
@@ -614,13 +596,6 @@ pub fn show(
         .build();
     subtitle_lang
         .set_selected(crate::video::subtitle_language_index(&settings.subtitle_language()) as u32);
-    // Audio-only rows have no video leg, so subtitles are moot —
-    // same desensitization as the quality row above.
-    video_audio.connect_active_notify({
-        let row = subtitle_lang.clone();
-        move |sw| row.set_sensitive(!sw.is_active())
-    });
-    subtitle_lang.set_sensitive(!video_audio.is_active());
     video_quality_group.add(&subtitle_lang);
     {
         let row = subtitle_lang.downgrade();
