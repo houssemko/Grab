@@ -215,7 +215,7 @@ msgid " • ↑ {upspeed}/s · {up} up{ratio}"
 msgstr ""
 
 #: src/download.rs:2280
-msgid "{pct}% ({amounts}) • {speed} • ETA {eta}{filter}{up}"
+msgid "{pct}% ({amounts}) • {speed} • About {eta} left{filter}{up}"
 msgstr ""
 
 #: src/download.rs:2291
@@ -711,7 +711,7 @@ msgid "No Downloads Yet"
 msgstr ""
 
 #: src/window.rs:786
-msgid "Add a download to get started."
+msgid "Add a download to get started"
 msgstr ""
 
 #: src/window.rs:815
@@ -1119,3 +1119,21 @@ msgid "Unknown proxy type: {t}"
 #: src/window.rs
 msgid "Automatic"
 msgstr ""
+
+#: src/download.rs
+msgid "1 hour"
+msgid_plural "{n} hours"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/download.rs
+msgid "1 minute"
+msgid_plural "{n} minutes"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/download.rs
+msgid "1 second"
+msgid_plural "{n} seconds"
+msgstr[0] ""
+msgstr[1] ""

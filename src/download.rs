@@ -1,5 +1,5 @@
 use futures_util::StreamExt as _;
-use gettextrs::gettext;
+use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
 use std::cell::{Cell, RefCell};
@@ -1499,14 +1499,16 @@ fn format_amounts(downloaded: u64, total: u64) -> String {
     format!("{} of {}", fmt_bytes(downloaded), fmt_bytes(total))
 }
 
+/// Human ETA ("14 minutes"): longest whole unit, for the HIG's
+/// "About {eta} left" estimate phrasing. Pure for tests.
 fn fmt_eta(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 {
-        format!("{h}h{m}m")
+        ngettext("1 hour", "{n} hours", h as u32).replace("{n}", &h.to_string())
     } else if m > 0 {
-        format!("{m}m{s}s")
+        ngettext("1 minute", "{n} minutes", m as u32).replace("{n}", &m.to_string())
     } else {
-        format!("{s}s")
+        ngettext("1 second", "{n} seconds", s as u32).replace("{n}", &s.to_string())
     }
 }
 
@@ -2780,7 +2782,7 @@ impl DownloadManager {
                                     "—".to_string()
                                 };
                                 item.set_detail(
-                                    gettext("{pct}% ({amounts}) • {speed} • ETA {eta}{filter}{up}")
+                                    gettext("{pct}% ({amounts}) • {speed} • About {eta} left{filter}{up}")
                                         .replace("{pct}", &((frac * 100.0) as u64).to_string())
                                         .replace("{amounts}", &format_amounts(downloaded, t))
                                         .replace("{speed}", &speed)
