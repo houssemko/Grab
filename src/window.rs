@@ -1342,7 +1342,6 @@ struct VideoStep {
     name: adw::EntryRow,
     revert: gtk4::Button,
     quality: adw::ComboRow,
-    audio: adw::SwitchRow,
     tools: adw::ActionRow,
     error: adw::ActionRow,
 }
@@ -1361,7 +1360,6 @@ fn hide_video_step(v: &VideoStep) {
     v.name.set_visible(false);
     v.revert.set_visible(false);
     v.quality.set_visible(false);
-    v.audio.set_visible(false);
     v.tools.set_visible(false);
     v.error.set_visible(false);
 }
@@ -1376,7 +1374,6 @@ fn show_video_ready(v: &VideoStep) {
     v.name.set_visible(true);
     v.revert.set_visible(true);
     v.quality.set_visible(true);
-    v.audio.set_visible(true);
 }
 
 fn show_video_tools_missing(v: &VideoStep, message: &str) {
@@ -1461,12 +1458,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         .build();
     video_quality.set_visible(false);
     video_group.add(&video_quality);
-    let video_audio = adw::SwitchRow::builder()
-        .title(gettext("Audio only"))
-        .subtitle(gettext("Skip the video track"))
-        .build();
-    video_audio.set_visible(false);
-    video_group.add(&video_audio);
     let video_tools = adw::ActionRow::builder()
         .title(gettext("Support tools"))
         .build();
@@ -1496,7 +1487,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         name: video_name,
         revert: video_revert_btn,
         quality: video_quality,
-        audio: video_audio,
         tools: video_tools,
         error: video_error,
     });
@@ -1505,15 +1495,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // later). The format picker opens on the preference-preselected
     // row; exact picks are per lookup, so nothing persists here.
     step.quality.set_selected(0);
-    step.audio.set_active(manager.settings().video_audio_only());
-    step.quality
-        .set_sensitive(!manager.settings().video_audio_only());
-    {
-        let q = step.quality.clone();
-        step.audio.connect_active_notify(move |sw| {
-            q.set_sensitive(!sw.is_active());
-        });
-    }
 
     let torrent_btn = gtk4::Button::builder()
         .label(gettext("Choose…"))
@@ -1733,10 +1714,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         if step_b.name.text().trim().is_empty() {
                             let typed = file_b.text().trim().to_string();
                             let base = if typed.is_empty() {
-                                crate::video::default_video_filename(
-                                    &v.title,
-                                    step_b.audio.is_active(),
-                                )
+                                crate::video::default_video_filename(&v.title)
                             } else {
                                 typed
                             };
@@ -1788,7 +1766,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let step2 = step.clone();
         let info2 = video_info.clone();
         let quiet = video_quiet.clone();
-        let settings = manager.settings().clone();
         let file_row2 = file_row.clone();
         url_row.connect_changed(move |row| {
             // Synthetic edit from the apply re-arm below: ignore it.
@@ -1802,18 +1779,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             file_row2.set_visible(!crate::video::is_video_page(&text));
             // Sync skeleton: leaving video-land (or editing a resolved URL)
             // hides the stale step at once; the debounced kick refills it.
-            // A new video URL also re-seeds the per-download choices from
-            // preferences (plus the audio-first preset), still overridable.
             let fresh = info2.borrow().as_ref().is_some_and(|v| v.page_url == text);
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
                 if !fresh {
                     info2.borrow_mut().take();
-                    if crate::video::is_video_page(&text) {
-                        step2.audio.set_active(
-                            settings.video_audio_only() || crate::video::is_audio_first(&text),
-                        );
-                    }
                 }
             }
             let my = generation.get() + 1;
@@ -1908,34 +1878,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let kick = kick_video.clone();
         video_retry_btn.connect_clicked(move |_| kick());
     }
-    // One-click restore of the title default (audio-aware, like submit).
+    // One-click restore of the title default (like submit).
     {
-        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let (name, info) = (step.name.clone(), video_info.clone());
         step.revert.connect_clicked(move |_| {
             if let Some(v) = info.borrow().as_ref() {
-                name.set_text(&crate::video::default_video_filename(
-                    &v.title,
-                    audio.is_active(),
-                ));
+                name.set_text(&crate::video::default_video_filename(&v.title));
                 name.grab_focus();
-            }
-        });
-    }
-    // Toggling the mode re-seeds an untouched name: the resolve-time
-    // seed ran under the other mode, so without this the row keeps a
-    // .mp4 name for an audio download (or vice versa). An edited name
-    // is never clobbered.
-    {
-        let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
-        audio.connect_active_notify(move |sw| {
-            if let Some(v) = info.borrow().as_ref() {
-                let active = sw.is_active();
-                let current = name.text().to_string();
-                if current.trim().is_empty()
-                    || current == crate::video::default_video_filename(&v.title, !active)
-                {
-                    name.set_text(&crate::video::default_video_filename(&v.title, active));
-                }
             }
         });
     }
@@ -2140,12 +2089,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 match ready {
                     Some(v) => {
                         let typed = step2.name.text().trim().to_string();
-                        let audio_only = step2.audio.is_active();
                         // Default name from the video title; the intake
                         // sanitizes it and falls back to the URL stem.
                         let auto = typed
                             .is_empty()
-                            .then(|| crate::video::default_video_filename(&v.title, audio_only));
+                            .then(|| crate::video::default_video_filename(&v.title));
                         let name = if typed.is_empty() {
                             auto.as_deref()
                         } else {
@@ -2175,7 +2123,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                             name,
                             crate::video::VideoChoices {
                                 quality,
-                                audio_only,
                                 video_format_id: format_id,
                                 is_live: v.is_live,
                             },

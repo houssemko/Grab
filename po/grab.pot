@@ -462,10 +462,6 @@ msgstr ""
 msgid "Preferred quality"
 msgstr ""
 
-#: src/preferences.rs:429 src/window.rs:1378
-msgid "Audio only"
-msgstr ""
-
 #: src/preferences.rs:447
 msgid "Authentication"
 msgstr ""
@@ -927,18 +923,10 @@ msgid "That link is not a supported media page"
 msgstr ""
 
 #: src/download.rs:1996 src/download.rs:2061
-msgid "Waiting to resolve audio…"
-msgstr ""
-
-#: src/download.rs:1998 src/download.rs:2063
 msgid "Waiting to resolve media…"
 msgstr ""
 
 #: src/download.rs:2715 src/video.rs:1423
-msgid "Resolving audio…"
-msgstr ""
-
-#: src/download.rs:2717 src/video.rs:1425
 msgid "Resolving media…"
 msgstr ""
 

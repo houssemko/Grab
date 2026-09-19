@@ -122,12 +122,7 @@
     <key name="video-quality" type="s">
       <default>'1080p'</default>
       <summary>Preferred video quality</summary>
-      <description>Target height for video-page downloads: best, 2160p, 1440p, 1080p, 720p, 480p, or audio.</description>
-    </key>
-    <key name="video-audio-only" type="b">
-      <default>false</default>
-      <summary>Audio-only video downloads</summary>
-      <description>Download only the audio track for video-page links.</description>
+      <description>Target height for video-page downloads: best, 2160p, 1440p, 1080p, 720p, or 480p.</description>
     </key>
     <key name="video-codec-priority" type="s">
       <default>'newest'</default>
