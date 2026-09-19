@@ -3884,3 +3884,24 @@ fn dir_file_names_snapshots_dir() {
     assert!(dir_file_names(&dir.join("missing-dir")).is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn collect_sidecar_never_clobbers() {
+    // A foreign sidecar arriving mid-download (after the intake
+    // snapshot) survives collection: ours stays beside the part file
+    // for row removal to sweep, and the download itself is unaffected.
+    let dir = std::env::temp_dir().join(format!("grab-sidecar-noclobber-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("Clip.video.mp4");
+    let dest = dir.join("Clip.mp4");
+    std::fs::write(dir.join("Clip.video.en.srt"), b"ours").unwrap();
+    std::fs::write(dir.join("Clip.en.srt"), b"foreign").unwrap();
+    collect_sidecar(&sidecar_path_for(&out, "en"), &dest, "en");
+    assert_eq!(std::fs::read(dir.join("Clip.en.srt")).unwrap(), b"foreign");
+    assert_eq!(
+        std::fs::read(dir.join("Clip.video.en.srt")).unwrap(),
+        b"ours"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

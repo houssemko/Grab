@@ -2170,7 +2170,11 @@ fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
         return;
     }
     let dst = sidecar_path_for(dest, lang);
-    if let Err(e) = std::fs::rename(src, &dst) {
+    // Never clobber: a foreign sidecar arriving mid-download (after the
+    // intake snapshot) must survive. Ours stays beside the part file,
+    // where row removal sweeps it. Collection runs at most once per row
+    // (post-claim), so an existing dst is always foreign.
+    if let Err(e) = crate::download::rename_noreplace(src, &dst) {
         tracing::warn!(
             src = %src.display(),
             dst = %dst.display(),
