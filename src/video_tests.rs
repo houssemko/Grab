@@ -3745,3 +3745,80 @@ fn hls_collects_sidecar_beside_finished_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Fake yt-dlp for live that behaves like a killed recorder: bytes land
+/// in the `.part` shell, no progress line is ever printed, then it exits
+/// cleanly after a beat (so the file watcher, not the log parser, must
+/// announce recording).
+fn fake_ytdlp_live_shell_only(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-live-shell");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+printf 'tsbytes' > "$out.part"
+sleep 2
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn live_part_shell_announces_recording_and_is_swept() {
+    // Two real-world live bugs in one: the file watcher polled the `-o`
+    // path (empty until finalize) instead of the growing `.part` shell,
+    // so the row sat on "Resolving media…" while bytes landed; and the
+    // shell survived next to the finished file after stop.
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-shell-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live_shell_only(&dir);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
+    let phases: Vec<String> = {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let crate::download::EngineMsg::Phase(p) = msg {
+                out.push(p);
+            }
+        }
+        out
+    };
+    assert!(
+        phases.iter().any(|p| p.contains("Recording")),
+        "shell growth must announce Recording, phases seen: {phases:?}"
+    );
+    assert!(
+        !dir.join("v.live.mp4.part").exists(),
+        "stopped capture must not leave its shell behind"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

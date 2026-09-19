@@ -3292,14 +3292,17 @@ async fn run_live_ytdlp(
     {
         let tx_rec = tx.clone();
         let out_rec = out.clone();
+        // yt-dlp records into the `.part` shell and only renames to the
+        // `-o` path at the end: the shell is what grows during capture.
+        // The final path covers a capture that finalized instantly.
+        let shell_rec = out.with_extension(format!("{ext}.part"));
         tokio::spawn(async move {
             for _ in 0..1200 {
-                if tokio::fs::metadata(&out_rec)
-                    .await
-                    .map(|m| m.len())
-                    .unwrap_or(0)
-                    > 0
-                {
+                let mut bytes = 0u64;
+                for p in [&shell_rec, &out_rec] {
+                    bytes = bytes.max(tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0));
+                }
+                if bytes > 0 {
                     tx_rec.send(EngineMsg::Phase(gettext("Recording…"))).ok();
                     break;
                 }
@@ -3382,7 +3385,7 @@ async fn run_live_ytdlp(
     // renames the `.part` shell on clean completion, so prefer the
     // finished name and fall back to the shell.
     let part = out.with_extension(format!("{ext}.part"));
-    let src = [out.clone(), part]
+    let src = [out.clone(), part.clone()]
         .into_iter()
         .find(|p| file_len(p).is_some_and(|n| n > 0));
     let Some(src) = src else {
@@ -3411,6 +3414,10 @@ async fn run_live_ytdlp(
         }
         Err(e) => return Err(VideoError::combine(&e)),
     }
+    // The killed recorder never renames its shell: sweep it now that the
+    // remux is claimed, so stopped captures leave no litter beside the
+    // finished file. A clean yt-dlp exit renamed it already (no-op).
+    let _ = tokio::fs::remove_file(&part).await;
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(file_len(&job.dest))
 }
