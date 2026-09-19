@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="3.8.0" date="2026-09-19">
+      <description>
+        <p>Audio-only download mode removed (preferences, per-download dialog override, and video-audio-only setting). Queue files with the removed audio_only key still parse. Simplified request plumbing and format-identity logic.</p>
+      </description>
+    </release>
     <release version="3.7.0" date="2026-09-19">
       <description>
         <p>Machine-readable download progress, overwrite pre-flight for existing files, per-language subtitle sidecars for videos, finished-download history with clear and URL dedup, live recording indicator with part-shell cleanup, and part-name protection for foreign files.</p>
