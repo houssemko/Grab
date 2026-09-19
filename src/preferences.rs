@@ -605,6 +605,45 @@ pub fn show(
         move |sw| row.set_sensitive(!sw.is_active())
     });
     video_quality.set_sensitive(!video_audio.is_active());
+    let subtitle_labels = crate::video::subtitle_language_labels();
+    let subtitle_refs: Vec<&str> = subtitle_labels.iter().map(String::as_str).collect();
+    let subtitle_lang = adw::ComboRow::builder()
+        .title(gettext("Subtitles"))
+        .subtitle(gettext("Download subtitles beside the video"))
+        .model(&gtk4::StringList::new(&subtitle_refs))
+        .build();
+    subtitle_lang
+        .set_selected(crate::video::subtitle_language_index(&settings.subtitle_language()) as u32);
+    // Audio-only rows have no video leg, so subtitles are moot —
+    // same desensitization as the quality row above.
+    video_audio.connect_active_notify({
+        let row = subtitle_lang.clone();
+        move |sw| row.set_sensitive(!sw.is_active())
+    });
+    subtitle_lang.set_sensitive(!video_audio.is_active());
+    video_quality_group.add(&subtitle_lang);
+    {
+        let row = subtitle_lang.downgrade();
+        settings.connect_changed(
+            Some(crate::settings::key::SUBTITLE_LANGUAGE),
+            move |s, _| {
+                if let Some(row) = row.upgrade() {
+                    row.set_selected(crate::video::subtitle_language_index(
+                        &s.string(crate::settings::key::SUBTITLE_LANGUAGE),
+                    ) as u32);
+                }
+            },
+        );
+    }
+    subtitle_lang.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::SUBTITLE_LANGUAGE,
+                crate::video::subtitle_language_value(row.selected() as usize),
+            );
+        }
+    });
     let video_auth_group = adw::PreferencesGroup::builder()
         .title(gettext("Authentication"))
         .description(gettext("Age gates and member-only pages"))

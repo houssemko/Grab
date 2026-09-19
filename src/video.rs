@@ -1393,6 +1393,102 @@ pub fn codec_priority_value(index: usize) -> &'static str {
         .unwrap_or(CODEC_PRIORITY_NEWEST)
 }
 
+/// yt-dlp subtitle language codes offered in preferences, index-aligned
+/// with [`subtitle_language_labels`]. `off` disables subtitle downloads.
+pub(crate) const SUBTITLE_LANGUAGE_VALUES: &[&str] = &[
+    "off", "en", "ar", "de", "es", "fr", "hi", "id", "it", "ja", "ko", "nl", "pl", "pt", "ru",
+    "tr", "vi", "zh",
+];
+
+pub fn subtitle_language_labels() -> Vec<String> {
+    vec![
+        gettext("Off"),
+        gettext("English"),
+        gettext("Arabic"),
+        gettext("German"),
+        gettext("Spanish"),
+        gettext("French"),
+        gettext("Hindi"),
+        gettext("Indonesian"),
+        gettext("Italian"),
+        gettext("Japanese"),
+        gettext("Korean"),
+        gettext("Dutch"),
+        gettext("Polish"),
+        gettext("Portuguese"),
+        gettext("Russian"),
+        gettext("Turkish"),
+        gettext("Vietnamese"),
+        gettext("Chinese"),
+    ]
+}
+
+/// Combo index for a stored subtitle language code. Unknown or empty
+/// values fall back to English (the default).
+pub fn subtitle_language_index(value: &str) -> usize {
+    SUBTITLE_LANGUAGE_VALUES
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(1)
+}
+
+/// Stored code for a combo index. Out-of-range indexes fall back to English.
+pub fn subtitle_language_value(index: usize) -> &'static str {
+    SUBTITLE_LANGUAGE_VALUES.get(index).copied().unwrap_or("en")
+}
+
+/// Active subtitle language for one job: the raw setting trimmed and
+/// lowercased, then allowlisted against [`SUBTITLE_LANGUAGE_VALUES`].
+/// `off`, empty and unknown codes (hand-edited dconf) all resolve to
+/// `None`: a code yt-dlp would only warn about is never requested, and
+/// the value reaching `--sub-langs` — and the sidecar filename — always
+/// comes from the fixed list.
+pub(crate) fn subtitle_lang_active(raw: &str) -> Option<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    SUBTITLE_LANGUAGE_VALUES
+        .iter()
+        .find(|v| **v == norm && **v != "off")
+        .map(|v| v.to_string())
+}
+
+/// Directory form of a resolved tool binary for `--ffmpeg-location`
+/// (yt-dlp wants the directory; Grab resolves the binary).
+fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
+    ffmpeg_bin
+        .parent()
+        .unwrap_or_else(|| Path::new("/usr/bin"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Best-effort subtitle sidecars — yt-dlp/Parabolic parity: exact
+/// language with automatic-caption fallback, converted to SRT beside
+/// the output. A missing language is only a warning upstream (verified
+/// against yt-dlp 2026.08.19: `There are no subtitles for the
+/// requested languages`, exit 0), and conversion points at Grab's
+/// resolved ffmpeg (guaranteed present by `resolve_libraries`, which
+/// refuses video attempts without it) — so subtitles can never sink a
+/// download.
+fn subtitle_cli_args(lang: &str, ffmpeg_bin: &Path) -> Vec<String> {
+    vec![
+        "--write-subs".to_string(),
+        "--sub-langs".to_string(),
+        lang.to_string(),
+        "--write-auto-subs".to_string(),
+        "--convert-subs".to_string(),
+        "srt".to_string(),
+        "--ffmpeg-location".to_string(),
+        ffmpeg_location_dir(ffmpeg_bin),
+    ]
+}
+
+/// Whether a leg downloads subtitles: only legs carrying video content
+/// (the split video part, or an adopted single file), never audio-only
+/// rows, and only when a language is configured.
+pub(crate) fn leg_downloads_subs(job: &VideoJob, video_leg: bool, single_file: bool) -> bool {
+    !job.audio_only && job.subtitles.is_some() && (video_leg || single_file)
+}
+
 /// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
 /// AV1 wins ties at the same height, then VP9, HEVC, AVC1, anything
 /// else. Older codecs are only dropped in favor of newer ones — never
@@ -1986,6 +2082,43 @@ pub fn clean_dest_parts(dest: &Path) {
     }
 }
 
+/// `<output-stem>.<lang>.srt` beside `output`: where yt-dlp drops a
+/// `--write-subs` sidecar for a `-o` path, and where Grab keeps it
+/// beside the finished file. The language is always allowlisted (no
+/// dots, no separators), so this can never escape its directory — and
+/// a finished `<stem>.<lang>.srt` can never match [`PART_KINDS`], so
+/// `clean_dest_parts` structurally leaves collected sidecars alone
+/// while still sweeping stale part-namespaced ones.
+pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
+    let stem = output
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".to_string());
+    output
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(format!("{stem}.{lang}.srt"))
+}
+
+/// Best-effort sidecar collection: move an exact sidecar file beside
+/// the finished download. A missing source (the page published no
+/// subtitles) is the normal nothing-to-do; any other failure only
+/// traces — subtitles must never fail a download that succeeded.
+fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
+    if !src.exists() {
+        return;
+    }
+    let dst = sidecar_path_for(dest, lang);
+    if let Err(e) = std::fs::rename(src, &dst) {
+        tracing::warn!(
+            src = %src.display(),
+            dst = %dst.display(),
+            error = %e,
+            "subtitle sidecar left beside the part file"
+        );
+    }
+}
+
 fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("manifest.json")
 }
@@ -2141,6 +2274,10 @@ pub struct VideoJob {
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
+    /// Subtitle language code for sidecar downloads (`None` = off or
+    /// audio-only). Only legs carrying video content request subtitles;
+    /// a missing language is a yt-dlp warning, never a failure.
+    pub subtitles: Option<String>,
     /// Proxy resolved at spawn time (`None` = direct). yt-dlp spawns
     /// take `--proxy` plus NO_PROXY from it.
     pub proxy: Option<crate::download::ResolvedProxy>,
@@ -2430,6 +2567,8 @@ pub async fn run_video_download(
                 &v.format_id,
                 &part_fallback_spec(&job.quality, true, false),
                 &path,
+                leg_downloads_subs(&job, true, single),
+                &ffmpeg_bin,
                 report,
                 &mut abort,
                 timeout,
@@ -2447,6 +2586,8 @@ pub async fn run_video_download(
             &audio_sel.format_id,
             &part_fallback_spec(&job.quality, false, job.audio_only || !single),
             &apart,
+            leg_downloads_subs(&job, false, single),
+            &ffmpeg_bin,
             report,
             &mut abort,
             timeout,
@@ -2501,6 +2642,7 @@ pub async fn run_video_download(
             &job.dest,
             video_sel.as_ref().map(|s| s.ext.as_str()),
             &video.title,
+            job.subtitles.as_deref(),
             timeout,
         )
         .await
@@ -2646,6 +2788,7 @@ async fn finish_merge(
     dest: &Path,
     video_ext: Option<&str>,
     title: &str,
+    subtitles: Option<&str>,
     timeout: Duration,
 ) -> Result<u64, VideoError> {
     let final_tmp: PathBuf = match (vpart, video_ext) {
@@ -2669,6 +2812,14 @@ async fn finish_merge(
         }
         Err(e) => return Err(VideoError::combine(&e)),
     }
+    // Best-effort subtitle sidecar: the subbed leg's `-o` is a part
+    // path, so the sidecar lands under the part namespace — collect it
+    // beside the finished file (outside the namespace, so retries and
+    // row removal keep it). Split rows subtitle the video leg; adopted
+    // single files their only (audio) leg.
+    if let Some(lang) = subtitles {
+        collect_sidecar(&sidecar_path_for(vpart.unwrap_or(apart), lang), dest, lang);
+    }
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(dest);
     if let Some(mut m) = read_manifest(staging) {
@@ -2682,7 +2833,13 @@ async fn finish_merge(
 /// yt-dlp argv for one split part: exact format id, exact output path.
 /// Pure for tests: flags, inputs and the end-of-options separator are
 /// pinned here, not in assertion-hostile spawn code.
-pub(crate) fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
+pub(crate) fn part_download_argv(
+    job: &VideoJob,
+    spec: &str,
+    out: &Path,
+    subs: bool,
+    ffmpeg_bin: &Path,
+) -> Vec<String> {
     let mut args = vec![
         "--ignore-config".to_string(),
         "--no-playlist".to_string(),
@@ -2698,6 +2855,9 @@ pub(crate) fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<
         job.tries.max(1).to_string(),
     ];
     args.extend(proxy_cli_args(job.proxy.as_ref()));
+    if subs && let Some(lang) = job.subtitles.as_deref() {
+        args.extend(subtitle_cli_args(lang, ffmpeg_bin));
+    }
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
         Some(job.user_agent.as_str()),
@@ -2855,12 +3015,14 @@ async fn run_part_ytdlp(
     spec_primary: &str,
     spec_fallback: &str,
     out_path: &Path,
+    subs: bool,
+    ffmpeg_bin: &Path,
     report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
     abort: &mut oneshot::Receiver<()>,
     timeout: Duration,
 ) -> Result<Option<()>, VideoError> {
     for (i, spec) in [spec_primary, spec_fallback].iter().enumerate() {
-        let argv = part_download_argv(job, spec, out_path);
+        let argv = part_download_argv(job, spec, out_path, subs, ffmpeg_bin);
         match run_part_attempt(
             youtube_bin,
             &argv,
@@ -3415,9 +3577,11 @@ fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Option<PathBu
             p.is_file()
                 && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                     n.starts_with(&prefix)
+                        // Subtitle sidecars (`<stem>.hls.<lang>.srt`) share
+                        // the prefix but are never the media output.
                         && !matches!(
                             p.extension().and_then(|e| e.to_str()),
-                            Some("part" | "ytdl" | "temp" | "tmp" | "frag")
+                            Some("part" | "ytdl" | "temp" | "tmp" | "frag" | "srt")
                         )
                 })
         })
@@ -3454,11 +3618,7 @@ pub(crate) fn hls_download_argv(
         "-o".to_string(),
         out_template.to_string_lossy().into_owned(),
         "--ffmpeg-location".to_string(),
-        ffmpeg_bin
-            .parent()
-            .unwrap_or_else(|| Path::new("/usr/bin"))
-            .to_string_lossy()
-            .into_owned(),
+        ffmpeg_location_dir(ffmpeg_bin),
         "--retries".to_string(),
         job.tries.max(1).to_string(),
         "--print".to_string(),
@@ -3471,6 +3631,14 @@ pub(crate) fn hls_download_argv(
     } else {
         args.push("--merge-output-format".to_string());
         args.push("mp4".to_string());
+    }
+    // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
+    // never reach this builder — they run through `live_capture_argv`,
+    // which deliberately omits subtitles).
+    if !job.audio_only
+        && let Some(lang) = job.subtitles.as_deref()
+    {
+        args.extend(subtitle_cli_args(lang, ffmpeg_bin));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
@@ -3639,6 +3807,16 @@ async fn run_hls_ytdlp(
             return Err(VideoError::exists());
         }
         Err(e) => return Err(VideoError::combine(&e)),
+    }
+    // Best-effort subtitle sidecar: `-o` is the `hls` part template, so
+    // collect `<stem>.hls.<lang>.srt` beside the finished file (outside
+    // the part namespace, so retries and row removal keep it).
+    if let Some(lang) = job.subtitles.as_deref() {
+        collect_sidecar(
+            &dest_part_path(&job.dest, "hls", &format!("{lang}.srt")),
+            &job.dest,
+            lang,
+        );
     }
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(file_len(&job.dest))

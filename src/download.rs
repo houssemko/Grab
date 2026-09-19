@@ -3194,6 +3194,13 @@ impl DownloadManager {
             is_live,
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
+            // Audio-only rows never subtitle (no video leg exists), so
+            // resolve to `None` here rather than gating at every use.
+            subtitles: if audio_only {
+                None
+            } else {
+                crate::video::subtitle_lang_active(&self.settings.subtitle_language())
+            },
             proxy,
         };
         let handle = tokio_rt().spawn(async move {

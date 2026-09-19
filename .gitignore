@@ -13,3 +13,6 @@ flatpak-repo/
 .vscode/
 # Python helper bytecode (tests/throttled_server.py)
 __pycache__/
+
+# Test-run artifact from the HLS fake (writes beside CWD)
+.argv.log
