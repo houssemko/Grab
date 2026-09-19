@@ -933,10 +933,11 @@ fn formats_bytes() {
 
 #[test]
 fn formats_eta() {
-    assert_eq!(fmt_eta(0), "0s");
-    assert_eq!(fmt_eta(45), "45s");
-    assert_eq!(fmt_eta(125), "2m5s");
-    assert_eq!(fmt_eta(3723), "1h2m");
+    assert_eq!(fmt_eta(0), "0 seconds");
+    assert_eq!(fmt_eta(1), "1 second");
+    assert_eq!(fmt_eta(45), "45 seconds");
+    assert_eq!(fmt_eta(125), "2 minutes");
+    assert_eq!(fmt_eta(3723), "1 hour");
 }
 
 #[test]
