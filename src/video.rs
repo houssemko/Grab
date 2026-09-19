@@ -2321,6 +2321,16 @@ pub async fn run_video_download(
     match plan {
         ResumePlan::Finished => return Ok(file_len(&job.dest)),
         ResumePlan::Fresh => {
+            // Overwrite pre-flight (Parabolic parity): a finished file
+            // already at `dest` means the atomic claim (rename_noreplace,
+            // which never clobbers) fails at the end no matter what —
+            // refuse before a wasted download so the pump requeues under
+            // a fresh name. This arm's normal cleanup drops our own
+            // shells too, since this row can never adopt them again.
+            if job.dest.exists() {
+                clean_dest_parts(&job.dest);
+                return Err(VideoError::exists());
+            }
             // Wipe the staging dir, not just known names: a previous
             // attempt's detached writers (pause winning the abort race) may
             // still hold the old inodes, so unlink first — they write
@@ -3082,6 +3092,13 @@ async fn run_live_ytdlp(
     let out = dest_part_path(&job.dest, "live", ext);
     let _ = tokio::fs::remove_file(&out).await;
     let _ = tokio::fs::remove_file(out.with_extension(format!("{ext}.part"))).await;
+    // Overwrite pre-flight (Parabolic parity): a finished file already
+    // at dest means the capture's rename claim fails at the end — refuse
+    // before recording so the pump requeues under a fresh name instead
+    // of wasting an entire stream.
+    if job.dest.exists() {
+        return Err(VideoError::exists());
+    }
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
@@ -3480,6 +3497,12 @@ async fn run_hls_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
+    // Overwrite pre-flight (Parabolic parity): refuse before transferring
+    // when the claim target is already taken — rename_noreplace never
+    // clobbers, so the run would only fail after a wasted download.
+    if job.dest.exists() {
+        return Err(VideoError::exists());
+    }
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());

@@ -2696,6 +2696,45 @@ fn live_capture_stale_staging_never_adopts() {
 }
 
 #[test]
+fn live_capture_refuses_existing_dest() {
+    // Overwrite pre-flight (Parabolic parity): a finished file already
+    // at dest makes the final rename claim impossible, so the capture
+    // must refuse before recording — no spawn, no part shell, and the
+    // pump's DEST_EXISTS path requeues under a fresh name.
+    let dir = std::env::temp_dir().join(format!("grab-fakelive-ow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    std::fs::write(&job.dest, b"already").unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    match res {
+        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS, "{e}"),
+        ok => panic!("expected pre-flight refusal, got {ok:?}"),
+    }
+    assert!(
+        !dir.join("v.live.mp4.part").exists(),
+        "no capture shell: the fake must never have run"
+    );
+    assert!(!staging.exists(), "staging untouched by the refusal");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn live_capture_abort_adopts_partial() {
     // User stop mid-capture: the kill lands, the recorded partial is
     // adopted and remuxed, the row completes Done.
@@ -2813,6 +2852,56 @@ fn vod_hls_pins_planner_variant_id() {
         logged.split_whitespace().nth(f + 1).expect("spec"),
         "h1080+ba/b",
         "{logged}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn vod_hls_refuses_existing_dest() {
+    // Overwrite pre-flight for the VOD HLS path: an existing finished
+    // file must be refused before yt-dlp transfers anything, so the
+    // pump requeues under a fresh name instead of downloading the whole
+    // stream into a doomed claim.
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-ow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls(&dir);
+    let staging = dir.join("staging");
+    let job = VideoJob {
+        item_id: 1,
+        page_url: "https://x.com/u/status/1".into(),
+        quality: "best".into(),
+        audio_only: false,
+        dest: dir.join("v.mp4"),
+        tries: 3,
+        timeout_secs: 60,
+        user_agent: "Grab-test/1.0".into(),
+        video_format_id: None,
+        is_live: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        proxy: None,
+    };
+    std::fs::write(&job.dest, b"already").unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    match res {
+        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS, "{e}"),
+        ok => panic!("expected pre-flight refusal, got {ok:?}"),
+    }
+    assert!(
+        !dir.with_extension("argv.log").exists(),
+        "no argv log: the fake must never have run"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
