@@ -3823,3 +3823,46 @@ fn drop_finished_duplicates_keeps_active_and_newest() {
     m.drop_finished_duplicates("", u64::MAX);
     assert_eq!(m.store().n_items(), 3);
 }
+
+#[test]
+fn enqueue_video_reserves_part_namespaced_stems() {
+    // A foreign file under Grab's part namespace reserves the stem: the
+    // intake must dedupe onward so a later clean_dest_parts sweep can
+    // never touch files Grab didn't write.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("enqueue-video-reserve");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-video-reserve-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("Clip.video.mp4"), b"foreign").unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest_s),
+            Some("Clip.mp4"),
+            crate::video::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+            },
+        )
+        .expect("video enqueue");
+    assert_eq!(item.filename(), "Clip (1).mp4");
+    // The foreign file is untouched and the fresh stem is unreserved.
+    assert_eq!(
+        std::fs::read(dest.join("Clip.video.mp4")).unwrap(),
+        b"foreign"
+    );
+    assert!(!crate::video::stem_reserved_in(
+        &crate::video::dir_file_names(&dest),
+        "Clip (1)"
+    ));
+    drain_engine(&manager, item.id());
+    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    let _ = std::fs::remove_dir_all(&dest);
+}

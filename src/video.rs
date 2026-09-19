@@ -2058,10 +2058,41 @@ fn is_grab_part(file_name: &str, stem: &str) -> bool {
     rest.is_some_and(|r| PART_KINDS.iter().any(|k| r.starts_with(k)))
 }
 
+/// File names directly inside `dir`: a best-effort snapshot for intake
+/// reservation. Unreadable or missing dirs read as empty; per-entry IO
+/// errors drop that entry (fail-open, same posture as the sweeper
+/// below, so neither side can conjure a phantom delete).
+pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `stem` already hosts Grab-namespaced part files in a
+/// snapshotted listing (`<stem>.video.*`, `<stem>.audio.*`,
+/// `<stem>.hls.*`, `<stem>.live.*`, plus yt-dlp `.part` shells of
+/// those). Intake treats such a stem as taken: claiming it would let a
+/// later `clean_dest_parts` sweep — or resume adoption — touch files
+/// Grab never wrote. Empty stems never match. Directories reserve too
+/// (the sweeper only deletes files): deliberately fail-closed, at most
+/// an extra ` (1)` in the claimed name.
+pub(crate) fn stem_reserved_in(names: &[String], stem: &str) -> bool {
+    if stem.is_empty() {
+        return false;
+    }
+    names.iter().any(|n| is_grab_part(n, stem))
+}
+
 /// Delete a row's dest-dir part files (finished parts plus yt-dlp `.part`
-/// shells). The finished file is never matched; foreign files only
-/// collide on exact `<stem>.<kind>.<ext>` names — Grab's documented
-/// namespace, claimed by intake dedupe of the finished name.
+/// shells). The finished file is never matched. Intake never claims a
+/// stem that already hosts part-namespace files (see `stem_has_parts`),
+/// so a match here is Grab's own output — except for files that arrived
+/// mid-download, which no claim-time check can cover.
 pub fn clean_dest_parts(dest: &Path) {
     let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
         return;
