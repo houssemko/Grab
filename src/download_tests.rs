@@ -3690,3 +3690,136 @@ exit 0
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn clear_finished_drops_only_done() {
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let qf = test_queue_file("clear-finished");
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let add = |id: u64, url: &str, name: &str, status: DownloadStatus| {
+        let it = DownloadItem::new(id, url, name, "/tmp/dl");
+        it.set_status(status);
+        m.store().append(&it);
+    };
+    add(
+        1,
+        "https://example.com/a.iso",
+        "a.iso",
+        DownloadStatus::Done,
+    );
+    add(
+        2,
+        "https://example.com/b.iso",
+        "b.iso",
+        DownloadStatus::Done,
+    );
+    add(
+        3,
+        "https://example.com/c.iso",
+        "c.iso",
+        DownloadStatus::Queued,
+    );
+    add(
+        4,
+        "https://example.com/d.iso",
+        "d.iso",
+        DownloadStatus::Failed,
+    );
+    assert_eq!(m.finished_count(), 2);
+    assert_eq!(m.clear_finished(), 2);
+    assert_eq!(m.finished_count(), 0);
+    assert_eq!(m.store().n_items(), 2);
+    // The persisted queue carries only the survivors.
+    let text = std::fs::read_to_string(&qf).unwrap();
+    let queue: StoredQueue = serde_json::from_str(&text).unwrap();
+    assert_eq!(queue.items.len(), 2);
+    assert!(
+        queue
+            .items
+            .iter()
+            .all(|it| it.status != DownloadStatus::Done),
+        "no Done rows may persist"
+    );
+    // Empty clear is a quiet no-op (no file churn, no UI sync).
+    let mtime = std::fs::metadata(&qf).and_then(|m| m.modified()).ok();
+    let syncs = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    m.set_on_change({
+        let syncs = syncs.clone();
+        move || {
+            syncs.set(syncs.get() + 1);
+        }
+    });
+    assert_eq!(m.clear_finished(), 0);
+    assert_eq!(syncs.get(), 0, "empty clear must not sync the UI");
+    assert_eq!(
+        std::fs::metadata(&qf).and_then(|m| m.modified()).ok(),
+        mtime,
+        "empty clear must not rewrite the queue file"
+    );
+    m.cancel_all();
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn restore_dedups_finished_urls() {
+    // Queue files written before dedup may hold several Done rows per
+    // URL; restore collapses them so the newest (last) one wins.
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let qf = test_queue_file("history-dedup");
+    let settings = test_settings();
+    let m1 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
+    for (id, name) in [(1u64, "old.iso"), (2, "new.iso")] {
+        let it = DownloadItem::new(id, "https://example.com/x.iso", name, "/tmp/dl");
+        it.set_progress(1.0);
+        it.set_status(DownloadStatus::Done);
+        it.set_detail("Finished".to_string());
+        m1.store().append(&it);
+    }
+    m1.persist_queue();
+
+    let m2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    m2.restore_queue();
+    assert_eq!(m2.store().n_items(), 1);
+    let it = m2.store().item(0).and_downcast::<DownloadItem>().unwrap();
+    assert_eq!(it.filename(), "new.iso");
+    assert_eq!(it.status(), DownloadStatus::Done);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn drop_finished_duplicates_keeps_active_and_newest() {
+    // The finish hook's policy, directly: the just-finished row stays,
+    // older Done rows for the URL go, everything else is user intent.
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("history-dedup-live");
+    let settings = test_settings();
+    let m = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let add = |id: u64, url: &str, status: DownloadStatus| {
+        let it = DownloadItem::new(id, url, &format!("f{id}.iso"), "/tmp/dl");
+        it.set_status(status);
+        m.store().append(&it);
+    };
+    add(1, "https://example.com/a.iso", DownloadStatus::Done);
+    add(2, "https://example.com/a.iso", DownloadStatus::Done);
+    add(3, "https://example.com/a.iso", DownloadStatus::Queued);
+    add(4, "https://example.com/b.iso", DownloadStatus::Done);
+    // Row 2 just finished: row 1 (older Done, same URL) drops; the
+    // queued row and the other URL are untouched.
+    m.drop_finished_duplicates("https://example.com/a.iso", 2);
+    let remaining: Vec<(u64, DownloadStatus)> = (0..m.store().n_items())
+        .filter_map(|i| m.store().item(i).and_downcast::<DownloadItem>())
+        .map(|it| (it.id(), it.status()))
+        .collect();
+    assert_eq!(
+        remaining,
+        vec![
+            (2, DownloadStatus::Done),
+            (3, DownloadStatus::Queued),
+            (4, DownloadStatus::Done)
+        ]
+    );
+    // Unnormalizable URLs skip quietly instead of dropping anything.
+    m.drop_finished_duplicates("", u64::MAX);
+    assert_eq!(m.store().n_items(), 3);
+}

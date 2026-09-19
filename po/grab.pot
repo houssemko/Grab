@@ -1233,3 +1233,23 @@ msgstr ""
 #: src/video.rs
 msgid "staging directory escaped its root"
 msgstr ""
+#: src/window.rs
+#: src/application.rs
+msgid "Clear Finished"
+msgstr ""
+
+#: src/application.rs
+msgid "Clear Finished Downloads?"
+msgstr ""
+
+#: src/application.rs
+msgid "This will remove the finished download from the list. The file stays on disk."
+msgid_plural "This will remove {n} finished downloads from the list. The files stay on disk."
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/application.rs
+msgid "Cleared finished download"
+msgid_plural "Cleared {n} finished downloads"
+msgstr[0] ""
+msgstr[1] ""

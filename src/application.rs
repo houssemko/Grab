@@ -288,6 +288,59 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
         },
         {
             let st = Rc::clone(st);
+            gio::ActionEntry::builder("clear-finished")
+                .activate(move |_, _, _| {
+                    let Some(s) = st.borrow().as_ref().cloned() else {
+                        return;
+                    };
+                    let n = s.manager.finished_count();
+                    if n == 0 {
+                        return;
+                    }
+                    // Records only: downloaded files stay on disk, so say
+                    // so in the body — a destructive confirm for a
+                    // non-destructive (to files) action still needs the
+                    // scope spelled out.
+                    let body = ngettext(
+                        "This will remove the finished download from the list. The file stays on disk.",
+                        "This will remove {n} finished downloads from the list. The files stay on disk.",
+                        n as u32,
+                    )
+                    .replace("{n}", &n.to_string());
+                    let dialog = adw::AlertDialog::builder()
+                        .heading(gettext("Clear Finished Downloads?"))
+                        .body(&body)
+                        .build();
+                    dialog.add_response("cancel", &gettext("Cancel"));
+                    dialog.add_response("confirm", &gettext("Clear Finished"));
+                    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+                    dialog.set_default_response(Some("cancel"));
+                    dialog.set_close_response("cancel");
+                    let manager = s.manager.clone();
+                    let toasts = s.toasts.clone();
+                    dialog.connect_response(None, move |_, response| {
+                        if response == "confirm" {
+                            let n = manager.clear_finished();
+                            if n == 0 {
+                                return;
+                            }
+                            let toast = adw::Toast::new(
+                                &ngettext(
+                                    "Cleared finished download",
+                                    "Cleared {n} finished downloads",
+                                    n as u32,
+                                )
+                                .replace("{n}", &n.to_string()),
+                            );
+                            toasts.add_toast(toast);
+                        }
+                    });
+                    dialog.present(Some(&s.window));
+                })
+                .build()
+        },
+        {
+            let st = Rc::clone(st);
             gio::ActionEntry::builder("open-folder")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {

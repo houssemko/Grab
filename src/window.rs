@@ -806,6 +806,7 @@ pub fn build_window(
     let section = gio::Menu::new();
     section.append(Some(&gettext("Cancel All")), Some("app.cancel-all"));
     section.append(Some(&gettext("Retry Failed")), Some("app.retry-failed"));
+    section.append(Some(&gettext("Clear Finished")), Some("app.clear-finished"));
     section.append(
         Some(&gettext("Open Download Folder")),
         Some("app.open-folder"),
