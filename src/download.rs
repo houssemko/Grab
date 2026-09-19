@@ -2543,6 +2543,9 @@ impl DownloadManager {
         } else {
             gettext("Finished")
         });
+        // Restored duplicates collapse too: queue files written before
+        // dedup may hold several Done rows per URL; the last one wins.
+        self.drop_finished_duplicates(&url, item.id());
         self.insert(item);
     }
 
@@ -2871,6 +2874,10 @@ impl DownloadManager {
                             } else {
                                 gettext("Finished")
                             });
+                            // One finished record per URL (Parabolic parity):
+                            // an older Done row for this URL leaves now, so
+                            // re-downloads replace instead of stacking.
+                            this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
                             // Filtered torrents: drop the untoggled files
@@ -3669,6 +3676,89 @@ impl DownloadManager {
             |s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled),
             |m, id| m.retry(id),
         );
+    }
+
+    /// Drop every finished row (files stay on disk). Still-seeding
+    /// torrents leave the session first: clearing the record must not
+    /// leave invisible uploading running. Returns the cleared count.
+    pub fn clear_finished(self: &Rc<Self>) -> usize {
+        let before = self.store.n_items();
+        self.for_matching(
+            |s| matches!(s, DownloadStatus::Done),
+            |m, id| m.drop_finished_row(id),
+        );
+        let n = (before - self.store.n_items()) as usize;
+        if n > 0 {
+            // Same hygiene as a restart: archives and staged selections
+            // no remaining row references go now (cleared rows have no
+            // Undo path holding them, unlike `remove`).
+            let referenced: std::collections::HashSet<String> = (0..self.store.n_items())
+                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                .map(|it| it.url().to_string())
+                .filter(|u| crate::torrent::is_torrent_url(u))
+                .collect();
+            crate::torrent::sweep_archives(&referenced);
+            crate::torrent::prune_selections(&referenced);
+            self.persist_queue();
+            self.changed();
+        }
+        n
+    }
+
+    /// Finished rows (for the clear-finished confirm and toast counts).
+    pub fn finished_count(&self) -> usize {
+        (0..self.store.n_items())
+            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            .filter(|it| it.status() == DownloadStatus::Done)
+            .count()
+    }
+
+    /// Drop finished rows for `url` other than `keep_id`: one finished
+    /// record per URL (Parabolic parity). Only Done rows — active,
+    /// paused, failed and cancelled rows are user intent and never
+    /// touched. Unnormalizable URLs skip quietly (rows are validated
+    /// at intake, so this is unreachable in practice). Store-only;
+    /// callers persist.
+    pub(crate) fn drop_finished_duplicates(&self, url: &str, keep_id: u64) {
+        let Ok(key) = normalize_url(url) else {
+            return;
+        };
+        let ids: Vec<u64> = (0..self.store.n_items())
+            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            .filter(|it| {
+                it.status() == DownloadStatus::Done
+                    && it.id() != keep_id
+                    && normalize_url(&it.url()).is_ok_and(|u| u == key)
+            })
+            .map(|it| it.id())
+            .collect();
+        for id in ids {
+            self.drop_finished_row(id);
+        }
+    }
+
+    /// Drop one finished row: a lingering torrent session leaves first
+    /// (see `clear_finished`), staged sources and epochs release, and
+    /// the row leaves the store. Files stay on disk. Done rows hold no
+    /// engines, bitmaps or partials, so unlike `remove` there is nothing
+    /// to cancel, snapshot or clean.
+    fn drop_finished_row(&self, id: u64) {
+        if let Some(item) = self.find(id) {
+            if crate::torrent::is_torrent(&item.url()) {
+                crate::torrent::forget_download(id);
+            }
+        }
+        self.video_sources.borrow_mut().remove(&id);
+        self.epoch.borrow_mut().remove(&id);
+        if let Some(pos) = (0..self.store.n_items()).find(|&i| {
+            self.store
+                .item(i)
+                .and_downcast::<DownloadItem>()
+                .map(|it| it.id() == id)
+                .unwrap_or(false)
+        }) {
+            self.store.remove(pos);
+        }
     }
 
     fn for_matching(
