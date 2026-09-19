@@ -3836,11 +3836,11 @@ fn stem_reserved_in_matches_namespace_only() {
     .map(|s| s.to_string())
     .collect();
     assert!(stem_reserved_in(&names, "Clip"));
-    // Finished files, foreign stems, sidecars and lookalikes reserve nothing.
+    // Finished files, foreign stems and lookalikes reserve nothing.
+    // (Sidecars live in the `subs` list below — they reserve by design.)
     let clean: Vec<String> = [
         "Clip.mp4",
         "Other.video.mp4",
-        "Clip.en.srt",
         "Clip.video-notes.txt",
         "Clip.mp4.part",
     ]
@@ -3854,6 +3854,21 @@ fn stem_reserved_in_matches_namespace_only() {
     // Empty stems never match, even against dotfiles shaped like parts.
     assert!(!stem_reserved_in(&[".video.mp4".to_string()], ""));
     assert!(!stem_reserved_in(&[], "Clip"));
+    // Subtitle sidecars reserve the stem (any offered language — the
+    // pref is global, and delete trashes every offered code); bare or
+    // unknown-code names do not.
+    let subs: Vec<String> = ["Clip.en.srt", "Clip.fr.srt"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(stem_reserved_in(&subs, "Clip"));
+    let bare: Vec<String> = ["Clip.srt", "Clip.eng.srt", "Clip.EN.srt"]
+        // "eng" is unknown *today*: if it ever joins the offered list,
+        // this case flips to reserving (correctly) — update then.
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert!(!stem_reserved_in(&bare, "Clip"));
 }
 
 #[test]
@@ -3867,5 +3882,26 @@ fn dir_file_names_snapshots_dir() {
     names.sort();
     assert_eq!(names, vec!["a.iso".to_string(), "sub".to_string()]);
     assert!(dir_file_names(&dir.join("missing-dir")).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn collect_sidecar_never_clobbers() {
+    // A foreign sidecar arriving mid-download (after the intake
+    // snapshot) survives collection: ours stays beside the part file
+    // for row removal to sweep, and the download itself is unaffected.
+    let dir = std::env::temp_dir().join(format!("grab-sidecar-noclobber-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("Clip.video.mp4");
+    let dest = dir.join("Clip.mp4");
+    std::fs::write(dir.join("Clip.video.en.srt"), b"ours").unwrap();
+    std::fs::write(dir.join("Clip.en.srt"), b"foreign").unwrap();
+    collect_sidecar(&sidecar_path_for(&out, "en"), &dest, "en");
+    assert_eq!(std::fs::read(dir.join("Clip.en.srt")).unwrap(), b"foreign");
+    assert_eq!(
+        std::fs::read(dir.join("Clip.video.en.srt")).unwrap(),
+        b"ours"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

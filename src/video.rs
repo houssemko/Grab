@@ -2083,26 +2083,46 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Whether `stem` already hosts Grab-namespaced part files in a
-/// snapshotted listing (`<stem>.video.*`, `<stem>.audio.*`,
-/// `<stem>.hls.*`, `<stem>.live.*`, plus yt-dlp `.part` shells of
-/// those). Intake treats such a stem as taken: claiming it would let a
-/// later `clean_dest_parts` sweep — or resume adoption — touch files
-/// Grab never wrote. Empty stems never match. Directories reserve too
-/// (the sweeper only deletes files): deliberately fail-closed, at most
-/// an extra ` (1)` in the claimed name.
+/// Whether `stem` already hosts Grab-namespaced part files or subtitle
+/// sidecars in a snapshotted listing (`<stem>.video.*` etc. plus
+/// `<stem>.<lang>.srt` for offered languages, plus yt-dlp `.part`
+/// shells of the part files). Intake treats such a stem as taken:
+/// claiming it would let a later `clean_dest_parts` sweep, subtitle
+/// collection, or row delete touch files Grab never wrote. Empty stems
+/// never match. Directories reserve too (the sweeper only deletes
+/// files): deliberately fail-closed, at most an extra ` (1)` in the
+/// claimed name.
 pub(crate) fn stem_reserved_in(names: &[String], stem: &str) -> bool {
     if stem.is_empty() {
         return false;
     }
-    names.iter().any(|n| is_grab_part(n, stem))
+    names.iter().any(|n| is_grab_part(n, stem)) || stem_has_subtitle_sidecar(names, stem)
+}
+
+/// Whether `stem` already hosts a subtitle sidecar for any offered
+/// language (`<stem>.<lang>.srt`) in a snapshotted listing. Checked
+/// alongside `stem_reserved_in` at intake so a pre-existing sidecar
+/// reserves the stem too. Deliberately NOT folded into `is_grab_part`:
+/// that matcher backs `clean_dest_parts`'s sweep, and sidecars must
+/// survive row removal, not be swept with it.
+fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
+    if stem.is_empty() {
+        return false;
+    }
+    names.iter().any(|n| {
+        n.strip_prefix(stem)
+            .and_then(|r| r.strip_prefix('.'))
+            .and_then(|r| r.strip_suffix(".srt"))
+            .is_some_and(|lang| subtitle_content_languages().any(|l| l == lang))
+    })
 }
 
 /// Delete a row's dest-dir part files (finished parts plus yt-dlp `.part`
 /// shells). The finished file is never matched. Intake never claims a
-/// stem that already hosts part-namespace files (see `stem_has_parts`),
-/// so a match here is Grab's own output — except for files that arrived
-/// mid-download, which no claim-time check can cover.
+/// stem that already hosts part-namespace files or subtitle sidecars
+/// (see `stem_reserved_in`), so a match here is Grab's own output —
+/// except for files that arrived mid-download, which no claim-time
+/// check can cover.
 pub fn clean_dest_parts(dest: &Path) {
     let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
         return;
@@ -2150,7 +2170,11 @@ fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
         return;
     }
     let dst = sidecar_path_for(dest, lang);
-    if let Err(e) = std::fs::rename(src, &dst) {
+    // Never clobber: a foreign sidecar arriving mid-download (after the
+    // intake snapshot) must survive. Ours stays beside the part file,
+    // where row removal sweeps it. Collection runs at most once per row
+    // (post-claim), so an existing dst is always foreign.
+    if let Err(e) = crate::download::rename_noreplace(src, &dst) {
         tracing::warn!(
             src = %src.display(),
             dst = %dst.display(),
