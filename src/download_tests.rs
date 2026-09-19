@@ -3420,6 +3420,52 @@ exit 0
 }
 
 #[test]
+fn cookie_export_ignores_ambient_configs() {
+    // --ignore-config must reach the export spawn: an ambient user
+    // config could otherwise reshape it (its own --cookies/--output),
+    // silently degrading export to plain requests. The fake refuses to
+    // write the jar without the flag, so a regression surfaces as a
+    // jar-less `None` and the expect below fails loudly.
+    let dir = std::env::temp_dir().join(format!("grab-ignorecfg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp-ignorecfg");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+has=0
+for a in "$@"; do
+    if [ "$a" = "--ignore-config" ]; then has=1; fi
+done
+[ "$has" = 1 ] || exit 1
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "--cookies" ]; then out="$a"; fi
+    prev="$a"
+done
+printf '.example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let jar = crate::download::tokio_rt()
+        .block_on(crate::cookies::jar_for_browser(
+            "firefox",
+            &bin,
+            "https://example.com/v",
+        ))
+        .expect("exported jar with --ignore-config");
+    assert!(crate::cookies::cookie_header_for(&jar, "https://example.com/v").is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn direct_mode_ignores_proxy_env() {
     // Ambient HTTP_PROXY-style variables must never steer Direct rows:
     // proxying is explicit settings or nothing.

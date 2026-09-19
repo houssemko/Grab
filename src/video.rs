@@ -2767,7 +2767,9 @@ async fn run_part_attempt(
                     total = total.max(t);
                 }
                 if total > 0 {
-                    report(have, total);
+                    // Raw downloaded_bytes can exceed the stated total
+                    // (retried ranges); never report more than 100%.
+                    report(have.min(total), total);
                 }
             }
         }
@@ -3245,6 +3247,9 @@ pub(crate) const YTDLP_PROGRESS_TEMPLATE: &str = "[Grab];%(progress.status)s;%(p
 /// One parsed template line: absolute byte counts (never percents), so
 /// callers accumulate instead of re-deriving. `total` already folds the
 /// estimate fallback; `None` means unknown (live/unsized), not zero.
+/// `speed`/`eta` are parsed and pinned by tests but not consumed — the
+/// pump recomputes both from ticks — so they stay (they document the
+/// line shape and cost nothing).
 #[derive(Debug, PartialEq)]
 pub(crate) struct YtProgress {
     pub downloaded: Option<u64>,
@@ -3261,7 +3266,11 @@ pub(crate) fn parse_ytdlp_template(line: &str) -> Option<YtProgress> {
     if status == "error" {
         return None;
     }
-    let num = |s: Option<&str>| s.filter(|v| *v != "NA").and_then(|v| v.parse::<f64>().ok());
+    let num = |s: Option<&str>| {
+        s.filter(|v| *v != "NA")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    };
     let downloaded = num(f.next()).map(|v| v as u64);
     let total = num(f.next()).map(|v| v as u64);
     let estimate = num(f.next()).map(|v| v as u64);
