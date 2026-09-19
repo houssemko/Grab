@@ -2161,6 +2161,26 @@ pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
         .join(format!("{stem}.{lang}.srt"))
 }
 
+/// Delete consumed split parts after a successful merge (`vpart` plus
+/// `apart`; adopted singles are renamed, never copied, so callers pass
+/// `vpart: None` for those and nothing happens). Extracted sync helper
+/// so the deletion set is unit-testable. Failures only warn: the row
+/// is already Done and must not fail over its own temp files.
+pub(crate) fn sweep_parts(vpart: Option<&Path>, apart: &Path) {
+    if vpart.is_none() {
+        return;
+    }
+    for p in vpart.into_iter().chain(std::iter::once(apart)) {
+        if let Err(e) = std::fs::remove_file(p) {
+            tracing::warn!(
+                part = %p.display(),
+                error = %e,
+                "split part left beside the finished file"
+            );
+        }
+    }
+}
+
 /// Best-effort sidecar collection: move an exact sidecar file beside
 /// the finished download. A missing source (the page published no
 /// subtitles) is the normal nothing-to-do; any other failure only
@@ -2884,6 +2904,14 @@ async fn finish_merge(
     // single files their only (audio) leg.
     if let Some(lang) = subtitles {
         collect_sidecar(&sidecar_path_for(vpart.unwrap_or(apart), lang), dest, lang);
+    }
+    // The parts served their purpose: sweep them now that the finished
+    // file is claimed, so successful splits leave no litter beside the
+    // destination. Split only — adopted singles were renamed, not
+    // copied, so there is nothing to sweep. Best-effort (warn only):
+    // the row is already Done and must not fail over temp files.
+    if vpart.is_some() {
+        sweep_parts(vpart, apart);
     }
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(dest);
