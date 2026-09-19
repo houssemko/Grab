@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-17 08:30+0100\n"
+"POT-Creation-Date: 2026-09-19 08:36+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -1137,3 +1137,99 @@ msgid "1 second"
 msgid_plural "{n} seconds"
 msgstr[0] ""
 msgstr[1] ""
+
+#: src/video.rs
+msgid "English"
+msgstr ""
+
+#: src/video.rs
+msgid "Arabic"
+msgstr ""
+
+#: src/video.rs
+msgid "German"
+msgstr ""
+
+#: src/video.rs
+msgid "Spanish"
+msgstr ""
+
+#: src/video.rs
+msgid "French"
+msgstr ""
+
+#: src/video.rs
+msgid "Hindi"
+msgstr ""
+
+#: src/video.rs
+msgid "Indonesian"
+msgstr ""
+
+#: src/video.rs
+msgid "Italian"
+msgstr ""
+
+#: src/video.rs
+msgid "Japanese"
+msgstr ""
+
+#: src/video.rs
+msgid "Korean"
+msgstr ""
+
+#: src/video.rs
+msgid "Dutch"
+msgstr ""
+
+#: src/video.rs
+msgid "Polish"
+msgstr ""
+
+#: src/video.rs
+msgid "Portuguese"
+msgstr ""
+
+#: src/video.rs
+msgid "Russian"
+msgstr ""
+
+#: src/video.rs
+msgid "Turkish"
+msgstr ""
+
+#: src/video.rs
+msgid "Vietnamese"
+msgstr ""
+
+#: src/video.rs
+msgid "Chinese"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Subtitles"
+msgstr ""
+
+#: src/preferences.rs
+msgid "Download subtitles beside the video"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Subtitle language"
+msgstr ""
+
+#: data/io.github.houssemko.Grab.gschema.xml
+msgid "Download subtitles in this language beside new video downloads, with automatic-caption fallback when the language is missing. 'off' disables subtitle downloads."
+msgstr ""
+
+#: src/video.rs
+msgid "No suitable formats found for this media (the page listed none)"
+msgstr ""
+
+#: src/download.rs
+msgid "Proxy host contains invalid characters"
+msgstr ""
+
+#: src/video.rs
+msgid "staging directory escaped its root"
+msgstr ""
