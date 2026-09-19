@@ -1160,24 +1160,30 @@ fn hls_format_spec_names_height_and_pin() {
 }
 
 #[test]
-fn ytdlp_progress_parses_percent_and_size() {
-    let (frac, total) =
-        parse_ytdlp_progress("[download]  45.2% of ~50.00MiB at 1.23MiB/s ETA 00:20")
-            .expect("progress");
-    assert!((frac - 0.452).abs() < 1e-12);
-    assert_eq!(total, Some(52_428_800));
-    assert_eq!(
-        parse_ytdlp_progress("[download] 100% of 10.00MiB in 5s"),
-        Some((1.0, Some(10_485_760)))
-    );
-    assert_eq!(parse_ytdlp_progress("[download] Destination: x.mp4"), None);
-    assert_eq!(
-        parse_ytdlp_progress("[download] file already downloaded"),
-        None
-    );
-    assert_eq!(parse_ytdlp_progress("[Merger] Merging"), None);
-    assert_eq!(parse_ytdlp_progress("[info] x"), None);
-    assert_eq!(parse_ytdlp_progress("garbage"), None);
+fn ytdlp_template_parses_absolute_counts() {
+    let p = parse_ytdlp_template("[Grab];downloading;47448064;52428800;52428800;1293945;4")
+        .expect("progress");
+    assert_eq!(p.downloaded, Some(47448064));
+    assert_eq!(p.total, Some(52428800));
+    assert!((p.speed.expect("speed") - 1293945.0).abs() < 1e-6);
+    assert_eq!(p.eta, Some(4));
+    // Estimate folds in when the total is unknown; NA means unknown.
+    let p = parse_ytdlp_template("[Grab];downloading;100;NA;200;NA;Unknown").expect("progress");
+    assert_eq!(p.downloaded, Some(100));
+    assert_eq!(p.total, Some(200));
+    assert_eq!(p.speed, None);
+    assert_eq!(p.eta, None);
+    // Finished lines still carry final counts; error lines carry none.
+    let p = parse_ytdlp_template("[Grab];finished;52428800;52428800;52428800;NA;0").expect("done");
+    assert_eq!(p.downloaded, Some(52428800));
+    assert_eq!(parse_ytdlp_template("[Grab];error;NA;NA;NA;NA;NA"), None);
+    // Foreign lines never parse — including bare paths, so the
+    // after_move sniffer keeps working.
+    assert_eq!(parse_ytdlp_template("[download] 45.2% of 50MiB"), None);
+    assert_eq!(parse_ytdlp_template("[Merger] Merging"), None);
+    assert_eq!(parse_ytdlp_template("[info] x"), None);
+    assert_eq!(parse_ytdlp_template("garbage"), None);
+    assert_eq!(parse_ytdlp_template("/tmp/grab/abc.mp4"), None);
     assert!(is_ytdlp_merge_line("[Merger] Merging formats"));
     assert!(is_ytdlp_merge_line("[ExtractAudio] Destination"));
     assert!(!is_ytdlp_merge_line("[download] 10% of 1MiB"));
@@ -1187,15 +1193,12 @@ fn ytdlp_progress_parses_percent_and_size() {
     );
     assert_eq!(parse_ytdlp_after_move("[download] 10%"), None);
     assert_eq!(parse_ytdlp_after_move(""), None);
-    // Size units, approximate marker included.
-    assert_eq!(
-        parse_ytdlp_progress("[download] 50% of ~1.50GiB at 1MiB/s"),
-        Some((0.5, Some(1_610_612_736)))
-    );
-    assert_eq!(
-        parse_ytdlp_progress("[download] 25% of 800K at 1MiB/s"),
-        Some((0.25, Some(819_200)))
-    );
+    // Absolute template counts need no unit table: exact bytes in/out.
+    let p = parse_ytdlp_template("[Grab];downloading;805306368;1610612736;1610612736;1048576;768")
+        .expect("progress");
+    assert_eq!(p.downloaded, Some(805306368));
+    assert_eq!(p.total, Some(1610612736));
+    assert_eq!(p.eta, Some(768));
 }
 
 #[test]
@@ -2104,7 +2107,8 @@ if [ "$spec" = "gone-id" ]; then
     echo "ERROR: [Video] 1: Requested format is not available" >&2
     exit 1
 fi
-echo "[download] 100.0% of 4.00B in 00:00"
+echo "[Grab];downloading;4;4;4;1000;0"
+echo "[Grab];finished;4;4;4;NA;0"
 printf 'data' > "$out"
 exit 0
 "#,
@@ -2519,7 +2523,7 @@ for a in "$@"; do
     if [ "$prev" = "-o" ]; then out="$a"; fi
     prev="$a"
 done
-echo "[download] 3.0% of 100.00B in 00:00"
+echo "[Grab];downloading;3;100;100;1000;5"
 printf 'tsbytes' > "$out.part"
 exit 0
 "#
@@ -2648,7 +2652,7 @@ for a in "$@"; do
     if [ "$prev" = "-o" ]; then out="$a"; fi
     prev="$a"
 done
-echo "[download] 1.0% of 100.00B in 00:00"
+echo "[Grab];downloading;1;100;100;1000;5"
 printf 'partial' > "$out.part"
 sleep 60
 "#,
@@ -3296,4 +3300,24 @@ fn clean_dest_parts_keeps_finished_and_foreign_files() {
         assert!(!dir.join(n).exists(), "{n} must go");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn download_builders_use_machine_progress_and_ignore_config() {
+    // Every yt-dlp spawn parses `--progress-template` lines (never human
+    // prose) and ignores ambient user configs that could reshape argv.
+    let out = std::path::Path::new("/tmp/staging/video.mp4");
+    let job = part_test_job();
+    for argv in [
+        part_download_argv(&job, "v123", out),
+        live_capture_argv(&job, "h720", out),
+        hls_download_argv(&job, "h720", std::path::Path::new("/usr/bin/ffmpeg"), out),
+    ] {
+        assert!(argv.contains(&"--ignore-config".to_string()), "{argv:?}");
+        let t = argv
+            .iter()
+            .position(|a| a == "--progress-template")
+            .expect("template flag");
+        assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
+    }
 }
