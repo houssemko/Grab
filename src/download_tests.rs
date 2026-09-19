@@ -3866,3 +3866,70 @@ fn enqueue_video_reserves_part_namespaced_stems() {
     crate::video::clean_staging(&crate::video::staging_dir(item.id()));
     let _ = std::fs::remove_dir_all(&dest);
 }
+
+#[test]
+fn delete_download_trashes_video_sidecars() {
+    // Trashing a video row takes its collected subtitle sidecars along;
+    // plain rows keep a same-named srt (never Grab's).
+    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
+    let _qf = test_queue_file("video-del-sidecar");
+    let settings = test_settings();
+    // Home-backed dir: GIO refuses to trash across filesystems like /tmp.
+    let dir = glib::user_data_dir().join(format!("grab-video-del-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = gio::ListStore::new::<DownloadItem>();
+    let manager = DownloadManager::new(store.clone(), settings);
+    let video = DownloadItem::new(
+        11,
+        "https://x.com/u/status/1",
+        "Clip.mp4",
+        &dir.to_string_lossy(),
+    );
+    video.set_status(DownloadStatus::Done);
+    store.append(&video);
+    manager.video_sources.borrow_mut().insert(
+        11,
+        crate::video::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+        },
+    );
+    let plain = DownloadItem::new(
+        12,
+        "https://example.com/other.mp4",
+        "Other.mp4",
+        &dir.to_string_lossy(),
+    );
+    plain.set_status(DownloadStatus::Done);
+    store.append(&plain);
+    for n in [
+        "Clip.mp4",
+        "Clip.en.srt",
+        "Clip.fr.srt",
+        "Other.mp4",
+        "Other.en.srt",
+    ] {
+        std::fs::write(dir.join(n), b"x").unwrap();
+    }
+    assert!(manager.delete_download(11).is_ok());
+    assert!(manager.delete_download(12).is_ok());
+    // Video + its sidecars trashed; plain row's same-named srt stays.
+    for n in ["Clip.mp4", "Clip.en.srt", "Clip.fr.srt", "Other.mp4"] {
+        assert!(!dir.join(n).exists(), "{n} must be trashed");
+    }
+    assert!(dir.join("Other.en.srt").exists());
+    assert_eq!(store.n_items(), 0);
+    // Undo the test's own Trash litter.
+    let trash = glib::user_data_dir().join("Trash");
+    for n in ["Clip.mp4", "Clip.en.srt", "Clip.fr.srt", "Other.mp4"] {
+        let _ = std::fs::remove_file(trash.join(format!("files/{n}")));
+        let _ = std::fs::remove_file(trash.join(format!("info/{n}.trashinfo")));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

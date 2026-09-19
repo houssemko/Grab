@@ -3684,6 +3684,26 @@ impl DownloadManager {
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
             Err(e) => return Err(format!("Could not move {} to Trash: {e}", item.filename())),
         }
+        // Collected subtitle sidecars travel with the video: trash every
+        // `<stem>.<lang>.srt` this row could own. The language pref is
+        // global rather than per-row, so every offered code is a
+        // candidate; failures only warn (the row delete must not fail
+        // over a sidecar). Plain rows never wrote sidecars — gate on the
+        // staged video source like remove()'s part cleanup does.
+        if self.video_sources.borrow().contains_key(&id) {
+            for lang in crate::video::subtitle_content_languages() {
+                let sidecar = crate::video::sidecar_path_for(&item.file_path(), lang);
+                match gio::File::for_path(&sidecar).trash(gio::Cancellable::NONE) {
+                    Ok(()) => {}
+                    Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
+                    Err(e) => tracing::warn!(
+                        sidecar = %sidecar.display(),
+                        error = %e,
+                        "subtitle sidecar left behind"
+                    ),
+                }
+            }
+        }
         self.remove(id);
         Ok(())
     }
