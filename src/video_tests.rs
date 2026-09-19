@@ -2798,7 +2798,11 @@ fn vod_hls_pins_planner_variant_id() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
-    let logged = std::fs::read_to_string(dir.join("staging.argv.log")).unwrap();
+    // argv log lands next to the dest-dir template (`v.hls.%(ext)s`):
+    // parts download beside the finished file, never into staging.
+    // (The fake logs to dirname(-o) + ".argv.log", i.e. beside `dir`.)
+    let logged = std::fs::read_to_string(dir.with_extension("argv.log")).unwrap();
+    assert!(logged.contains("v.hls."), "{logged}");
     let f = logged
         .split_whitespace()
         .position(|a| a == "-f")
@@ -3235,4 +3239,61 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
         text.lines().any(|l| l.starts_with("NO_PROXY=")),
         "proxied spawn missing NO_PROXY"
     );
+}
+
+#[test]
+fn dest_part_paths_sit_beside_finished_file() {
+    // yt-dlp defaults: `<stem>.<kind>.<ext>` in the dest dir, so `.part`
+    // shells and fragments show up in the user's folder while moving
+    // nothing else. Deterministic across attempts for crash-resume.
+    let dest = std::path::Path::new("/tmp/dl/Clip.mp4");
+    assert_eq!(
+        dest_part_path(dest, "video", "mp4"),
+        std::path::Path::new("/tmp/dl/Clip.video.mp4")
+    );
+    assert_eq!(
+        dest_part_path(dest, "audio", "webm"),
+        std::path::Path::new("/tmp/dl/Clip.audio.webm")
+    );
+    assert_eq!(
+        dest_part_path(dest, "hls", "%(ext)s"),
+        std::path::Path::new("/tmp/dl/Clip.hls.%(ext)s")
+    );
+    assert_eq!(
+        dest_part_path(dest, "live", "mp4"),
+        std::path::Path::new("/tmp/dl/Clip.live.mp4")
+    );
+}
+
+#[test]
+fn clean_dest_parts_keeps_finished_and_foreign_files() {
+    let dir = std::env::temp_dir().join(format!("grab-cleanparts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.join("Clip.mp4");
+    let keep = [
+        "Clip.mp4",
+        "Clip.srt",
+        "Other.video.mp4",
+        "Clip.video-notes.txt",
+    ];
+    let drop = [
+        "Clip.video.mp4",
+        "Clip.video.mp4.part",
+        "Clip.audio.webm",
+        "Clip.audio.webm.part",
+        "Clip.hls.mp4",
+        "Clip.live.mp4.part",
+    ];
+    for n in keep.iter().chain(drop.iter()) {
+        std::fs::write(dir.join(n), b"x").unwrap();
+    }
+    clean_dest_parts(&dest);
+    for n in keep {
+        assert!(dir.join(n).exists(), "{n} must survive");
+    }
+    for n in drop {
+        assert!(!dir.join(n).exists(), "{n} must go");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

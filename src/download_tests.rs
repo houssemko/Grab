@@ -3084,8 +3084,21 @@ fn remove_cleans_video_staging() {
     let id = 910_000 + std::process::id() as u64;
     let dir = crate::video::staging_dir(id);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("video.mp4"), b"partial").unwrap();
-    let item = DownloadItem::new(id, "https://x.com/u/status/1", "v.mp4", "/tmp/dl");
+    std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
+    // Dest-dir parts (yt-dlp defaults) go with the row too; the
+    // finished file and foreign neighbors stay.
+    let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&destdir);
+    std::fs::create_dir_all(&destdir).unwrap();
+    for n in ["v.mp4", "v.srt", "v.video.mp4", "v.audio.webm.part"] {
+        std::fs::write(destdir.join(n), b"x").unwrap();
+    }
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        destdir.to_str().unwrap(),
+    );
     manager.store().append(&item);
     manager.video_sources.borrow_mut().insert(
         id,
@@ -3100,7 +3113,15 @@ fn remove_cleans_video_staging() {
         },
     );
     manager.remove(id);
-    assert!(!dir.exists(), "staged parts must go with the row");
+    assert!(!dir.exists(), "staged sidecar must go with the row");
+    assert!(!destdir.join("v.video.mp4").exists(), "dest parts go too");
+    assert!(
+        !destdir.join("v.audio.webm.part").exists(),
+        "part shells go too"
+    );
+    assert!(destdir.join("v.mp4").exists(), "finished file stays");
+    assert!(destdir.join("v.srt").exists(), "foreign files stay");
+    let _ = std::fs::remove_dir_all(&destdir);
 }
 
 #[test]

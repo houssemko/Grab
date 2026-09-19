@@ -1932,6 +1932,57 @@ pub(crate) fn part_path(dir: &Path, kind: &str, ext: &str) -> PathBuf {
     dir.join(format!("{kind}.{ext}"))
 }
 
+/// Dest-dir part names (`<stem>.<kind>.<ext>` beside the finished file):
+/// yt-dlp defaults — `.part` shells and fragments show up in the user's
+/// folder while transferring, and yt-dlp's native `--continue` resumes
+/// them in place. Deterministic across attempts (crash-resume finds the
+/// same paths); unique per row via intake dedupe of the finished name.
+pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
+    let dir = dest.parent().unwrap_or_else(|| Path::new(""));
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "part".to_string());
+    dir.join(format!("{stem}.{kind}.{ext}"))
+}
+
+/// Grab-namespaced part infixes: the only names `clean_dest_parts` ever
+/// touches. The finished file itself (`<stem>.<ext>`) never matches.
+const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live."];
+
+fn is_grab_part(file_name: &str, stem: &str) -> bool {
+    file_name.len() > stem.len()
+        && file_name.starts_with(stem)
+        && file_name[stem.len()..].starts_with('.')
+        && PART_KINDS
+            .iter()
+            .any(|k| file_name[stem.len() + 1..].starts_with(k))
+}
+
+/// Delete a row's dest-dir part files (finished parts plus yt-dlp `.part`
+/// shells). The finished file is never matched; foreign files only
+/// collide on exact `<stem>.<kind>.<ext>` names — Grab's documented
+/// namespace, claimed by intake dedupe of the finished name.
+pub fn clean_dest_parts(dest: &Path) {
+    let (Some(dir), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && is_grab_part(name, stem)
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 fn manifest_path(dir: &Path) -> PathBuf {
     dir.join("manifest.json")
 }
@@ -2247,11 +2298,14 @@ pub async fn run_video_download(
         "formats selected"
     );
 
-    // Retry discipline from the sidecar.
+    // Retry discipline from the sidecar. The manifest lives in staging
+    // (scratch); the parts live beside the finished file (yt-dlp
+    // defaults), so the query dir is the dest parent.
     let manifest = read_manifest(&staging);
+    let dest_dir = job.dest.parent().unwrap_or_else(|| Path::new(""));
     let query = ResumeQuery {
         manifest: manifest.as_ref(),
-        dir: &staging,
+        dir: dest_dir,
         dest: &job.dest,
         page_url: &job.page_url,
         quality: &job.quality,
@@ -2277,6 +2331,11 @@ pub async fn run_video_download(
             tokio::fs::create_dir_all(&staging)
                 .await
                 .map_err(VideoError::staging)?;
+            // Dest-dir parts are Grab-namespaced (`<stem>.<kind>.<ext>`),
+            // so a mismatch restarts clean instead of letting yt-dlp
+            // resume into a foreign lookalike. The finished file itself
+            // is never touched (rename_noreplace guards the claim).
+            clean_dest_parts(&job.dest);
             // Record this attempt's selection up front: a pause from here
             // on leaves a matchable sidecar, so the next attempt resumes
             // instead of wiping.
@@ -2341,8 +2400,8 @@ pub async fn run_video_download(
     // unthrottled. Retries and timeouts still follow the user's settings.
     let vpart: Option<PathBuf> = video_sel
         .as_ref()
-        .map(|s| part_path(&staging, "video", &s.ext));
-    let apart: PathBuf = part_path(&staging, "audio", &audio_sel.ext);
+        .map(|s| dest_part_path(&job.dest, "video", &s.ext));
+    let apart: PathBuf = dest_part_path(&job.dest, "audio", &audio_sel.ext);
     // Parts download through the yt-dlp binary (see run_part_ytdlp),
     // not the crate's fetch manager: only the binary keeps the
     // extraction cookies and full format headers that hotlink-guarded
@@ -2352,7 +2411,7 @@ pub async fn run_video_download(
         if let Some(v) = video_sel.as_ref() {
             let path = vpart
                 .clone()
-                .unwrap_or_else(|| part_path(&staging, "video", &v.ext));
+                .unwrap_or_else(|| dest_part_path(&job.dest, "video", &v.ext));
             let report = Arc::new(make_cb(Arc::clone(&v_done), Arc::clone(&a_done)))
                 as Arc<dyn Fn(u64, u64) + Send + Sync>;
             let done = run_part_ytdlp(
@@ -3000,15 +3059,20 @@ async fn run_live_ytdlp(
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
-    // Wipe first: a crashed run's `live.mp4` must never be adopted as a
-    // fresh capture that recorded nothing (same discipline the ffmpeg
-    // path had; yt-dlp resume state is per-attempt, not cross-attempt).
-    let _ = tokio::fs::remove_dir_all(staging).await;
+    // Fresh capture: a crashed run's dest-dir live file must never be
+    // resumed into (append-only stream — resume corrupts) nor adopted
+    // as a fresh capture that recorded nothing. Staging still hosts the
+    // remux temp below.
+    let ext = if job.audio_only { "m4a" } else { "mp4" };
+    // Capture beside the finished file (yt-dlp defaults): the `.part`
+    // shell shows up in the user's folder while recording, and the
+    // file-growth watcher announces "Recording…" off this path.
+    let out = dest_part_path(&job.dest, "live", ext);
+    let _ = tokio::fs::remove_file(&out).await;
+    let _ = tokio::fs::remove_file(out.with_extension(format!("{ext}.part"))).await;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    let ext = if job.audio_only { "m4a" } else { "mp4" };
-    let out = staging.join(format!("live.{ext}"));
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(live_capture_argv(job, hls_format_id, &out));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
@@ -3288,23 +3352,38 @@ async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T> {
 /// The finished file of one yt-dlp attempt: the `after_move` path
 /// when it landed under staging, else the largest non-temp file.
 /// Temp suffixes (parts, metadata sidecars) never qualify.
-fn discover_ytdlp_output(staging: &Path, after_move: Option<&str>) -> Option<PathBuf> {
+/// Adopt yt-dlp's finished HLS output: the `--print after_move:filepath`
+/// line when trustworthy, else the largest finished `<stem>.hls.*` file
+/// beside the destination. The fallback is stem-constrained (never the
+/// largest whatever) because the search dir is now the user's folder.
+fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Option<PathBuf> {
+    let dir = dest.parent().unwrap_or_else(|| Path::new(""));
+    let stem = dest
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let prefix = format!("{stem}.hls.");
     if let Some(path) = after_move
         && let Ok(canonical) = std::fs::canonicalize(path)
-        && canonical.starts_with(staging)
+        && canonical.starts_with(dir)
         && canonical.is_file()
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+        && name.starts_with(&prefix)
     {
         return Some(canonical);
     }
-    std::fs::read_dir(staging)
+    std::fs::read_dir(dir)
         .ok()?
         .filter_map(|entry| entry.ok().map(|e| e.path()))
         .filter(|p| {
             p.is_file()
-                && !matches!(
-                    p.extension().and_then(|e| e.to_str()),
-                    Some("part" | "ytdl" | "temp" | "tmp" | "frag")
-                )
+                && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                    n.starts_with(&prefix)
+                        && !matches!(
+                            p.extension().and_then(|e| e.to_str()),
+                            Some("part" | "ytdl" | "temp" | "tmp" | "frag")
+                        )
+                })
         })
         .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
 }
@@ -3324,18 +3403,16 @@ pub(crate) fn hls_download_argv(
     job: &VideoJob,
     hls_format_id: &str,
     ffmpeg_bin: &Path,
-    staging: &Path,
+    dest: &Path,
 ) -> Vec<String> {
+    let out_template = dest_part_path(dest, "hls", "%(ext)s");
     let mut args = vec![
         "--no-playlist".to_string(),
         "--newline".to_string(),
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only),
         "-o".to_string(),
-        staging
-            .join("grab-hls.%(ext)s")
-            .to_string_lossy()
-            .into_owned(),
+        out_template.to_string_lossy().into_owned(),
         "--ffmpeg-location".to_string(),
         ffmpeg_bin
             .parent()
@@ -3381,7 +3458,7 @@ async fn run_hls_ytdlp(
         .await
         .map_err(VideoError::staging)?;
     let mut cmd = tokio::process::Command::new(youtube_bin);
-    cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, staging));
+    cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -3504,7 +3581,7 @@ async fn run_hls_ytdlp(
             .to_string();
         return Err(VideoError::part_failed(detail));
     }
-    let final_tmp = discover_ytdlp_output(staging, after_move.as_deref());
+    let final_tmp = discover_ytdlp_output(&job.dest, after_move.as_deref());
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
     };
