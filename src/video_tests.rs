@@ -504,12 +504,10 @@ fn test_manifest_dir(tag: &str) -> std::path::PathBuf {
 
 fn test_query<'a>(
     manifest: Option<&'a VideoManifest>,
-    dir: &'a std::path::Path,
     dest: &'a std::path::Path,
 ) -> ResumeQuery<'a> {
     ResumeQuery {
         manifest,
-        dir,
         dest,
         page_url: "https://vimeo.com/99",
         quality: "720p",
@@ -525,7 +523,7 @@ fn test_query<'a>(
 fn resume_plan_fresh_without_manifest() {
     let dir = test_manifest_dir("fresh");
     let dest = dir.join("Clip.mp4");
-    let q = test_query(None, &dir, &dest);
+    let q = test_query(None, &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -533,11 +531,11 @@ fn resume_plan_fresh_without_manifest() {
 #[test]
 fn resume_plan_combine_only_with_verified_parts() {
     let dir = test_manifest_dir("combine");
-    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 100]).unwrap();
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 50]).unwrap();
     let dest = dir.join("Clip.mp4");
+    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 50]).unwrap();
     let m = test_manifest();
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::CombineOnly);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -545,12 +543,12 @@ fn resume_plan_combine_only_with_verified_parts() {
 #[test]
 fn resume_plan_resumes_truncated_parts() {
     let dir = test_manifest_dir("truncated");
-    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 100]).unwrap();
-    // Audio part truncated mid-download: resume it, never re-download.
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 49]).unwrap();
     let dest = dir.join("Clip.mp4");
+    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
+    // Audio part truncated mid-download: resume it, never re-download.
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 49]).unwrap();
     let m = test_manifest();
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -560,13 +558,13 @@ fn resume_plan_resumes_pending_manifest() {
     // Pause before any part completed bookkeeping: the pending sidecar
     // (zero bytes recorded) plus partial files on disk means resume.
     let dir = test_manifest_dir("pending");
-    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 60]).unwrap();
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 30]).unwrap();
     let dest = dir.join("Clip.mp4");
+    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 60]).unwrap();
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 30]).unwrap();
     let mut m = test_manifest();
     m.video_bytes = 0;
     m.audio_bytes = 0;
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -576,10 +574,10 @@ fn resume_plan_fresh_without_manifest_despite_parts() {
     // Bytes without a matching sidecar are unverifiable (pre-sidecar
     // upgrades, foreign files): wipe and start clean.
     let dir = test_manifest_dir("unverified");
-    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 60]).unwrap();
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 30]).unwrap();
     let dest = dir.join("Clip.mp4");
-    let q = test_query(None, &dir, &dest);
+    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 60]).unwrap();
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 30]).unwrap();
+    let q = test_query(None, &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -588,11 +586,11 @@ fn resume_plan_fresh_without_manifest_despite_parts() {
 fn resume_plan_fresh_on_overlong_part() {
     // A part larger than its total cannot be resumed into: wipe it.
     let dir = test_manifest_dir("overlong");
-    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 100]).unwrap();
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 60]).unwrap();
     let dest = dir.join("Clip.mp4");
+    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 60]).unwrap();
     let m = test_manifest();
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -604,15 +602,15 @@ fn resume_plan_fresh_on_sparse_shell() {
     // engine equates size with completeness, so this must never reach
     // it — wipe and start over instead.
     let dir = test_manifest_dir("sparse");
-    let vpart = part_path(&dir, "video", "mp4");
-    let apart = part_path(&dir, "audio", "webm");
+    let dest = dir.join("Clip.mp4");
+    let vpart = dest_part_path(&dest, "video", "mp4");
+    let apart = dest_part_path(&dest, "audio", "webm");
     std::fs::File::create(&vpart).unwrap().set_len(100).unwrap();
     std::fs::File::create(&apart).unwrap().set_len(50).unwrap();
     assert!(is_sparse_shell(&vpart));
     assert!(is_sparse_shell(&apart));
-    let dest = dir.join("Clip.mp4");
     let m = test_manifest();
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -624,7 +622,7 @@ fn resume_plan_fresh_when_nothing_on_disk() {
     let mut m = test_manifest();
     m.video_bytes = 0;
     m.audio_bytes = 0;
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -632,20 +630,20 @@ fn resume_plan_fresh_when_nothing_on_disk() {
 #[test]
 fn resume_plan_fresh_on_selection_change() {
     let dir = test_manifest_dir("reselect");
-    std::fs::write(part_path(&dir, "video", "mp4"), vec![0u8; 100]).unwrap();
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 50]).unwrap();
     let dest = dir.join("Clip.mp4");
+    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 50]).unwrap();
     let m = test_manifest();
     // Same parts, but the row now wants 1080p: re-download.
     let q = ResumeQuery {
         quality: "1080p",
-        ..test_query(Some(&m), &dir, &dest)
+        ..test_query(Some(&m), &dest)
     };
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     // Same prefs, but the extractor picked another audio format: re-download.
     let q = ResumeQuery {
         audio: ("250", "webm"),
-        ..test_query(Some(&m), &dir, &dest)
+        ..test_query(Some(&m), &dest)
     };
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
@@ -658,7 +656,7 @@ fn resume_plan_finished_when_dest_complete() {
     std::fs::write(&dest, vec![0u8; 1000]).unwrap();
     let mut m = test_manifest();
     m.final_bytes = Some(1000);
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Finished);
     // Same manifest, foreign file at dest: fall through to parts check
     // (absent here) instead of adopting someone else's bytes.
@@ -670,8 +668,8 @@ fn resume_plan_finished_when_dest_complete() {
 #[test]
 fn resume_plan_audio_only() {
     let dir = test_manifest_dir("audio-only");
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 50]).unwrap();
     let dest = dir.join("Clip.m4a");
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 50]).unwrap();
     let mut m = test_manifest();
     m.audio_only = true;
     m.video_format_id = None;
@@ -679,11 +677,11 @@ fn resume_plan_audio_only() {
     let q = ResumeQuery {
         audio_only: true,
         video: None,
-        ..test_query(Some(&m), &dir, &dest)
+        ..test_query(Some(&m), &dest)
     };
     assert_eq!(resume_plan(&q), ResumePlan::CombineOnly);
     // A stale video expectation against an audio-only manifest: re-download.
-    let q = test_query(Some(&m), &dir, &dest);
+    let q = test_query(Some(&m), &dest);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3176,10 +3174,10 @@ fn resume_plan_unknown_total_resumes_bytes_on_disk() {
     // No total to judge overlong against (live-adjacent/single-connection
     // flows): bytes on disk mean resume, never a Fresh wipe.
     let dir = test_manifest_dir("unknown-total");
-    std::fs::write(part_path(&dir, "audio", "webm"), vec![0u8; 49]).unwrap();
     let dest = dir.join("Clip.mp4");
+    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 49]).unwrap();
     let m = test_manifest();
-    let mut q = test_query(Some(&m), &dir, &dest);
+    let mut q = test_query(Some(&m), &dest);
     q.video_total = None;
     q.audio_total = None;
     assert_eq!(resume_plan(&q), ResumePlan::Resume);

@@ -1907,15 +1907,17 @@ impl VideoManifest {
     /// recorded sizes. Equality (not >=) so a truncated or replaced part
     /// forces a re-download instead of a corrupt merge. Zero-byte records
     /// never count (a pending manifest carries zeros), and neither do
-    /// sparse shells (pre-allocated zeros from a killed attempt).
-    fn parts_present(&self, dir: &Path) -> bool {
-        let audio_part = part_path(dir, "audio", &self.audio_ext);
+    /// sparse shells (pre-allocated zeros from a killed attempt). Paths
+    /// build off the finished file (dest-dir `<stem>.<kind>.<ext>`
+    /// names), never the query dir.
+    fn parts_present(&self, dest: &Path) -> bool {
+        let audio_part = dest_part_path(dest, "audio", &self.audio_ext);
         let audio_ok = self.audio_bytes > 0
             && file_len(&audio_part) == Some(self.audio_bytes)
             && !is_sparse_shell(&audio_part);
         let video_ok = match &self.video_format_id {
             Some(_) => {
-                let video_part = part_path(dir, "video", &self.video_ext);
+                let video_part = dest_part_path(dest, "video", &self.video_ext);
                 self.video_bytes > 0
                     && file_len(&video_part) == Some(self.video_bytes)
                     && !is_sparse_shell(&video_part)
@@ -1951,12 +1953,12 @@ pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
 const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live."];
 
 fn is_grab_part(file_name: &str, stem: &str) -> bool {
-    file_name.len() > stem.len()
-        && file_name.starts_with(stem)
-        && file_name[stem.len()..].starts_with('.')
-        && PART_KINDS
-            .iter()
-            .any(|k| file_name[stem.len() + 1..].starts_with(k))
+    // strip_prefix (not slicing past starts_with): panic-free even if a
+    // future edit reorders the guards.
+    let rest = file_name
+        .strip_prefix(stem)
+        .and_then(|r| r.strip_prefix('.'));
+    rest.is_some_and(|r| PART_KINDS.iter().any(|k| r.starts_with(k)))
 }
 
 /// Delete a row's dest-dir part files (finished parts plus yt-dlp `.part`
@@ -2049,7 +2051,6 @@ pub(crate) enum ResumePlan {
 /// Inputs for [`resume_plan`], bundled so the signature stays small.
 pub(crate) struct ResumeQuery<'a> {
     pub manifest: Option<&'a VideoManifest>,
-    pub dir: &'a Path,
     pub dest: &'a Path,
     pub page_url: &'a str,
     pub quality: &'a str,
@@ -2075,7 +2076,7 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     {
         return ResumePlan::Finished;
     }
-    if m.parts_present(q.dir) {
+    if m.parts_present(q.dest) {
         return ResumePlan::CombineOnly;
     }
     // Sparse shells (full size, nothing on disk) left by a killed attempt
@@ -2085,10 +2086,10 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     // Anything else with bytes on disk is resumable — the manifest match
     // above is the identity check.
     let (_, audio_ext) = q.audio;
-    let audio_part = part_path(q.dir, "audio", audio_ext);
+    let audio_part = dest_part_path(q.dest, "audio", audio_ext);
     let video_part = q
         .video
-        .map(|(_, video_ext)| part_path(q.dir, "video", video_ext));
+        .map(|(_, video_ext)| dest_part_path(q.dest, "video", video_ext));
     if is_sparse_shell(&audio_part) || video_part.as_ref().is_some_and(|p| is_sparse_shell(p)) {
         return ResumePlan::Fresh;
     }
@@ -2300,12 +2301,10 @@ pub async fn run_video_download(
 
     // Retry discipline from the sidecar. The manifest lives in staging
     // (scratch); the parts live beside the finished file (yt-dlp
-    // defaults), so the query dir is the dest parent.
+    // defaults), so every file check builds off the destination.
     let manifest = read_manifest(&staging);
-    let dest_dir = job.dest.parent().unwrap_or_else(|| Path::new(""));
     let query = ResumeQuery {
         manifest: manifest.as_ref(),
-        dir: dest_dir,
         dest: &job.dest,
         page_url: &job.page_url,
         quality: &job.quality,
