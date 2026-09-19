@@ -3743,10 +3743,10 @@ impl DownloadManager {
     /// engines, bitmaps or partials, so unlike `remove` there is nothing
     /// to cancel, snapshot or clean.
     fn drop_finished_row(&self, id: u64) {
-        if let Some(item) = self.find(id) {
-            if crate::torrent::is_torrent(&item.url()) {
-                crate::torrent::forget_download(id);
-            }
+        if let Some(item) = self.find(id)
+            && crate::torrent::is_torrent(&item.url())
+        {
+            crate::torrent::forget_download(id);
         }
         self.video_sources.borrow_mut().remove(&id);
         self.epoch.borrow_mut().remove(&id);
