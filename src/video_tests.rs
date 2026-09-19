@@ -3905,3 +3905,36 @@ fn collect_sidecar_never_clobbers() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn sweep_parts_removes_split_parts_only() {
+    // Successful splits must leave no litter: both legs go, the
+    // finished file and sidecars stay, missing files are quiet.
+    let dir = std::env::temp_dir().join(format!("grab-sweepparts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Spaced name mirrors real titles (and file_stem edge cases).
+    let vpart = dir.join("How Do LLMs Work?.video.mp4");
+    let apart = dir.join("How Do LLMs Work?.audio.m4a");
+    let dest = dir.join("How Do LLMs Work?.mp4");
+    let sidecar = dir.join("How Do LLMs Work?.en.srt");
+    for p in [&vpart, &apart, &dest, &sidecar] {
+        std::fs::write(p, b"x").unwrap();
+    }
+    sweep_parts(Some(&vpart), &apart);
+    assert!(!vpart.exists());
+    assert!(!apart.exists());
+    assert!(dest.exists(), "finished file must survive");
+    assert!(sidecar.exists(), "collected sidecar must survive");
+    // Adopted singles (and audio-only rows) sweep nothing: the part
+    // was renamed to the destination, not copied.
+    std::fs::write(&apart, b"x").unwrap();
+    sweep_parts(None, &apart);
+    assert!(apart.exists());
+    // Missing files never panic.
+    sweep_parts(
+        Some(&dir.join("gone.video.mp4")),
+        &dir.join("gone.audio.m4a"),
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
