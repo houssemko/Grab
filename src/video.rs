@@ -1130,6 +1130,7 @@ async fn fetch_video_page(
     fetch_proxy: Option<&crate::download::ResolvedProxy>,
 ) -> Result<Video, VideoError> {
     let mut args = vec![
+        "--ignore-config".to_string(),
         "--no-progress".to_string(),
         "--dump-single-json".to_string(),
     ];
@@ -2673,8 +2674,12 @@ async fn finish_merge(
 /// pinned here, not in assertion-hostile spawn code.
 pub(crate) fn part_download_argv(job: &VideoJob, spec: &str, out: &Path) -> Vec<String> {
     let mut args = vec![
+        "--ignore-config".to_string(),
         "--no-playlist".to_string(),
         "--newline".to_string(),
+        "--progress".to_string(),
+        "--progress-template".to_string(),
+        YTDLP_PROGRESS_TEMPLATE.to_string(),
         "-f".to_string(),
         spec.to_string(),
         "-o".to_string(),
@@ -2753,13 +2758,17 @@ async fn run_part_attempt(
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let (mut have, mut total) = (0u64, 0u64);
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some((frac, t)) = parse_ytdlp_progress(&line) {
-                if let Some(t) = t {
+            if let Some(p) = parse_ytdlp_template(&line) {
+                if let Some(d) = p.downloaded {
+                    have = have.max(d);
+                }
+                if let Some(t) = p.total {
                     total = total.max(t);
                 }
                 if total > 0 {
-                    have = have.max((frac * total as f64) as u64);
-                    report(have, total);
+                    // Raw downloaded_bytes can exceed the stated total
+                    // (retried ranges); never report more than 100%.
+                    report(have.min(total), total);
                 }
             }
         }
@@ -2901,8 +2910,12 @@ fn hls_format_spec(quality: &str, pinned: Option<&str>, audio_only: bool) -> Str
 /// attempt). Pure for tests.
 pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path) -> Vec<String> {
     let mut args = vec![
+        "--ignore-config".to_string(),
         "--no-playlist".to_string(),
         "--newline".to_string(),
+        "--progress".to_string(),
+        "--progress-template".to_string(),
+        YTDLP_PROGRESS_TEMPLATE.to_string(),
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only),
         "--hls-use-mpegts".to_string(),
@@ -3123,13 +3136,13 @@ async fn run_live_ytdlp(
         // whichever fires first wins and the second is a no-op).
         let mut announced = false;
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some((frac, total)) = parse_ytdlp_progress(&line) {
+            if let Some(p) = parse_ytdlp_template(&line) {
                 if !announced {
                     announced = true;
                     tx_p.send(EngineMsg::Phase(gettext("Recording…"))).ok();
                 }
-                if let Some(t) = total {
-                    have = have.max((frac * t as f64) as u64);
+                if let Some(d) = p.downloaded {
+                    have = have.max(d);
                 }
                 tx_p.send(EngineMsg::Progress {
                     downloaded: have,
@@ -3223,47 +3236,54 @@ async fn run_live_ytdlp(
     Ok(file_len(&job.dest))
 }
 
-/// Parse a byte size from yt-dlp progress (`~50.00MiB`, `10.5K`, `3B`).
-/// Binary and decimal suffixes both occur across versions.
-fn parse_ytdlp_size(raw: &str) -> Option<u64> {
-    let raw = raw.trim().trim_start_matches('~');
-    let split = raw
-        .char_indices()
-        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.'))
-        .map(|(i, _)| i)
-        .unwrap_or(raw.len());
-    let number: f64 = raw[..split].parse().ok()?;
-    if !number.is_finite() || number < 0.0 {
-        return None;
-    }
-    let factor = match raw[split..].trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1.0,
-        "k" | "kb" | "kib" => 1024.0,
-        "m" | "mb" | "mib" => 1024.0 * 1024.0,
-        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
-        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
-        _ => return None,
-    };
-    Some((number * factor) as u64)
+/// Machine-readable progress lines: `--progress-template` with stable
+/// fields beats parsing human `[download]` prose (percent formats and
+/// unit spellings drift between versions). `[Grab];`-prefixed so
+/// `parse_ytdlp_after_move` (bare absolute paths only) never mistakes
+/// one for a filepath.
+pub(crate) const YTDLP_PROGRESS_TEMPLATE: &str = "[Grab];%(progress.status)s;%(progress.downloaded_bytes)s;%(progress.total_bytes)s;%(progress.total_bytes_estimate)s;%(progress.speed)s;%(progress.eta)s";
+
+/// One parsed template line: absolute byte counts (never percents), so
+/// callers accumulate instead of re-deriving. `total` already folds the
+/// estimate fallback; `None` means unknown (live/unsized), not zero.
+/// `speed`/`eta` are parsed and pinned by tests but not consumed — the
+/// pump recomputes both from ticks — so they stay (they document the
+/// line shape and cost nothing).
+#[derive(Debug, PartialEq)]
+pub(crate) struct YtProgress {
+    pub downloaded: Option<u64>,
+    pub total: Option<u64>,
+    pub speed: Option<f64>,
+    pub eta: Option<u64>,
 }
 
-/// One parsed yt-dlp `--newline` download line: completion fraction
-/// plus the stated total when the line carries one (`of X`).
-fn parse_ytdlp_progress(line: &str) -> Option<(f64, Option<u64>)> {
-    let rest = line.strip_prefix("[download]")?.trim();
-    let mut words = rest.split_whitespace();
-    let pct: f64 = words.next()?.strip_suffix('%')?.parse().ok()?;
-    if !(0.0..=100.0).contains(&pct) {
+pub(crate) fn parse_ytdlp_template(line: &str) -> Option<YtProgress> {
+    let rest = line.strip_prefix("[Grab];")?;
+    let mut f = rest.split(';');
+    let status = f.next()?;
+    // "error" lines carry no usable counts; finished lines do.
+    if status == "error" {
         return None;
     }
-    let mut total = None;
-    let words: Vec<&str> = words.collect();
-    if let Some(of) = words.iter().position(|w| *w == "of")
-        && let Some(size) = words.get(of + 1)
-    {
-        total = parse_ytdlp_size(size);
-    }
-    Some((pct / 100.0, total))
+    let num = |s: Option<&str>| {
+        s.filter(|v| *v != "NA")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+    };
+    let downloaded = num(f.next()).map(|v| v as u64);
+    let total = num(f.next()).map(|v| v as u64);
+    let estimate = num(f.next()).map(|v| v as u64);
+    let speed = num(f.next());
+    let eta = f
+        .next()
+        .filter(|v| *v != "NA" && *v != "Unknown")
+        .and_then(|v| v.parse::<u64>().ok());
+    Some(YtProgress {
+        downloaded,
+        total: total.or(estimate),
+        speed,
+        eta,
+    })
 }
 
 /// Whether a `--newline` line announces a merge/extract phase.
@@ -3406,8 +3426,12 @@ pub(crate) fn hls_download_argv(
 ) -> Vec<String> {
     let out_template = dest_part_path(dest, "hls", "%(ext)s");
     let mut args = vec![
+        "--ignore-config".to_string(),
         "--no-playlist".to_string(),
         "--newline".to_string(),
+        "--progress".to_string(),
+        "--progress-template".to_string(),
+        YTDLP_PROGRESS_TEMPLATE.to_string(),
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id), job.audio_only),
         "-o".to_string(),
@@ -3489,8 +3513,8 @@ async fn run_hls_ytdlp(
                 tx_p.send(EngineMsg::Phase(gettext("Merging…"))).ok();
             } else if let Some(path) = parse_ytdlp_after_move(&line) {
                 after_move = Some(path.to_string());
-            } else if let Some((frac, total)) = parse_ytdlp_progress(&line) {
-                if let Some(t) = total {
+            } else if let Some(p) = parse_ytdlp_template(&line) {
+                if let Some(t) = p.total {
                     if max_total.is_none() {
                         if t > 0 {
                             tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
@@ -3503,10 +3527,11 @@ async fn run_hls_ytdlp(
                     }
                     max_total = Some(t.max(max_total.unwrap_or(0)));
                 }
-                if let Some(t) = max_total
+                if let Some(d) = p.downloaded
+                    && let Some(t) = max_total
                     && t > 0
                 {
-                    let have = max_dl.max((frac * t as f64) as u64);
+                    let have = max_dl.max(d.min(t));
                     max_dl = have;
                     for idx in piece_marks(crate::download::piece_len(t), &mut marked, have) {
                         tx_p.send(EngineMsg::PieceDone(idx)).ok();

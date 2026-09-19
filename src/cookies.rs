@@ -157,7 +157,8 @@ async fn export_cookies(
         }
     };
     let mut cmd = tokio::process::Command::new(youtube_bin);
-    cmd.arg("--no-progress")
+    cmd.arg("--ignore-config")
+        .arg("--no-progress")
         .arg("--cookies-from-browser")
         .arg(spec)
         .arg("--cookies")
