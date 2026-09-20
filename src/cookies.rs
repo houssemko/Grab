@@ -174,10 +174,20 @@ async fn export_cookies(
         cmd.process_group(0);
     }
     let mut child = cmd.spawn().ok()?;
-    let status = tokio::time::timeout(timeout, child.wait())
-        .await
-        .ok()?
-        .ok()?;
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        _ => {
+            // Timed out (or the wait itself failed): SIGKILL the process
+            // group — the child runs under `process_group(0)` like the
+            // download spawns — so a hung yt-dlp can't linger holding the
+            // browser's cookie DB lock. Reap it, drop the temp file, and
+            // fall back to plain requests.
+            crate::video::kill_tree(&mut child);
+            let _ = child.wait().await;
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
     if !status.success() {
         tracing::debug!("cookie export failed, continuing without cookies");
         let _ = std::fs::remove_file(&path);
