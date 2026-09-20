@@ -39,6 +39,7 @@ pub mod key {
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
+    pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
     pub const EMBED_THUMBNAIL: &str = "embed-thumbnail";
     pub const EMBED_CHAPTERS: &str = "embed-chapters";
     pub const LIVE_FROM_START: &str = "live-from-start";
@@ -165,6 +166,10 @@ impl AppSettings {
     /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
     pub fn sponsorblock_remove(&self) -> bool {
         self.0.boolean(key::SPONSORBLOCK_REMOVE)
+    }
+    /// Mark SponsorBlock-flagged sponsor segments as chapters in yt-dlp downloads.
+    pub fn sponsorblock_mark(&self) -> bool {
+        self.0.boolean(key::SPONSORBLOCK_MARK)
     }
     /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
     /// Opt-in; live rows never take it (no post-processing leg exists).

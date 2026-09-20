@@ -717,6 +717,27 @@ pub fn show(
         )
         .build();
     video_post_group.add(&sponsorblock);
+    let sponsorblock_mark = adw::SwitchRow::builder()
+        .title(gettext("Mark sponsored segments"))
+        .subtitle(gettext(
+            "Tag SponsorBlock-flagged sponsor segments as chapters",
+        ))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::SPONSORBLOCK_MARK,
+            &sponsorblock_mark,
+            "active",
+        )
+        .build();
+    // Removing segments makes marking them moot: grey the Mark row out
+    // while Remove is on.
+    sponsorblock
+        .bind_property("active", &sponsorblock_mark, "sensitive")
+        .invert_boolean()
+        .sync_create()
+        .build();
+    video_post_group.add(&sponsorblock_mark);
     let embed_thumbnail = adw::SwitchRow::builder()
         .title(gettext("Embed thumbnail"))
         .subtitle(gettext("Attach the video thumbnail as cover art"))

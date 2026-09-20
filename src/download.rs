@@ -3370,6 +3370,7 @@ impl DownloadManager {
             },
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),
+            sponsorblock_mark: self.settings.sponsorblock_mark(),
             embed_thumbnail: self.settings.embed_thumbnail(),
             embed_chapters: self.settings.embed_chapters(),
             retry_sleep: self.settings.retry_sleep().max(0) as u32,

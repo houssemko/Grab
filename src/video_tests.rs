@@ -839,6 +839,7 @@ fn pipeline_reports_missing_tools() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2256,6 +2257,7 @@ fn direct_test_job() -> VideoJob {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2482,6 +2484,7 @@ fn live_test_job() -> VideoJob {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2882,6 +2885,7 @@ fn vod_hls_pins_planner_variant_id() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2951,6 +2955,7 @@ fn vod_hls_refuses_existing_dest() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -3572,6 +3577,43 @@ fn unified_argv_cuts_sponsors_when_enabled() {
 }
 
 #[test]
+fn unified_argv_marks_sponsors_when_enabled() {
+    // Opt-in post-processing: the "sponsor" category only, nothing else.
+    let mut job = direct_test_job();
+    job.sponsorblock_mark = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--sponsorblock-mark")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "sponsor");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(
+        pos < sep,
+        "sponsorblock flag must precede the URL separator"
+    );
+    // Default off: no trace of the flag.
+    job.sponsorblock_mark = false;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
+}
+
+#[test]
 fn hls_argv_passes_concurrent_fragments() {
     // Fragmented HLS like the DASH legs: same parallelism setting.
     let mut job = direct_test_job();
@@ -3603,6 +3645,28 @@ fn hls_argv_cuts_sponsors_when_enabled() {
 }
 
 #[test]
+fn hls_argv_marks_sponsors_when_enabled() {
+    let mut job = direct_test_job();
+    job.sponsorblock_mark = true;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--sponsorblock-mark")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "sponsor");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(
+        pos < sep,
+        "sponsorblock flag must precede the URL separator"
+    );
+    // Default off: no trace of the flag.
+    job.sponsorblock_mark = false;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
+}
+
+#[test]
 fn live_capture_argv_has_no_concurrent_fragments() {
     // Live edge recording keeps its conservative serial timing: the
     // fragment-tuning change is VOD-only by design.
@@ -3617,8 +3681,10 @@ fn live_capture_argv_never_cuts_sponsors() {
     // captures must not pass the flag.
     let mut job = live_test_job();
     job.sponsorblock_remove = true;
+    job.sponsorblock_mark = true;
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
     assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
+    assert!(!argv.iter().any(|a| a == "--sponsorblock-mark"));
 }
 
 #[test]
@@ -4268,6 +4334,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         subtitles: Some("en".into()),
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
