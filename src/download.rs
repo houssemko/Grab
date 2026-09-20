@@ -4241,10 +4241,10 @@ impl DownloadManager {
                         // late — session adoption would see None against the
                         // persisted filter and fail the row on the
                         // only_files mismatch arm.
-                        if let Some(sel) = p.item.selected_files.clone() {
-                            if let Ok(url) = normalize_url(&p.item.url) {
-                                crate::torrent::stage_selection(&url, sel);
-                            }
+                        if let Some(sel) = p.item.selected_files.clone()
+                            && let Ok(url) = normalize_url(&p.item.url)
+                        {
+                            crate::torrent::stage_selection(&url, sel);
                         }
                         match self.restore_existing(
                             &p.item.url,

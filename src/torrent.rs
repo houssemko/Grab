@@ -467,17 +467,20 @@ async fn ensure_session(
         .get_or_try_init(|| async {
             let dir = glib::user_data_dir().join("grab");
             std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create session dir: {e}"))?;
-            let mut opts = SessionOptions::default();
             // Fast resume: persist per-torrent progress (bitfields) so a
             // relaunch skips re-hashing completed pieces, and remember the
             // session's torrents across restarts. Creation re-adds every
             // remembered torrent (Grab re-adds its own rows right after and
             // adopts those handles); entries with no queue row left are
             // swept by `sweep_session_orphans` once the queue is restored.
-            opts.fastresume = true;
-            opts.persistence = Some(SessionPersistenceConfig::Json {
-                folder: Some(dir.join("session")),
-            });
+            let mut opts = SessionOptions {
+                fastresume: true,
+                persistence: Some(SessionPersistenceConfig::Json {
+                    folder: Some(dir.join("session")),
+                }),
+                peer_limit,
+                ..Default::default()
+            };
             if !dht {
                 opts.dht = None;
             }
@@ -492,8 +495,8 @@ async fn ensure_session(
                 });
             }
             // The session struct carries no live setter for this: it applies
-            // here and per add below, so new downloads pick up edits.
-            opts.peer_limit = peer_limit;
+            // here (see the initializer above) and per add below, so new
+            // downloads pick up edits.
             // 0 means disabled (status quo: no listener). Positive ports
             // bind dual-stack; the session only reads this at creation.
             if listen_port > 0 {
