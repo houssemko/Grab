@@ -113,6 +113,11 @@
       <summary>Torrent peer limit</summary>
       <description>Maximum torrent peers. 0 means unlimited.</description>
     </key>
+    <key name="torrent-upload-limit" type="s">
+      <default>''</default>
+      <summary>Torrent upload speed limit</summary>
+      <description>Torrent upload speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
+    </key>
     <key name="torrent-trackers" type="s">
       <default>""</default>
       <summary>Extra torrent trackers</summary>

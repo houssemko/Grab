@@ -2317,9 +2317,25 @@ impl DownloadManager {
                 if let Some(s) = settings_weak.upgrade() {
                     let s = crate::settings::AppSettings::from(s);
                     publish_rate_limit(&s);
-                    crate::torrent::apply_live_limits(parse_rate(s.speed_limit().trim()));
+                    crate::torrent::apply_live_limits(
+                        parse_rate(s.speed_limit().trim()),
+                        parse_rate(s.torrent_upload_limit().trim()),
+                    );
                 }
             });
+        let settings_weak = this.settings.downgrade();
+        this.settings.connect_changed(
+            Some(crate::settings::key::TORRENT_UPLOAD_LIMIT),
+            move |_, _| {
+                if let Some(s) = settings_weak.upgrade() {
+                    let s = crate::settings::AppSettings::from(s);
+                    crate::torrent::apply_live_limits(
+                        parse_rate(s.speed_limit().trim()),
+                        parse_rate(s.torrent_upload_limit().trim()),
+                    );
+                }
+            },
+        );
         this
     }
 
@@ -3228,6 +3244,7 @@ impl DownloadManager {
         let seed_finished = settings.torrent_seed_finished();
         let peer_limit = crate::torrent::peer_limit_of(settings);
         let download_bps = parse_rate(settings.speed_limit().trim());
+        let upload_bps = parse_rate(settings.torrent_upload_limit().trim());
         let trackers = crate::torrent::parse_trackers(&settings.torrent_trackers());
         // Invalid manual proxy fails loudly like every other engine: no
         // silent direct torrent while the user asked for a tunnel.
@@ -3280,6 +3297,7 @@ impl DownloadManager {
             dht: net.dht,
             peer_limit,
             download_bps,
+            upload_bps,
             listen_port: net.listen_port,
             trackers: net.trackers,
             socks_proxy: net.socks_proxy,

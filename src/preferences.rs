@@ -433,6 +433,37 @@ pub fn show(
         .bind(crate::settings::key::TORRENT_PEER_LIMIT, &peers, "value")
         .build();
     torrent_net_group.add(&peers);
+    let upload_limit = adw::EntryRow::builder()
+        .title(gettext("Upload speed limit"))
+        .build();
+    upload_limit.set_tooltip_text(Some(&gettext(
+        "Per torrent, e.g. 500K, 2M; empty means unlimited",
+    )));
+    upload_limit.set_input_purpose(gtk4::InputPurpose::FreeForm);
+    settings
+        .bind(
+            crate::settings::key::TORRENT_UPLOAD_LIMIT,
+            &upload_limit,
+            "text",
+        )
+        .build();
+    // Flag junk immediately instead of failing rows at spawn time.
+    {
+        let l = upload_limit.clone();
+        let mark = move |row: &adw::EntryRow| {
+            let t = row.text().to_string();
+            let t = t.trim();
+            let ok = t.is_empty() || t == "0" || crate::download::parse_rate(t).is_some();
+            if ok {
+                l.remove_css_class("error");
+            } else {
+                l.add_css_class("error");
+            }
+        };
+        mark(&upload_limit);
+        upload_limit.connect_changed(mark);
+    }
+    torrent_net_group.add(&upload_limit);
     let trackers = adw::EntryRow::builder()
         .title(gettext("Extra trackers"))
         .tooltip_text(gettext(

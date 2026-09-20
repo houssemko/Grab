@@ -28,6 +28,7 @@ pub mod key {
     pub const TORRENT_SEED_FINISHED: &str = "torrent-seed-finished";
     pub const TORRENT_DHT: &str = "torrent-dht";
     pub const TORRENT_PEER_LIMIT: &str = "torrent-peer-limit";
+    pub const TORRENT_UPLOAD_LIMIT: &str = "torrent-upload-limit";
     pub const TORRENT_TRACKERS: &str = "torrent-trackers";
     pub const TORRENT_SEED_RATIO: &str = "torrent-seed-ratio";
     pub const TORRENT_SEED_TIME: &str = "torrent-seed-time";
@@ -123,6 +124,9 @@ impl AppSettings {
     }
     pub fn torrent_peer_limit(&self) -> i32 {
         self.0.int(key::TORRENT_PEER_LIMIT)
+    }
+    pub fn torrent_upload_limit(&self) -> String {
+        self.0.string(key::TORRENT_UPLOAD_LIMIT).to_string()
     }
     pub fn torrent_trackers(&self) -> String {
         self.0.string(key::TORRENT_TRACKERS).to_string()

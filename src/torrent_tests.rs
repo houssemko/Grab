@@ -304,3 +304,14 @@ fn sweep_session_orphans_without_session_is_noop() {
     crate::download::tokio_rt().block_on(sweep_session_orphans(&keep));
     assert!(session_handle().is_none());
 }
+
+#[test]
+fn bps_maps_limits() {
+    // Both the download and upload caps share this conversion: empty and
+    // zero mean unlimited, and values beyond u32 stay unlimited instead of
+    // truncating into a tiny cap.
+    assert_eq!(bps(None), None);
+    assert_eq!(bps(Some(0)), None);
+    assert_eq!(bps(Some(500_000)), NonZeroU32::new(500_000));
+    assert_eq!(bps(Some(u64::from(u32::MAX) + 1)), None);
+}

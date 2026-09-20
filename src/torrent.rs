@@ -460,6 +460,7 @@ async fn ensure_session(
     dht: bool,
     peer_limit: Option<usize>,
     download_bps: Option<u64>,
+    upload_bps: Option<u64>,
     listen_port: i32,
     socks_proxy: Option<String>,
 ) -> Result<Arc<Session>, String> {
@@ -509,6 +510,9 @@ async fn ensure_session(
                 .await
                 .map_err(|e| format!("Cannot start torrent engine: {e}"))?;
             session.ratelimits.set_download_bps(bps(download_bps));
+            // The upload cap rides the same session-wide limiter; like the
+            // download cap it also live-applies through apply_live_limits.
+            session.ratelimits.set_upload_bps(bps(upload_bps));
             Ok(session)
         })
         .await
@@ -537,12 +541,13 @@ pub(crate) fn parse_trackers(raw: &str) -> Option<Vec<String>> {
     (!list.is_empty()).then_some(list)
 }
 
-/// Live-apply the download cap (speed-limit watcher, any thread): the rate
+/// Live-apply the speed caps (speed-limit watcher, any thread): the rate
 /// limiter is internally synchronized. Peer limit has no live setter in
 /// rqbit, so it applies at session creation and per add instead.
-pub(crate) fn apply_live_limits(download_bps: Option<u64>) {
+pub(crate) fn apply_live_limits(download_bps: Option<u64>, upload_bps: Option<u64>) {
     if let Some(s) = SESSION.get() {
         s.ratelimits.set_download_bps(bps(download_bps));
+        s.ratelimits.set_upload_bps(bps(upload_bps));
     }
 }
 
@@ -766,6 +771,7 @@ pub(crate) struct TorrentJob {
     pub dht: bool,
     pub peer_limit: Option<usize>,
     pub download_bps: Option<u64>,
+    pub upload_bps: Option<u64>,
     pub listen_port: i32,
     /// Extra tracker URLs from preferences (per-add, so edits apply to new
     /// downloads without restarting the engine).
@@ -792,6 +798,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         dht,
         peer_limit,
         download_bps,
+        upload_bps,
         listen_port,
         trackers,
         socks_proxy,
@@ -902,15 +909,23 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             false
         }
     };
-    let session =
-        match ensure_session(dht, peer_limit, download_bps, listen_port, socks_proxy).await {
-            Ok(s) => s,
-            Err(e) => {
-                ACTIVE.lock().await.remove(&id);
-                fail(e);
-                return;
-            }
-        };
+    let session = match ensure_session(
+        dht,
+        peer_limit,
+        download_bps,
+        upload_bps,
+        listen_port,
+        socks_proxy,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            ACTIVE.lock().await.remove(&id);
+            fail(e);
+            return;
+        }
+    };
     if resumed {
         if let Some(h) = ACTIVE.lock().await.get(&id).and_then(|a| a.handle.clone()) {
             let _ = session.clone().unpause(&h).await;
