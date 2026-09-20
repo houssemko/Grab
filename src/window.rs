@@ -2616,6 +2616,7 @@ pub(crate) fn show_torrent_files_dialog(
     let mut checks = Vec::new();
     for e in &entries {
         let check = gtk4::CheckButton::builder().active(true).build();
+        check.update_property(&[gtk4::accessible::Property::Label(&e.path)]);
         let row = adw::ActionRow::builder()
             .title(&e.path)
             .subtitle(crate::download::fmt_bytes(e.length))
@@ -2653,11 +2654,12 @@ pub(crate) fn show_torrent_files_dialog(
     // HIG selection mode: the selection's actions live in a bottom
     // action bar, not the header.
     let action_bar = gtk4::ActionBar::new();
-    let select_all_btn = gtk4::Button::builder().label(gettext("Select all")).build();
+    let select_all_btn = gtk4::Button::builder().label(gettext("Select All")).build();
     let select_none_btn = gtk4::Button::builder()
-        .label(gettext("Select none"))
+        .label(gettext("Select None"))
         .build();
     let add_btn = gtk4::Button::builder()
+        .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
     action_bar.pack_start(&select_all_btn);
@@ -2675,7 +2677,7 @@ pub(crate) fn show_torrent_files_dialog(
         move || {
             let n = checks.iter().filter(|c| c.is_active()).count();
             add_btn.set_label(
-                &ngettext("Add {} file", "Add {} files", n as u32).replace("{}", &n.to_string()),
+                &ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string()),
             );
         }
     });
@@ -2805,6 +2807,7 @@ fn push_playlist_items_page(
     let mut checks = Vec::new();
     for item in &playlist.items {
         let check = gtk4::CheckButton::builder().active(true).build();
+        check.update_property(&[gtk4::accessible::Property::Label(&item.title)]);
         let row = adw::ActionRow::builder()
             .title(&item.title)
             .activatable(true)
@@ -2847,11 +2850,12 @@ fn push_playlist_items_page(
     toolbar.add_top_bar(&hb);
     toolbar.set_content(Some(&scrolled));
     let action_bar = gtk4::ActionBar::new();
-    let select_all_btn = gtk4::Button::builder().label(gettext("Select all")).build();
+    let select_all_btn = gtk4::Button::builder().label(gettext("Select All")).build();
     let select_none_btn = gtk4::Button::builder()
-        .label(gettext("Select none"))
+        .label(gettext("Select None"))
         .build();
     let add_btn = gtk4::Button::builder()
+        .use_underline(true)
         .css_classes(["suggested-action"])
         .build();
     action_bar.pack_start(&select_all_btn);
@@ -2873,7 +2877,7 @@ fn push_playlist_items_page(
         move || {
             let n = checks.iter().filter(|c| c.is_active()).count();
             add_btn.set_label(
-                &ngettext("Queue {} item", "Queue {} items", n as u32)
+                &ngettext("_Queue {} item", "_Queue {} items", n as u32)
                     .replace("{}", &n.to_string()),
             );
         }
