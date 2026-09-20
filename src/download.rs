@@ -330,19 +330,6 @@ pub(crate) fn sane_filename(s: &str) -> bool {
         && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
-/// Header-safe User-Agent from the free-text setting: keep visible ASCII
-/// plus spaces, drop the rest. An invalid byte would make reqwest fail the
-/// request (or worse, per version), and the value is dconf-writable — so
-/// sanitize at the single choke point instead of trusting all call sites.
-pub(crate) fn sanitize_user_agent(raw: &str) -> String {
-    raw.trim()
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || *c == ' ')
-        .collect::<String>()
-        .trim()
-        .to_string()
-}
-
 /// Best-effort filename from a URL path, falling back to `index.html`.
 /// Decode `%XX` escapes (RFC 5987 `filename*=`); leaves everything else
 /// (including `+`) untouched. No new dependency for ten lines.
@@ -489,10 +476,7 @@ pub fn normalize_url(input: &str) -> Result<String, String> {
 
 #[derive(Debug, Clone, Default)]
 pub struct DownloadOptions {
-    pub tries: i32,
-    pub timeout: i32,
     pub limit_rate: String,
-    pub user_agent: String,
     /// Parallel range connections for large downloads (1 = single stream).
     pub connections: i32,
     pub proxy_mode: String,
@@ -503,6 +487,11 @@ pub struct DownloadOptions {
     /// exports it to a cookie jar once per attempt (see cookies.rs).
     pub cookies_browser: String,
 }
+
+/// Default User-Agent for plain (non-yt-dlp) downloads: a common Chrome
+/// string, since some hosts refuse requests with no (or a bot-like) UA.
+/// Previously a preference; now fixed.
+pub(crate) const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 /// Proxy modes for the `proxy-mode` setting.
 pub const PROXY_MODE_SYSTEM: &str = "system";
@@ -786,10 +775,7 @@ impl DownloadOptions {
     /// Snapshot the network-related GSettings keys.
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
         Self {
-            tries: s.retries(),
-            timeout: s.timeout(),
             limit_rate: s.speed_limit(),
-            user_agent: sanitize_user_agent(&s.user_agent()),
             connections: s.connections(),
             proxy_mode: s.proxy_mode(),
             proxy_type: s.proxy_type(),
@@ -974,8 +960,8 @@ struct FetchCtx {
 }
 
 async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
-    let timeout = Duration::from_secs(ctx.opts.timeout.max(1) as u64);
-    let mut tries = ctx.opts.tries.max(1);
+    let timeout = Duration::from_secs(30);
+    let mut tries = 3;
     // One export per attempt: the browser profile may have changed
     // since the last run, and jars are cheap next to downloads.
     if !ctx.opts.cookies_browser.is_empty() && ctx.opts.cookies_browser != "none" {
@@ -1015,7 +1001,7 @@ async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
                     } else {
                         ctx.tx.send(EngineMsg::SegmentsInit { total }).ok();
                         if multi_loop(&ctx, total, None, connections, &mut tries).await {
-                            let mut single_tries = ctx.opts.tries.max(1);
+                            let mut single_tries = 3;
                             single_loop(&ctx, &mut single_tries, Some(total), false).await;
                         }
                     }
@@ -1028,7 +1014,7 @@ async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
         StartMode::Resume(st) => {
             let total = st.total;
             if multi_loop(&ctx, total, Some(st), connections, &mut tries).await {
-                let mut single_tries = ctx.opts.tries.max(1);
+                let mut single_tries = 3;
                 single_loop(&ctx, &mut single_tries, Some(total), false).await;
             }
         }
@@ -1349,7 +1335,7 @@ async fn attempt_once(
             .unwrap_or(0);
         let mut req = stamp_request(
             ctx.client.get(&ctx.url),
-            &ctx.opts.user_agent,
+            DEFAULT_USER_AGENT,
             ctx.cookies.as_ref(),
             &ctx.url,
         );
@@ -1392,7 +1378,7 @@ async fn attempt_once(
                 // directly before deleting anything that might be complete.
                 let hreq = stamp_request(
                     ctx.client.head(&ctx.url),
-                    &ctx.opts.user_agent,
+                    DEFAULT_USER_AGENT,
                     ctx.cookies.as_ref(),
                     &ctx.url,
                 );
@@ -1995,7 +1981,7 @@ async fn probe_ranges(
 ) -> Result<u64, String> {
     let req = stamp_request(
         client.get(url).header("Range", "bytes=0-0"),
-        &opts.user_agent,
+        DEFAULT_USER_AGENT,
         cookies,
         url,
     );
@@ -2104,7 +2090,7 @@ async fn fetch_piece(
             ctx.client
                 .get(&ctx.url)
                 .header("Range", format!("bytes={start}-{end}")),
-            &ctx.opts.user_agent,
+            DEFAULT_USER_AGENT,
             ctx.cookies.as_ref(),
             &ctx.url,
         );
@@ -2793,7 +2779,7 @@ impl DownloadManager {
             );
         }
         let connections = (opts.connections.max(1) as usize).min(16);
-        let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
+        let timeout = Duration::from_secs(30);
         // A saved bitmap means this item wrote non-contiguous pieces: only a
         // segmented resume is correct (single-stream appends at EOF).
         let mode = match self.segment_state.borrow().get(&item.id()).cloned() {
@@ -3251,10 +3237,10 @@ impl DownloadManager {
         let _ = std::fs::create_dir_all(&dest);
         let settings = &self.settings;
         let seed_finished = settings.torrent_seed_finished();
-        let peer_limit = crate::torrent::peer_limit_of(settings);
+        let peer_limit: Option<usize> = None; // rqbit default
         let download_bps = parse_rate(settings.speed_limit().trim());
         let upload_bps = parse_rate(settings.torrent_upload_limit().trim());
-        let trackers = crate::torrent::parse_trackers(&settings.torrent_trackers());
+        let trackers: Option<Vec<String>> = None;
         // A malformed blocklist URL fails loudly like the manual proxy:
         // silently torrenting without the blocklist would betray the
         // user's intent.
@@ -3281,11 +3267,13 @@ impl DownloadManager {
         };
         // SOCKS5 takes over TCP peers + HTTP trackers (DHT, LSD, listener
         // and UDP trackers go dark alongside); anything else stays direct.
+        // No listen port (rqbit default: no listener), so UPnP port
+        // forwarding has nothing to forward: hardcoded off.
         let net = crate::torrent::plan_torrent_net(
             settings.torrent_dht(),
             settings.torrent_lsd(),
-            settings.torrent_listen_port(),
-            settings.torrent_upnp(),
+            0,
+            false,
             trackers,
             proxy.as_ref(),
         );
@@ -3390,7 +3378,6 @@ impl DownloadManager {
             quality,
             audio_only,
             dest: item.file_path(),
-            tries: opts.tries.max(1) as u32,
             connections: opts.connections.max(1) as u32,
             // Shared throttle: parsed once here; empty/0/invalid means
             // unlimited (the preferences row flags junk live).
@@ -3399,8 +3386,6 @@ impl DownloadManager {
             // Extraction quality for audio-only rows; the schema range is
             // 0..=10 and 5 is yt-dlp's own default, clamped at spawn.
             audio_quality: self.settings.audio_quality().clamp(0, 10),
-            timeout_secs: opts.timeout.max(1) as u64,
-            user_agent: opts.user_agent.clone(),
             video_format_id,
             is_live,
             live_from_start: self.settings.live_from_start(),
@@ -3423,15 +3408,7 @@ impl DownloadManager {
             } else {
                 crate::video::remux_video_active(&self.settings.remux_video())
             },
-            embed_thumbnail: self.settings.embed_thumbnail(),
             embed_chapters: self.settings.embed_chapters(),
-            retry_sleep: self.settings.retry_sleep().max(0) as u32,
-            sleep_interval: self.settings.sleep_interval().max(0) as u32,
-            max_sleep_interval: self.settings.max_sleep_interval().max(0) as u32,
-            throttled_rate: self.settings.throttled_rate().max(0) as u32,
-            extractor_retries: self.settings.extractor_retries().max(0) as u32,
-            sleep_requests: self.settings.sleep_requests().max(0) as u32,
-            socket_timeout: self.settings.socket_timeout().max(0) as u32,
             proxy,
         };
         let handle = tokio_rt().spawn(async move {

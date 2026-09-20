@@ -2329,7 +2329,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         // row per chosen entry, each re-resolving its own
                         // page at download time.
                         crate::video::ProbeResult::Playlist(pl) => {
-                            show_playlist_items_dialog(
+                            push_playlist_items_page(
+                                &nav2,
                                 m.clone(),
                                 dd.clone(),
                                 dialog_weak.clone(),
@@ -2716,17 +2717,22 @@ fn fmt_item_duration(secs: i64) -> String {
 /// only listed them. Quality follows the global preference (no pin:
 /// pins don't survive across items); the audio-only choice from the
 /// New Download dialog applies to every queued row.
-fn show_playlist_items_dialog(
+/// The picker is a page in the New Download navigation stack (tag
+/// "playlist"), not a standalone dialog: one window, one close path,
+/// and the navigation header's Back button.
+fn push_playlist_items_page(
+    nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     parent: glib::WeakRef<adw::Dialog>,
     playlist: crate::video::PlaylistInfo,
     audio_only: bool,
 ) {
-    let dialog = adw::Dialog::builder().title(&playlist.title).build();
-    dialog.set_follows_content_size(true);
-    dialog.set_content_width(420);
-    dialog.set_content_height(560);
+    // Same guard as the video page: don't stack a second picker while
+    // one is already visible.
+    if nav.visible_page_tag().as_deref() == Some("playlist") {
+        return;
+    }
 
     let page = adw::PreferencesPage::new();
     let count = playlist.items.len();
@@ -2770,21 +2776,22 @@ fn show_playlist_items_dialog(
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
+    // No WM title buttons either end and no explicit Cancel: the
+    // navigation header's Back button (and Esc) close the picker, like
+    // the Media Details page.
     hb.set_show_start_title_buttons(false);
     hb.set_show_end_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder()
-        .label(gettext("_Cancel"))
-        .use_underline(true)
-        .build();
     let add_btn = gtk4::Button::builder()
         .css_classes(["suggested-action"])
         .build();
-    hb.pack_start(&cancel_btn);
     hb.pack_end(&add_btn);
     toolbar.add_top_bar(&hb);
     toolbar.set_content(Some(&scrolled));
-    dialog.set_child(Some(&toolbar));
-    dialog.set_default_widget(Some(&add_btn));
+    let picker_page = adw::NavigationPage::builder()
+        .tag("playlist")
+        .title(&playlist.title)
+        .child(&toolbar)
+        .build();
 
     // The action counts the live selection; with nothing selected it
     // reads "Queue 0 items" and clicking it shows the error label,
@@ -2807,15 +2814,7 @@ fn show_playlist_items_dialog(
     refresh_add();
 
     {
-        let dialog_weak = dialog.downgrade();
-        cancel_btn.connect_clicked(move |_| {
-            if let Some(d) = dialog_weak.upgrade() {
-                d.close();
-            }
-        });
-    }
-    {
-        let dialog_weak = dialog.downgrade();
+        let parent_weak = parent.clone();
         add_btn.connect_clicked(move |_| {
             let chosen: Vec<(usize, &crate::video::PlaylistItem)> = playlist
                 .items
@@ -2860,18 +2859,31 @@ fn show_playlist_items_dialog(
                 error_label.set_visible(true);
                 return;
             }
-            if let Some(d) = dialog_weak.upgrade() {
-                d.close();
-            }
-            if let Some(p) = parent.upgrade() {
+            // Complete success closes the whole New Download dialog; a
+            // partial failure stays on the picker so the remaining rows
+            // can be retried (their switches were flipped off above).
+            if let Some(p) = parent_weak.upgrade() {
                 p.close();
             }
         });
     }
 
-    // No gtk Window parent exists here (invoked from an adw::Dialog):
-    // present standalone like the torrent picker above.
-    dialog.present(None::<&gtk4::Window>);
+    // Enter queues the selection while the picker is up; the dialog's
+    // previous default widget is restored when the page is popped.
+    if let Some(p) = parent.upgrade() {
+        let prev_default = p.default_widget();
+        p.set_default_widget(Some(&add_btn));
+        let parent_weak = parent.clone();
+        nav.connect_popped(move |_, popped| {
+            if popped.tag().as_deref() == Some("playlist") {
+                if let Some(p) = parent_weak.upgrade() {
+                    p.set_default_widget(prev_default.as_ref());
+                }
+            }
+        });
+    }
+
+    nav.push(&picker_page);
 }
 
 #[cfg(test)]

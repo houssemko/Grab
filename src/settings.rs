@@ -12,16 +12,6 @@ pub mod key {
     pub const MAX_CONCURRENT: &str = "max-concurrent";
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
-    pub const EXTRACTOR_RETRIES: &str = "extractor-retries";
-    pub const MAX_SLEEP_INTERVAL: &str = "max-sleep-interval";
-    pub const RETRIES: &str = "retries";
-    pub const RETRY_SLEEP: &str = "retry-sleep";
-    pub const SLEEP_INTERVAL: &str = "sleep-interval";
-    pub const SLEEP_REQUESTS: &str = "sleep-requests";
-    pub const SOCKET_TIMEOUT: &str = "socket-timeout";
-    pub const THROTTLED_RATE: &str = "throttled-rate";
-    pub const TIMEOUT: &str = "timeout";
-    pub const USER_AGENT: &str = "user-agent";
     pub const PROXY_MODE: &str = "proxy-mode";
     pub const PROXY_TYPE: &str = "proxy-type";
     pub const PROXY_HOST: &str = "proxy-host";
@@ -32,13 +22,9 @@ pub mod key {
     pub const INHIBIT_SUSPEND: &str = "inhibit-suspend";
     pub const TORRENT_SEED_FINISHED: &str = "torrent-seed-finished";
     pub const TORRENT_DHT: &str = "torrent-dht";
-    pub const TORRENT_PEER_LIMIT: &str = "torrent-peer-limit";
     pub const TORRENT_UPLOAD_LIMIT: &str = "torrent-upload-limit";
-    pub const TORRENT_TRACKERS: &str = "torrent-trackers";
     pub const TORRENT_SEED_RATIO: &str = "torrent-seed-ratio";
     pub const TORRENT_SEED_TIME: &str = "torrent-seed-time";
-    pub const TORRENT_LISTEN_PORT: &str = "torrent-listen-port";
-    pub const TORRENT_UPNP: &str = "torrent-upnp";
     pub const TORRENT_BLOCKLIST_URL: &str = "torrent-blocklist-url";
     pub const TORRENT_LSD: &str = "torrent-lsd";
     pub const VIDEO_QUALITY: &str = "video-quality";
@@ -50,7 +36,6 @@ pub mod key {
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
     pub const REMUX_VIDEO: &str = "remux-video";
-    pub const EMBED_THUMBNAIL: &str = "embed-thumbnail";
     pub const EMBED_CHAPTERS: &str = "embed-chapters";
     pub const LIVE_FROM_START: &str = "live-from-start";
     pub const WINDOW_WIDTH: &str = "window-width";
@@ -80,52 +65,6 @@ impl AppSettings {
     }
     pub fn speed_limit(&self) -> String {
         self.0.string(key::SPEED_LIMIT).to_string()
-    }
-    /// Retries for known extractor errors (`--extractor-retries`).
-    /// Opt-in; 0 uses yt-dlp's default of 3.
-    pub fn extractor_retries(&self) -> i32 {
-        self.0.int(key::EXTRACTOR_RETRIES)
-    }
-    /// Upper bound of the random sleep before each download
-    /// (`--max-sleep-interval`). Opt-in; 0 disables the upper bound.
-    /// Only meaningful together with `sleep_interval`.
-    pub fn max_sleep_interval(&self) -> i32 {
-        self.0.int(key::MAX_SLEEP_INTERVAL)
-    }
-    pub fn retries(&self) -> i32 {
-        self.0.int(key::RETRIES)
-    }
-    /// Seconds to wait between fragment retries (`--retry-sleep
-    /// fragment:N`). Opt-in; 0 disables the delay.
-    pub fn retry_sleep(&self) -> i32 {
-        self.0.int(key::RETRY_SLEEP)
-    }
-    /// Seconds to wait before each download (`--sleep-interval`).
-    /// Opt-in; 0 disables the pause.
-    pub fn sleep_interval(&self) -> i32 {
-        self.0.int(key::SLEEP_INTERVAL)
-    }
-    /// Seconds to sleep between requests during data extraction
-    /// (`--sleep-requests`). Opt-in; 0 disables the pause.
-    pub fn sleep_requests(&self) -> i32 {
-        self.0.int(key::SLEEP_REQUESTS)
-    }
-    /// Seconds to wait on a stalled connection before giving up
-    /// (`--socket-timeout`). Opt-in; 0 uses yt-dlp's default.
-    pub fn socket_timeout(&self) -> i32 {
-        self.0.int(key::SOCKET_TIMEOUT)
-    }
-    /// Minimum download rate in KB/s below which throttling is assumed
-    /// and the video data is re-extracted (`--throttled-rate`).
-    /// Opt-in; 0 disables detection.
-    pub fn throttled_rate(&self) -> i32 {
-        self.0.int(key::THROTTLED_RATE)
-    }
-    pub fn timeout(&self) -> i32 {
-        self.0.int(key::TIMEOUT)
-    }
-    pub fn user_agent(&self) -> String {
-        self.0.string(key::USER_AGENT).to_string()
     }
     pub fn proxy_mode(&self) -> String {
         self.0.string(key::PROXY_MODE).to_string()
@@ -157,26 +96,14 @@ impl AppSettings {
     pub fn torrent_dht(&self) -> bool {
         self.0.boolean(key::TORRENT_DHT)
     }
-    pub fn torrent_peer_limit(&self) -> i32 {
-        self.0.int(key::TORRENT_PEER_LIMIT)
-    }
     pub fn torrent_upload_limit(&self) -> String {
         self.0.string(key::TORRENT_UPLOAD_LIMIT).to_string()
-    }
-    pub fn torrent_trackers(&self) -> String {
-        self.0.string(key::TORRENT_TRACKERS).to_string()
     }
     pub fn torrent_seed_ratio(&self) -> f64 {
         self.0.double(key::TORRENT_SEED_RATIO)
     }
     pub fn torrent_seed_time(&self) -> i32 {
         self.0.int(key::TORRENT_SEED_TIME)
-    }
-    pub fn torrent_listen_port(&self) -> i32 {
-        self.0.int(key::TORRENT_LISTEN_PORT)
-    }
-    pub fn torrent_upnp(&self) -> bool {
-        self.0.boolean(key::TORRENT_UPNP)
     }
     pub fn torrent_blocklist_url(&self) -> String {
         self.0.string(key::TORRENT_BLOCKLIST_URL).to_string()
@@ -224,11 +151,6 @@ impl AppSettings {
     /// Target container for opt-in remuxing (`--remux-video`); `"off"` disables it.
     pub fn remux_video(&self) -> String {
         self.0.string(key::REMUX_VIDEO).to_string()
-    }
-    /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
-    /// Opt-in; live rows never take it (no post-processing leg exists).
-    pub fn embed_thumbnail(&self) -> bool {
-        self.0.boolean(key::EMBED_THUMBNAIL)
     }
     /// Write chapter markers into the finished file (`--embed-chapters`).
     /// Opt-in; live rows never take it (no post-processing leg exists).

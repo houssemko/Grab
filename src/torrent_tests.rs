@@ -101,28 +101,6 @@ fn intake_plan_mirrors_engine_layout() {
 }
 
 #[test]
-fn trackers_split_and_schemeless_dropped() {
-    assert_eq!(parse_trackers(""), None);
-    assert_eq!(parse_trackers("  ,  "), None);
-    assert_eq!(parse_trackers("not a url"), None);
-    assert_eq!(
-        parse_trackers("udp://t.one:1337/announce, https://t.two/announce"),
-        Some(vec![
-            "udp://t.one:1337/announce".to_string(),
-            "https://t.two/announce".to_string()
-        ])
-    );
-    // Newlines/spaces split too; schemeless typos never fail a download.
-    assert_eq!(
-        parse_trackers("udp://t.one/a\ntypo.example.com https://t.two/b"),
-        Some(vec![
-            "udp://t.one/a".to_string(),
-            "https://t.two/b".to_string()
-        ])
-    );
-}
-
-#[test]
 fn blocklist_url_empty_disables() {
     assert_eq!(blocklist_url_of(""), Ok(None));
     assert_eq!(blocklist_url_of("   "), Ok(None));

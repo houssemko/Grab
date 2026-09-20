@@ -28,65 +28,6 @@
       <summary>Speed limit</summary>
       <description>Download speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
     </key>
-    <key name="extractor-retries" type="i">
-      <default>0</default>
-      <range min="0" max="20"/>
-      <summary>Extractor retries</summary>
-      <description>Retries for known extractor errors. 0 uses yt-dlp's default of 3.</description>
-    </key>
-    <key name="max-sleep-interval" type="i">
-      <default>0</default>
-      <range min="0" max="300"/>
-      <summary>Max sleep interval</summary>
-      <description>Upper bound of the random sleep before each download. Only used together with Sleep interval; 0 disables the upper bound.</description>
-    </key>
-    <key name="retries" type="i">
-      <default>3</default>
-      <range min="1" max="99"/>
-      <summary>Retries</summary>
-      <description>How many times a failed download retries.</description>
-    </key>
-    <key name="retry-sleep" type="i">
-      <default>0</default>
-      <range min="0" max="60"/>
-      <summary>Retry delay</summary>
-      <description>Seconds to wait between fragment retries. 0 disables the delay.</description>
-    </key>
-    <key name="sleep-interval" type="i">
-      <default>0</default>
-      <range min="0" max="300"/>
-      <summary>Sleep interval</summary>
-      <description>Seconds to wait before each download. 0 disables the pause.</description>
-    </key>
-    <key name="sleep-requests" type="i">
-      <default>0</default>
-      <range min="0" max="300"/>
-      <summary>Sleep between requests</summary>
-      <description>Seconds to sleep between requests during data extraction. 0 disables the pause.</description>
-    </key>
-    <key name="socket-timeout" type="i">
-      <default>0</default>
-      <range min="0" max="300"/>
-      <summary>Socket timeout</summary>
-      <description>Seconds to wait on a stalled connection before giving up. 0 uses yt-dlp's default.</description>
-    </key>
-    <key name="throttled-rate" type="i">
-      <default>0</default>
-      <range min="0" max="10000"/>
-      <summary>Throttled rate</summary>
-      <description>Minimum download rate in KB/s below which throttling is assumed and the video data is re-extracted. 0 disables detection.</description>
-    </key>
-    <key name="timeout" type="i">
-      <default>30</default>
-      <range min="5" max="300"/>
-      <summary>Timeout in seconds</summary>
-      <description>Network timeout in seconds.</description>
-    </key>
-    <key name="user-agent" type="s">
-      <default>'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'</default>
-      <summary>User agent</summary>
-      <description>Custom User-Agent header. Empty means the default.</description>
-    </key>
     <key name="proxy-mode" type="s">
       <default>'system'</default>
       <summary>Proxy mode</summary>
@@ -137,21 +78,10 @@
       <summary>Use DHT for torrents</summary>
       <description>Find torrent peers through the distributed hash table. Applies when the torrent engine first starts.</description>
     </key>
-    <key name="torrent-peer-limit" type="i">
-      <default>0</default>
-      <range min="0" max="500"/>
-      <summary>Torrent peer limit</summary>
-      <description>Maximum torrent peers. 0 means unlimited.</description>
-    </key>
     <key name="torrent-upload-limit" type="s">
       <default>''</default>
       <summary>Torrent upload speed limit</summary>
       <description>Torrent upload speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
-    </key>
-    <key name="torrent-trackers" type="s">
-      <default>""</default>
-      <summary>Extra torrent trackers</summary>
-      <description>Comma-separated tracker URLs added to every torrent. Applies when a download starts.</description>
     </key>
     <key name="torrent-seed-ratio" type="d">
       <default>0.0</default>
@@ -164,17 +94,6 @@
       <range min="0" max="43200"/>
       <summary>Seed time limit in minutes</summary>
       <description>Stop seeding this many minutes after finishing. 0 means unlimited.</description>
-    </key>
-    <key name="torrent-listen-port" type="i">
-      <default>0</default>
-      <range min="0" max="65535"/>
-      <summary>Torrent listen port</summary>
-      <description>Port for incoming torrent connections. 0 means disabled. Applies when the torrent engine first starts.</description>
-    </key>
-    <key name="torrent-upnp" type="b">
-      <default>false</default>
-      <summary>UPnP port forwarding</summary>
-      <description>Ask the router to forward the torrent listen port via UPnP. Applies when the torrent engine first starts.</description>
     </key>
     <key name="torrent-blocklist-url" type="s">
       <default>""</default>
@@ -231,11 +150,6 @@
       <default>'off'</default>
       <summary>Remux video</summary>
       <description>Remux finished video downloads into another container without re-encoding. 'off' disables remuxing.</description>
-    </key>
-    <key name="embed-thumbnail" type="b">
-      <default>false</default>
-      <summary>Embed thumbnail</summary>
-      <description>Attach the video thumbnail as cover art on new downloads.</description>
     </key>
     <key name="embed-chapters" type="b">
       <default>false</default>

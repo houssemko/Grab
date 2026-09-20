@@ -320,10 +320,6 @@ msgstr ""
 msgid "Per download, e.g. 500K, 2M; empty means unlimited"
 msgstr ""
 
-#: src/preferences.rs:186
-msgid "Retries"
-msgstr ""
-
 #: src/preferences.rs:423
 msgid "Notifications"
 msgstr ""
@@ -374,24 +370,6 @@ msgid ""
 "starts."
 msgstr ""
 
-#: src/preferences.rs:535
-msgid "Peer limit"
-msgstr ""
-
-#: src/preferences.rs:537
-msgid ""
-"Maximum peers per download. 0 means unlimited. Applies when a download "
-"starts."
-msgstr ""
-
-#: src/preferences.rs:577
-msgid "Extra trackers"
-msgstr ""
-
-#: src/preferences.rs:579
-msgid "Comma-separated tracker URLs added to every download"
-msgstr ""
-
 #: src/preferences.rs:587
 msgid "Peer blocklist"
 msgstr ""
@@ -400,26 +378,6 @@ msgstr ""
 msgid ""
 "URL of a peer blocklist (eMule ipfilter.dat format); empty means disabled. "
 "Fetched directly, bypassing any proxy."
-msgstr ""
-
-#: src/preferences.rs:617
-msgid "Listen port"
-msgstr ""
-
-#: src/preferences.rs:619
-msgid ""
-"Port for incoming connections. 0 means disabled. Applies when the torrent "
-"engine first starts."
-msgstr ""
-
-#: src/preferences.rs:632
-msgid "UPnP port forwarding"
-msgstr ""
-
-#: src/preferences.rs:634
-msgid ""
-"Ask your router to forward the listen port. Applies when the torrent engine "
-"first starts."
 msgstr ""
 
 #: src/preferences.rs:696
@@ -1316,58 +1274,6 @@ msgstr[1] ""
 msgid "Parallel connections for large files"
 msgstr ""
 
-#: src/preferences.rs:195
-msgid "Retry delay"
-msgstr ""
-
-#: src/preferences.rs:269
-msgid "Timeout"
-msgstr ""
-
-#: src/preferences.rs:196 src/preferences.rs:206 src/preferences.rs:220 src/preferences.rs:242 src/preferences.rs:256 src/preferences.rs:270
-msgid "In seconds"
-msgstr ""
-
-#: src/preferences.rs:205
-msgid "Sleep interval"
-msgstr ""
-
-#: src/preferences.rs:219
-msgid "Max sleep interval"
-msgstr ""
-
-#: src/preferences.rs:241
-msgid "Sleep between requests"
-msgstr ""
-
-#: src/preferences.rs:255
-msgid "Socket timeout"
-msgstr ""
-
-#: src/preferences.rs:279
-msgid "Throttled rate"
-msgstr ""
-
-#: src/preferences.rs:280
-msgid "In KB/s"
-msgstr ""
-
-#: src/preferences.rs:293
-msgid "Extractor retries"
-msgstr ""
-
-#: src/preferences.rs:294
-msgid "0 uses the default of 3"
-msgstr ""
-
-#: src/preferences.rs:307
-msgid "User agent"
-msgstr ""
-
-#: src/preferences.rs:309
-msgid "Blank uses the default user agent"
-msgstr ""
-
 #: src/preferences.rs:316
 msgid "Keep original file dates"
 msgstr ""
@@ -1440,14 +1346,6 @@ msgstr ""
 msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
 msgstr ""
 
-#: src/preferences.rs:921
-msgid "Embed thumbnail"
-msgstr ""
-
-#: src/preferences.rs:922
-msgid "Attach the video thumbnail as cover art"
-msgstr ""
-
 #: src/preferences.rs:933
 msgid "Embed chapters"
 msgstr ""
@@ -1470,4 +1368,9 @@ msgstr ""
 
 #: src/preferences.rs:549
 msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
+msgstr ""
+
+
+#: src/video.rs:355
+msgid "This stream can't be recorded from the start — the site offers no replay. Turn off \"Live from start\" to record from the live edge instead."
 msgstr ""

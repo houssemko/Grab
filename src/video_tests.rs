@@ -825,12 +825,9 @@ fn pipeline_reports_missing_tools() {
         audio_only: false,
         audio_quality: 5,
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
-        tries: 1,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 5,
-        user_agent: "test".into(),
         video_format_id: None,
         is_live: false,
         live_from_start: false,
@@ -841,15 +838,7 @@ fn pipeline_reports_missing_tools() {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2249,12 +2238,9 @@ fn direct_test_job() -> VideoJob {
         audio_only: false,
         audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
-        tries: 3,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 60,
-        user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
         live_from_start: false,
@@ -2265,15 +2251,7 @@ fn direct_test_job() -> VideoJob {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: None,
     }
 }
@@ -2482,12 +2460,9 @@ fn live_test_job() -> VideoJob {
         audio_only: false,
         audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
-        tries: 3,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 60,
-        user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: true,
         live_from_start: false,
@@ -2498,15 +2473,7 @@ fn live_test_job() -> VideoJob {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: None,
     }
 }
@@ -2889,12 +2856,9 @@ fn vod_hls_pins_planner_variant_id() {
         audio_only: false,
         audio_quality: 5,
         dest: dir.join("v.mp4"),
-        tries: 3,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 60,
-        user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
         live_from_start: false,
@@ -2905,15 +2869,7 @@ fn vod_hls_pins_planner_variant_id() {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2965,12 +2921,9 @@ fn vod_hls_refuses_existing_dest() {
         audio_only: false,
         audio_quality: 5,
         dest: dir.join("v.mp4"),
-        tries: 3,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 60,
-        user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
         live_from_start: false,
@@ -2981,15 +2934,7 @@ fn vod_hls_refuses_existing_dest() {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -3218,6 +3163,140 @@ fn fetch_video_page_rejects_garbage_stdout() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fake yt-dlp that records its argv (one per line) to `args.txt` and
+/// prints `stdout`. Returns the bin path; the args file sits beside it.
+fn fake_argv_dump_bin(dir_name: &str, stdout: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("{dir_name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("out.txt"), stdout).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}/args.txt\"\ncat \"{}/out.txt\"\n",
+            dir.display(),
+            dir.display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+fn fake_bin_argv(bin: &std::path::Path) -> String {
+    std::fs::read_to_string(bin.parent().unwrap().join("args.txt")).unwrap()
+}
+
+#[test]
+fn fetch_video_page_resolves_without_flat_playlist() {
+    // The download worker must fully extract the single item: a story
+    // queued from the picker failed with "the page listed none" because
+    // its resolve ran under --flat-playlist and came back stub-shaped.
+    let bin = fake_argv_dump_bin(
+        "grab-noflat",
+        &serde_json::json!({
+            "id": "abc",
+            "title": "T",
+            "age_limit": 0,
+            "live_status": "not_live",
+            "playable_in_embed": true,
+            "extractor": "generic",
+            "extractor_key": "Generic",
+            "_version": {"version": "2026.08.19", "repository": "yt-dlp"},
+            "formats": [],
+        })
+        .to_string(),
+    );
+    let video = crate::download::tokio_rt()
+        .block_on(fetch_video_page(
+            &bin,
+            "https://example.com/v",
+            "none",
+            std::time::Duration::from_secs(30),
+            None,
+        ))
+        .expect("fake extract parses");
+    assert_eq!(video.id, "abc");
+    let argv = fake_bin_argv(&bin);
+    assert!(
+        !argv.lines().any(|l| l == "--flat-playlist"),
+        "download resolve must not pass --flat-playlist, got:\n{argv}"
+    );
+    let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+}
+
+#[test]
+fn dump_json_flat_playlist_flag_per_caller() {
+    // Both sides of the split, pinned: the dialog's collection probe
+    // keeps --flat-playlist (stub listings); the single-item resolve
+    // must not.
+    for (name, flat, want) in [
+        ("grab-flatprobe-on", true, true),
+        ("grab-flatprobe-off", false, false),
+    ] {
+        let bin = fake_argv_dump_bin(name, r#"{"id":"x","title":"T"}"#);
+        crate::download::tokio_rt()
+            .block_on(fetch_raw_dump_json(
+                &bin,
+                "https://example.com/v",
+                "none",
+                std::time::Duration::from_secs(30),
+                None,
+                flat,
+            ))
+            .expect("fake dump parses");
+        let argv = fake_bin_argv(&bin);
+        assert_eq!(
+            argv.lines().any(|l| l == "--flat-playlist"),
+            want,
+            "flat={flat} argv:\n{argv}"
+        );
+        let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+    }
+}
+
+#[test]
+fn fetch_video_page_rejects_playlist_shaped_output() {
+    // A collection URL reaching the download worker must fail loudly,
+    // not parse as a video with an empty format list ("the page listed
+    // none").
+    let bin = fake_argv_dump_bin(
+        "grab-playlistshape",
+        &serde_json::json!({
+            "_type": "playlist",
+            "id": "pl",
+            "title": "Stories",
+            "extractor": "instagram",
+            "extractor_key": "Instagram",
+            "entries": [
+                {"_type": "url", "id": "s1", "title": "Video by onlyhopeyy",
+                 "webpage_url": "https://www.instagram.com/stories/x/1/"},
+            ],
+        })
+        .to_string(),
+    );
+    let res = crate::download::tokio_rt().block_on(fetch_video_page(
+        &bin,
+        "https://example.com/stories",
+        "none",
+        std::time::Duration::from_secs(30),
+        None,
+    ));
+    match res {
+        Err(e) => assert!(
+            e.to_string().contains("collection"),
+            "unexpected error: {e}"
+        ),
+        ok => panic!("playlist-shaped output must not parse as a video, got {ok:?}"),
+    }
+    let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+}
+
 #[test]
 fn sanitize_missing_codec_fields_still_parse() {
     // A new sparse extractor omitting codec/container/height keys must
@@ -3280,11 +3359,9 @@ fn apply_proxy_env_sets_nothing_when_direct() {
 #[test]
 fn apply_proxy_env_stamps_no_proxy_when_proxied() {
     let proxy = crate::download::DownloadOptions {
-        tries: 3,
         connections: 4,
         timeout: 30,
         limit_rate: String::new(),
-        user_agent: String::new(),
         proxy_mode: "manual".into(),
         proxy_type: "socks5".into(),
         proxy_host: "127.0.0.1".into(),
@@ -3310,11 +3387,9 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
 #[test]
 fn proxy_cli_args_passes_plain_url() {
     let proxy = crate::download::DownloadOptions {
-        tries: 3,
         connections: 4,
         timeout: 30,
         limit_rate: String::new(),
-        user_agent: String::new(),
         proxy_mode: "manual".into(),
         proxy_type: "socks5".into(),
         proxy_host: "127.0.0.1".into(),
@@ -3854,39 +3929,6 @@ fn live_capture_argv_never_cuts_sponsors() {
 }
 
 #[test]
-fn unified_argv_embeds_thumbnail_when_enabled() {
-    // Opt-in post-processing: the thumbnail becomes the file's cover art.
-    let mut job = direct_test_job();
-    job.embed_thumbnail = true;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--embed-thumbnail")
-        .expect("flag");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "thumbnail flag must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.embed_thumbnail = false;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--embed-thumbnail"));
-}
-
-#[test]
 fn unified_argv_embeds_chapters_when_enabled() {
     // Opt-in post-processing: chapter markers land in the finished file.
     let mut job = direct_test_job();
@@ -3966,30 +4008,25 @@ fn remux_video_active_allowlists_targets() {
 }
 
 #[test]
-fn hls_argv_embeds_thumbnail_and_chapters_when_enabled() {
+fn hls_argv_embeds_chapters_when_enabled() {
     let mut job = direct_test_job();
-    job.embed_thumbnail = true;
     job.embed_chapters = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
     let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(argv.iter().any(|a| a == "--embed-thumbnail"));
     assert!(argv.iter().any(|a| a == "--embed-chapters"));
-    // Default off: no trace of either flag.
-    job.embed_thumbnail = false;
+    // Default off: no trace of the flag.
     job.embed_chapters = false;
     let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--embed-thumbnail"));
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
 
 #[test]
-fn audio_only_rows_still_get_thumbnail_and_chapters() {
-    // Cover art and chapters are meaningful on audio containers (m4a), so
-    // unlike --embed-subs these flags apply to audio-only rows too. Pinned
-    // here so a future reorder of the flag blocks can't silently drop them.
+fn audio_only_rows_still_get_chapters() {
+    // Chapters are meaningful on audio containers (m4a), so unlike
+    // --embed-subs this flag applies to audio-only rows too. Pinned here
+    // so a future reorder of the flag blocks can't silently drop it.
     let mut job = direct_test_job();
     job.audio_only = true;
-    job.embed_thumbnail = true;
     job.embed_chapters = true;
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let argv = unified_download_argv(
@@ -4000,30 +4037,39 @@ fn audio_only_rows_still_get_thumbnail_and_chapters() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
     );
-    assert!(argv.iter().any(|a| a == "--embed-thumbnail"));
     assert!(argv.iter().any(|a| a == "--embed-chapters"));
 }
 
 #[test]
-fn live_capture_argv_never_embeds_thumbnail_or_chapters() {
+fn live_capture_argv_never_embeds_chapters() {
     // Live captures record raw transport streams: no post-processing leg
-    // exists, so even opted in these flags must not appear.
+    // exists, so even opted in this flag must not appear.
     let mut job = live_test_job();
-    job.embed_thumbnail = true;
     job.embed_chapters = true;
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--embed-thumbnail"));
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
 }
 
 #[test]
-fn unified_argv_retry_sleep_fragment_scoped_when_set() {
-    // Opt-in resilience: the delay is scoped to fragment retries
-    // (fragment:N), not every retry type.
-    let mut job = direct_test_job();
-    job.retry_sleep = 5;
+fn vod_and_live_argv_never_emit_removed_tuning_flags() {
+    // The old Advanced tuning knobs are gone: retries, sleeps, socket
+    // timeout, throttled rate, extractor retries and user agent are all
+    // left at the yt-dlp defaults now, so none of their flags may appear
+    // on any leg.
+    let gone = [
+        "--retries",
+        "--retry-sleep",
+        "--sleep-interval",
+        "--max-sleep-interval",
+        "--sleep-requests",
+        "--socket-timeout",
+        "--throttled-rate",
+        "--extractor-retries",
+        "--user-agent",
+    ];
+    let job = direct_test_job();
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
+    let unified = unified_download_argv(
         &job,
         "bv+ba/b",
         true,
@@ -4031,488 +4077,21 @@ fn unified_argv_retry_sleep_fragment_scoped_when_set() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
     );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--retry-sleep")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "fragment:5");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "retry-sleep must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.retry_sleep = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--retry-sleep"));
-}
-
-#[test]
-fn hls_argv_retry_sleep_when_set() {
-    let mut job = direct_test_job();
-    job.retry_sleep = 10;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--retry-sleep")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "fragment:10");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "retry-sleep must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.retry_sleep = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--retry-sleep"));
-}
-
-#[test]
-fn live_capture_argv_never_retry_sleep() {
-    // Live fragment retries are endless by design; a sleep between them
-    // would stall live catch-up, so even opted in the flag must not appear.
-    let mut job = live_test_job();
-    job.retry_sleep = 5;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--retry-sleep"));
-}
-
-#[test]
-fn unified_argv_sleep_interval_when_set() {
-    // Opt-in politeness: pause before each download.
-    let mut job = direct_test_job();
-    job.sleep_interval = 30;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
+    let hls = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let live = live_capture_argv(
+        &live_test_job(),
+        "h720",
+        std::path::Path::new("/tmp/dl/v.live.ts"),
     );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--sleep-interval")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "30");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "sleep-interval must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.sleep_interval = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--sleep-interval"));
-}
-
-#[test]
-fn hls_argv_sleep_interval_when_set() {
-    let mut job = direct_test_job();
-    job.sleep_interval = 45;
-    let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--sleep-interval")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "45");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "sleep-interval must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.sleep_interval = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--sleep-interval"));
-}
-
-#[test]
-fn live_capture_argv_never_sleep_interval() {
-    // A pre-download sleep would stall live catch-up, so even opted in
-    // the flag must not appear on the live leg.
-    let mut job = live_test_job();
-    job.sleep_interval = 30;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--sleep-interval"));
-}
-
-#[test]
-fn live_capture_argv_never_max_sleep_interval() {
-    // The max only rides along with the min, and the min never reaches
-    // the live leg — pin that the max cannot leak through either, even
-    // with both opted in.
-    let mut job = live_test_job();
-    job.sleep_interval = 10;
-    job.max_sleep_interval = 20;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--max-sleep-interval"));
-}
-
-#[test]
-fn unified_argv_max_sleep_interval_when_set() {
-    // Opt-in upper bound: randomize the pre-download pause within [min, max].
-    let mut job = direct_test_job();
-    job.sleep_interval = 10;
-    job.max_sleep_interval = 20;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--max-sleep-interval")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "20");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(
-        pos < sep,
-        "max-sleep-interval must precede the URL separator"
-    );
-    // Without the min, yt-dlp rejects the max outright, so it must not
-    // be emitted on its own.
-    job.sleep_interval = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--max-sleep-interval"));
-    // A contradictory max below the min is clamped up to the min instead
-    // of letting yt-dlp hard-error the download.
-    job.sleep_interval = 30;
-    job.max_sleep_interval = 10;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--max-sleep-interval")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "30");
-    // Default off: no trace of the flag.
-    job.sleep_interval = 10;
-    job.max_sleep_interval = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--max-sleep-interval"));
-}
-
-#[test]
-fn hls_argv_max_sleep_interval_when_set() {
-    let mut job = direct_test_job();
-    job.sleep_interval = 10;
-    job.max_sleep_interval = 25;
-    let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--max-sleep-interval")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "25");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(
-        pos < sep,
-        "max-sleep-interval must precede the URL separator"
-    );
-    // Without the min the max must not be emitted (yt-dlp would reject it).
-    job.sleep_interval = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--max-sleep-interval"));
-}
-
-#[test]
-fn unified_argv_throttled_rate_when_set() {
-    // Opt-in throttling detection: re-extract when the rate drops below
-    // the threshold.
-    let mut job = direct_test_job();
-    job.throttled_rate = 100;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--throttled-rate")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "100K");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "throttled-rate must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.throttled_rate = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--throttled-rate"));
-}
-
-#[test]
-fn hls_argv_throttled_rate_when_set() {
-    let mut job = direct_test_job();
-    job.throttled_rate = 250;
-    let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--throttled-rate")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "250K");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "throttled-rate must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.throttled_rate = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--throttled-rate"));
-}
-
-#[test]
-fn live_capture_argv_never_throttled_rate() {
-    // On live, rate dips are normal and re-extracting would disrupt the
-    // capture, so even opted in the flag must not appear on the live leg.
-    let mut job = live_test_job();
-    job.throttled_rate = 100;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--throttled-rate"));
-}
-
-#[test]
-fn unified_argv_extractor_retries_when_set() {
-    // Opt-in: retry known extractor errors a custom number of times.
-    let mut job = direct_test_job();
-    job.extractor_retries = 5;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--extractor-retries")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "5");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(
-        pos < sep,
-        "extractor-retries must precede the URL separator"
-    );
-    // Default off: no trace of the flag (yt-dlp's own default applies).
-    job.extractor_retries = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--extractor-retries"));
-}
-
-#[test]
-fn hls_argv_extractor_retries_when_set() {
-    let mut job = direct_test_job();
-    job.extractor_retries = 7;
-    let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--extractor-retries")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "7");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(
-        pos < sep,
-        "extractor-retries must precede the URL separator"
-    );
-    // Default off: no trace of the flag.
-    job.extractor_retries = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--extractor-retries"));
-}
-
-#[test]
-fn live_capture_argv_never_extractor_retries() {
-    // The live leg's stream is already identified; extractor retries are
-    // a VOD probe knob, so the flag must not appear on the live leg.
-    let mut job = live_test_job();
-    job.extractor_retries = 5;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--extractor-retries"));
-}
-
-#[test]
-fn unified_argv_sleep_requests_when_set() {
-    // Opt-in politeness: pace the extractor's requests.
-    let mut job = direct_test_job();
-    job.sleep_requests = 5;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--sleep-requests")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "5");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "sleep-requests must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.sleep_requests = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--sleep-requests"));
-}
-
-#[test]
-fn hls_argv_sleep_requests_when_set() {
-    let mut job = direct_test_job();
-    job.sleep_requests = 5;
-    let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--sleep-requests")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "5");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "sleep-requests must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.sleep_requests = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--sleep-requests"));
-}
-
-#[test]
-fn live_capture_argv_never_sleep_requests() {
-    // Extraction pacing is a VOD politeness knob; the live leg's startup
-    // requests stay unthrottled, so even opted in the flag must not
-    // appear on the live leg.
-    let mut job = live_test_job();
-    job.sleep_requests = 5;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--sleep-requests"));
-}
-
-#[test]
-fn unified_argv_socket_timeout_when_set() {
-    // Opt-in resilience: bound stalled connections.
-    let mut job = direct_test_job();
-    job.socket_timeout = 20;
-    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--socket-timeout")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "20");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "socket-timeout must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.socket_timeout = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    assert!(!argv.iter().any(|a| a == "--socket-timeout"));
-}
-
-#[test]
-fn hls_argv_socket_timeout_when_set() {
-    let mut job = direct_test_job();
-    job.socket_timeout = 20;
-    let dest = std::path::Path::new("/tmp/dl/v.mp4");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--socket-timeout")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "20");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "socket-timeout must precede the URL separator");
-    // Default off: no trace of the flag.
-    job.socket_timeout = 0;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--socket-timeout"));
-}
-
-#[test]
-fn live_capture_argv_socket_timeout_when_set() {
-    // Unlike the sleep knobs, a timeout shortens stalls instead of
-    // adding them, so the live leg takes it too: a stalled fragment
-    // fails fast and the endless fragment retries recover it.
-    let mut job = live_test_job();
-    job.socket_timeout = 20;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    let pos = argv
-        .iter()
-        .position(|a| a == "--socket-timeout")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "20");
-    // Default off: no trace of the flag.
-    job.socket_timeout = 0;
-    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
-    assert!(!argv.iter().any(|a| a == "--socket-timeout"));
+    for argv in [&unified, &hls, &live] {
+        for flag in gone {
+            assert!(
+                !argv.iter().any(|a| a == flag),
+                "{flag} must not be emitted"
+            );
+        }
+    }
 }
 
 #[test]
@@ -4733,6 +4312,31 @@ fn live_capture_argv_live_from_start_when_enabled() {
 }
 
 #[test]
+fn live_startup_failure_maps_no_replay() {
+    // yt-dlp's exact from-start stderr line (Twitch with no replay
+    // behind the stream): the row must name the toggle, not echo the
+    // flag back at the user.
+    let log = "[twitch:stream] someid: --live-from-start is passed, but there are no formats that can be downloaded from the start. If you want to download from the current time, use --no-live-from-start";
+    let err = live_startup_failure(true, true, log).expect("must map");
+    let text = err.to_string();
+    assert!(text.contains("Live from start"), "{text}");
+    assert!(text.contains("live edge"), "{text}");
+}
+
+#[test]
+fn live_startup_failure_ignores_other_cases() {
+    let log = "[twitch:stream] someid: --live-from-start is passed, but there are no formats that can be downloaded from the start.";
+    // Toggle off: the user's choice stands, yt-dlp's own line survives.
+    assert!(live_startup_failure(true, false, log).is_none());
+    // Not a live row: the builder never passes the flag anyway.
+    assert!(live_startup_failure(false, true, log).is_none());
+    // Unrelated startup failure: untouched.
+    assert!(live_startup_failure(true, true, "ERROR: unable to open output file").is_none());
+    // Partial marker (e.g. a wrapped line) must not map.
+    assert!(live_startup_failure(true, true, "--live-from-start is passed").is_none());
+}
+
+#[test]
 fn live_from_start_stays_off_non_live_rows() {
     // The flag is live-only: a non-live row never emits it, even with the
     // preference opted in — no live edge exists to rewind to.
@@ -4904,12 +4508,9 @@ fn hls_collects_sidecar_beside_finished_file() {
         audio_only: false,
         audio_quality: 5,
         dest: dir.join("v.mp4"),
-        tries: 3,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 60,
-        user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
         live_from_start: false,
@@ -4920,15 +4521,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
