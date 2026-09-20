@@ -825,6 +825,7 @@ fn pipeline_reports_missing_tools() {
         audio_only: false,
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
         tries: 1,
+        connections: 4,
         timeout_secs: 5,
         user_agent: "test".into(),
         video_format_id: None,
@@ -2231,6 +2232,7 @@ fn direct_test_job() -> VideoJob {
         audio_only: false,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
+        connections: 4,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2446,6 +2448,7 @@ fn live_test_job() -> VideoJob {
         audio_only: false,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
+        connections: 4,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2835,6 +2838,7 @@ fn vod_hls_pins_planner_variant_id() {
         audio_only: false,
         dest: dir.join("v.mp4"),
         tries: 3,
+        connections: 4,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2893,6 +2897,7 @@ fn vod_hls_refuses_existing_dest() {
         audio_only: false,
         dest: dir.join("v.mp4"),
         tries: 3,
+        connections: 4,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -3191,10 +3196,10 @@ fn apply_proxy_env_sets_nothing_when_direct() {
 fn apply_proxy_env_stamps_no_proxy_when_proxied() {
     let proxy = crate::download::DownloadOptions {
         tries: 3,
+        connections: 4,
         timeout: 30,
         limit_rate: String::new(),
         user_agent: String::new(),
-        connections: 4,
         proxy_mode: "manual".into(),
         proxy_type: "socks5".into(),
         proxy_host: "127.0.0.1".into(),
@@ -3386,6 +3391,66 @@ fn live_capture_argv_never_takes_subtitles() {
 }
 
 #[test]
+fn unified_argv_passes_concurrent_fragments() {
+    // VOD DASH legs fragment, so they inherit the user's parallel
+    // connections setting instead of yt-dlp's serial default.
+    let mut job = direct_test_job();
+    job.connections = 7;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "7");
+    // A zeroed setting degrades to serial, never to "0".
+    job.connections = 0;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "1");
+}
+
+#[test]
+fn hls_argv_passes_concurrent_fragments() {
+    // Fragmented HLS like the DASH legs: same parallelism setting.
+    let mut job = direct_test_job();
+    job.connections = 6;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--concurrent-fragments")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "6");
+}
+
+#[test]
+fn live_capture_argv_has_no_concurrent_fragments() {
+    // Live edge recording keeps its conservative serial timing: the
+    // fragment-tuning change is VOD-only by design.
+    let job = live_test_job();
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
+}
+
+#[test]
 fn subtitle_language_index_value_round_trip() {
     assert_eq!(subtitle_language_index("off"), 0);
     assert_eq!(subtitle_language_value(0), "off");
@@ -3531,6 +3596,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         audio_only: false,
         dest: dir.join("v.mp4"),
         tries: 3,
+        connections: 4,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
