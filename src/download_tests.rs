@@ -3595,6 +3595,7 @@ fn proxy_argv_precedes_end_of_options() {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: Some(proxy),
     };
     for argv in [

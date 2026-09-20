@@ -845,6 +845,7 @@ fn pipeline_reports_missing_tools() {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2264,6 +2265,7 @@ fn direct_test_job() -> VideoJob {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: None,
     }
 }
@@ -2492,6 +2494,7 @@ fn live_test_job() -> VideoJob {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: None,
     }
 }
@@ -2894,6 +2897,7 @@ fn vod_hls_pins_planner_variant_id() {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2965,6 +2969,7 @@ fn vod_hls_refuses_existing_dest() {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -4012,6 +4017,70 @@ fn live_capture_argv_never_sleep_interval() {
 }
 
 #[test]
+fn unified_argv_sleep_requests_when_set() {
+    // Opt-in politeness: pace the extractor's requests.
+    let mut job = direct_test_job();
+    job.sleep_requests = 5;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--sleep-requests")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "5");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "sleep-requests must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.sleep_requests = 0;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--sleep-requests"));
+}
+
+#[test]
+fn hls_argv_sleep_requests_when_set() {
+    let mut job = direct_test_job();
+    job.sleep_requests = 5;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--sleep-requests")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "5");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "sleep-requests must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.sleep_requests = 0;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--sleep-requests"));
+}
+
+#[test]
+fn live_capture_argv_never_sleep_requests() {
+    // Extraction pacing is a VOD politeness knob; the live leg's startup
+    // requests stay unthrottled, so even opted in the flag must not
+    // appear on the live leg.
+    let mut job = live_test_job();
+    job.sleep_requests = 5;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--sleep-requests"));
+}
+
+#[test]
 fn unified_argv_ratelimit_when_set() {
     // Opt-in throttle: the shared speed limit caps VOD legs via
     // `--ratelimit` (plain bytes; yt-dlp accepts the raw rate).
@@ -4420,6 +4489,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         embed_chapters: false,
         retry_sleep: 0,
         sleep_interval: 0,
+        sleep_requests: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
