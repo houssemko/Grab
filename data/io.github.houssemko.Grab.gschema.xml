@@ -6,6 +6,11 @@
       <summary>Download folder</summary>
       <description>Empty means the system Downloads folder.</description>
     </key>
+    <key name="restrict-filenames" type="b">
+      <default>false</default>
+      <summary>Restrict filenames to ASCII</summary>
+      <description>Sanitize download filenames to ASCII-only characters, also avoiding ampersands and spaces.</description>
+    </key>
     <key name="max-concurrent" type="i">
       <default>3</default>
       <range min="1" max="10"/>

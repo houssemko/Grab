@@ -668,6 +668,39 @@ fn enqueue_video_spawns_and_fails_without_tools() {
 }
 
 #[test]
+fn enqueue_video_restrict_filenames_folds_name() {
+    // The opt-in applies where Grab names the file (enqueue), not via a
+    // yt-dlp flag: yt-dlp only sanitizes its own template fields, while
+    // Grab passes literal output paths.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("enqueue-restrict");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    settings.set_boolean("restrict-filenames", true).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join("grab-video-restrict");
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest = dest.to_string_lossy().into_owned();
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest),
+            Some("Café & Croissants.mp4"),
+            crate::video::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+            },
+        )
+        .expect("video enqueue");
+    assert_eq!(item.filename(), "Cafe_Croissants.mp4");
+    let id = item.id();
+    drain_engine(&manager, id);
+    crate::video::clean_staging(&crate::video::staging_dir(id));
+}
+
+#[test]
 fn video_source_survives_restore_and_retry() {
     let (_q, _l) = test_locks();
     let qf = test_queue_file("video-restore");
@@ -1475,6 +1508,37 @@ fn shortens_long_filenames() {
     assert!(short.ends_with(".mp4"));
     let no_ext = "b".repeat(300);
     assert!(shorten_filename(&no_ext).len() <= 240);
+}
+
+#[test]
+fn restrict_filename_ascii_folds_to_ascii() {
+    // Accented Latin folds to its base letter; spaces, "&" and other
+    // punctuation become "_"; the extension survives.
+    assert_eq!(
+        restrict_filename_ascii("Café & Croissants.mp4"),
+        "Cafe_Croissants.mp4"
+    );
+    assert_eq!(
+        restrict_filename_ascii("naïve façade — 50%.mkv"),
+        "naive_facade_50.mkv"
+    );
+    assert_eq!(
+        restrict_filename_ascii("Straße æther œil.mp4"),
+        "Strasse_aether_oeil.mp4"
+    );
+    // Plain ASCII names pass through untouched.
+    assert_eq!(
+        restrict_filename_ascii("my-video_01.final.mp4"),
+        "my-video_01.final.mp4"
+    );
+    // Runs of "_" collapse; leading/trailing "_" are stripped.
+    assert_eq!(restrict_filename_ascii("a  b.mp4"), "a_b.mp4");
+    assert_eq!(restrict_filename_ascii(" _x_ .mp4"), "x.mp4");
+    // Quotes and control characters are dropped, not underscored.
+    assert_eq!(restrict_filename_ascii("a\"b.mp4"), "ab.mp4");
+    // A stem that folds to nothing falls back instead of going empty.
+    assert_eq!(restrict_filename_ascii("日本語"), "file");
+    assert_eq!(restrict_filename_ascii("日本語.mp4"), "file.mp4");
 }
 
 #[test]

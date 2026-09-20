@@ -8,6 +8,7 @@ use gtk4::prelude::SettingsExt as _;
 
 pub mod key {
     pub const DOWNLOAD_DIR: &str = "download-dir";
+    pub const RESTRICT_FILENAMES: &str = "restrict-filenames";
     pub const MAX_CONCURRENT: &str = "max-concurrent";
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
@@ -54,6 +55,10 @@ impl AppSettings {
 
     pub fn download_dir(&self) -> String {
         self.0.string(key::DOWNLOAD_DIR).to_string()
+    }
+    /// Fold download filenames to ASCII-only.
+    pub fn restrict_filenames(&self) -> bool {
+        self.0.boolean(key::RESTRICT_FILENAMES)
     }
     pub fn max_concurrent(&self) -> i32 {
         self.0.int(key::MAX_CONCURRENT)
