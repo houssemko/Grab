@@ -32,7 +32,7 @@ msgstr[1] ""
 msgid "Cancel All Downloads?"
 msgstr ""
 
-#: src/application.rs:248 src/application.rs:251 src/application.rs:252 src/application.rs:266 src/application.rs:314 src/application.rs:410 src/window.rs:124 src/window.rs:126 src/window.rs:205 src/window.rs:807 src/window.rs:931 src/window.rs:1264 src/window.rs:2146 src/window.rs:2517 src/window.rs:2635 src/window.rs:2776
+#: src/application.rs:248 src/application.rs:251 src/application.rs:252 src/application.rs:266 src/application.rs:314 src/application.rs:410 src/window.rs:124 src/window.rs:126 src/window.rs:205 src/window.rs:807 src/window.rs:931 src/window.rs:1264 src/window.rs:2146 src/window.rs:2517 src/window.rs:2647
 msgid "Cancel"
 msgstr ""
 
@@ -712,7 +712,7 @@ msgstr ""
 msgid "File name"
 msgstr ""
 
-#: src/window.rs:1264 src/window.rs:2146 src/window.rs:2517 src/window.rs:2635 src/window.rs:2776
+#: src/window.rs:1264 src/window.rs:2146 src/window.rs:2518 src/window.rs:2647
 msgid "_Cancel"
 msgstr ""
 
@@ -756,7 +756,7 @@ msgid_plural "{} highlights"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:1406 src/window.rs:2798
+#: src/window.rs:1406
 msgid "{} item"
 msgid_plural "{} items"
 msgstr[0] ""
@@ -814,7 +814,7 @@ msgstr ""
 msgid "Added {added} of {total} URLs ({skipped} invalid lines skipped)"
 msgstr ""
 
-#: src/window.rs:2604 src/window.rs:2639
+#: src/window.rs:2605
 msgid "Files"
 msgstr ""
 
@@ -824,11 +824,7 @@ msgid_plural "{} files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2639
-msgid "_Add Files"
-msgstr ""
-
-#: src/window.rs:2668
+#: src/window.rs:2722
 msgid "Select at least one file"
 msgstr ""
 
@@ -890,17 +886,17 @@ msgstr ""
 msgid "Still looking up the media — wait for the preview, then add."
 msgstr ""
 
-#: src/window.rs:1428 src/window.rs:2738
+#: src/window.rs:1428 src/window.rs:2798
 msgid "Showing the first {n} of {total}"
 msgstr ""
 
-#: src/window.rs:2798
+#: src/window.rs:2876
 msgid "Queue {} item"
 msgid_plural "Queue {} items"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2827
+#: src/window.rs:2913
 msgid "Select at least one item"
 msgstr ""
 
@@ -1370,7 +1366,6 @@ msgstr ""
 msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
 msgstr ""
 
-
 #: src/video.rs:356
 msgid "This stream can't be recorded from the start — the site offers no replay. Turn off \"Live from start\" to record from the live edge instead."
 msgstr ""
@@ -1398,7 +1393,6 @@ msgstr ""
 #: src/preferences.rs:398
 msgid "Lets magnet links and trackerless torrents find peers"
 msgstr ""
-
 
 #: src/preferences.rs:609
 msgid "Ranks available formats; the closest match wins when your pick isn't offered"
@@ -1435,3 +1429,17 @@ msgstr ""
 #: src/video.rs:1481
 msgid "the link opened a collection, not a single video"
 msgstr ""
+
+#: src/window.rs:2656 src/window.rs:2850
+msgid "Select all"
+msgstr ""
+
+#: src/window.rs:2658 src/window.rs:2852
+msgid "Select none"
+msgstr ""
+
+#: src/window.rs:2678
+msgid "Add {} file"
+msgid_plural "Add {} files"
+msgstr[0] ""
+msgstr[1] ""
