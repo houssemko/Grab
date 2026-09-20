@@ -827,6 +827,7 @@ fn pipeline_reports_missing_tools() {
         tries: 1,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 5,
         user_agent: "test".into(),
         video_format_id: None,
@@ -2241,6 +2242,7 @@ fn direct_test_job() -> VideoJob {
         tries: 3,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2464,6 +2466,7 @@ fn live_test_job() -> VideoJob {
         tries: 3,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2861,6 +2864,7 @@ fn vod_hls_pins_planner_variant_id() {
         tries: 3,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2927,6 +2931,7 @@ fn vod_hls_refuses_existing_dest() {
         tries: 3,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -3820,6 +3825,37 @@ fn unified_argv_ratelimit_when_set() {
 }
 
 #[test]
+fn unified_argv_mtime_when_set() {
+    // Opt-in fidelity: the finished file takes the server's Last-Modified date
+    // instead of the download time.
+    let mut job = direct_test_job();
+    job.keep_server_date = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv.iter().position(|a| a == "--mtime").expect("flag");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "mtime must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.keep_server_date = false;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--mtime"));
+}
+
+#[test]
 fn hls_argv_ratelimit_when_set() {
     let mut job = direct_test_job();
     job.speed_limit = Some(2_097_152);
@@ -3843,6 +3879,32 @@ fn live_capture_argv_never_ratelimit() {
     job.speed_limit = Some(512_000);
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
     assert!(!argv.iter().any(|a| a == "--ratelimit"));
+}
+
+#[test]
+fn hls_argv_mtime_when_set() {
+    let mut job = direct_test_job();
+    job.keep_server_date = true;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv.iter().position(|a| a == "--mtime").expect("flag");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "mtime must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.keep_server_date = false;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--mtime"));
+}
+
+#[test]
+fn live_capture_argv_never_mtime() {
+    // The live path remuxes through ffmpeg after capture, which would
+    // clobber any mtime yt-dlp set. Excluded like the other VOD-only
+    // opt-ins.
+    let mut job = live_test_job();
+    job.keep_server_date = true;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--mtime"));
 }
 
 #[test]
@@ -4038,6 +4100,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         tries: 3,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,

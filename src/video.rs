@@ -2611,6 +2611,14 @@ pub struct VideoJob {
     /// rows never take it (capping an endless capture would fall behind the
     /// live edge).
     pub speed_limit: Option<u64>,
+    /// Stamp the finished file with the server's Last-Modified date
+    /// (`--mtime`) instead of the download time. Opt-in preference, shared
+    /// with the app's own Last-Modified handling; best-effort like the
+    /// rest (fragment/CDN responses often carry no usable header, and the
+    /// merge step can reset the stamp on multi-format legs). Live rows
+    /// never take it: the live path remuxes through ffmpeg after capture,
+    /// which would clobber any mtime yt-dlp set.
+    pub keep_server_date: bool,
     pub timeout_secs: u64,
     pub user_agent: String,
     /// Dialog-pinned video format id, if the user picked an exact format.
@@ -3126,6 +3134,16 @@ pub(crate) fn unified_download_argv(
         // (parsed once at spawn; empty/0/invalid means unlimited).
         args.push("--ratelimit".to_string());
         args.push(limit.to_string());
+    }
+    if job.keep_server_date {
+        // Opt-in fidelity: stamp the finished file with the server's
+        // Last-Modified date instead of the download time (same preference
+        // as the app's own Last-Modified handling). `--mtime` is the CLI
+        // spelling — the old `--updatetime` name survives only as
+        // optparse's dest and is rejected as an unknown option.
+        // Best-effort: yt-dlp stamps the downloaded file, so the merge
+        // step can reset it on multi-format legs.
+        args.push("--mtime".to_string());
     }
     if job.audio_only {
         // Dialog audio-only choice: extract the audio track to m4a
@@ -4022,6 +4040,11 @@ pub(crate) fn hls_download_argv(
         // Same opt-in throttle as the unified VOD legs.
         args.push("--ratelimit".to_string());
         args.push(limit.to_string());
+    }
+    if job.keep_server_date {
+        // Same opt-in Last-Modified stamping as the unified VOD legs
+        // (best-effort: the merge step can reset the stamp).
+        args.push("--mtime".to_string());
     }
     if job.audio_only {
         args.push("--extract-audio".to_string());
