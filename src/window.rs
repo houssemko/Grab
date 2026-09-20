@@ -1258,8 +1258,8 @@ fn show_rename_dialog(
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
-    hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(false);
     let cancel_btn = gtk4::Button::builder()
         .label(gettext("_Cancel"))
         .use_underline(true)
@@ -2078,8 +2078,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
-    hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(false);
     let cancel_btn = gtk4::Button::builder()
         .label(gettext("_Cancel"))
         .use_underline(true)
@@ -2101,7 +2101,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     video_page.add(&step.group);
     let video_toolbar = adw::ToolbarView::new();
     let video_hb = adw::HeaderBar::new();
-    video_hb.set_show_end_title_buttons(true);
+    // No WM title buttons either end: close paths are the nav back
+    // button and Esc, like the sibling dialog headers (which keep an
+    // explicit Cancel instead).
+    video_hb.set_show_start_title_buttons(false);
+    video_hb.set_show_end_title_buttons(false);
     let final_add_btn = gtk4::Button::builder()
         .label(gettext("_Add Download"))
         .use_underline(true)
@@ -2429,8 +2433,8 @@ pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
-    hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(false);
     let cancel_btn = gtk4::Button::builder()
         .label(gettext("_Cancel"))
         .use_underline(true)
@@ -2547,8 +2551,8 @@ pub(crate) fn show_torrent_files_dialog(
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
-    hb.set_show_end_title_buttons(true);
     hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(false);
     let cancel_btn = gtk4::Button::builder()
         .label(gettext("_Cancel"))
         .use_underline(true)
