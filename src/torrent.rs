@@ -423,6 +423,9 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
 /// Pure for tests.
 pub(crate) struct TorrentNetPlan {
     pub dht: bool,
+    /// Local Service Discovery: forced off under SOCKS5 (multicast can't
+    /// traverse the tunnel and would leak local presence like DHT).
+    pub lsd: bool,
     pub listen_port: i32,
     pub upnp: bool,
     pub trackers: Option<Vec<String>>,
@@ -431,6 +434,7 @@ pub(crate) struct TorrentNetPlan {
 
 pub(crate) fn plan_torrent_net(
     dht: bool,
+    lsd: bool,
     listen_port: i32,
     upnp: bool,
     trackers: Option<Vec<String>>,
@@ -439,6 +443,7 @@ pub(crate) fn plan_torrent_net(
     let Some(url) = proxy.and_then(|p| p.torrent_socks_url()) else {
         return TorrentNetPlan {
             dht,
+            lsd,
             listen_port,
             upnp,
             trackers,
@@ -454,6 +459,7 @@ pub(crate) fn plan_torrent_net(
         .filter(|ts| !ts.is_empty());
     TorrentNetPlan {
         dht: false,
+        lsd: false,
         listen_port: 0,
         upnp: false,
         trackers,
@@ -469,6 +475,8 @@ async fn ensure_session(
     listen_port: i32,
     upnp: bool,
     socks_proxy: Option<String>,
+    blocklist_url: Option<String>,
+    lsd: bool,
 ) -> Result<Arc<Session>, String> {
     SESSION
         .get_or_try_init(|| async {
@@ -491,6 +499,10 @@ async fn ensure_session(
             if !dht {
                 opts.dht = None;
             }
+            // Creation-scoped like DHT above: no live setter exists, so
+            // edits apply to sessions created after them.
+            opts.blocklist_url = blocklist_url;
+            opts.disable_local_service_discovery = !lsd;
             // SOCKS5 carries outgoing TCP peers (and HTTP trackers via the
             // session client); creation-scoped like DHT/listener below, so
             // proxy edits apply to sessions created after them — same rule
@@ -546,6 +558,21 @@ pub(crate) fn parse_trackers(raw: &str) -> Option<Vec<String>> {
         .map(str::to_string)
         .collect();
     (!list.is_empty()).then_some(list)
+}
+
+/// Validate the peer-blocklist preference: empty disables it, anything
+/// else must be an http(s) URL. Fails loudly instead of silently
+/// torrenting without the blocklist the user asked for.
+pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, String> {
+    let url = raw.trim();
+    if url.is_empty() {
+        return Ok(None);
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("http://") || lower.starts_with("https://") {
+        return Ok(Some(url.to_string()));
+    }
+    Err(gettext("Peer blocklist must be an http(s) URL"))
 }
 
 /// Live-apply the speed caps (settings watchers, any thread): the rate
@@ -812,6 +839,11 @@ pub(crate) struct TorrentJob {
     /// SOCKS5 proxy URL for the engine session (planned at spawn: DHT,
     /// listener and UDP trackers already forced off alongside).
     pub socks_proxy: Option<String>,
+    /// Peer blocklist URL from preferences (creation-scoped like DHT:
+    /// the engine reads it once when the session starts).
+    pub blocklist_url: Option<String>,
+    /// Local Service Discovery: find peers on the local network.
+    pub lsd: bool,
     /// Pre-chosen file indices for multi-file torrents (intake dialog).
     pub only_files: Option<Vec<usize>>,
     /// Intake recorded a collision-proof subfolder as dest: use it
@@ -836,6 +868,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         upnp,
         trackers,
         socks_proxy,
+        blocklist_url,
+        lsd,
         only_files,
         dest_is_final,
         tx,
@@ -951,6 +985,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         listen_port,
         upnp,
         socks_proxy,
+        blocklist_url,
+        lsd,
     )
     .await
     {

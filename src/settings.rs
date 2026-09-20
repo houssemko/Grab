@@ -39,6 +39,8 @@ pub mod key {
     pub const TORRENT_SEED_TIME: &str = "torrent-seed-time";
     pub const TORRENT_LISTEN_PORT: &str = "torrent-listen-port";
     pub const TORRENT_UPNP: &str = "torrent-upnp";
+    pub const TORRENT_BLOCKLIST_URL: &str = "torrent-blocklist-url";
+    pub const TORRENT_LSD: &str = "torrent-lsd";
     pub const VIDEO_QUALITY: &str = "video-quality";
     pub const VIDEO_CODEC_PRIORITY: &str = "video-codec-priority";
     pub const AUDIO_QUALITY: &str = "audio-quality";
@@ -175,6 +177,13 @@ impl AppSettings {
     }
     pub fn torrent_upnp(&self) -> bool {
         self.0.boolean(key::TORRENT_UPNP)
+    }
+    pub fn torrent_blocklist_url(&self) -> String {
+        self.0.string(key::TORRENT_BLOCKLIST_URL).to_string()
+    }
+    /// Local Service Discovery: find peers on the local network.
+    pub fn torrent_lsd(&self) -> bool {
+        self.0.boolean(key::TORRENT_LSD)
     }
     // Read by the New Download video step (per-download defaults).
     pub fn video_quality(&self) -> String {

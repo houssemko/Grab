@@ -520,7 +520,17 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_DHT, &dht, "active")
         .build();
-    advanced_torrent_group.add(&dht);
+    torrent_net_group.add(&dht);
+    let lsd = adw::SwitchRow::builder()
+        .title(gettext("Find peers on the local network"))
+        .subtitle(gettext(
+            "Discover peers on your local network. Applies when the torrent engine first starts.",
+        ))
+        .build();
+    settings
+        .bind(crate::settings::key::TORRENT_LSD, &lsd, "active")
+        .build();
+    torrent_net_group.add(&lsd);
     let peers = adw::SpinRow::builder()
         .title(gettext("Peer limit"))
         .subtitle(gettext(
@@ -531,7 +541,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_PEER_LIMIT, &peers, "value")
         .build();
-    advanced_torrent_group.add(&peers);
+    torrent_net_group.add(&peers);
     let upload_limit = adw::EntryRow::builder()
         .title(gettext("Upload speed limit"))
         .build();
@@ -572,7 +582,37 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_TRACKERS, &trackers, "text")
         .build();
-    advanced_torrent_group.add(&trackers);
+    torrent_net_group.add(&trackers);
+    let blocklist = adw::EntryRow::builder()
+        .title(gettext("Peer blocklist"))
+        .build();
+    blocklist.set_tooltip_text(Some(&gettext(
+        "URL of a peer blocklist (eMule ipfilter.dat format); empty means disabled. Fetched directly, bypassing any proxy.",
+    )));
+    blocklist.set_input_purpose(gtk4::InputPurpose::Url);
+    settings
+        .bind(
+            crate::settings::key::TORRENT_BLOCKLIST_URL,
+            &blocklist,
+            "text",
+        )
+        .build();
+    // Flag junk immediately instead of failing rows at spawn time.
+    {
+        let l = blocklist.clone();
+        let mark = move |row: &adw::EntryRow| {
+            let t = row.text().to_string();
+            let ok = crate::torrent::blocklist_url_of(t.trim()).is_ok();
+            if ok {
+                l.remove_css_class("error");
+            } else {
+                l.add_css_class("error");
+            }
+        };
+        mark(&blocklist);
+        blocklist.connect_changed(mark);
+    }
+    torrent_net_group.add(&blocklist);
     let listen_port = adw::SpinRow::builder()
         .title(gettext("Listen port"))
         .subtitle(gettext(

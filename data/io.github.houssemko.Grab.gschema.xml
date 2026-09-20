@@ -176,6 +176,16 @@
       <summary>UPnP port forwarding</summary>
       <description>Ask the router to forward the torrent listen port via UPnP. Applies when the torrent engine first starts.</description>
     </key>
+    <key name="torrent-blocklist-url" type="s">
+      <default>""</default>
+      <summary>Torrent peer blocklist</summary>
+      <description>URL of a peer blocklist (eMule ipfilter.dat format) applied to every torrent. Empty means disabled. Applies when the torrent engine first starts.</description>
+    </key>
+    <key name="torrent-lsd" type="b">
+      <default>true</default>
+      <summary>Find torrent peers on the local network</summary>
+      <description>Discover torrent peers on the local network via Local Service Discovery. Applies when the torrent engine first starts.</description>
+    </key>
     <key name="video-quality" type="s">
       <default>'1080p'</default>
       <summary>Preferred video quality</summary>

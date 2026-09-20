@@ -3255,6 +3255,19 @@ impl DownloadManager {
         let download_bps = parse_rate(settings.speed_limit().trim());
         let upload_bps = parse_rate(settings.torrent_upload_limit().trim());
         let trackers = crate::torrent::parse_trackers(&settings.torrent_trackers());
+        // A malformed blocklist URL fails loudly like the manual proxy:
+        // silently torrenting without the blocklist would betray the
+        // user's intent.
+        let blocklist_url =
+            match crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url()) {
+                Ok(url) => url,
+                Err(e) => {
+                    item.set_status(DownloadStatus::Failed);
+                    item.set_detail(e);
+                    self.changed();
+                    return;
+                }
+            };
         // Invalid manual proxy fails loudly like every other engine: no
         // silent direct torrent while the user asked for a tunnel.
         let proxy = match crate::download::DownloadOptions::from_settings(settings).proxy_config() {
@@ -3266,10 +3279,11 @@ impl DownloadManager {
                 return;
             }
         };
-        // SOCKS5 takes over TCP peers + HTTP trackers (DHT, listener and
-        // UDP trackers go dark alongside); anything else stays direct.
+        // SOCKS5 takes over TCP peers + HTTP trackers (DHT, LSD, listener
+        // and UDP trackers go dark alongside); anything else stays direct.
         let net = crate::torrent::plan_torrent_net(
             settings.torrent_dht(),
+            settings.torrent_lsd(),
             settings.torrent_listen_port(),
             settings.torrent_upnp(),
             trackers,
@@ -3312,6 +3326,8 @@ impl DownloadManager {
             upnp: net.upnp,
             trackers: net.trackers,
             socks_proxy: net.socks_proxy,
+            blocklist_url,
+            lsd: net.lsd,
             only_files,
             dest_is_final,
             tx,
