@@ -3512,6 +3512,7 @@ fn proxy_argv_precedes_end_of_options() {
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 60,
         user_agent: String::new(),
         video_format_id: None,

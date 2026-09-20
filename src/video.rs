@@ -2605,6 +2605,12 @@ pub struct VideoJob {
     /// from the same "connections" setting as the app's own segmented HTTP
     /// downloads. Schema range is 1..=16; clamped at spawn.
     pub connections: u32,
+    /// Per-download speed cap in bytes/sec (`--ratelimit`), parsed once from
+    /// the shared "speed limit" preference. `None` means unlimited (empty,
+    /// `0`, or invalid input — the preferences row flags junk live). Live
+    /// rows never take it (capping an endless capture would fall behind the
+    /// live edge).
+    pub speed_limit: Option<u64>,
     pub timeout_secs: u64,
     pub user_agent: String,
     /// Dialog-pinned video format id, if the user picked an exact format.
@@ -2906,8 +2912,10 @@ pub async fn run_video_download(
         job.audio_only,
     );
     let combined_total = query.total;
-    // NOTE: Grab's speed limit does not apply here — the binary runs
-    // unthrottled. Retries and timeouts still follow the user's settings.
+    // NOTE: Grab's speed limit applies to VOD legs via `--ratelimit`
+    // (a finite leg can be capped safely). Live capture still runs
+    // unthrottled: capping an endless stream would fall behind the edge.
+    // Retries and timeouts still follow the user's settings.
     run_unified_ytdlp(
         &youtube_bin,
         &ffmpeg_bin,
@@ -3112,6 +3120,12 @@ pub(crate) fn unified_download_argv(
         // connections instead of hammering the server immediately.
         args.push("--retry-sleep".to_string());
         args.push(format!("fragment:{}", job.retry_sleep));
+    }
+    if let Some(limit) = job.speed_limit {
+        // Opt-in throttle: cap this leg at the shared speed limit
+        // (parsed once at spawn; empty/0/invalid means unlimited).
+        args.push("--ratelimit".to_string());
+        args.push(limit.to_string());
     }
     if job.audio_only {
         // Dialog audio-only choice: extract the audio track to m4a
@@ -4003,6 +4017,11 @@ pub(crate) fn hls_download_argv(
         // Same opt-in fragment-retry delay as the unified VOD legs.
         args.push("--retry-sleep".to_string());
         args.push(format!("fragment:{}", job.retry_sleep));
+    }
+    if let Some(limit) = job.speed_limit {
+        // Same opt-in throttle as the unified VOD legs.
+        args.push("--ratelimit".to_string());
+        args.push(limit.to_string());
     }
     if job.audio_only {
         args.push("--extract-audio".to_string());

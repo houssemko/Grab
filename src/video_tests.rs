@@ -826,6 +826,7 @@ fn pipeline_reports_missing_tools() {
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
         tries: 1,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 5,
         user_agent: "test".into(),
         video_format_id: None,
@@ -2239,6 +2240,7 @@ fn direct_test_job() -> VideoJob {
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2461,6 +2463,7 @@ fn live_test_job() -> VideoJob {
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2857,6 +2860,7 @@ fn vod_hls_pins_planner_variant_id() {
         dest: dir.join("v.mp4"),
         tries: 3,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -2922,6 +2926,7 @@ fn vod_hls_refuses_existing_dest() {
         dest: dir.join("v.mp4"),
         tries: 3,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
@@ -3783,6 +3788,64 @@ fn live_capture_argv_never_retry_sleep() {
 }
 
 #[test]
+fn unified_argv_ratelimit_when_set() {
+    // Opt-in throttle: the shared speed limit caps VOD legs via
+    // `--ratelimit` (plain bytes; yt-dlp accepts the raw rate).
+    let mut job = direct_test_job();
+    job.speed_limit = Some(512_000);
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
+    assert_eq!(argv[pos + 1], "512000");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "ratelimit must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.speed_limit = None;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--ratelimit"));
+}
+
+#[test]
+fn hls_argv_ratelimit_when_set() {
+    let mut job = direct_test_job();
+    job.speed_limit = Some(2_097_152);
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv.iter().position(|a| a == "--ratelimit").expect("flag");
+    assert_eq!(argv[pos + 1], "2097152");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "ratelimit must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.speed_limit = None;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--ratelimit"));
+}
+
+#[test]
+fn live_capture_argv_never_ratelimit() {
+    // Throttling an endless capture would fall behind the live edge, so
+    // even opted in the flag must not appear.
+    let mut job = live_test_job();
+    job.speed_limit = Some(512_000);
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--ratelimit"));
+}
+
+#[test]
 fn live_capture_argv_live_from_start_when_enabled() {
     // Opt-in live capture: record from the beginning of the stream
     // instead of the live edge.
@@ -3974,6 +4037,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         dest: dir.join("v.mp4"),
         tries: 3,
         connections: 4,
+        speed_limit: None,
         timeout_secs: 60,
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
