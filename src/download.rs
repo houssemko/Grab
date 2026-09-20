@@ -3234,6 +3234,9 @@ impl DownloadManager {
             dest: item.file_path(),
             tries: opts.tries.max(1) as u32,
             connections: opts.connections.max(1) as u32,
+            // Shared throttle: parsed once here; empty/0/invalid means
+            // unlimited (the preferences row flags junk live).
+            speed_limit: parse_rate(opts.limit_rate.as_str()),
             timeout_secs: opts.timeout.max(1) as u64,
             user_agent: opts.user_agent.clone(),
             video_format_id,
