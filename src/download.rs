@@ -2,6 +2,7 @@ use futures_util::StreamExt as _;
 use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
@@ -499,6 +500,11 @@ pub struct DownloadOptions {
     pub proxy_type: String,
     pub proxy_host: String,
     pub proxy_port: i32,
+    /// Manual proxy username (GSettings). The password lives in the
+    /// keyring; this snapshot carries the in-memory cache state so the
+    /// synchronous proxy path can fail loudly instead of guessing.
+    pub proxy_username: String,
+    pub proxy_password: crate::secrets::CachedSecret,
     /// Raw browser-auth setting (`none` when off). The direct engine
     /// exports it to a cookie jar once per attempt (see cookies.rs).
     pub cookies_browser: String,
@@ -557,31 +563,116 @@ pub fn proxy_type_value(index: usize) -> &'static str {
     PROXY_TYPE_VALUES.get(index).copied().unwrap_or("socks5")
 }
 
+/// Proxy credentials from the keyring-backed cache. Kept out of `cli_url`,
+/// `cache_key`, and every log line: only injected at the use sites
+/// (`cli_url_authed`, reqwest `basic_auth`).
+#[derive(Clone)]
+pub(crate) struct ProxyCreds {
+    username: String,
+    password: String,
+}
+
+// A derived Debug would print the password: redact it.
+impl std::fmt::Debug for ProxyCreds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyCreds")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+// WHATWG userinfo percent-encode set: everything that must not appear
+// literally in the `user:password@` part of a proxy URL.
+const USERINFO_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'@')
+    .add(b'[')
+    .add(b'\\')
+    .add(b']')
+    .add(b'^')
+    .add(b'|')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b',');
+
+/// Percent-encode one userinfo component for a proxy URL.
+fn encode_userinfo(s: &str) -> String {
+    utf8_percent_encode(s, USERINFO_ENCODE_SET).to_string()
+}
+
 /// Proxy resolved for one attempt: reqwest interceptors for the direct
 /// engine, plus the CLI form for yt-dlp spawns.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct ResolvedProxy {
     proxies: Vec<reqwest::Proxy>,
-    /// Single URL for `--proxy` (SOCKS always remote-resolving).
+    /// Single URL for `--proxy` (SOCKS always remote-resolving),
+    /// without credentials — see [`ResolvedProxy::cli_url_authed`].
     pub cli_url: String,
     /// Comma list for NO_PROXY env on yt-dlp spawns.
     pub no_proxy_env: String,
     cache_key: String,
+    auth: Option<ProxyCreds>,
+}
+
+// A derived Debug would print the password via `auth`: redact it.
+impl std::fmt::Debug for ResolvedProxy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedProxy")
+            .field("cli_url", &self.cli_url)
+            .field("no_proxy_env", &self.no_proxy_env)
+            .field("cache_key", &self.cache_key)
+            .field("auth", &self.auth)
+            .finish()
+    }
 }
 
 impl ResolvedProxy {
+    /// `--proxy` URL with percent-encoded `user:password@` userinfo when
+    /// the proxy is authenticated. Built on demand so the password never
+    /// sits in a stored/logged field.
+    pub fn cli_url_authed(&self) -> String {
+        let Some(creds) = &self.auth else {
+            return self.cli_url.clone();
+        };
+        let (scheme, rest) = self
+            .cli_url
+            .split_once("://")
+            .unwrap_or(("", &self.cli_url));
+        format!(
+            "{scheme}://{}:{}@{rest}",
+            encode_userinfo(&creds.username),
+            encode_userinfo(&creds.password)
+        )
+    }
+
     /// SOCKS5 URL for the torrent engine: librqbit's `proxy_url` demands
     /// exactly the `socks5://` scheme, so the remote-resolving `socks5h://`
     /// form normalizes down. Peer addresses arrive as IPs (trackers, PEX —
     /// DHT is off under proxy), so no hostname resolution happens on the
     /// peer path at all. HTTP(S) proxies yield `None`: the engine has no
     /// HTTP-CONNECT peer path, so those torrents stay direct instead of
-    /// failing.
+    /// failing. Authenticated proxies carry encoded userinfo, which
+    /// librqbit's SOCKS5 URLs accept.
     pub fn torrent_socks_url(&self) -> Option<String> {
-        let rest = self
-            .cli_url
+        let url = self.cli_url_authed();
+        let rest = url
             .strip_prefix("socks5h://")
-            .or_else(|| self.cli_url.strip_prefix("socks5://"))?;
+            .or_else(|| url.strip_prefix("socks5://"))?;
         Some(format!("socks5://{rest}"))
     }
 }
@@ -666,6 +757,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
             cache_key: format!("{url}|{no_proxy_env}"),
             cli_url: url,
             no_proxy_env,
+            auth: None,
         });
     }
     let http = host("http-host");
@@ -688,6 +780,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
             cache_key: format!("{url}|{no_proxy_env}"),
             cli_url: url,
             no_proxy_env,
+            auth: None,
         });
     }
     // Split HTTP/HTTPS proxies: cover each scheme present. CLI gets the
@@ -721,7 +814,43 @@ fn system_proxy() -> Option<ResolvedProxy> {
         cache_key: format!("{cli_url}|{no_proxy_env}"),
         cli_url,
         no_proxy_env,
+        auth: None,
     })
+}
+
+/// Resolve proxy authentication from the cached keyring state. Auth is
+/// all-or-nothing and loud: a username without a stored password, a stored
+/// password without a username, and a failed keyring read all abort the
+/// download instead of silently downgrading it to unauthenticated.
+fn proxy_auth(o: &DownloadOptions) -> Result<Option<ProxyCreds>, String> {
+    use crate::secrets::CachedSecret;
+    let username = o.proxy_username.trim();
+    if username.is_empty() {
+        // A stored password with no username is almost certainly a
+        // misconfiguration: say so instead of silently ignoring it.
+        if matches!(o.proxy_password, CachedSecret::Present(_)) {
+            return Err(gettext(
+                "A proxy password is stored in the keyring but no proxy username is set",
+            ));
+        }
+        return Ok(None);
+    }
+    match &o.proxy_password {
+        CachedSecret::Present(password) => Ok(Some(ProxyCreds {
+            username: username.to_owned(),
+            password: password.clone(),
+        })),
+        CachedSecret::Absent => Err(gettext(
+            "Proxy username is set but no password is stored in the keyring",
+        )),
+        CachedSecret::Failed(e) => Err(gettext(
+            "Could not read the proxy password from the keyring: {e}",
+        )
+        .replace("{e}", e)),
+        CachedSecret::Unloaded => Err(gettext(
+            "The proxy password is still loading from the keyring; try again in a moment",
+        )),
+    }
 }
 
 /// Proxy from the manual settings. Unlike system resolution this is an
@@ -745,12 +874,21 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     {
         return Err(gettext("Proxy host contains invalid characters"));
     }
+    let auth = proxy_auth(o)?;
     let no_proxy_env = LOOPBACK_BYPASS.to_string();
-    let no_proxy = reqwest::NoProxy::from_string(&no_proxy_env);
+    // reqwest takes credentials via basic_auth (it percent-encodes the
+    // userinfo itself); the CLI URL carries them encoded (see
+    // cli_url_authed). The cache key stays credential-free by construction.
+    let apply_auth = |p: reqwest::Proxy| {
+        let p = p.no_proxy(reqwest::NoProxy::from_string(&no_proxy_env));
+        match &auth {
+            Some(creds) => p.basic_auth(&creds.username, &creds.password),
+            None => p,
+        }
+    };
     let (proxies, cli_url) = match o.proxy_type.as_str() {
         "http" | "https" => {
             let url = format!("http://{host}:{}", o.proxy_port);
-            let mk = |p: reqwest::Proxy| p.no_proxy(reqwest::NoProxy::from_string(&no_proxy_env));
             let proxies = [
                 reqwest::Proxy::http(url.clone()),
                 reqwest::Proxy::https(url.clone()),
@@ -759,7 +897,7 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?
             .into_iter()
-            .map(mk)
+            .map(apply_auth)
             .collect();
             (proxies, url)
         }
@@ -767,9 +905,7 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
         // hostname around the tunnel.
         "socks5" => {
             let url = format!("socks5h://{host}:{}", o.proxy_port);
-            let proxy = reqwest::Proxy::all(url.clone())
-                .map_err(|e| e.to_string())?
-                .no_proxy(no_proxy);
+            let proxy = apply_auth(reqwest::Proxy::all(url.clone()).map_err(|e| e.to_string())?);
             (vec![proxy], url)
         }
         other => {
@@ -781,12 +917,20 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
         cache_key: format!("{cli_url}|{no_proxy_env}"),
         cli_url,
         no_proxy_env,
+        auth,
     }))
 }
 
 impl DownloadOptions {
     /// Snapshot the network-related GSettings keys.
     pub fn from_settings(s: &crate::settings::AppSettings) -> Self {
+        let proxy_username = s.proxy_username();
+        // Kick the async keyring load for usernames configured after
+        // startup (or under a non-manual mode): cheap once loaded, and the
+        // sync path fails loudly until it completes.
+        if !proxy_username.trim().is_empty() {
+            crate::secrets::ensure_proxy_password_loaded();
+        }
         Self {
             tries: s.retries(),
             timeout: s.timeout(),
@@ -797,6 +941,8 @@ impl DownloadOptions {
             proxy_type: s.proxy_type(),
             proxy_host: s.proxy_host(),
             proxy_port: s.proxy_port(),
+            proxy_username,
+            proxy_password: crate::secrets::cached_proxy_password(),
             cookies_browser: s.cookies_browser(),
         }
     }
@@ -831,7 +977,7 @@ fn send_last_modified(
 /// Lock a worker-shared mutex, recovering the guarded value when a
 /// previous worker panic poisoned it. The item then fails with an error
 /// instead of the panic cascading through every worker into the app.
-fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -852,15 +998,23 @@ fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| client_builder().build().expect("http client"))
 }
 
-/// reqwest client honoring this attempt's proxy, sharing one pooled
-/// client per proxy config. Direct attempts keep the static client, so
-/// enabling a proxy never perturbs existing connection pools.
+/// reqwest client honoring this attempt's proxy. Unauthenticated proxies
+/// share one pooled client per proxy config; direct attempts keep the
+/// static client, so enabling a proxy never perturbs existing
+/// connection pools. Authenticated proxies are never pooled: the cache
+/// key is credential-free by design, so a pooled client would keep
+/// sending a rotated-out password after the user changes it.
 pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> reqwest::Client {
     let Some(proxy) = proxy else {
         return http_client().clone();
     };
-    static PROXIED: OnceLock<Mutex<std::collections::HashMap<String, reqwest::Client>>> =
-        OnceLock::new();
+    if proxy.auth.is_some() {
+        let mut builder = client_builder();
+        for p in &proxy.proxies {
+            builder = builder.proxy(p.clone());
+        }
+        return builder.build().expect("proxied http client");
+    }
     let cache = PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
     if let Some(client) = lock_recover(cache).get(&proxy.cache_key) {
         return client.clone();
@@ -872,6 +1026,15 @@ pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> reqwest::Client 
     let client = builder.build().expect("proxied http client");
     lock_recover(cache).insert(proxy.cache_key.clone(), client.clone());
     client
+}
+
+static PROXIED: OnceLock<Mutex<std::collections::HashMap<String, reqwest::Client>>> =
+    OnceLock::new();
+
+/// Test hook: how many unauthenticated proxied clients are pooled.
+#[cfg(test)]
+pub(crate) fn proxied_pool_len() -> usize {
+    lock_recover(PROXIED.get_or_init(|| Mutex::new(std::collections::HashMap::new()))).len()
 }
 
 /// Shared builder: bounded hops, no downgrades (see [`http_client`]).

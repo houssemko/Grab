@@ -300,6 +300,66 @@ pub fn show(
         .bind(crate::settings::key::PROXY_PORT, &proxy_port, "value")
         .build();
     proxy_group.add(&proxy_port);
+    let proxy_username = adw::EntryRow::builder().title(gettext("Username")).build();
+    settings
+        .bind(
+            crate::settings::key::PROXY_USERNAME,
+            &proxy_username,
+            "text",
+        )
+        .build();
+    proxy_group.add(&proxy_username);
+    // The password never touches GSettings: it lives in the system keyring
+    // (see secrets.rs) and only an in-memory copy reaches the synchronous
+    // proxy path.
+    let proxy_password = adw::PasswordEntryRow::builder()
+        .title(gettext("Password"))
+        .subtitle(gettext("Stored in the system keyring"))
+        .show_apply_button(true)
+        .build();
+    proxy_group.add(&proxy_password);
+    {
+        let row = proxy_password.downgrade();
+        // Populate from the in-memory cache (filled at startup, refreshed
+        // after every edit): no keyring round-trip on every prefs open. A
+        // failed startup read surfaces here, where the user can re-enter
+        // the password, instead of only at download time.
+        match crate::secrets::cached_proxy_password() {
+            crate::secrets::CachedSecret::Present(password) => {
+                proxy_password.set_text(&password);
+            }
+            crate::secrets::CachedSecret::Failed(e) => {
+                proxy_password.set_subtitle(
+                    &gettext("Could not read the system keyring: {e}").replace("{e}", &e),
+                );
+            }
+            crate::secrets::CachedSecret::Absent | crate::secrets::CachedSecret::Unloaded => {}
+        }
+        proxy_password.connect_apply(move |typed| {
+            let password = typed.text().to_string();
+            let row = row.clone();
+            typed.set_subtitle(&gettext("Saving…"));
+            // oo7 is async on the tokio runtime; the result comes back to
+            // the main loop for the row update.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            crate::download::tokio_rt().spawn(async move {
+                let result = crate::secrets::store_proxy_password(&password).await;
+                let _ = tx.send(result);
+            });
+            gtk4::glib::spawn_future_local(async move {
+                let result = rx
+                    .await
+                    .unwrap_or_else(|_| Err("The keyring task was cancelled".to_string()));
+                let Some(row) = row.upgrade() else { return };
+                match result {
+                    Ok(()) => row.set_subtitle(&gettext("Stored in the system keyring")),
+                    Err(e) => row.set_subtitle(
+                        &gettext("Could not store the password: {e}").replace("{e}", &e),
+                    ),
+                }
+            });
+        });
+    }
     // The manual rows only exist in manual mode; the group hides
     // otherwise so System/Direct stay one clean row.
     fn sync_proxy_group(group: &gtk4::glib::WeakRef<adw::PreferencesGroup>, manual: bool) {
