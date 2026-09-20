@@ -631,7 +631,7 @@ pub(crate) async fn sweep_session_orphans(keep: &std::collections::HashSet<Strin
 /// Pause sets the flag under the ACTIVE lock before touching the session,
 /// so a racing pause is either visible to the re-check or lands its own
 /// session pause after our unpause — both end paused.
-async fn unpause_adopted(session: &Session, id: u64, handle: &ManagedTorrentHandle) {
+async fn unpause_adopted(session: &Arc<Session>, id: u64, handle: &ManagedTorrentHandle) {
     let _ = session.unpause(handle).await;
     if ACTIVE.lock().await.get(&id).is_some_and(|a| a.paused) {
         let _ = session.pause(handle).await;
@@ -672,7 +672,7 @@ pub(crate) fn forget_download(id: u64) {
             if h.metadata.load().is_some() {
                 let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
             } else {
-                tracing::debug!(id, info_hash = %h.info_hash(), "keeping metadata-less torrent for the orphan sweep");
+                tracing::debug!(id, info_hash = %h.info_hash().as_string(), "keeping metadata-less torrent for the orphan sweep");
             }
         }
     });
