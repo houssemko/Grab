@@ -3509,6 +3509,7 @@ fn proxy_argv_precedes_end_of_options() {
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         connections: 4,

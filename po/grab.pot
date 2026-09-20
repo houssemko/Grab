@@ -1195,6 +1195,14 @@ msgstr ""
 msgid "Chinese"
 msgstr ""
 
+#: src/preferences.rs:596
+msgid "Audio quality"
+msgstr ""
+
+#: src/preferences.rs:597
+msgid "0 is best, 10 is worst"
+msgstr ""
+
 #: src/preferences.rs:598
 msgid "Subtitles"
 msgstr ""
