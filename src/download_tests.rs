@@ -3513,6 +3513,7 @@ fn proxy_argv_precedes_end_of_options() {
         tries: 3,
         connections: 4,
         speed_limit: None,
+        keep_server_date: false,
         timeout_secs: 60,
         user_agent: String::new(),
         video_format_id: None,
