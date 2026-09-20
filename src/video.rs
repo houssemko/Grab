@@ -4106,7 +4106,7 @@ fn is_format_selection_line(line: &str) -> bool {
 /// both run in a dedicated process group (`process_group(0)` at
 /// spawn), so one killpg reaps the tree instead of orphaning ffmpeg
 /// mid-merge.
-fn kill_tree(child: &mut tokio::process::Child) {
+pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         // Deliberately unconditional: the group outlives its leader by
         // design (ffmpeg grandchildren), so an exited child still leaves
