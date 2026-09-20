@@ -165,6 +165,11 @@
       <summary>Embed chapters</summary>
       <description>Write chapter markers into the finished file on new downloads.</description>
     </key>
+    <key name="live-from-start" type="b">
+      <default>false</default>
+      <summary>Live from start</summary>
+      <description>Record live streams from the beginning when the site supports it.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>

@@ -706,6 +706,22 @@ pub fn show(
         )
         .build();
     video_post_group.add(&embed_chapters);
+    let video_live_group = adw::PreferencesGroup::builder()
+        .title(gettext("Live"))
+        .description(gettext("Live stream recording"))
+        .build();
+    let live_from_start = adw::SwitchRow::builder()
+        .title(gettext("Live from start"))
+        .subtitle(gettext("Record live streams from the beginning"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::LIVE_FROM_START,
+            &live_from_start,
+            "active",
+        )
+        .build();
+    video_live_group.add(&live_from_start);
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
         .description(gettext("yt-dlp and ffmpeg resolve media pages"))
@@ -933,6 +949,7 @@ pub fn show(
     video_page.add(&video_quality_group);
     video_page.add(&video_auth_group);
     video_page.add(&video_post_group);
+    video_page.add(&video_live_group);
     video_page.add(&video_tools_group);
     dialog.add(&video_page);
     // Page order: Downloads, Media, Torrent, Network (Network last).

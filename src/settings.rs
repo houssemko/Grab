@@ -38,6 +38,7 @@ pub mod key {
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const EMBED_THUMBNAIL: &str = "embed-thumbnail";
     pub const EMBED_CHAPTERS: &str = "embed-chapters";
+    pub const LIVE_FROM_START: &str = "live-from-start";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
 }
@@ -157,6 +158,11 @@ impl AppSettings {
     /// Opt-in; live rows never take it (no post-processing leg exists).
     pub fn embed_chapters(&self) -> bool {
         self.0.boolean(key::EMBED_CHAPTERS)
+    }
+    /// Record live streams from the beginning (`--live-from-start`).
+    /// Opt-in; only live rows take it (VOD legs have no live edge).
+    pub fn live_from_start(&self) -> bool {
+        self.0.boolean(key::LIVE_FROM_START)
     }
     pub fn window_width(&self) -> i32 {
         self.0.int(key::WINDOW_WIDTH)
