@@ -2231,6 +2231,32 @@ fn is_sparse_shell(path: &Path) -> bool {
     }
 }
 
+/// Heuristic upper bound for a sane unified temp: the planned combined
+/// total plus 10% for `filesize_approx` underestimates (the primary
+/// wobble — the total sums extractor estimates, not measured bytes)
+/// plus 8 MiB flat for fixed post-merge additions (`--embed-metadata`,
+/// container overhead). The temp on disk is yt-dlp's merged output
+/// while the total sums the planned part sizes, so an exact comparison
+/// wipes valid crash-recovery temps whenever the estimate understates
+/// reality, forcing full re-downloads.
+///
+/// Deliberately generous, and honest about it: the flat floor disables
+/// garbage detection below ~8 MiB almost entirely, and anything under
+/// this bound is trusted as final — yt-dlp treats an existing file at
+/// or past its expected size as "already downloaded" (exit 0, verified
+/// against yt-dlp 2026.08.19), and the post-run path claims non-empty
+/// output without re-verifying size. The counterweight is staging
+/// isolation: yt-dlp is the sole writer to the row's staging dir and
+/// the manifest selection must match, so foreign bytes here mean
+/// same-selection byte variance across attempts, not arbitrary garbage.
+/// Past this bound, treat as garbage: wipe and start over. Pure
+/// function (no I/O), unit-testable directly.
+fn unified_temp_limit(total: u64) -> u64 {
+    total
+        .saturating_add(total / 10)
+        .saturating_add(8 * 1024 * 1024)
+}
+
 /// What the next attempt should do, decided from the sidecar and disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResumePlan {
@@ -2271,14 +2297,24 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     {
         return ResumePlan::Finished;
     }
-    // The unified temp (if any) must be sane: over-long means garbage
-    // (nothing valid past the total), and a sparse full-size shell
-    // would resume as zeros. Either way, wipe and start over. Anything
-    // else — partial temp, or nothing at all — spawns the same command
-    // and lets yt-dlp resume or download fresh on its own.
+    // The unified temp (if any) must be sane: far past the total, treat
+    // as garbage (nothing valid that far past it), and a sparse
+    // full-size shell would resume as zeros. Either way, wipe and start
+    // over. Anything else — partial temp, or nothing at all — spawns
+    // the same command and lets yt-dlp resume or download fresh on its
+    // own; note an in-margin temp is then trusted as final (see
+    // `unified_temp_limit`), since yt-dlp skips files already at or
+    // past the expected size. The limit carries headroom because the
+    // temp is yt-dlp's merged output while the total sums extractor
+    // estimates: estimate error, not container overhead, is the wobble
+    // source, and an exact comparison wipes valid crash recovery
+    // whenever the estimate understates reality.
     if let Some(temp) = discover_unified_output(q.staging, None) {
         let len = file_len(&temp);
-        if q.total.is_some_and(|t| len.is_some_and(|n| n > t)) || is_sparse_shell(&temp) {
+        if q.total
+            .is_some_and(|t| len.is_some_and(|n| n > unified_temp_limit(t)))
+            || is_sparse_shell(&temp)
+        {
             return ResumePlan::Fresh;
         }
     }
