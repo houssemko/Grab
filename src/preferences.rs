@@ -23,16 +23,9 @@ pub fn show(
     let advanced_general_group = adw::PreferencesGroup::builder()
         .title(gettext("General"))
         .build();
-    let advanced_net_group = adw::PreferencesGroup::builder()
-        .title(gettext("Network"))
-        .build();
     let advanced_media_group = adw::PreferencesGroup::builder()
         .title(gettext("Media"))
         .build();
-    let advanced_torrent_group = adw::PreferencesGroup::builder()
-        .title(gettext("Torrent"))
-        .build();
-
     let page = adw::PreferencesPage::builder()
         .title(gettext("Downloads"))
         .icon_name("folder-download-symbolic")
@@ -79,6 +72,9 @@ pub fn show(
         .title(gettext("Restrict filenames to ASCII"))
         .subtitle(gettext("Use only ASCII characters in filenames"))
         .build();
+    restrict_filenames.set_tooltip_text(Some(&gettext(
+        "Avoids broken names on USB drives, network shares and older systems",
+    )));
     settings
         .bind(
             crate::settings::key::RESTRICT_FILENAMES,
@@ -152,7 +148,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::CONNECTIONS, &connections, "value")
         .build();
-    advanced_net_group.add(&connections);
+    net_group.add(&connections);
 
     let limit = adw::EntryRow::builder()
         .title(gettext("Speed limit"))
@@ -182,140 +178,13 @@ pub fn show(
     }
     net_group.add(&limit);
 
-    let retries = adw::SpinRow::builder()
-        .title(gettext("Retries"))
-        .adjustment(&gtk4::Adjustment::new(3.0, 1.0, 99.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(crate::settings::key::RETRIES, &retries, "value")
-        .build();
-    advanced_net_group.add(&retries);
-
-    let retry_sleep = adw::SpinRow::builder()
-        .title(gettext("Retry delay"))
-        .subtitle(gettext("In seconds"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 60.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(crate::settings::key::RETRY_SLEEP, &retry_sleep, "value")
-        .build();
-    advanced_net_group.add(&retry_sleep);
-
-    let sleep_interval = adw::SpinRow::builder()
-        .title(gettext("Sleep interval"))
-        .subtitle(gettext("In seconds"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 300.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::SLEEP_INTERVAL,
-            &sleep_interval,
-            "value",
-        )
-        .build();
-    advanced_net_group.add(&sleep_interval);
-
-    let max_sleep_interval = adw::SpinRow::builder()
-        .title(gettext("Max sleep interval"))
-        .subtitle(gettext("In seconds"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 300.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::MAX_SLEEP_INTERVAL,
-            &max_sleep_interval,
-            "value",
-        )
-        .build();
-    // The upper bound only means anything alongside an active Sleep
-    // interval (yt-dlp rejects --max-sleep-interval on its own), so the
-    // row greys out while the minimum is 0.
-    sleep_interval
-        .bind_property("value", &max_sleep_interval, "sensitive")
-        .transform_to(|_: &gtk4::glib::Binding, n: f64| Some(n > 0.0))
-        .sync_create()
-        .build();
-    advanced_net_group.add(&max_sleep_interval);
-
-    let sleep_requests = adw::SpinRow::builder()
-        .title(gettext("Sleep between requests"))
-        .subtitle(gettext("In seconds"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 300.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::SLEEP_REQUESTS,
-            &sleep_requests,
-            "value",
-        )
-        .build();
-    advanced_net_group.add(&sleep_requests);
-
-    let socket_timeout = adw::SpinRow::builder()
-        .title(gettext("Socket timeout"))
-        .subtitle(gettext("In seconds"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 300.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::SOCKET_TIMEOUT,
-            &socket_timeout,
-            "value",
-        )
-        .build();
-    advanced_net_group.add(&socket_timeout);
-
-    let timeout = adw::SpinRow::builder()
-        .title(gettext("Timeout"))
-        .subtitle(gettext("In seconds"))
-        .adjustment(&gtk4::Adjustment::new(30.0, 5.0, 300.0, 5.0, 30.0, 0.0))
-        .build();
-    settings
-        .bind(crate::settings::key::TIMEOUT, &timeout, "value")
-        .build();
-    advanced_net_group.add(&timeout);
-
-    let throttled_rate = adw::SpinRow::builder()
-        .title(gettext("Throttled rate"))
-        .subtitle(gettext("In KB/s"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 10000.0, 10.0, 100.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::THROTTLED_RATE,
-            &throttled_rate,
-            "value",
-        )
-        .build();
-    advanced_net_group.add(&throttled_rate);
-
-    let extractor_retries = adw::SpinRow::builder()
-        .title(gettext("Extractor retries"))
-        .subtitle(gettext("0 uses the default of 3"))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 20.0, 1.0, 5.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::EXTRACTOR_RETRIES,
-            &extractor_retries,
-            "value",
-        )
-        .build();
-    advanced_net_group.add(&extractor_retries);
-
-    let ua = adw::EntryRow::builder()
-        .title(gettext("User agent"))
-        .build();
-    ua.set_tooltip_text(Some(&gettext("Blank uses the default user agent")));
-    settings
-        .bind(crate::settings::key::USER_AGENT, &ua, "text")
-        .build();
-    advanced_net_group.add(&ua);
-
     let keep_date = adw::SwitchRow::builder()
         .title(gettext("Keep original file dates"))
         .subtitle(gettext("Use the server's date instead of download time"))
         .build();
+    keep_date.set_tooltip_text(Some(&gettext(
+        "Handy for archives; otherwise files are dated when you downloaded them",
+    )));
     settings
         .bind(crate::settings::key::KEEP_SERVER_DATE, &keep_date, "active")
         .build();
@@ -470,6 +339,9 @@ pub fn show(
     let seed = adw::SwitchRow::builder()
         .title(gettext("Seed finished downloads"))
         .build();
+    seed.set_tooltip_text(Some(&gettext(
+        "Keep sharing the finished file with other downloaders",
+    )));
     settings
         .bind(crate::settings::key::TORRENT_SEED_FINISHED, &seed, "active")
         .build();
@@ -482,6 +354,9 @@ pub fn show(
         .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 100.0, 0.1, 1.0, 0.0))
         .digits(1)
         .build();
+    seed_ratio.set_tooltip_text(Some(&gettext(
+        "Upload relative to download size; 2.0 means twice as much up as down",
+    )));
     settings
         .bind(
             crate::settings::key::TORRENT_SEED_RATIO,
@@ -500,6 +375,9 @@ pub fn show(
         ))
         .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 43200.0, 5.0, 60.0, 0.0))
         .build();
+    seed_time.set_tooltip_text(Some(&gettext(
+        "Counts from the moment your download finished",
+    )));
     settings
         .bind(crate::settings::key::TORRENT_SEED_TIME, &seed_time, "value")
         .build();
@@ -517,6 +395,9 @@ pub fn show(
             "Find peers without trackers. Takes effect on restart.",
         ))
         .build();
+    dht.set_tooltip_text(Some(&gettext(
+        "Lets magnet links and trackerless torrents find peers",
+    )));
     settings
         .bind(crate::settings::key::TORRENT_DHT, &dht, "active")
         .build();
@@ -531,17 +412,6 @@ pub fn show(
         .bind(crate::settings::key::TORRENT_LSD, &lsd, "active")
         .build();
     torrent_net_group.add(&lsd);
-    let peers = adw::SpinRow::builder()
-        .title(gettext("Peer limit"))
-        .subtitle(gettext(
-            "Maximum peers per download. 0 means unlimited. Applies when a download starts.",
-        ))
-        .adjustment(&gtk4::Adjustment::new(50.0, 0.0, 500.0, 1.0, 10.0, 0.0))
-        .build();
-    settings
-        .bind(crate::settings::key::TORRENT_PEER_LIMIT, &peers, "value")
-        .build();
-    torrent_net_group.add(&peers);
     let upload_limit = adw::EntryRow::builder()
         .title(gettext("Upload speed limit"))
         .build();
@@ -573,16 +443,6 @@ pub fn show(
         upload_limit.connect_changed(mark);
     }
     torrent_net_group.add(&upload_limit);
-    let trackers = adw::EntryRow::builder()
-        .title(gettext("Extra trackers"))
-        .tooltip_text(gettext(
-            "Comma-separated tracker URLs added to every download",
-        ))
-        .build();
-    settings
-        .bind(crate::settings::key::TORRENT_TRACKERS, &trackers, "text")
-        .build();
-    torrent_net_group.add(&trackers);
     let blocklist = adw::EntryRow::builder()
         .title(gettext("Peer blocklist"))
         .build();
@@ -613,32 +473,6 @@ pub fn show(
         blocklist.connect_changed(mark);
     }
     torrent_net_group.add(&blocklist);
-    let listen_port = adw::SpinRow::builder()
-        .title(gettext("Listen port"))
-        .subtitle(gettext(
-            "Port for incoming connections. 0 means disabled. Applies when the torrent engine first starts.",
-        ))
-        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 65535.0, 1.0, 100.0, 0.0))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::TORRENT_LISTEN_PORT,
-            &listen_port,
-            "value",
-        )
-        .build();
-    advanced_torrent_group.add(&listen_port);
-    let upnp = adw::SwitchRow::builder()
-        .title(gettext("UPnP port forwarding"))
-        .subtitle(gettext(
-            "Ask your router to forward the listen port. Applies when the torrent engine first starts.",
-        ))
-        .build();
-    settings
-        .bind(crate::settings::key::TORRENT_UPNP, &upnp, "active")
-        .build();
-    advanced_torrent_group.add(&upnp);
-
     torrent_page.add(&torrent_net_group);
 
     // Video pages resolve through the yt-dlp support tools; this page
@@ -772,6 +606,9 @@ pub fn show(
         .subtitle(gettext("Newest codecs first, or widest playback"))
         .model(&gtk4::StringList::new(&codec_refs))
         .build();
+    video_codec.set_tooltip_text(Some(&gettext(
+        "Ranks available formats; the closest match wins when your pick isn't offered",
+    )));
     video_codec
         .set_selected(crate::video::codec_priority_index(&settings.video_codec_priority()) as u32);
     advanced_media_group.add(&video_codec);
@@ -802,6 +639,9 @@ pub fn show(
         .subtitle(gettext("0 is best, 10 is worst"))
         .adjustment(&gtk4::Adjustment::new(5.0, 0.0, 10.0, 1.0, 5.0, 0.0))
         .build();
+    audio_quality.set_tooltip_text(Some(&gettext(
+        "Applies to audio-only downloads and extracted audio",
+    )));
     settings
         .bind(crate::settings::key::AUDIO_QUALITY, &audio_quality, "value")
         .build();
@@ -880,6 +720,9 @@ pub fn show(
         .title(gettext("Embed subtitles"))
         .subtitle(gettext("Mux downloaded subtitles into the video file"))
         .build();
+    embed_subs.set_tooltip_text(Some(&gettext(
+        "Needs subtitles enabled under Media → Subtitles; does nothing without them",
+    )));
     settings
         .bind(crate::settings::key::EMBED_SUBS, &embed_subs, "active")
         .build();
@@ -888,6 +731,9 @@ pub fn show(
         .title(gettext("Remove sponsored segments"))
         .subtitle(gettext("Cut SponsorBlock-flagged sponsor segments"))
         .build();
+    sponsorblock.set_tooltip_text(Some(&gettext(
+        "Works where SponsorBlock has data, mostly YouTube",
+    )));
     settings
         .bind(
             crate::settings::key::SPONSORBLOCK_REMOVE,
@@ -902,6 +748,9 @@ pub fn show(
             "Tag SponsorBlock-flagged sponsor segments as chapters",
         ))
         .build();
+    sponsorblock_mark.set_tooltip_text(Some(&gettext(
+        "Lets you skip sponsors with chapter navigation instead of cutting them",
+    )));
     settings
         .bind(
             crate::settings::key::SPONSORBLOCK_MARK,
@@ -917,22 +766,13 @@ pub fn show(
         .sync_create()
         .build();
     video_post_group.add(&sponsorblock_mark);
-    let embed_thumbnail = adw::SwitchRow::builder()
-        .title(gettext("Embed thumbnail"))
-        .subtitle(gettext("Attach the video thumbnail as cover art"))
-        .build();
-    settings
-        .bind(
-            crate::settings::key::EMBED_THUMBNAIL,
-            &embed_thumbnail,
-            "active",
-        )
-        .build();
-    video_post_group.add(&embed_thumbnail);
     let embed_chapters = adw::SwitchRow::builder()
         .title(gettext("Embed chapters"))
         .subtitle(gettext("Write chapter markers into the finished file"))
         .build();
+    embed_chapters.set_tooltip_text(Some(&gettext(
+        "Players with chapter support let you jump between sections",
+    )));
     settings
         .bind(
             crate::settings::key::EMBED_CHAPTERS,
@@ -952,6 +792,9 @@ pub fn show(
         ))
         .model(&gtk4::StringList::new(&remux_refs))
         .build();
+    remux_row.set_tooltip_text(Some(&gettext(
+        "Useful when a player or editor dislikes the original container",
+    )));
     remux_row.set_selected(crate::video::remux_video_index(&settings.remux_video()) as u32);
     video_post_group.add(&remux_row);
     {
@@ -981,6 +824,9 @@ pub fn show(
         .title(gettext("Live from start"))
         .subtitle(gettext("Record live streams from the beginning"))
         .build();
+    live_from_start.set_tooltip_text(Some(&gettext(
+        "Needs the site to keep a replay; otherwise recording starts from the live edge",
+    )));
     settings
         .bind(
             crate::settings::key::LIVE_FROM_START,
@@ -1221,12 +1067,10 @@ pub fn show(
     // with each family's related groups adjacent (Media keeps
     // Post-processing and Live; Torrent keeps Sharing).
     advanced_page.add(&advanced_general_group);
-    advanced_page.add(&advanced_net_group);
     advanced_page.add(&advanced_media_group);
     advanced_page.add(&video_post_group);
     advanced_page.add(&video_live_group);
     advanced_page.add(&share_group);
-    advanced_page.add(&advanced_torrent_group);
     // Page order: Downloads, Media, Torrent, Network, Advanced (Advanced last).
     dialog.add(&torrent_page);
     dialog.add(&net_page);

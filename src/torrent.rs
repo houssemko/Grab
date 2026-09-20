@@ -556,28 +556,6 @@ async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
         .map(Arc::clone)
 }
 
-/// Map the peer-limit preference to rqbit's shape: 0 means unlimited, so
-/// the default limit applies when no limit is set.
-pub(crate) fn peer_limit_of(settings: &crate::settings::AppSettings) -> Option<usize> {
-    match settings.torrent_peer_limit() {
-        0 => None,
-        n => Some(n as usize),
-    }
-}
-
-/// Split the trackers preference (comma/space/newline separated) into clean
-/// URLs. Entries without a scheme are dropped so a typo can never fail a
-/// whole download at add time.
-pub(crate) fn parse_trackers(raw: &str) -> Option<Vec<String>> {
-    let list: Vec<String> = raw
-        .split([',', ' ', '\n', '\t'])
-        .map(str::trim)
-        .filter(|s| s.contains("://"))
-        .map(str::to_string)
-        .collect();
-    (!list.is_empty()).then_some(list)
-}
-
 /// Validate the peer-blocklist preference: empty disables it, anything
 /// else must be an http(s) URL. Fails loudly instead of silently
 /// torrenting without the blocklist the user asked for.
@@ -592,7 +570,6 @@ pub(crate) fn blocklist_url_of(raw: &str) -> Result<Option<String>, String> {
     }
     Err(gettext("Peer blocklist must be an http(s) URL"))
 }
-
 /// Live-apply the speed caps (settings watchers, any thread): the rate
 /// limiter is internally synchronized. Peer limit has no live setter in
 /// rqbit, so it applies at session creation and per add instead.
@@ -847,9 +824,9 @@ pub(crate) struct TorrentJob {
     pub download_bps: Option<u64>,
     pub upload_bps: Option<u64>,
     pub listen_port: i32,
-    /// Ask the router to forward the listen port via UPnP (creation-scoped
-    /// like the listener itself: only meaningful with a listen port, and
-    /// forced off under SOCKS5 by the net plan).
+    /// Ask the router to forward the listen port via UPnP. Currently
+    /// always false: with no listen port configured there is nothing to
+    /// forward (forced off under SOCKS5 by the net plan regardless).
     pub upnp: bool,
     /// Extra tracker URLs from preferences (per-add, so edits apply to new
     /// downloads without restarting the engine).

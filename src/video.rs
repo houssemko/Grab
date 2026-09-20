@@ -348,6 +348,14 @@ impl VideoError {
             gettext("Media download failed: {detail}").replace("{detail}", &e.to_string()),
         )
     }
+    /// The site offers no replay/DVR, so `--live-from-start` found no
+    /// from-start formats: name the toggle instead of echoing yt-dlp's
+    /// flag back at the user.
+    fn live_from_start_no_replay() -> Self {
+        Self::Message(gettext(
+            "This stream can't be recorded from the start — the site offers no replay. Turn off \"Live from start\" to record from the live edge instead.",
+        ))
+    }
     fn combine(e: impl std::fmt::Display) -> Self {
         Self::Message(
             gettext("Couldn't merge video and audio: {detail}").replace("{detail}", &e.to_string()),
@@ -1352,27 +1360,31 @@ fn parse_playlist_json(value: &serde_json::Value, url: &str) -> Option<PlaylistI
     })
 }
 
-/// Fetch one page's raw `--dump-single-json` through the crate's
-/// [`Executor`] (same spawn/timeout/output semantics as its extractors)
-/// with exactly the arguments its default extractors use, then parse
-/// leniently (see [`sanitize_video_json`]). `--flat-playlist` lists
+/// Fetch one page's raw `--dump-single-json` through a direct spawn
+/// (same spawn/timeout/output semantics as the crate's extractors),
+/// then parse leniently (see [`sanitize_video_json`]). Used instead of
+/// the crate's `fetch_video_infos`, whose strict model breaks whenever
+/// the binary's JSON gains or drops a field.
+///
+/// `flat_playlist` selects the probe mode: `true` lists collection
 /// entries as stubs instead of extracting every one (minutes and
-/// megabytes for big lists); it is a no-op for single videos. Used
-/// instead of the crate's `fetch_video_infos`, whose strict model
-/// breaks whenever the binary's JSON gains or drops a field.
+/// megabytes for big lists; a no-op for single videos) — the dialog's
+/// collection probe. `false` runs full extraction — the download
+/// worker's single-item resolve, where stub listings would come back
+/// with no formats and fail every row.
 async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
     cookies_browser: &str,
     timeout: Duration,
     fetch_proxy: Option<&crate::download::ResolvedProxy>,
+    flat_playlist: bool,
 ) -> Result<serde_json::Value, VideoError> {
-    let mut args = vec![
-        "--ignore-config".to_string(),
-        "--no-progress".to_string(),
-        "--flat-playlist".to_string(),
-        "--dump-single-json".to_string(),
-    ];
+    let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
+    if flat_playlist {
+        args.push("--flat-playlist".to_string());
+    }
+    args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));
     // Spawned directly (tokio + timeout) rather than through the
@@ -1442,9 +1454,12 @@ async fn fetch_raw_dump_json(
     Ok(value)
 }
 
-/// Strict single-video model for the download worker. Playlist-shaped
-/// output never reaches it: the dialog probes collections through
-/// [`fetch_video_infos`] and queues one page URL per item instead.
+/// Strict single-video model for the download worker. Full
+/// extraction here, not `--flat-playlist`: stub listings parse as a
+/// video with no formats, which is exactly the "the page listed none"
+/// failure a queued story hit. Playlist-shaped output is rejected
+/// outright — a collection URL reaching the worker is a routing bug or
+/// a page that changed shape, never a downloadable video.
 async fn fetch_video_page(
     youtube_bin: &Path,
     url: &str,
@@ -1452,8 +1467,20 @@ async fn fetch_video_page(
     timeout: Duration,
     fetch_proxy: Option<&crate::download::ResolvedProxy>,
 ) -> Result<Video, VideoError> {
-    let mut value =
-        fetch_raw_dump_json(youtube_bin, url, cookies_browser, timeout, fetch_proxy).await?;
+    let mut value = fetch_raw_dump_json(
+        youtube_bin,
+        url,
+        cookies_browser,
+        timeout,
+        fetch_proxy,
+        false,
+    )
+    .await?;
+    if parse_playlist_json(&value, url).is_some() {
+        return Err(VideoError::fetch(gettext(
+            "the link opened a collection, not a single video",
+        )));
+    }
     sanitize_video_json(&mut value);
     let mut video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
     for format in &mut video.formats {
@@ -1486,6 +1513,7 @@ pub async fn fetch_video_infos(
                 &cookies_browser,
                 Duration::from_secs(300),
                 fetch_proxy.as_ref(),
+                true,
             ),
         )
         .await
@@ -2664,44 +2692,6 @@ pub struct VideoJob {
     pub page_url: String,
     pub quality: String,
     pub dest: PathBuf,
-    pub tries: u32,
-    /// Seconds to sleep between fragment retries (`--retry-sleep
-    /// fragment:N`). Opt-in preference; 0 disables the delay. Live rows
-    /// never take it (their fragment retries are endless by design, and a
-    /// sleep would stall live catch-up).
-    pub retry_sleep: u32,
-    /// Seconds to wait before each download (`--sleep-interval`).
-    /// Opt-in preference; 0 disables the pause. Live rows never take it
-    /// (a pre-download sleep would stall live catch-up).
-    pub sleep_interval: u32,
-    /// Upper bound of the random sleep before each download
-    /// (`--max-sleep-interval`). Opt-in preference; 0 disables the bound.
-    /// Only emitted alongside an active `sleep_interval` (yt-dlp rejects
-    /// the max on its own); a contradictory max below the min is clamped
-    /// up to the min so the download never hard-errors.
-    pub max_sleep_interval: u32,
-    /// Seconds to sleep between requests during data extraction
-    /// (`--sleep-requests`). Opt-in preference; 0 disables the pause.
-    /// Live rows never take it (extraction pacing is a VOD politeness
-    /// knob; the live leg's startup requests stay unthrottled).
-    pub sleep_requests: u32,
-    /// Seconds to wait on a stalled connection before giving up
-    /// (`--socket-timeout`). Opt-in preference; 0 uses yt-dlp's default.
-    /// Unlike the sleep knobs above, this one shortens stalls instead of
-    /// adding them, so live rows take it too: a stalled live fragment
-    /// fails fast and the endless fragment retries pick it back up.
-    pub socket_timeout: u32,
-    /// Minimum download rate in KB/s below which throttling is assumed
-    /// and the video data is re-extracted (`--throttled-rate`). Opt-in
-    /// preference; 0 disables detection. VOD legs only: on live, rate
-    /// dips are normal and re-extracting would disrupt the capture.
-    pub throttled_rate: u32,
-    /// Retries for known extractor errors (`--extractor-retries`).
-    /// Opt-in preference; 0 uses yt-dlp's default of 3. VOD download
-    /// legs only (they re-extract the page URL): the live leg's capture
-    /// is a single continuous extraction whose resilience story is the
-    /// infinite fragment-retry loop.
-    pub extractor_retries: u32,
     /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
     /// from the same "connections" setting as the app's own segmented HTTP
     /// downloads. Schema range is 1..=16; clamped at spawn.
@@ -2720,8 +2710,6 @@ pub struct VideoJob {
     /// never take it: the live path remuxes through ffmpeg after capture,
     /// which would clobber any mtime yt-dlp set.
     pub keep_server_date: bool,
-    pub timeout_secs: u64,
-    pub user_agent: String,
     /// Dialog-pinned video format id, if the user picked an exact format.
     /// `None` means the quality preset decides at attempt time.
     pub video_format_id: Option<String>,
@@ -2771,10 +2759,6 @@ pub struct VideoJob {
     /// (live captures record raw transport streams, no post-processing
     /// leg exists).
     pub remux_video: Option<String>,
-    /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
-    /// Opt-in preference; live rows never take it (live captures record
-    /// raw transport streams, no post-processing leg exists).
-    pub embed_thumbnail: bool,
     /// Write chapter markers into the finished file (`--embed-chapters`).
     /// Opt-in preference; live rows never take it (same reason as above).
     pub embed_chapters: bool,
@@ -2818,10 +2802,9 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // Attempt timeout floor: a full-length merge on a slow CPU dwarfs
-    // any network timeout, so never go below the crate default (the
-    // user's setting extends it).
-    let timeout = Duration::from_secs(job.timeout_secs.max(300));
+    // Attempt timeout: a full-length merge on a slow CPU dwarfs any
+    // network timeout, so bound the whole attempt at five minutes.
+    let timeout = Duration::from_secs(300);
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
     let phase = |text: String| {
@@ -2836,7 +2819,7 @@ pub async fn run_video_download(
         gettext("Resolving media…")
     });
     let mut video: Option<Video> = None;
-    for attempt in 0..job.tries.max(1) {
+    for attempt in 0u32..3 {
         match fetch_video_page(
             &youtube_bin,
             &job.page_url,
@@ -2850,7 +2833,7 @@ pub async fn run_video_download(
                 video = Some(v);
                 break;
             }
-            Err(e) if attempt + 1 < job.tries.max(1) => {
+            Err(e) if attempt + 1 < 3 => {
                 tracing::debug!("video resolve failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
             }
@@ -3232,8 +3215,6 @@ pub(crate) fn unified_download_argv(
         out.to_string_lossy().into_owned(),
         "--ffmpeg-location".to_string(),
         ffmpeg_location_dir(ffmpeg_bin),
-        "--retries".to_string(),
-        job.tries.max(1).to_string(),
         // Same parallelism as the app's own segmented downloads: DASH/HLS
         // legs fetch fragments, not one byte stream (yt-dlp default is 1).
         "--concurrent-fragments".to_string(),
@@ -3241,50 +3222,6 @@ pub(crate) fn unified_download_argv(
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
-    if job.retry_sleep > 0 {
-        // Opt-in resilience: pause between fragment retries on flaky
-        // connections instead of hammering the server immediately.
-        args.push("--retry-sleep".to_string());
-        args.push(format!("fragment:{}", job.retry_sleep));
-    }
-    if job.sleep_interval > 0 {
-        // Opt-in politeness: pause before each download so repeated
-        // fetches don't hammer the server.
-        args.push("--sleep-interval".to_string());
-        args.push(job.sleep_interval.to_string());
-        if job.max_sleep_interval > 0 {
-            // Opt-in upper bound: randomize the pause within [min, max].
-            // yt-dlp rejects --max-sleep-interval without the min, hence
-            // the nesting; clamp a contradictory max up to the min so the
-            // download never hard-errors (uniform(min, min) is just min).
-            args.push("--max-sleep-interval".to_string());
-            args.push(job.max_sleep_interval.max(job.sleep_interval).to_string());
-        }
-    }
-    if job.sleep_requests > 0 {
-        // Opt-in politeness: pace the extractor's requests so bursts of
-        // API/page fetches don't hammer the server.
-        args.push("--sleep-requests".to_string());
-        args.push(job.sleep_requests.to_string());
-    }
-    if job.socket_timeout > 0 {
-        // Opt-in resilience: bound how long a stalled connection may hang
-        // before yt-dlp gives up on it and retries.
-        args.push("--socket-timeout".to_string());
-        args.push(job.socket_timeout.to_string());
-    }
-    if job.throttled_rate > 0 {
-        // Opt-in resilience: below this rate yt-dlp assumes the server is
-        // throttling and re-extracts. VOD only (see the field docs).
-        args.push("--throttled-rate".to_string());
-        args.push(format!("{}K", job.throttled_rate));
-    }
-    if job.extractor_retries > 0 {
-        // Opt-in resilience: retry known extractor errors more (or fewer)
-        // times than yt-dlp's default of 3. VOD legs only (see field docs).
-        args.push("--extractor-retries".to_string());
-        args.push(job.extractor_retries.to_string());
-    }
     if let Some(limit) = job.speed_limit {
         // Opt-in throttle: cap this leg at the shared speed limit
         // (parsed once at spawn; empty/0/invalid means unlimited).
@@ -3338,10 +3275,6 @@ pub(crate) fn unified_download_argv(
         args.push("--sponsorblock-mark".to_string());
         args.push("sponsor".to_string());
     }
-    if job.embed_thumbnail {
-        // Opt-in post-processing: attach the video thumbnail as cover art.
-        args.push("--embed-thumbnail".to_string());
-    }
     if job.embed_chapters {
         // Opt-in post-processing: write chapter markers into the file.
         args.push("--embed-chapters".to_string());
@@ -3362,7 +3295,7 @@ pub(crate) fn unified_download_argv(
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
-        Some(job.user_agent.as_str()),
+        None,
         &job.page_url,
     ));
     args
@@ -3656,8 +3589,6 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
         "--hls-use-mpegts".to_string(),
         "--fragment-retries".to_string(),
         "infinite".to_string(),
-        "--retries".to_string(),
-        job.tries.max(1).to_string(),
         "-o".to_string(),
         ytdlp_output_template(out),
     ];
@@ -3668,17 +3599,10 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
         // future caller misroutes a VOD row here.
         args.push("--live-from-start".to_string());
     }
-    if job.socket_timeout > 0 {
-        // Opt-in resilience: bound stalled live fragments so the endless
-        // fragment retries recover faster. Unlike the sleep knobs (never
-        // on live), a timeout shortens stalls instead of adding them.
-        args.push("--socket-timeout".to_string());
-        args.push(job.socket_timeout.to_string());
-    }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
-        Some(job.user_agent.as_str()),
+        None,
         &job.page_url,
     ));
     args
@@ -3798,6 +3722,29 @@ async fn remux_live_capture(
         return Err(VideoError::combine(detail));
     }
     unreachable!("bsf retry always returns");
+}
+
+/// yt-dlp's exact stderr line when `--live-from-start` meets a stream
+/// with no replay/DVR behind it (verified against yt-dlp's
+/// `raise_no_formats` call in `process_video_result`): the stable
+/// substring to match on, not the `[twitch:stream] <id>:` prefix.
+const LIVE_FROM_START_NO_FORMATS: &str =
+    "--live-from-start is passed, but there are no formats that can be downloaded from the start";
+
+/// Map a live-capture startup failure to the actionable error: when the
+/// user opted into recording from the start and yt-dlp reports no
+/// from-start formats, say which toggle to flip. Every other startup
+/// failure keeps yt-dlp's own last line. Pure for tests.
+fn live_startup_failure(
+    is_live: bool,
+    live_from_start: bool,
+    log_tail: &str,
+) -> Option<VideoError> {
+    if is_live && live_from_start && log_tail.contains(LIVE_FROM_START_NO_FORMATS) {
+        Some(VideoError::live_from_start_no_replay())
+    } else {
+        None
+    }
 }
 
 /// One live capture through the yt-dlp binary: variant choice, audio
@@ -3966,6 +3913,12 @@ async fn run_live_ytdlp(
         .into_iter()
         .find(|p| file_len(p).is_some_and(|n| n > 0));
     let Some(src) = src else {
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        // Opt-in from-start on a replay-less stream: name the toggle,
+        // don't echo yt-dlp's flag line.
+        if let Some(e) = live_startup_failure(job.is_live, job.live_from_start, &log_tail) {
+            return Err(e);
+        }
         // Startup failure: surface yt-dlp's line, not a generic miss.
         let detail = log_tail
             .lines()
@@ -3974,7 +3927,6 @@ async fn run_live_ytdlp(
             .unwrap_or("nothing recorded")
             .trim()
             .to_string();
-        let _ = tokio::fs::remove_dir_all(staging).await;
         return Err(VideoError::part_failed(detail));
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
@@ -4207,51 +4159,12 @@ pub(crate) fn hls_download_argv(
         ytdlp_output_template(&out_template),
         "--ffmpeg-location".to_string(),
         ffmpeg_location_dir(ffmpeg_bin),
-        "--retries".to_string(),
-        job.tries.max(1).to_string(),
         // Fragmented HLS like the DASH legs: same parallelism setting.
         "--concurrent-fragments".to_string(),
         job.connections.max(1).to_string(),
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
-    if job.retry_sleep > 0 {
-        // Same opt-in fragment-retry delay as the unified VOD legs.
-        args.push("--retry-sleep".to_string());
-        args.push(format!("fragment:{}", job.retry_sleep));
-    }
-    if job.sleep_interval > 0 {
-        // Same opt-in pre-download pause as the unified VOD legs.
-        args.push("--sleep-interval".to_string());
-        args.push(job.sleep_interval.to_string());
-        if job.max_sleep_interval > 0 {
-            // Same opt-in randomized upper bound as the unified VOD legs
-            // (nested: yt-dlp rejects the max without the min; clamp a
-            // contradictory max up to the min).
-            args.push("--max-sleep-interval".to_string());
-            args.push(job.max_sleep_interval.max(job.sleep_interval).to_string());
-        }
-    }
-    if job.sleep_requests > 0 {
-        // Same opt-in extraction pacing as the unified VOD legs.
-        args.push("--sleep-requests".to_string());
-        args.push(job.sleep_requests.to_string());
-    }
-    if job.socket_timeout > 0 {
-        // Same opt-in stalled-connection bound as the unified VOD legs.
-        args.push("--socket-timeout".to_string());
-        args.push(job.socket_timeout.to_string());
-    }
-    if job.throttled_rate > 0 {
-        // Same opt-in throttling detection as the unified VOD legs.
-        args.push("--throttled-rate".to_string());
-        args.push(format!("{}K", job.throttled_rate));
-    }
-    if job.extractor_retries > 0 {
-        // Same opt-in extractor-error retries as the unified VOD legs.
-        args.push("--extractor-retries".to_string());
-        args.push(job.extractor_retries.to_string());
-    }
     if let Some(limit) = job.speed_limit {
         // Same opt-in throttle as the unified VOD legs.
         args.push("--ratelimit".to_string());
@@ -4290,10 +4203,6 @@ pub(crate) fn hls_download_argv(
         args.push("--sponsorblock-mark".to_string());
         args.push("sponsor".to_string());
     }
-    if job.embed_thumbnail {
-        // Same opt-in post-processing as the unified VOD legs.
-        args.push("--embed-thumbnail".to_string());
-    }
     if job.embed_chapters {
         // Same opt-in post-processing as the unified VOD legs.
         args.push("--embed-chapters".to_string());
@@ -4314,7 +4223,7 @@ pub(crate) fn hls_download_argv(
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,
-        Some(job.user_agent.as_str()),
+        None,
         &job.page_url,
     ));
     args

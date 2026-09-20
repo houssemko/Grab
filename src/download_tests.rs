@@ -1708,15 +1708,6 @@ fn sane_filenames() {
 }
 
 #[test]
-fn user_agent_sanitized_to_header_safe() {
-    assert_eq!(sanitize_user_agent("Grab/2.3.4"), "Grab/2.3.4");
-    assert_eq!(sanitize_user_agent("  a b  "), "a b");
-    assert_eq!(sanitize_user_agent("a\nb\rc"), "abc");
-    assert_eq!(sanitize_user_agent("é💾"), "");
-    assert_eq!(sanitize_user_agent("   "), "");
-}
-
-#[test]
 fn restore_rejects_bad_filenames() {
     let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("restore-bad");
@@ -2451,7 +2442,6 @@ fn piece_rejects_changed_file_version() {
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
-            timeout: 30,
             ..Default::default()
         },
         cookies: None,
@@ -3215,10 +3205,7 @@ fn remove_leaves_plain_rows_staging_alone() {
 
 fn proxy_opts(mode: &str, ptype: &str, host: &str, port: i32) -> DownloadOptions {
     DownloadOptions {
-        tries: 3,
-        timeout: 30,
         limit_rate: String::new(),
-        user_agent: String::new(),
         connections: 4,
         proxy_mode: mode.into(),
         proxy_type: ptype.into(),
@@ -3558,7 +3545,6 @@ fn direct_mode_ignores_proxy_env() {
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
-            timeout: 30,
             ..Default::default()
         },
         cookies: None,
@@ -3590,12 +3576,9 @@ fn proxy_argv_precedes_end_of_options() {
         audio_only: false,
         audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
-        tries: 3,
         connections: 4,
         speed_limit: None,
         keep_server_date: false,
-        timeout_secs: 60,
-        user_agent: String::new(),
         video_format_id: None,
         is_live: false,
         live_from_start: false,
@@ -3606,15 +3589,7 @@ fn proxy_argv_precedes_end_of_options() {
         sponsorblock_remove: false,
         sponsorblock_mark: false,
         remux_video: None,
-        embed_thumbnail: false,
         embed_chapters: false,
-        retry_sleep: 0,
-        sleep_interval: 0,
-        max_sleep_interval: 0,
-        throttled_rate: 0,
-        extractor_retries: 0,
-        sleep_requests: 0,
-        socket_timeout: 0,
         proxy: Some(proxy),
     };
     for argv in [
@@ -3656,7 +3631,6 @@ fn single_connection_skips_probe() {
         url: format!("http://127.0.0.1:{port}/v.bin"),
         dest: dl.join("v.bin"),
         opts: DownloadOptions {
-            timeout: 30,
             ..Default::default()
         },
         cookies: None,

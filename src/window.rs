@@ -2329,7 +2329,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         // row per chosen entry, each re-resolving its own
                         // page at download time.
                         crate::video::ProbeResult::Playlist(pl) => {
-                            show_playlist_items_dialog(
+                            push_playlist_items_page(
+                                &nav2,
                                 m.clone(),
                                 dd.clone(),
                                 dialog_weak.clone(),
@@ -2609,14 +2610,25 @@ pub(crate) fn show_torrent_files_dialog(
         .build();
     page.add(&group);
 
-    let mut switches = Vec::new();
+    // HIG selection, not settings: a switch means "a setting is on",
+    // a checkbox means "this item is picked". Clicking a row toggles
+    // its checkbox.
+    let mut checks = Vec::new();
     for e in &entries {
-        let row = adw::SwitchRow::builder()
+        let check = gtk4::CheckButton::builder().active(true).build();
+        let row = adw::ActionRow::builder()
             .title(&e.path)
             .subtitle(crate::download::fmt_bytes(e.length))
-            .active(true)
+            .activatable(true)
             .build();
-        switches.push(row.clone());
+        row.add_prefix(&check);
+        {
+            let check = check.clone();
+            row.connect_activate(move |_| {
+                check.set_active(!check.is_active());
+            });
+        }
+        checks.push(check);
         group.add(&row);
     }
     let error_label = gtk4::Label::builder()
@@ -2635,17 +2647,59 @@ pub(crate) fn show_torrent_files_dialog(
         .label(gettext("_Cancel"))
         .use_underline(true)
         .build();
-    let add_btn = gtk4::Button::builder()
-        .label(gettext("_Add Files"))
-        .use_underline(true)
-        .css_classes(["suggested-action"])
-        .build();
     hb.pack_start(&cancel_btn);
-    hb.pack_end(&add_btn);
     toolbar.add_top_bar(&hb);
     toolbar.set_content(Some(&page));
+    // HIG selection mode: the selection's actions live in a bottom
+    // action bar, not the header.
+    let action_bar = gtk4::ActionBar::new();
+    let select_all_btn = gtk4::Button::builder().label(gettext("Select all")).build();
+    let select_none_btn = gtk4::Button::builder()
+        .label(gettext("Select none"))
+        .build();
+    let add_btn = gtk4::Button::builder()
+        .css_classes(["suggested-action"])
+        .build();
+    action_bar.pack_start(&select_all_btn);
+    action_bar.pack_start(&select_none_btn);
+    action_bar.pack_end(&add_btn);
+    toolbar.add_bottom_bar(&action_bar);
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&add_btn));
+
+    // The action counts the live selection; with nothing selected it
+    // reads "Add 0 files" and clicking it shows the error label.
+    let refresh_add = Rc::new({
+        let add_btn = add_btn.clone();
+        let checks = checks.clone();
+        move || {
+            let n = checks.iter().filter(|c| c.is_active()).count();
+            add_btn.set_label(
+                &ngettext("Add {} file", "Add {} files", n as u32).replace("{}", &n.to_string()),
+            );
+        }
+    });
+    for check in &checks {
+        let refresh = refresh_add.clone();
+        check.connect_toggled(move |_| refresh());
+    }
+    {
+        let checks = checks.clone();
+        select_all_btn.connect_clicked(move |_| {
+            for c in &checks {
+                c.set_active(true);
+            }
+        });
+    }
+    {
+        let checks = checks.clone();
+        select_none_btn.connect_clicked(move |_| {
+            for c in &checks {
+                c.set_active(false);
+            }
+        });
+    }
+    refresh_add();
 
     {
         let dialog_weak = dialog.downgrade();
@@ -2658,10 +2712,10 @@ pub(crate) fn show_torrent_files_dialog(
     {
         let dialog_weak = dialog.downgrade();
         add_btn.connect_clicked(move |_| {
-            let selected: Vec<usize> = switches
+            let selected: Vec<usize> = checks
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.is_active())
+                .filter(|(_, c)| c.is_active())
                 .map(|(i, _)| i)
                 .collect();
             if selected.is_empty() {
@@ -2670,7 +2724,7 @@ pub(crate) fn show_torrent_files_dialog(
                 return;
             }
             // All on means no filter: pass None, not every index.
-            let only = (selected.len() < switches.len()).then_some(selected);
+            let only = (selected.len() < checks.len()).then_some(selected);
             match manager.enqueue_torrent_file(
                 bytes.clone(),
                 &file_name,
@@ -2710,23 +2764,29 @@ fn fmt_item_duration(secs: i64) -> String {
 }
 
 /// Item picker for probed playlists, stories and highlights, mirroring
-/// [`show_torrent_files_dialog`]: one switch per entry, all on by
-/// default. Each chosen item becomes its own queue row through the Page
+/// [`show_torrent_files_dialog`]: one checkbox per entry, all checked
+/// by default (HIG selection: checkboxes pick items, switches flip
+/// settings). Each chosen item becomes its own queue row through the Page
 /// intake, so formats resolve per item at download time — the probe
 /// only listed them. Quality follows the global preference (no pin:
 /// pins don't survive across items); the audio-only choice from the
 /// New Download dialog applies to every queued row.
-fn show_playlist_items_dialog(
+/// The picker is a page in the New Download navigation stack (tag
+/// "playlist"), not a standalone dialog: one window, one close path,
+/// and the navigation header's Back button.
+fn push_playlist_items_page(
+    nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     parent: glib::WeakRef<adw::Dialog>,
     playlist: crate::video::PlaylistInfo,
     audio_only: bool,
 ) {
-    let dialog = adw::Dialog::builder().title(&playlist.title).build();
-    dialog.set_follows_content_size(true);
-    dialog.set_content_width(420);
-    dialog.set_content_height(560);
+    // Same guard as the video page: don't stack a second picker while
+    // one is already visible.
+    if nav.visible_page_tag().as_deref() == Some("playlist") {
+        return;
+    }
 
     let page = adw::PreferencesPage::new();
     let count = playlist.items.len();
@@ -2742,16 +2802,24 @@ fn show_playlist_items_dialog(
     }
     page.add(&group);
 
-    let mut switches = Vec::new();
+    let mut checks = Vec::new();
     for item in &playlist.items {
-        let row = adw::SwitchRow::builder()
+        let check = gtk4::CheckButton::builder().active(true).build();
+        let row = adw::ActionRow::builder()
             .title(&item.title)
-            .active(true)
+            .activatable(true)
             .build();
         if let Some(d) = item.duration {
             row.set_subtitle(&fmt_item_duration(d));
         }
-        switches.push(row.clone());
+        row.add_prefix(&check);
+        {
+            let check = check.clone();
+            row.connect_activate(move |_| {
+                check.set_active(!check.is_active());
+            });
+        }
+        checks.push(check);
         group.add(&row);
     }
     let error_label = gtk4::Label::builder()
@@ -2770,58 +2838,76 @@ fn show_playlist_items_dialog(
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
+    // No WM title buttons either end and no explicit Cancel: the
+    // navigation header's Back button (and Esc) close the picker, like
+    // the Media Details page. The selection's action lives in the
+    // bottom action bar, per HIG selection mode.
     hb.set_show_start_title_buttons(false);
     hb.set_show_end_title_buttons(false);
-    let cancel_btn = gtk4::Button::builder()
-        .label(gettext("_Cancel"))
-        .use_underline(true)
+    toolbar.add_top_bar(&hb);
+    toolbar.set_content(Some(&scrolled));
+    let action_bar = gtk4::ActionBar::new();
+    let select_all_btn = gtk4::Button::builder().label(gettext("Select all")).build();
+    let select_none_btn = gtk4::Button::builder()
+        .label(gettext("Select none"))
         .build();
     let add_btn = gtk4::Button::builder()
         .css_classes(["suggested-action"])
         .build();
-    hb.pack_start(&cancel_btn);
-    hb.pack_end(&add_btn);
-    toolbar.add_top_bar(&hb);
-    toolbar.set_content(Some(&scrolled));
-    dialog.set_child(Some(&toolbar));
-    dialog.set_default_widget(Some(&add_btn));
+    action_bar.pack_start(&select_all_btn);
+    action_bar.pack_start(&select_none_btn);
+    action_bar.pack_end(&add_btn);
+    toolbar.add_bottom_bar(&action_bar);
+    let picker_page = adw::NavigationPage::builder()
+        .tag("playlist")
+        .title(&playlist.title)
+        .child(&toolbar)
+        .build();
 
     // The action counts the live selection; with nothing selected it
     // reads "Queue 0 items" and clicking it shows the error label,
     // mirroring the torrent picker.
     let refresh_add = Rc::new({
         let add_btn = add_btn.clone();
-        let switches = switches.clone();
+        let checks = checks.clone();
         move || {
-            let n = switches.iter().filter(|s| s.is_active()).count();
+            let n = checks.iter().filter(|c| c.is_active()).count();
             add_btn.set_label(
                 &ngettext("Queue {} item", "Queue {} items", n as u32)
                     .replace("{}", &n.to_string()),
             );
         }
     });
-    for row in &switches {
+    for check in &checks {
         let refresh = refresh_add.clone();
-        row.connect_active_notify(move |_| refresh());
+        check.connect_toggled(move |_| refresh());
     }
-    refresh_add();
-
     {
-        let dialog_weak = dialog.downgrade();
-        cancel_btn.connect_clicked(move |_| {
-            if let Some(d) = dialog_weak.upgrade() {
-                d.close();
+        let checks = checks.clone();
+        select_all_btn.connect_clicked(move |_| {
+            for c in &checks {
+                c.set_active(true);
             }
         });
     }
     {
-        let dialog_weak = dialog.downgrade();
+        let checks = checks.clone();
+        select_none_btn.connect_clicked(move |_| {
+            for c in &checks {
+                c.set_active(false);
+            }
+        });
+    }
+    refresh_add();
+
+    {
+        let parent_weak = parent.clone();
         add_btn.connect_clicked(move |_| {
             let chosen: Vec<(usize, &crate::video::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| switches[*i].is_active())
+                .filter(|(i, _)| checks[*i].is_active())
                 .collect();
             if chosen.is_empty() {
                 error_label.set_text(&gettext("Select at least one item"));
@@ -2850,9 +2936,9 @@ fn show_playlist_items_dialog(
                     break;
                 }
                 // Rows already queued stay queued on a partial failure:
-                // switch them off so a retry only submits the remainder
+                // uncheck them so a retry only submits the remainder
                 // instead of duplicating them (dedupe is by filename).
-                switches[*i].set_active(false);
+                checks[*i].set_active(false);
             }
             manager.end_batch();
             if let Some(e) = failed {
@@ -2860,18 +2946,31 @@ fn show_playlist_items_dialog(
                 error_label.set_visible(true);
                 return;
             }
-            if let Some(d) = dialog_weak.upgrade() {
-                d.close();
-            }
-            if let Some(p) = parent.upgrade() {
+            // Complete success closes the whole New Download dialog; a
+            // partial failure stays on the picker so the remaining rows
+            // can be retried (their checkboxes were unchecked above).
+            if let Some(p) = parent_weak.upgrade() {
                 p.close();
             }
         });
     }
 
-    // No gtk Window parent exists here (invoked from an adw::Dialog):
-    // present standalone like the torrent picker above.
-    dialog.present(None::<&gtk4::Window>);
+    // Enter queues the selection while the picker is up; the dialog's
+    // previous default widget is restored when the page is popped.
+    if let Some(p) = parent.upgrade() {
+        let prev_default = p.default_widget();
+        p.set_default_widget(Some(&add_btn));
+        let parent_weak = parent.clone();
+        nav.connect_popped(move |_, popped| {
+            if popped.tag().as_deref() == Some("playlist")
+                && let Some(p) = parent_weak.upgrade()
+            {
+                p.set_default_widget(prev_default.as_ref());
+            }
+        });
+    }
+
+    nav.push(&picker_page);
 }
 
 #[cfg(test)]

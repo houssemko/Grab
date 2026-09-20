@@ -101,28 +101,6 @@ fn intake_plan_mirrors_engine_layout() {
 }
 
 #[test]
-fn trackers_split_and_schemeless_dropped() {
-    assert_eq!(parse_trackers(""), None);
-    assert_eq!(parse_trackers("  ,  "), None);
-    assert_eq!(parse_trackers("not a url"), None);
-    assert_eq!(
-        parse_trackers("udp://t.one:1337/announce, https://t.two/announce"),
-        Some(vec![
-            "udp://t.one:1337/announce".to_string(),
-            "https://t.two/announce".to_string()
-        ])
-    );
-    // Newlines/spaces split too; schemeless typos never fail a download.
-    assert_eq!(
-        parse_trackers("udp://t.one/a\ntypo.example.com https://t.two/b"),
-        Some(vec![
-            "udp://t.one/a".to_string(),
-            "https://t.two/b".to_string()
-        ])
-    );
-}
-
-#[test]
 fn blocklist_url_empty_disables() {
     assert_eq!(blocklist_url_of(""), Ok(None));
     assert_eq!(blocklist_url_of("   "), Ok(None));
@@ -150,10 +128,7 @@ fn blocklist_url_rejects_non_http() {
 
 fn manual_proxy(ptype: &str) -> Option<crate::download::ResolvedProxy> {
     crate::download::DownloadOptions {
-        tries: 3,
-        timeout: 30,
         limit_rate: String::new(),
-        user_agent: String::new(),
         connections: 4,
         proxy_mode: "manual".into(),
         proxy_type: ptype.into(),
@@ -195,7 +170,7 @@ fn torrent_net_plan_direct_passthrough() {
 
 #[test]
 fn torrent_net_plan_upnp_defaults_off() {
-    // Opt-in headline promise: UPnP stays off unless the user enables it.
+    // UPnP port forwarding is no longer user-configurable; the plan always leaves it off.
     let plan = plan_torrent_net(true, true, 6881, false, None, None);
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
