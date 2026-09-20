@@ -1366,8 +1366,8 @@ msgstr ""
 msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
 msgstr ""
 
-#: src/video.rs:357
-msgid "This stream can't be recorded from the start — the site offers no replay. Turn off \"Live from start\" to record from the live edge instead."
+#: src/video.rs:4132
+msgid "\"Live from start\" isn't available for this stream — recording from the live edge…"
 msgstr ""
 
 #: src/preferences.rs:75

@@ -4540,28 +4540,22 @@ fn live_capture_argv_live_from_start_when_enabled() {
 }
 
 #[test]
-fn live_startup_failure_maps_no_replay() {
-    // yt-dlp's exact from-start stderr line (Twitch with no replay
-    // behind the stream): the row must name the toggle, not echo the
-    // flag back at the user.
-    let log = "[twitch:stream] someid: --live-from-start is passed, but there are no formats that can be downloaded from the start. If you want to download from the current time, use --no-live-from-start";
-    let err = live_startup_failure(true, true, log).expect("must map");
-    let text = err.to_string();
-    assert!(text.contains("Live from start"), "{text}");
-    assert!(text.contains("live edge"), "{text}");
+fn fallback_to_live_edge_retries_unstopped_from_start_miss() {
+    // The from-start attempt recorded nothing and wasn't stopped: one
+    // retry from the live edge.
+    assert!(fallback_to_live_edge(true, true, false, false));
 }
 
 #[test]
-fn live_startup_failure_ignores_other_cases() {
-    let log = "[twitch:stream] someid: --live-from-start is passed, but there are no formats that can be downloaded from the start.";
-    // Toggle off: the user's choice stands, yt-dlp's own line survives.
-    assert!(live_startup_failure(true, false, log).is_none());
+fn fallback_to_live_edge_never_overrides_or_repeats() {
+    // Toggle off: the user's choice stands, no retry.
+    assert!(!fallback_to_live_edge(true, false, false, false));
     // Not a live row: the builder never passes the flag anyway.
-    assert!(live_startup_failure(false, true, log).is_none());
-    // Unrelated startup failure: untouched.
-    assert!(live_startup_failure(true, true, "ERROR: unable to open output file").is_none());
-    // Partial marker (e.g. a wrapped line) must not map.
-    assert!(live_startup_failure(true, true, "--live-from-start is passed").is_none());
+    assert!(!fallback_to_live_edge(false, true, false, false));
+    // Stopped attempt: Stop must never come back as a fresh capture.
+    assert!(!fallback_to_live_edge(true, true, true, false));
+    // Already retried: exactly once, then the error stands.
+    assert!(!fallback_to_live_edge(true, true, false, true));
 }
 
 #[test]
