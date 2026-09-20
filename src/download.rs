@@ -2441,7 +2441,11 @@ impl DownloadManager {
                     })
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
-        item.set_detail(gettext("Waiting to resolve media…"));
+        item.set_detail(if choices.audio_only {
+            gettext("Waiting to resolve audio…")
+        } else {
+            gettext("Waiting to resolve media…")
+        });
         self.video_sources.borrow_mut().insert(
             item.id(),
             crate::video::VideoSource::Page {
@@ -2449,6 +2453,7 @@ impl DownloadManager {
                 media_url: None,
                 expires_at: None,
                 quality: choices.quality,
+                audio_only: choices.audio_only,
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
             },
@@ -2499,7 +2504,18 @@ impl DownloadManager {
         if let Some(src) = video_source {
             let matches = matches!(&src, crate::video::VideoSource::Page { page_url, .. } if *page_url == url);
             if matches {
-                item.set_detail(gettext("Waiting to resolve media…"));
+                let audio_only = matches!(
+                    &src,
+                    crate::video::VideoSource::Page {
+                        audio_only: true,
+                        ..
+                    }
+                );
+                item.set_detail(if audio_only {
+                    gettext("Waiting to resolve audio…")
+                } else {
+                    gettext("Waiting to resolve media…")
+                });
                 self.video_sources.borrow_mut().insert(item.id(), src);
             } else {
                 tracing::warn!("dropping video source with mismatched page URL");
@@ -2622,12 +2638,20 @@ impl DownloadManager {
         if let Some(crate::video::VideoSource::Page {
             page_url,
             quality,
+            audio_only,
             is_live,
             video_format_id,
             ..
         }) = self.video_source(item.id())
         {
-            return self.spawn_video(item, page_url, quality, video_format_id, is_live);
+            return self.spawn_video(
+                item,
+                page_url,
+                quality,
+                audio_only,
+                video_format_id,
+                is_live,
+            );
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(opts.timeout.max(1) as u64);
@@ -3170,6 +3194,7 @@ impl DownloadManager {
         item: DownloadItem,
         page_url: String,
         quality: String,
+        audio_only: bool,
         video_format_id: Option<String>,
         is_live: bool,
     ) {
@@ -3204,6 +3229,7 @@ impl DownloadManager {
             item_id: id,
             page_url,
             quality,
+            audio_only,
             dest: item.file_path(),
             tries: opts.tries.max(1) as u32,
             timeout_secs: opts.timeout.max(1) as u64,
@@ -3212,7 +3238,13 @@ impl DownloadManager {
             is_live,
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
-            subtitles: crate::video::subtitle_lang_active(&self.settings.subtitle_language()),
+            // Audio-only rows never subtitle (no video leg exists), so
+            // resolve to `None` here rather than gating at every use.
+            subtitles: if audio_only {
+                None
+            } else {
+                crate::video::subtitle_lang_active(&self.settings.subtitle_language())
+            },
             proxy,
         };
         let handle = tokio_rt().spawn(async move {
@@ -3236,7 +3268,11 @@ impl DownloadManager {
         // carry its old fraction, which would otherwise sit frozen
         // through the whole "Resolving media…" phase.
         item.set_progress(0.0);
-        item.set_detail(gettext("Resolving media…"));
+        item.set_detail(if audio_only {
+            gettext("Resolving audio…")
+        } else {
+            gettext("Resolving media…")
+        });
         self.changed();
         self.pump(item, id, generation, rx);
     }
