@@ -304,10 +304,6 @@ msgstr ""
 msgid "Connections per download"
 msgstr ""
 
-#: src/preferences.rs:114
-msgid "Parallel connections for large files (1 = single stream without probing)"
-msgstr ""
-
 #: src/preferences.rs:119
 msgid "Files under ~16 MB always use one connection"
 msgstr ""
@@ -324,32 +320,12 @@ msgstr ""
 msgid "Retries"
 msgstr ""
 
-#: src/preferences.rs:164
-msgid "Timeout (seconds)"
-msgstr ""
-
-#: src/preferences.rs:173
-msgid "User agent (optional)"
-msgstr ""
-
-#: src/preferences.rs
-msgid "Preserve server file dates"
-msgstr ""
-
-#: src/preferences.rs
-msgid "Downloaded files are dated when published, not when downloaded"
-msgstr ""
-
 #: src/preferences.rs:190
 msgid "Notifications"
 msgstr ""
 
 #: src/preferences.rs:193
 msgid "Notify when downloads finish"
-msgstr ""
-
-#: src/preferences.rs:200
-msgid "Notify for background downloads"
 msgstr ""
 
 #: src/preferences.rs:201
@@ -364,10 +340,6 @@ msgstr ""
 msgid "Prevent sleep during downloads"
 msgstr ""
 
-#: src/preferences.rs:214
-msgid "Block suspend while downloads are queued or running"
-msgstr ""
-
 #: src/preferences.rs:231
 msgid "Torrent"
 msgstr ""
@@ -380,34 +352,12 @@ msgstr ""
 msgid "Seed finished downloads"
 msgstr ""
 
-#: src/preferences.rs:240
-msgid "Keep sharing files after they finish downloading"
-msgstr ""
-
 #: src/preferences.rs:247
 msgid "Seed to ratio"
 msgstr ""
 
-#: src/preferences.rs:249
-msgid ""
-"Stop seeding after uploading this multiple of the download size. 0 means "
-"unlimited."
-msgstr ""
-
-#: src/preferences.rs:266
-msgid "Seed for (minutes)"
-msgstr ""
-
-#: src/preferences.rs:268
-msgid "Stop seeding this many minutes after finishing. 0 means unlimited."
-msgstr ""
-
 #: src/preferences.rs:284
 msgid "Use DHT"
-msgstr ""
-
-#: src/preferences.rs:286
-msgid "Find peers through the distributed hash table. Applies after restart."
 msgstr ""
 
 #: src/preferences.rs:294
@@ -1018,10 +968,6 @@ msgstr ""
 msgid "Most compatible"
 msgstr ""
 
-#: src/preferences.rs:462
-msgid "Newest codecs or widest playback"
-msgstr ""
-
 #: src/video.rs
 msgid "Finalizing…"
 msgstr ""
@@ -1112,6 +1058,8 @@ msgstr ""
 
 #: src/download.rs
 msgid "Unknown proxy type: {t}"
+msgstr ""
+
 #: src/window.rs
 msgid "Automatic"
 msgstr ""
@@ -1249,3 +1197,63 @@ msgid "Cleared finished download"
 msgid_plural "Cleared {n} finished downloads"
 msgstr[0] ""
 msgstr[1] ""
+
+#: src/preferences.rs:113
+msgid "Parallel connections for large files"
+msgstr ""
+
+#: src/preferences.rs:162
+msgid "Timeout"
+msgstr ""
+
+#: src/preferences.rs:163
+msgid "In seconds"
+msgstr ""
+
+#: src/preferences.rs:172
+msgid "User agent"
+msgstr ""
+
+#: src/preferences.rs:174
+msgid "Blank uses the default user agent"
+msgstr ""
+
+#: src/preferences.rs:181
+msgid "Keep original file dates"
+msgstr ""
+
+#: src/preferences.rs:182
+msgid "Use the server's date instead of download time"
+msgstr ""
+
+#: src/preferences.rs:298
+msgid "Background download notifications"
+msgstr ""
+
+#: src/preferences.rs:311
+msgid "Keep the computer awake while downloads are active"
+msgstr ""
+
+#: src/preferences.rs:343
+msgid "Stop seeding at this upload ratio. 0 means unlimited."
+msgstr ""
+
+#: src/preferences.rs:360
+msgid "Seed time limit"
+msgstr ""
+
+#: src/preferences.rs:362
+msgid "Stop seeding this many minutes after finishing. 0 means unlimited."
+msgstr ""
+
+#: src/preferences.rs:375
+msgid "Connectivity"
+msgstr ""
+
+#: src/preferences.rs:380
+msgid "Find peers without trackers. Takes effect on restart."
+msgstr ""
+
+#: src/preferences.rs:555
+msgid "Newest codecs first, or widest playback"
+msgstr ""
