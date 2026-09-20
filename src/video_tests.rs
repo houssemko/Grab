@@ -848,8 +848,8 @@ fn pipeline_reports_missing_tools() {
 
 // ── preview freshness (dialog kick/submit gate) ──────────────────────
 
-fn test_video_info(page_url: &str) -> VideoInfo {
-    VideoInfo {
+fn test_video_info(page_url: &str) -> ProbeResult {
+    ProbeResult::Single(VideoInfo {
         id: "x".into(),
         title: "T".into(),
         duration: None,
@@ -859,7 +859,7 @@ fn test_video_info(page_url: &str) -> VideoInfo {
         formats: vec![],
         is_live: false,
         fetchable: false,
-    }
+    })
 }
 
 #[test]
@@ -902,6 +902,169 @@ fn preview_fresh_rejects_stale_and_empty() {
     ));
     // Empty text never matches, even with a coincidental empty key.
     assert!(!preview_fresh(&info, "", ""));
+}
+
+// ── playlist probe ───────────────────────────────────────────────────
+
+fn playlist_json(entries: serde_json::Value, url: &str) -> serde_json::Value {
+    serde_json::json!({
+        "_type": "playlist",
+        "id": "PL1",
+        "title": "My List",
+        "webpage_url": url,
+        "extractor": "youtube",
+        "extractor_key": "YoutubePlaylist",
+        "entries": entries,
+    })
+}
+
+#[test]
+fn parse_playlist_reads_flat_entries() {
+    let value = playlist_json(
+        serde_json::json!([
+            {"_type": "url", "id": "a1", "title": "First", "webpage_url": "https://www.youtube.com/watch?v=a1", "playlist_index": 1, "duration": 61.9},
+            null,
+            {"id": "b2", "title": "", "url": "https://example.com/v/b2"},
+            {"id": "c3", "title": "No usable url", "url": "not-a-url"},
+        ]),
+        "https://www.youtube.com/playlist?list=PL1",
+    );
+    let pl =
+        parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
+    assert_eq!(pl.kind, PlaylistKind::Playlist);
+    assert_eq!(pl.title, "My List");
+    assert_eq!(pl.total, 4);
+    // Null, empty and unusable-URL entries are dropped.
+    assert_eq!(pl.items.len(), 2);
+    assert_eq!(pl.items[0].title, "First");
+    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+    // Float durations truncate like the video path.
+    assert_eq!(pl.items[0].duration, Some(61));
+    assert_eq!(pl.items[0].index, 1);
+    // Empty title falls back to the id; missing playlist_index falls
+    // back to the position.
+    assert_eq!(pl.items[1].title, "b2");
+    assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
+    assert_eq!(pl.items[1].index, 3);
+    assert_eq!(pl.items[1].duration, None);
+}
+
+#[test]
+fn parse_playlist_classifies_stories_and_highlights() {
+    let entries = serde_json::json!([]);
+    let pl = parse_playlist_json(
+        &playlist_json(
+            entries.clone(),
+            "https://www.instagram.com/stories/someuser/",
+        ),
+        "https://www.instagram.com/stories/someuser/",
+    )
+    .expect("playlist");
+    assert_eq!(pl.kind, PlaylistKind::Stories);
+    // Highlights URLs contain "/stories/" too: the highlight check wins.
+    let pl = parse_playlist_json(
+        &playlist_json(entries, "https://www.instagram.com/stories/highlights/123/"),
+        "https://www.instagram.com/stories/highlights/123/",
+    )
+    .expect("playlist");
+    assert_eq!(pl.kind, PlaylistKind::Highlights);
+}
+
+#[test]
+fn parse_playlist_rejects_single_video_json() {
+    let video = serde_json::json!({"id": "v", "title": "T", "_type": "video"});
+    assert!(parse_playlist_json(&video, "https://www.youtube.com/watch?v=v").is_none());
+    let bare = serde_json::json!({"id": "v"});
+    assert!(parse_playlist_json(&bare, "https://example.com/v").is_none());
+}
+
+#[test]
+fn parse_playlist_ignores_null_entries() {
+    // A private/deleted playlist reports entries: null; the probe must
+    // fall through to the single-video path instead of erroring here.
+    let value = serde_json::json!({
+        "_type": "playlist",
+        "id": "PL9",
+        "title": "Gone",
+        "webpage_url": "https://www.youtube.com/playlist?list=PL9",
+        "entries": null,
+    });
+    assert!(parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL9").is_none());
+}
+
+#[test]
+fn parse_playlist_prefers_webpage_url() {
+    // YouTube flat entries carry the video id in `url`: only an http(s)
+    // value may serve as the page URL.
+    let value = playlist_json(
+        serde_json::json!([
+            {"id": "a1", "title": "A", "url": "a1", "webpage_url": "https://www.youtube.com/watch?v=a1"},
+            {"id": "b2", "title": "B", "url": "b2"},
+        ]),
+        "https://www.youtube.com/playlist?list=PL1",
+    );
+    let pl =
+        parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
+    assert_eq!(pl.items.len(), 1);
+    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+}
+
+#[test]
+fn parse_playlist_caps_items_but_reports_total() {
+    let entries: Vec<serde_json::Value> = (0..600)
+        .map(|i| {
+            serde_json::json!({
+                "id": format!("v{i}"),
+                "title": format!("T{i}"),
+                "webpage_url": format!("https://www.youtube.com/watch?v=v{i}"),
+            })
+        })
+        .collect();
+    let value = playlist_json(
+        serde_json::Value::Array(entries),
+        "https://www.youtube.com/playlist?list=PL1",
+    );
+    let pl =
+        parse_playlist_json(&value, "https://www.youtube.com/playlist?list=PL1").expect("playlist");
+    assert_eq!(pl.items.len(), MAX_PLAYLIST_ITEMS);
+    assert_eq!(pl.total, 600);
+}
+
+#[test]
+fn probe_result_helpers_cover_both_variants() {
+    let single = test_video_info("https://www.youtube.com/watch?v=x");
+    assert_eq!(single.page_url(), "https://www.youtube.com/watch?v=x");
+    assert_eq!(single.title(), "T");
+    assert!(!single.fetchable());
+
+    let items = vec![PlaylistItem {
+        index: 1,
+        id: "a1".into(),
+        title: "First".into(),
+        page_url: "https://www.youtube.com/watch?v=a1".into(),
+        duration: None,
+    }];
+    let list = ProbeResult::Playlist(PlaylistInfo {
+        id: "PL1".into(),
+        title: "My List".into(),
+        page_url: "https://www.youtube.com/playlist?list=PL1".into(),
+        kind: PlaylistKind::Playlist,
+        total: 1,
+        items,
+    });
+    assert_eq!(list.page_url(), "https://www.youtube.com/playlist?list=PL1");
+    assert_eq!(list.title(), "My List");
+    assert!(list.fetchable());
+
+    let empty = ProbeResult::Playlist(PlaylistInfo {
+        id: "PL1".into(),
+        title: "My List".into(),
+        page_url: "https://www.youtube.com/playlist?list=PL1".into(),
+        kind: PlaylistKind::Playlist,
+        total: 0,
+        items: vec![],
+    });
+    assert!(!empty.fetchable());
 }
 
 // ── tool versions ────────────────────────────────────────────────────
