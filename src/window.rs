@@ -2833,10 +2833,15 @@ fn push_playlist_items_page(
         .build();
     group.add(&error_label);
 
-    // Scrolled: big playlists must not size the dialog off-screen.
+    // Scrolled: big playlists must not size the dialog off-screen, but
+    // propagate the natural height (capped) so the dialog grows and
+    // shrinks with the item count instead of keeping the previous
+    // page's size and scrolling a short list.
     let scrolled = gtk4::ScrolledWindow::builder()
         .child(&page)
         .vexpand(true)
+        .propagate_natural_height(true)
+        .max_content_height(480)
         .build();
 
     let toolbar = adw::ToolbarView::new();
