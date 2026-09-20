@@ -170,7 +170,7 @@ fn torrent_net_plan_direct_passthrough() {
 
 #[test]
 fn torrent_net_plan_upnp_defaults_off() {
-    // Opt-in headline promise: UPnP stays off unless the user enables it.
+    // UPnP port forwarding is no longer user-configurable; the plan always leaves it off.
     let plan = plan_torrent_net(true, true, 6881, false, None, None);
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
