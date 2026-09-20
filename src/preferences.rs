@@ -215,6 +215,28 @@ pub fn show(
         .build();
     advanced_net_group.add(&sleep_interval);
 
+    let max_sleep_interval = adw::SpinRow::builder()
+        .title(gettext("Max sleep interval"))
+        .subtitle(gettext("In seconds"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 300.0, 1.0, 5.0, 0.0))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::MAX_SLEEP_INTERVAL,
+            &max_sleep_interval,
+            "value",
+        )
+        .build();
+    // The upper bound only means anything alongside an active Sleep
+    // interval (yt-dlp rejects --max-sleep-interval on its own), so the
+    // row greys out while the minimum is 0.
+    sleep_interval
+        .bind_property("value", &max_sleep_interval, "sensitive")
+        .transform_to(|_: &gtk4::glib::Binding, n: f64| Some(n > 0.0))
+        .sync_create()
+        .build();
+    advanced_net_group.add(&max_sleep_interval);
+
     let sleep_requests = adw::SpinRow::builder()
         .title(gettext("Sleep between requests"))
         .subtitle(gettext("In seconds"))
@@ -252,6 +274,34 @@ pub fn show(
         .bind(crate::settings::key::TIMEOUT, &timeout, "value")
         .build();
     advanced_net_group.add(&timeout);
+
+    let throttled_rate = adw::SpinRow::builder()
+        .title(gettext("Throttled rate"))
+        .subtitle(gettext("In KB/s"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 10000.0, 10.0, 100.0, 0.0))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::THROTTLED_RATE,
+            &throttled_rate,
+            "value",
+        )
+        .build();
+    advanced_net_group.add(&throttled_rate);
+
+    let extractor_retries = adw::SpinRow::builder()
+        .title(gettext("Extractor retries"))
+        .subtitle(gettext("0 uses the default of 3"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 20.0, 1.0, 5.0, 0.0))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::EXTRACTOR_RETRIES,
+            &extractor_retries,
+            "value",
+        )
+        .build();
+    advanced_net_group.add(&extractor_retries);
 
     let ua = adw::EntryRow::builder()
         .title(gettext("User agent"))

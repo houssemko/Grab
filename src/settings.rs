@@ -12,11 +12,14 @@ pub mod key {
     pub const MAX_CONCURRENT: &str = "max-concurrent";
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
+    pub const EXTRACTOR_RETRIES: &str = "extractor-retries";
+    pub const MAX_SLEEP_INTERVAL: &str = "max-sleep-interval";
     pub const RETRIES: &str = "retries";
     pub const RETRY_SLEEP: &str = "retry-sleep";
     pub const SLEEP_INTERVAL: &str = "sleep-interval";
     pub const SLEEP_REQUESTS: &str = "sleep-requests";
     pub const SOCKET_TIMEOUT: &str = "socket-timeout";
+    pub const THROTTLED_RATE: &str = "throttled-rate";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
     pub const PROXY_MODE: &str = "proxy-mode";
@@ -77,6 +80,17 @@ impl AppSettings {
     pub fn speed_limit(&self) -> String {
         self.0.string(key::SPEED_LIMIT).to_string()
     }
+    /// Retries for known extractor errors (`--extractor-retries`).
+    /// Opt-in; 0 uses yt-dlp's default of 3.
+    pub fn extractor_retries(&self) -> i32 {
+        self.0.int(key::EXTRACTOR_RETRIES)
+    }
+    /// Upper bound of the random sleep before each download
+    /// (`--max-sleep-interval`). Opt-in; 0 disables the upper bound.
+    /// Only meaningful together with `sleep_interval`.
+    pub fn max_sleep_interval(&self) -> i32 {
+        self.0.int(key::MAX_SLEEP_INTERVAL)
+    }
     pub fn retries(&self) -> i32 {
         self.0.int(key::RETRIES)
     }
@@ -99,6 +113,12 @@ impl AppSettings {
     /// (`--socket-timeout`). Opt-in; 0 uses yt-dlp's default.
     pub fn socket_timeout(&self) -> i32 {
         self.0.int(key::SOCKET_TIMEOUT)
+    }
+    /// Minimum download rate in KB/s below which throttling is assumed
+    /// and the video data is re-extracted (`--throttled-rate`).
+    /// Opt-in; 0 disables detection.
+    pub fn throttled_rate(&self) -> i32 {
+        self.0.int(key::THROTTLED_RATE)
     }
     pub fn timeout(&self) -> i32 {
         self.0.int(key::TIMEOUT)
