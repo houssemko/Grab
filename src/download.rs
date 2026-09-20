@@ -2572,6 +2572,7 @@ impl DownloadManager {
                 audio_only: choices.audio_only,
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
+                playlist_item_id: choices.playlist_item_id,
             },
         );
         Ok(self.insert(item))
@@ -2757,6 +2758,7 @@ impl DownloadManager {
             audio_only,
             is_live,
             video_format_id,
+            playlist_item_id,
             ..
         }) = self.video_source(item.id())
         {
@@ -2767,6 +2769,7 @@ impl DownloadManager {
                 audio_only,
                 video_format_id,
                 is_live,
+                playlist_item_id,
             );
         }
         let connections = (opts.connections.max(1) as usize).min(16);
@@ -3335,6 +3338,7 @@ impl DownloadManager {
         audio_only: bool,
         video_format_id: Option<String>,
         is_live: bool,
+        playlist_item_id: Option<String>,
     ) {
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
@@ -3366,6 +3370,7 @@ impl DownloadManager {
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
+            playlist_item_id,
             quality,
             audio_only,
             dest: item.file_path(),

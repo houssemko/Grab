@@ -645,6 +645,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
                 audio_only: false,
                 video_format_id: None,
                 is_live: false,
+                playlist_item_id: None,
             },
         )
         .expect("video enqueue");
@@ -691,6 +692,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
                 audio_only: false,
                 video_format_id: None,
                 is_live: false,
+                playlist_item_id: None,
             },
         )
         .expect("video enqueue");
@@ -721,6 +723,7 @@ fn video_source_survives_restore_and_retry() {
                     audio_only: false,
                     video_format_id: None,
                     is_live: false,
+                    playlist_item_id: None,
                 },
             )
             .expect("video enqueue");
@@ -772,6 +775,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 audio_only: false,
                 is_live: false,
                 video_format_id: None,
+                playlist_item_id: None,
             }),
         }],
     };
@@ -811,6 +815,7 @@ fn unremove_restores_video_source() {
                 audio_only: false,
                 video_format_id: None,
                 is_live: false,
+                playlist_item_id: None,
             },
         )
         .expect("video enqueue");
@@ -862,6 +867,7 @@ fn queue_file_never_carries_cookies() {
                 audio_only: false,
                 video_format_id: None,
                 is_live: false,
+                playlist_item_id: None,
             },
         )
         .expect("video enqueue");
@@ -3141,6 +3147,7 @@ fn remove_cleans_video_staging() {
             audio_only: false,
             is_live: false,
             video_format_id: None,
+            playlist_item_id: None,
         },
     );
     manager.remove(id);
@@ -3178,6 +3185,7 @@ fn remove_keeps_live_staging_for_finalize() {
             audio_only: false,
             is_live: true,
             video_format_id: None,
+            playlist_item_id: None,
         },
     );
     manager.live_rows.borrow_mut().insert(id);
@@ -3572,6 +3580,7 @@ fn proxy_argv_precedes_end_of_options() {
     let job = crate::video::VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
         audio_quality: 5,
@@ -3897,6 +3906,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
                 audio_only: false,
                 video_format_id: None,
                 is_live: false,
+                playlist_item_id: None,
             },
         )
         .expect("video enqueue");
@@ -3946,6 +3956,7 @@ fn delete_download_trashes_video_sidecars() {
             audio_only: false,
             is_live: false,
             video_format_id: None,
+            playlist_item_id: None,
         },
     );
     let plain = DownloadItem::new(
@@ -4008,6 +4019,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
                 audio_only: false,
                 video_format_id: None,
                 is_live: false,
+                playlist_item_id: None,
             },
         )
         .expect("video enqueue");
@@ -4033,6 +4045,7 @@ fn enqueue_video_accepts_unlisted_url() {
         audio_only: false,
         video_format_id: None,
         is_live: false,
+        playlist_item_id: None,
     };
     let item = manager
         .enqueue_video(

@@ -141,6 +141,11 @@ pub struct VideoChoices {
     pub audio_only: bool,
     pub video_format_id: Option<String>,
     pub is_live: bool,
+    /// yt-dlp id of the playlist entry this row was picked from, if any.
+    /// Instagram stamps every story/highlight entry with the collection
+    /// URL, so the row's page URL re-resolves the whole tray: the worker
+    /// selects the picked entry by this id instead.
+    pub playlist_item_id: Option<String>,
 }
 
 /// Where a to-be-downloaded resource comes from. Serialized into the queue
@@ -173,6 +178,11 @@ pub enum VideoSource {
         /// preset when the id vanishes from fresh metadata.
         #[serde(default)]
         video_format_id: Option<String>,
+        /// yt-dlp id of the playlist entry this row was picked from, if
+        /// any (see [`VideoChoices::playlist_item_id`]). Persisted so
+        /// rows restored across launches still resolve the picked story.
+        #[serde(default)]
+        playlist_item_id: Option<String>,
     },
 }
 
@@ -194,6 +204,7 @@ pub fn classify(url: &str) -> VideoSource {
                     audio_only: false,
                     is_live: false,
                     video_format_id: None,
+                    playlist_item_id: None,
                 }
             } else {
                 VideoSource::Direct
@@ -468,8 +479,10 @@ impl ProbeResult {
     }
 }
 
-/// Which flavor of multi-item collection a probe found. Only affects
-/// labels ("3 stories" vs "3 items"); the pipeline treats them alike.
+/// Which flavor of multi-item collection a probe found. Affects the
+/// picker labels ("3 stories" vs "3 items") and whether single-story
+/// pastes are retargeted to the owner's tray; the download pipeline
+/// otherwise treats them alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaylistKind {
     Playlist,
@@ -1438,6 +1451,54 @@ fn parse_playlist_json(value: &serde_json::Value, url: &str) -> Option<PlaylistI
     })
 }
 
+/// Instagram's story extractor stamps every tray entry with the URL that
+/// was pasted. For a single-story link (`/stories/<user>/<id>/`) that is
+/// the *pasted story's* URL, not the entry's: a row queued from such an
+/// entry would re-resolve — and download — the pasted story instead of
+/// the picked one. Point story items at the owner's story tray instead;
+/// the worker re-resolves the tray and selects the picked entry by id.
+/// Highlights keep their URL: a highlight *is* the collection, and its
+/// items are not addressable as live stories.
+fn retarget_story_items(url: &str, playlist: &mut PlaylistInfo) {
+    if playlist.kind != PlaylistKind::Stories {
+        return;
+    }
+    let Some(tray) = story_tray_url(url) else {
+        return;
+    };
+    for item in &mut playlist.items {
+        item.page_url = tray.clone();
+    }
+}
+
+/// `https://www.instagram.com/stories/<user>/<story-id>/` → the owner's
+/// story tray `https://www.instagram.com/stories/<user>/`. Returns `None`
+/// for tray URLs (nothing to retarget), highlights, and anything that
+/// does not parse as an Instagram story link.
+fn story_tray_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    if !matches!(
+        parsed.host_str(),
+        Some("instagram.com") | Some("www.instagram.com")
+    ) {
+        return None;
+    }
+    let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let ["stories", user, story_id] = segments.as_slice() else {
+        return None;
+    };
+    if user.eq_ignore_ascii_case("highlights") {
+        return None;
+    }
+    if !story_id.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("https://www.instagram.com/stories/{user}/"))
+}
+
 /// Fetch one page's raw `--dump-single-json` through a direct spawn
 /// (same spawn/timeout/output semantics as the crate's extractors),
 /// then parse leniently (see [`sanitize_video_json`]). Used instead of
@@ -1537,15 +1598,20 @@ async fn fetch_raw_dump_json(
 /// video with no formats, which is exactly the "the page listed none"
 /// failure a queued story hit. Playlist-shaped output is rejected
 /// outright — a collection URL reaching the worker is a routing bug or
-/// a page that changed shape, never a downloadable video.
+/// a page that changed shape, never a downloadable video — with one
+/// exception: rows queued from the story/highlight picker carry the
+/// picked entry's id, because Instagram stamps every such entry with
+/// the collection URL and the row's page re-resolves the whole tray.
+/// For those, the picked entry is selected out of the playlist.
 async fn fetch_video_page(
     youtube_bin: &Path,
     url: &str,
     cookies_browser: &str,
     timeout: Duration,
     fetch_proxy: Option<&crate::download::ResolvedProxy>,
+    playlist_item_id: Option<&str>,
 ) -> Result<Video, VideoError> {
-    let mut value = fetch_raw_dump_json(
+    let value = fetch_raw_dump_json(
         youtube_bin,
         url,
         cookies_browser,
@@ -1555,10 +1621,46 @@ async fn fetch_video_page(
     )
     .await?;
     if parse_playlist_json(&value, url).is_some() {
-        return Err(VideoError::fetch(gettext(
-            "the link opened a collection, not a single video",
-        )));
+        if let Some(entry) = pick_playlist_entry(&value, playlist_item_id) {
+            return parse_single_video(entry);
+        }
+        return Err(playlist_resolve_error(playlist_item_id));
     }
+    parse_single_video(value)
+}
+
+/// Worker error when the page resolved playlist-shaped and no entry
+/// could be selected: a routing bug when the row was never picked from
+/// a playlist, an expired story when it was.
+fn playlist_resolve_error(playlist_item_id: Option<&str>) -> VideoError {
+    VideoError::fetch(gettext(if playlist_item_id.is_some() {
+        "the story is no longer available"
+    } else {
+        "the link opened a collection, not a single video"
+    }))
+}
+
+/// The picked playlist entry, for rows queued from a picker whose page
+/// re-resolves playlist-shaped (Instagram stories/highlights: every
+/// entry carries the collection URL, so the row has no per-item page).
+/// Matches on the entry id persisted at pick time; `None` when the row
+/// was not picked from a playlist or the entry is gone.
+fn pick_playlist_entry(
+    value: &serde_json::Value,
+    playlist_item_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    let want = playlist_item_id?;
+    value
+        .get("entries")
+        .and_then(|entries| entries.as_array())?
+        .iter()
+        .find(|entry| entry.get("id").and_then(|id| id.as_str()) == Some(want))
+        .cloned()
+}
+
+/// Parse one video-shaped dump into the worker's [`Video`] model,
+/// stamping formats with their video id.
+fn parse_single_video(mut value: serde_json::Value) -> Result<Video, VideoError> {
     sanitize_video_json(&mut value);
     let mut video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
     for format in &mut video.formats {
@@ -1604,7 +1706,8 @@ pub async fn fetch_video_infos(
         };
         // Playlist-shaped output never reaches the video model: its
         // entries are stubs the crate's strict structs would choke on.
-        if let Some(playlist) = parse_playlist_json(&value, &url) {
+        if let Some(mut playlist) = parse_playlist_json(&value, &url) {
+            retarget_story_items(&url, &mut playlist);
             return Ok::<_, VideoError>(ProbeResult::Playlist(playlist));
         }
         sanitize_video_json(&mut value);
@@ -2782,6 +2885,10 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
 pub struct VideoJob {
     pub item_id: u64,
     pub page_url: String,
+    /// yt-dlp id of the playlist entry this row was picked from, if any
+    /// (see [`VideoChoices::playlist_item_id`]). The worker selects the
+    /// entry when the page re-resolves playlist-shaped.
+    pub playlist_item_id: Option<String>,
     pub quality: String,
     pub dest: PathBuf,
     /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
@@ -2918,6 +3025,7 @@ pub async fn run_video_download(
             &job.cookies_browser,
             Duration::from_secs(300),
             job.proxy.as_ref(),
+            job.playlist_item_id.as_deref(),
         )
         .await
         {

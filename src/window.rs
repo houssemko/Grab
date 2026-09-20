@@ -2316,6 +2316,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                     audio_only,
                                     video_format_id: format_id,
                                     is_live: v.is_live,
+                                    playlist_item_id: None,
                                 },
                             ) {
                                 Ok(_) => close(),
@@ -2939,6 +2940,11 @@ fn push_playlist_items_page(
                         // Live streams queued from a playlist take the VOD
                         // path; the worker re-resolves each item page anyway.
                         is_live: false,
+                        // Remember the picked entry: Instagram stories and
+                        // highlights stamp every entry with the collection
+                        // URL, so the worker selects the picked entry out
+                        // of the re-resolved tray by this id.
+                        playlist_item_id: Some(item.id.clone()),
                     },
                 ) {
                     failed = Some(e);
