@@ -581,6 +581,16 @@ pub fn show(
         )
         .build();
     torrent_net_group.add(&listen_port);
+    let upnp = adw::SwitchRow::builder()
+        .title(gettext("UPnP port forwarding"))
+        .subtitle(gettext(
+            "Ask your router to forward the listen port. Applies when the torrent engine first starts.",
+        ))
+        .build();
+    settings
+        .bind(crate::settings::key::TORRENT_UPNP, &upnp, "active")
+        .build();
+    torrent_net_group.add(&upnp);
 
     torrent_page.add(&share_group);
     torrent_page.add(&torrent_net_group);

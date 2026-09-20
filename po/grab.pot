@@ -400,27 +400,37 @@ msgid ""
 "engine first starts."
 msgstr ""
 
-#: src/preferences.rs:640
+#: src/preferences.rs:585
+msgid "UPnP port forwarding"
+msgstr ""
+
+#: src/preferences.rs:587
+msgid ""
+"Ask your router to forward the listen port. Applies when the torrent engine "
+"first starts."
+msgstr ""
+
+#: src/preferences.rs:650
 msgid "Ready • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:1070
+#: src/preferences.rs:1080
 msgid "Update"
 msgstr ""
 
-#: src/preferences.rs:648
+#: src/preferences.rs:658
 msgid "Not installed"
 msgstr ""
 
-#: src/preferences.rs:649 src/window.rs:1517
+#: src/preferences.rs:659 src/window.rs:1517
 msgid "Install"
 msgstr ""
 
-#: src/preferences.rs:680
+#: src/preferences.rs:690
 msgid "Quality"
 msgstr ""
 
-#: src/preferences.rs:685
+#: src/preferences.rs:695
 msgid "Preferred quality"
 msgstr ""
 
@@ -428,59 +438,59 @@ msgstr ""
 msgid "Audio only"
 msgstr ""
 
-#: src/preferences.rs:786
+#: src/preferences.rs:796
 msgid "Authentication"
 msgstr ""
 
-#: src/preferences.rs:787
+#: src/preferences.rs:797
 msgid "Age gates and member-only pages"
 msgstr ""
 
-#: src/preferences.rs:792
+#: src/preferences.rs:802
 msgid "Cookies from Browser"
 msgstr ""
 
-#: src/preferences.rs:793
+#: src/preferences.rs:803
 msgid "Reads this browser's profile directly"
 msgstr ""
 
-#: src/preferences.rs:921
+#: src/preferences.rs:931
 msgid "Live"
 msgstr ""
 
-#: src/preferences.rs:922
+#: src/preferences.rs:932
 msgid "Live stream recording"
 msgstr ""
 
-#: src/preferences.rs:925
+#: src/preferences.rs:935
 msgid "Live from start"
 msgstr ""
 
-#: src/preferences.rs:926
+#: src/preferences.rs:936
 msgid "Record live streams from the beginning"
 msgstr ""
 
-#: src/preferences.rs:937 src/window.rs:1514
+#: src/preferences.rs:947 src/window.rs:1514
 msgid "Support tools"
 msgstr ""
 
-#: src/preferences.rs:961
+#: src/preferences.rs:971
 msgid "Checking…"
 msgstr ""
 
-#: src/preferences.rs:998 src/window.rs:1968
+#: src/preferences.rs:1008 src/window.rs:1968
 msgid "How to Install"
 msgstr ""
 
-#: src/preferences.rs:999 src/window.rs:1969
+#: src/preferences.rs:1009 src/window.rs:1969
 msgid "Show terminal install instructions"
 msgstr ""
 
-#: src/preferences.rs:1106 src/window.rs:1981
+#: src/preferences.rs:1116 src/window.rs:1981
 msgid "Downloading yt-dlp (1 of 2)…"
 msgstr ""
 
-#: src/preferences.rs:1141 src/window.rs:2015
+#: src/preferences.rs:1151 src/window.rs:2015
 msgid "Downloading ffmpeg (2 of 2)…"
 msgstr ""
 
@@ -917,19 +927,19 @@ msgstr[1] ""
 msgid "Select at least one item"
 msgstr ""
 
-#: src/preferences.rs:676
+#: src/preferences.rs:686
 msgid "Media"
 msgstr ""
 
-#: src/preferences.rs:686
+#: src/preferences.rs:696
 msgid "Used for new media downloads"
 msgstr ""
 
-#: src/preferences.rs:938
+#: src/preferences.rs:948
 msgid "yt-dlp and ffmpeg resolve media pages"
 msgstr ""
 
-#: src/preferences.rs:941
+#: src/preferences.rs:951
 msgid "Media support tools"
 msgstr ""
 
@@ -961,23 +971,23 @@ msgstr ""
 msgid "No suitable formats found for this media"
 msgstr ""
 
-#: src/preferences.rs:644 src/preferences.rs:1092 src/preferences.rs:1097
+#: src/preferences.rs:654 src/preferences.rs:1102 src/preferences.rs:1107
 msgid "Check for Updates"
 msgstr ""
 
-#: src/preferences.rs:1026
+#: src/preferences.rs:1036
 msgid "Checking for updates…"
 msgstr ""
 
-#: src/preferences.rs:1066
+#: src/preferences.rs:1076
 msgid "Update available: {installed} → {latest}"
 msgstr ""
 
-#: src/preferences.rs:1088
+#: src/preferences.rs:1098
 msgid "Up to date • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:1096
+#: src/preferences.rs:1106
 msgid "Couldn't check for updates"
 msgstr ""
 
@@ -1017,7 +1027,7 @@ msgstr ""
 msgid "unclassified"
 msgstr ""
 
-#: src/preferences.rs:715
+#: src/preferences.rs:725
 msgid "Preferred video codec"
 msgstr ""
 
@@ -1069,7 +1079,7 @@ msgstr ""
 msgid "Port"
 msgstr ""
 
-#: src/preferences.rs:1042
+#: src/preferences.rs:1052
 msgid "Update checks are skipped while a proxy is configured"
 msgstr ""
 
@@ -1207,19 +1217,19 @@ msgstr ""
 msgid "Chinese"
 msgstr ""
 
-#: src/preferences.rs:745
+#: src/preferences.rs:755
 msgid "Audio quality"
 msgstr ""
 
-#: src/preferences.rs:746
+#: src/preferences.rs:756
 msgid "0 is best, 10 is worst"
 msgstr ""
 
-#: src/preferences.rs:756
+#: src/preferences.rs:766
 msgid "Subtitles"
 msgstr ""
 
-#: src/preferences.rs:757
+#: src/preferences.rs:767
 msgid "Download subtitles beside the video"
 msgstr ""
 
@@ -1355,63 +1365,63 @@ msgstr ""
 msgid "Find peers without trackers. Takes effect on restart."
 msgstr ""
 
-#: src/preferences.rs:716
+#: src/preferences.rs:726
 msgid "Newest codecs first, or widest playback"
 msgstr ""
 
-#: src/preferences.rs:820
+#: src/preferences.rs:830
 msgid "Post-processing"
 msgstr ""
 
-#: src/preferences.rs:821
+#: src/preferences.rs:831
 msgid "Applied while finishing downloads"
 msgstr ""
 
-#: src/preferences.rs:824
+#: src/preferences.rs:834
 msgid "Embed subtitles"
 msgstr ""
 
-#: src/preferences.rs:825
+#: src/preferences.rs:835
 msgid "Mux downloaded subtitles into the video file"
 msgstr ""
 
-#: src/preferences.rs:832
+#: src/preferences.rs:842
 msgid "Remove sponsored segments"
 msgstr ""
 
-#: src/preferences.rs:833
+#: src/preferences.rs:843
 msgid "Cut SponsorBlock-flagged sponsor segments"
 msgstr ""
 
-#: src/preferences.rs:844
+#: src/preferences.rs:854
 msgid "Mark sponsored segments"
 msgstr ""
 
-#: src/preferences.rs:846
+#: src/preferences.rs:856
 msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
 msgstr ""
 
-#: src/preferences.rs:865
+#: src/preferences.rs:875
 msgid "Embed thumbnail"
 msgstr ""
 
-#: src/preferences.rs:866
+#: src/preferences.rs:876
 msgid "Attach the video thumbnail as cover art"
 msgstr ""
 
-#: src/preferences.rs:877
+#: src/preferences.rs:887
 msgid "Embed chapters"
 msgstr ""
 
-#: src/preferences.rs:878
+#: src/preferences.rs:888
 msgid "Write chapter markers into the finished file"
 msgstr ""
 
-#: src/preferences.rs:893
+#: src/preferences.rs:903
 msgid "Remux video"
 msgstr ""
 
-#: src/preferences.rs:895
+#: src/preferences.rs:905
 msgid "Change the finished file's container without re-encoding"
 msgstr ""
 

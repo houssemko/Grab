@@ -3429,6 +3429,7 @@ impl DownloadManager {
         let net = crate::torrent::plan_torrent_net(
             settings.torrent_dht(),
             settings.torrent_listen_port(),
+            settings.torrent_upnp(),
             trackers,
             proxy.as_ref(),
         );
@@ -3466,6 +3467,7 @@ impl DownloadManager {
             download_bps,
             upload_bps,
             listen_port: net.listen_port,
+            upnp: net.upnp,
             trackers: net.trackers,
             socks_proxy: net.socks_proxy,
             only_files,
