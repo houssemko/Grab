@@ -4234,6 +4234,18 @@ impl DownloadManager {
                         );
                     }
                     status => {
+                        // Re-stage the intake file selection BEFORE
+                        // restore_existing: the live map is in-memory only,
+                        // and insert → start_next → spawn_torrent reads it
+                        // synchronously. Staging after the insert is too
+                        // late — session adoption would see None against the
+                        // persisted filter and fail the row on the
+                        // only_files mismatch arm.
+                        if let Some(sel) = p.item.selected_files.clone()
+                            && let Ok(url) = normalize_url(&p.item.url)
+                        {
+                            crate::torrent::stage_selection(&url, sel);
+                        }
                         match self.restore_existing(
                             &p.item.url,
                             &p.item.dest_dir,
@@ -4246,13 +4258,6 @@ impl DownloadManager {
                                 // Re-attach the recorded engine folder.
                                 if let Some(dir) = p.output_dir.clone() {
                                     restored.set_output_dir(dir);
-                                }
-                                // Re-stage the intake file selection: the
-                                // live map is in-memory only, so without
-                                // this a restart drops the filter and the
-                                // resume downloads every file.
-                                if let Some(sel) = p.item.selected_files {
-                                    crate::torrent::stage_selection(&restored.url(), sel);
                                 }
                             }
                             Err(e) => tracing::warn!("skipping queue entry: {e}"),
@@ -4273,6 +4278,22 @@ impl DownloadManager {
             // Same for staged file selections: rows that are gone need no
             // filter on a future re-add (which stages fresh at intake).
             crate::torrent::prune_selections(&referenced);
+            // Session persistence re-adds every remembered torrent when the
+            // engine is created — including entries whose rows vanished in
+            // a crash between row removal and the session delete. Sweep
+            // those orphans now that the queue is restored: the keep-set
+            // is every live torrent row's info-hash (Done rows finished and
+            // already left the session).
+            let keep: std::collections::HashSet<String> = (0..self.store.n_items())
+                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                .filter(|it| {
+                    it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
+                })
+                .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
+                .collect();
+            tokio_rt().spawn(async move {
+                crate::torrent::sweep_session_orphans(&keep).await;
+            });
             self.persist_queue();
             self.changed();
         }

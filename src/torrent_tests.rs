@@ -279,3 +279,28 @@ fn display_path_strips_spoof_chars() {
     assert!(shown.ends_with('…'));
     assert_eq!(sanitize_display_path(""), "");
 }
+
+#[test]
+fn info_hash_for_url_resolves_magnets() {
+    assert_eq!(
+        info_hash_for_url(MAGNET).as_deref(),
+        Some("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3")
+    );
+    assert_eq!(
+        info_hash_for_url(BARE_HASH).as_deref(),
+        Some("a94a8fe5ccb19ba61c4c0873d391e987982fbbd3")
+    );
+    // Unresolvable inputs yield None, never a panic: the sweep skips them.
+    assert_eq!(info_hash_for_url("magnet:?xt=urn:btih:xyz"), None);
+    assert_eq!(info_hash_for_url("https://example.com/f.iso"), None);
+    assert_eq!(info_hash_for_url("torrent:/no/such/file.torrent"), None);
+}
+
+#[test]
+fn sweep_session_orphans_without_session_is_noop() {
+    // No engine started in tests: the sweep must return without touching
+    // anything (in particular, without creating a session as a side effect).
+    let keep = std::collections::HashSet::new();
+    crate::download::tokio_rt().block_on(sweep_session_orphans(&keep));
+    assert!(session_handle().is_none());
+}
