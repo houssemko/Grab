@@ -1,7 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=data/io.github.houssemko.Grab.gschema.xml");
     println!("cargo:rerun-if-changed=data/grab.gresource.xml");
-    println!("cargo:rerun-if-changed=data/empty-downloads.svg");
     println!("cargo:rerun-if-changed=data/io.github.houssemko.Grab.metainfo.xml.in");
     println!("cargo:rustc-env=GRAB_VERSION={}", env!("CARGO_PKG_VERSION"));
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
