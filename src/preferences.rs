@@ -110,9 +110,7 @@ pub fn show(
 
     let connections = adw::SpinRow::builder()
         .title(gettext("Connections per download"))
-        .subtitle(gettext(
-            "Parallel connections for large files (1 = single stream without probing)",
-        ))
+        .subtitle(gettext("Parallel connections for large files"))
         .adjustment(&gtk4::Adjustment::new(4.0, 1.0, 16.0, 1.0, 1.0, 0.0))
         .build();
     connections.set_tooltip_text(Some(&gettext(
@@ -161,7 +159,8 @@ pub fn show(
     net_group.add(&retries);
 
     let timeout = adw::SpinRow::builder()
-        .title(gettext("Timeout (seconds)"))
+        .title(gettext("Timeout"))
+        .subtitle(gettext("In seconds"))
         .adjustment(&gtk4::Adjustment::new(30.0, 5.0, 300.0, 5.0, 30.0, 0.0))
         .build();
     settings
@@ -170,23 +169,22 @@ pub fn show(
     net_group.add(&timeout);
 
     let ua = adw::EntryRow::builder()
-        .title(gettext("User agent (optional)"))
+        .title(gettext("User agent"))
         .build();
+    ua.set_tooltip_text(Some(&gettext("Blank uses the default user agent")));
     settings
         .bind(crate::settings::key::USER_AGENT, &ua, "text")
         .build();
     net_group.add(&ua);
 
     let keep_date = adw::SwitchRow::builder()
-        .title(gettext("Preserve server file dates"))
-        .subtitle(gettext(
-            "Downloaded files are dated when published, not when downloaded",
-        ))
+        .title(gettext("Keep original file dates"))
+        .subtitle(gettext("Use the server's date instead of download time"))
         .build();
     settings
         .bind(crate::settings::key::KEEP_SERVER_DATE, &keep_date, "active")
         .build();
-    net_group.add(&keep_date);
+    dest_group.add(&keep_date);
 
     let proxy_mode = adw::ComboRow::builder()
         .title(gettext("Proxy"))
@@ -297,7 +295,7 @@ pub fn show(
         .build();
     notif_group.add(&notif);
     let bg_notif = adw::SwitchRow::builder()
-        .title(gettext("Notify for background downloads"))
+        .title(gettext("Background download notifications"))
         .subtitle(gettext("When closing with downloads still running"))
         .build();
     settings
@@ -311,7 +309,7 @@ pub fn show(
     let inhibit = adw::SwitchRow::builder()
         .title(gettext("Prevent sleep during downloads"))
         .subtitle(gettext(
-            "Block suspend while downloads are queued or running",
+            "Keep the computer awake while downloads are active",
         ))
         .build();
     settings
@@ -325,7 +323,6 @@ pub fn show(
     dialog.add(&page);
 
     net_page.add(&net_group);
-    dialog.add(&net_page);
 
     let torrent_page = adw::PreferencesPage::builder()
         .title(gettext("Torrent"))
@@ -337,7 +334,6 @@ pub fn show(
         .build();
     let seed = adw::SwitchRow::builder()
         .title(gettext("Seed finished downloads"))
-        .subtitle(gettext("Keep sharing files after they finish downloading"))
         .build();
     settings
         .bind(crate::settings::key::TORRENT_SEED_FINISHED, &seed, "active")
@@ -346,7 +342,7 @@ pub fn show(
     let seed_ratio = adw::SpinRow::builder()
         .title(gettext("Seed to ratio"))
         .subtitle(gettext(
-            "Stop seeding after uploading this multiple of the download size. 0 means unlimited.",
+            "Stop seeding at this upload ratio. 0 means unlimited.",
         ))
         .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 100.0, 0.1, 1.0, 0.0))
         .digits(1)
@@ -363,7 +359,7 @@ pub fn show(
         .build();
     share_group.add(&seed_ratio);
     let seed_time = adw::SpinRow::builder()
-        .title(gettext("Seed for (minutes)"))
+        .title(gettext("Seed time limit"))
         .subtitle(gettext(
             "Stop seeding this many minutes after finishing. 0 means unlimited.",
         ))
@@ -378,12 +374,12 @@ pub fn show(
     share_group.add(&seed_time);
 
     let torrent_net_group = adw::PreferencesGroup::builder()
-        .title(gettext("Network"))
+        .title(gettext("Connectivity"))
         .build();
     let dht = adw::SwitchRow::builder()
         .title(gettext("Use DHT"))
         .subtitle(gettext(
-            "Find peers through the distributed hash table. Applies after restart.",
+            "Find peers without trackers. Takes effect on restart.",
         ))
         .build();
     settings
@@ -429,7 +425,6 @@ pub fn show(
 
     torrent_page.add(&share_group);
     torrent_page.add(&torrent_net_group);
-    dialog.add(&torrent_page);
 
     // Video pages resolve through the yt-dlp support tools; this page
     // holds the defaults new video downloads start from, plus tool setup.
@@ -559,7 +554,7 @@ pub fn show(
     let codec_refs: Vec<&str> = codec_labels.iter().map(String::as_str).collect();
     let video_codec = adw::ComboRow::builder()
         .title(gettext("Preferred video codec"))
-        .subtitle(gettext("Newest codecs or widest playback"))
+        .subtitle(gettext("Newest codecs first, or widest playback"))
         .model(&gtk4::StringList::new(&codec_refs))
         .build();
     video_codec
@@ -881,5 +876,8 @@ pub fn show(
     video_page.add(&video_auth_group);
     video_page.add(&video_tools_group);
     dialog.add(&video_page);
+    // Page order: Downloads, Media, Torrent, Network (Network last).
+    dialog.add(&torrent_page);
+    dialog.add(&net_page);
     dialog.present(Some(parent));
 }
