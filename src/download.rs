@@ -3233,6 +3233,7 @@ impl DownloadManager {
             audio_only,
             dest: item.file_path(),
             tries: opts.tries.max(1) as u32,
+            connections: opts.connections.max(1) as u32,
             timeout_secs: opts.timeout.max(1) as u64,
             user_agent: opts.user_agent.clone(),
             video_format_id,

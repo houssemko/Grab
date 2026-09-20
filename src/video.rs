@@ -2377,6 +2377,10 @@ pub struct VideoJob {
     pub quality: String,
     pub dest: PathBuf,
     pub tries: u32,
+    /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
+    /// from the same "connections" setting as the app's own segmented HTTP
+    /// downloads. Schema range is 1..=16; clamped at spawn.
+    pub connections: u32,
     pub timeout_secs: u64,
     pub user_agent: String,
     /// Dialog-pinned video format id, if the user picked an exact format.
@@ -2853,6 +2857,10 @@ pub(crate) fn unified_download_argv(
         ffmpeg_location_dir(ffmpeg_bin),
         "--retries".to_string(),
         job.tries.max(1).to_string(),
+        // Same parallelism as the app's own segmented downloads: DASH/HLS
+        // legs fetch fragments, not one byte stream (yt-dlp default is 1).
+        "--concurrent-fragments".to_string(),
+        job.connections.max(1).to_string(),
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
@@ -3710,6 +3718,9 @@ pub(crate) fn hls_download_argv(
         ffmpeg_location_dir(ffmpeg_bin),
         "--retries".to_string(),
         job.tries.max(1).to_string(),
+        // Fragmented HLS like the DASH legs: same parallelism setting.
+        "--concurrent-fragments".to_string(),
+        job.connections.max(1).to_string(),
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
