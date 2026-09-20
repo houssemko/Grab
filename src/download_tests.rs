@@ -3224,8 +3224,6 @@ fn proxy_opts(mode: &str, ptype: &str, host: &str, port: i32) -> DownloadOptions
         proxy_type: ptype.into(),
         proxy_host: host.into(),
         proxy_port: port,
-        proxy_username: String::new(),
-        proxy_password: crate::secrets::CachedSecret::Absent,
         cookies_browser: String::new(),
     }
 }
@@ -3331,134 +3329,19 @@ fn proxy_manual_rejects_garbage_loudly() {
     assert_eq!(proxy.cli_url, "http://proxy.lan:8080");
 }
 
-fn proxy_auth_opts(username: &str, password: crate::secrets::CachedSecret) -> DownloadOptions {
-    DownloadOptions {
-        tries: 3,
-        timeout: 30,
-        limit_rate: String::new(),
-        user_agent: String::new(),
-        connections: 4,
-        proxy_mode: "manual".into(),
-        proxy_type: "socks5".into(),
-        proxy_host: "127.0.0.1".into(),
-        proxy_port: 9050,
-        proxy_username: username.into(),
-        proxy_password: password,
-        cookies_browser: String::new(),
-    }
-}
-
 #[test]
-fn proxy_auth_injects_encoded_userinfo() {
-    let proxy = proxy_auth_opts(
-        "user",
-        crate::secrets::CachedSecret::Present("p@ss:w/rd".into()),
-    )
-    .proxy_config()
-    .expect("valid")
-    .expect("proxied");
-    // The stored URL stays credential-free; the authed forms carry
-    // percent-encoded userinfo for `--proxy` and the torrent engine.
-    assert_eq!(proxy.cli_url, "socks5h://127.0.0.1:9050");
-    assert_eq!(
-        proxy.cli_url_authed(),
-        "socks5h://user:p%40ss%3Aw%2Frd@127.0.0.1:9050"
-    );
-    assert_eq!(
-        proxy.torrent_socks_url().as_deref(),
-        Some("socks5://user:p%40ss%3Aw%2Frd@127.0.0.1:9050")
-    );
-}
-
-#[test]
-fn proxy_auth_missing_password_fails_loudly() {
-    let err = proxy_auth_opts("user", crate::secrets::CachedSecret::Absent)
-        .proxy_config()
-        .expect_err("username without a stored password must fail");
-    assert!(err.contains("keyring"), "unexpected error: {err}");
-}
-
-#[test]
-fn proxy_auth_keyring_failure_fails_closed() {
-    let err = proxy_auth_opts(
-        "user",
-        crate::secrets::CachedSecret::Failed("dbus exploded".into()),
-    )
-    .proxy_config()
-    .expect_err("keyring failure must fail closed, never go unauthenticated");
-    assert!(err.contains("dbus exploded"), "unexpected error: {err}");
-}
-
-#[test]
-fn proxy_auth_unloaded_cache_fails_loudly() {
-    let err = proxy_auth_opts("user", crate::secrets::CachedSecret::Unloaded)
-        .proxy_config()
-        .expect_err("a still-loading cache must fail loudly");
-    assert!(err.contains("loading"), "unexpected error: {err}");
-}
-
-#[test]
-fn proxy_authenticated_clients_are_not_pooled() {
-    // Unauthenticated proxies share one pooled client per config...
-    let plain = proxy_opts("manual", "socks5", "127.0.0.1", 19050)
+fn proxy_clients_are_pooled_per_config() {
+    // Proxied configs share one pooled client per proxy config, so a
+    // second attempt with the same config reuses the client.
+    let proxy = proxy_opts("manual", "socks5", "127.0.0.1", 19050)
         .proxy_config()
         .expect("valid")
         .expect("proxied");
     let before = proxied_pool_len();
-    let _ = http_client_for(Some(&plain));
+    let _ = http_client_for(Some(&proxy));
     assert_eq!(proxied_pool_len(), before + 1);
-    // ...while an authenticated proxy never touches the pool, so a
-    // rotated password takes effect on the next attempt instead of
-    // the old one lingering in a cached client.
-    let authed = proxy_auth_opts(
-        "user",
-        crate::secrets::CachedSecret::Present("s3cret".into()),
-    )
-    .proxy_config()
-    .expect("valid")
-    .expect("proxied");
-    assert!(authed.auth.is_some());
-    let _ = http_client_for(Some(&authed));
+    let _ = http_client_for(Some(&proxy));
     assert_eq!(proxied_pool_len(), before + 1);
-}
-
-#[test]
-fn proxy_password_without_username_fails_loudly() {
-    // A stored password with no username is a misconfiguration: say so
-    // instead of silently dropping the credential.
-    let err = proxy_auth_opts("", crate::secrets::CachedSecret::Present("s3cret".into()))
-        .proxy_config()
-        .expect_err("password without username must fail");
-    assert!(err.contains("username"), "unexpected error: {err}");
-}
-
-#[test]
-fn proxy_password_never_reaches_debug_output() {
-    let proxy = proxy_auth_opts(
-        "user",
-        crate::secrets::CachedSecret::Present("s3cret".into()),
-    )
-    .proxy_config()
-    .expect("valid")
-    .expect("proxied");
-    // Covers cli_url, cache_key, no_proxy_env and auth: none may leak.
-    let debug = format!("{proxy:?}");
-    assert!(
-        !debug.contains("s3cret"),
-        "Debug output leaked the password: {debug}"
-    );
-    assert!(
-        debug.contains("user"),
-        "username should stay visible: {debug}"
-    );
-    let cached = format!(
-        "{:?}",
-        crate::secrets::CachedSecret::Present("s3cret".into())
-    );
-    assert!(
-        !cached.contains("s3cret"),
-        "CachedSecret Debug leaked the password: {cached}"
-    );
 }
 
 #[test]

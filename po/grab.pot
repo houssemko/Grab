@@ -1245,37 +1245,12 @@ msgstr ""
 msgid "Download subtitles in this language beside new video downloads, with automatic-caption fallback when the language is missing. 'off' disables subtitle downloads."
 msgstr ""
 
-#: data/io.github.houssemko.Grab.gschema.xml
-msgid "Proxy username"
-msgstr ""
-
-#: data/io.github.houssemko.Grab.gschema.xml
-msgid "Username for manual proxy authentication. The password is kept in the system keyring, never in settings."
-msgstr ""
-
 #: src/video.rs:299
 msgid "No suitable formats found for this media (the page listed none)"
 msgstr ""
 
 #: src/download.rs:875
 msgid "Proxy host contains invalid characters"
-msgstr ""
-
-#: src/download.rs:833
-msgid "A proxy password is stored in the keyring but no proxy username is set"
-msgstr ""
-
-#: src/download.rs:844
-msgid "Proxy username is set but no password is stored in the keyring"
-msgstr ""
-
-#: src/download.rs:847
-msgid "Could not read the proxy password from the keyring: {e}"
-msgstr ""
-
-#: src/download.rs:851
-msgid ""
-"The proxy password is still loading from the keyring; try again in a moment"
 msgstr ""
 
 #: src/application.rs:323 src/window.rs:809
@@ -1459,33 +1434,4 @@ msgstr ""
 
 #: src/preferences.rs:620
 msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
-msgstr ""
-
-
-#: src/preferences.rs:391
-msgid "Username"
-msgstr ""
-
-#: src/preferences.rs:406
-msgid "Password"
-msgstr ""
-
-#: src/preferences.rs:414
-msgid "Apply"
-msgstr ""
-
-#: src/preferences.rs:407 src/preferences.rs:456
-msgid "Stored in the system keyring"
-msgstr ""
-
-#: src/preferences.rs:434
-msgid "Could not read the system keyring: {e}"
-msgstr ""
-
-#: src/preferences.rs:443
-msgid "Saving…"
-msgstr ""
-
-#: src/preferences.rs:458
-msgid "Could not store the password: {e}"
 msgstr ""

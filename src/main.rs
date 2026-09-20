@@ -3,7 +3,6 @@ mod cookies;
 mod download;
 mod install_help;
 mod preferences;
-mod secrets;
 mod settings;
 mod torrent;
 // Video-page extraction + resolver worker (src/video.rs): consumed by the
