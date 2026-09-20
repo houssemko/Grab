@@ -1593,6 +1593,16 @@ fn live_rate_limit() -> Option<u64> {
     }
 }
 
+/// Re-apply both torrent speed caps from settings. Both the download and
+/// upload watchers call this so editing one key can never silently clear
+/// the other.
+fn apply_torrent_limits(s: &crate::settings::AppSettings) {
+    crate::torrent::apply_live_limits(
+        parse_rate(s.speed_limit().trim()),
+        parse_rate(s.torrent_upload_limit().trim()),
+    );
+}
+
 pub(crate) fn fmt_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut v = n as f64;
@@ -2317,10 +2327,7 @@ impl DownloadManager {
                 if let Some(s) = settings_weak.upgrade() {
                     let s = crate::settings::AppSettings::from(s);
                     publish_rate_limit(&s);
-                    crate::torrent::apply_live_limits(
-                        parse_rate(s.speed_limit().trim()),
-                        parse_rate(s.torrent_upload_limit().trim()),
-                    );
+                    apply_torrent_limits(&s);
                 }
             });
         let settings_weak = this.settings.downgrade();
@@ -2329,10 +2336,7 @@ impl DownloadManager {
             move |_, _| {
                 if let Some(s) = settings_weak.upgrade() {
                     let s = crate::settings::AppSettings::from(s);
-                    crate::torrent::apply_live_limits(
-                        parse_rate(s.speed_limit().trim()),
-                        parse_rate(s.torrent_upload_limit().trim()),
-                    );
+                    apply_torrent_limits(&s);
                 }
             },
         );
@@ -4302,16 +4306,19 @@ impl DownloadManager {
             // those orphans now that the queue is restored: the keep-set
             // is every live torrent row's info-hash (Done rows finished and
             // already left the session).
-            let keep: std::collections::HashSet<String> = (0..self.store.n_items())
-                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-                .filter(|it| {
-                    it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
-                })
-                .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
-                .collect();
-            tokio_rt().spawn(async move {
-                crate::torrent::sweep_session_orphans(&keep).await;
-            });
+            // No session yet: the sweep would no-op, so skip the store walk.
+            if crate::torrent::session_handle().is_some() {
+                let keep: std::collections::HashSet<String> = (0..self.store.n_items())
+                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                    .filter(|it| {
+                        it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
+                    })
+                    .filter_map(|it| crate::torrent::info_hash_for_url(&it.url()))
+                    .collect();
+                tokio_rt().spawn(async move {
+                    crate::torrent::sweep_session_orphans(&keep).await;
+                });
+            }
             self.persist_queue();
             self.changed();
         }
