@@ -823,6 +823,7 @@ fn pipeline_reports_missing_tools() {
         page_url: "https://vimeo.com/123456".into(),
         quality: "1080p".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
         tries: 1,
         connections: 4,
@@ -2238,6 +2239,7 @@ fn direct_test_job() -> VideoJob {
         page_url: "https://x.com/u/status/1".into(),
         quality: "720p".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         connections: 4,
@@ -2462,6 +2464,7 @@ fn live_test_job() -> VideoJob {
         page_url: "https://x.com/u/status/1".into(),
         quality: "720p".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         connections: 4,
@@ -2860,6 +2863,7 @@ fn vod_hls_pins_planner_variant_id() {
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: dir.join("v.mp4"),
         tries: 3,
         connections: 4,
@@ -2927,6 +2931,7 @@ fn vod_hls_refuses_existing_dest() {
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: dir.join("v.mp4"),
         tries: 3,
         connections: 4,
@@ -3908,6 +3913,89 @@ fn live_capture_argv_never_mtime() {
 }
 
 #[test]
+fn unified_argv_audio_quality_when_audio_only() {
+    // Audio-only extraction takes the preferred quality (0 is best,
+    // 10 is worst; 5 is yt-dlp's default).
+    let mut job = direct_test_job();
+    job.audio_only = true;
+    job.audio_quality = 0;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "ba/b",
+        false,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--audio-quality")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "0");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "audio-quality must precede the URL separator");
+    // At yt-dlp's own default of 5 the flag is a no-op, so it is
+    // omitted — like the other opt-ins.
+    job.audio_quality = 5;
+    let argv = unified_download_argv(
+        &job,
+        "ba/b",
+        false,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--audio-quality"));
+    // Video legs never extract, so the flag must not appear.
+    job.audio_only = false;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--audio-quality"));
+}
+
+#[test]
+fn hls_argv_audio_quality_when_audio_only() {
+    let mut job = direct_test_job();
+    job.audio_only = true;
+    job.audio_quality = 2;
+    let dest = std::path::Path::new("/tmp/dl/v.m4a");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--audio-quality")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "2");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "audio-quality must precede the URL separator");
+    // At yt-dlp's own default of 5 the flag is a no-op, so it is omitted.
+    job.audio_quality = 5;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--audio-quality"));
+    // Video legs never extract, so the flag must not appear.
+    job.audio_only = false;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--audio-quality"));
+}
+
+#[test]
+fn live_capture_argv_never_audio_quality() {
+    // Live rows remux through ffmpeg after capture — there is no
+    // yt-dlp extraction step, so the flag must not appear.
+    let mut job = live_test_job();
+    job.audio_only = true;
+    job.audio_quality = 0;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--audio-quality"));
+}
+
+#[test]
 fn live_capture_argv_live_from_start_when_enabled() {
     // Opt-in live capture: record from the beginning of the stream
     // instead of the live edge.
@@ -4096,6 +4184,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
         audio_only: false,
+        audio_quality: 5,
         dest: dir.join("v.mp4"),
         tries: 3,
         connections: 4,

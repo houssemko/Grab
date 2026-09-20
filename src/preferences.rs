@@ -592,6 +592,15 @@ pub fn show(
             );
         }
     });
+    let audio_quality = adw::SpinRow::builder()
+        .title(gettext("Audio quality"))
+        .subtitle(gettext("0 is best, 10 is worst"))
+        .adjustment(&gtk4::Adjustment::new(5.0, 0.0, 10.0, 1.0, 5.0, 0.0))
+        .build();
+    settings
+        .bind(crate::settings::key::AUDIO_QUALITY, &audio_quality, "value")
+        .build();
+    video_quality_group.add(&audio_quality);
     let subtitle_labels = crate::video::subtitle_language_labels();
     let subtitle_refs: Vec<&str> = subtitle_labels.iter().map(String::as_str).collect();
     let subtitle_lang = adw::ComboRow::builder()
