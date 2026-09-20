@@ -24,7 +24,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     let page = adw::PreferencesPage::new();
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
-    hb.set_show_end_title_buttons(true);
+    hb.set_show_end_title_buttons(false);
     hb.set_show_start_title_buttons(false);
     let close_btn = gtk4::Button::builder()
         .label(gettext("_Close"))
