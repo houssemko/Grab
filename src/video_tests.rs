@@ -3037,7 +3037,6 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
         timeout: 30,
         limit_rate: String::new(),
         user_agent: String::new(),
-        connections: 4,
         proxy_mode: "manual".into(),
         proxy_type: "socks5".into(),
         proxy_host: "127.0.0.1".into(),
