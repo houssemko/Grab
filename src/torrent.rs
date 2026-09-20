@@ -19,7 +19,8 @@ use gettextrs::gettext;
 use gtk4::glib;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, Api, ConnectionOptions, ListenerOptions,
-    ManagedTorrent, Session, SessionOptions, TorrentStatsState, api::TorrentIdOrHash,
+    ManagedTorrent, Session, SessionOptions, SessionPersistenceConfig, TorrentStatsState,
+    api::TorrentIdOrHash,
 };
 use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
@@ -467,6 +468,16 @@ async fn ensure_session(
             let dir = glib::user_data_dir().join("grab");
             std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create session dir: {e}"))?;
             let mut opts = SessionOptions::default();
+            // Fast resume: persist per-torrent progress (bitfields) so a
+            // relaunch skips re-hashing completed pieces, and remember the
+            // session's torrents across restarts. Creation re-adds every
+            // remembered torrent (Grab re-adds its own rows right after and
+            // adopts those handles); entries with no queue row left are
+            // swept by `sweep_session_orphans` once the queue is restored.
+            opts.fastresume = true;
+            opts.persistence = Some(SessionPersistenceConfig::Json {
+                folder: Some(dir.join("session")),
+            });
             if !dht {
                 opts.dht = None;
             }
@@ -529,6 +540,77 @@ pub(crate) fn parse_trackers(raw: &str) -> Option<Vec<String>> {
 pub(crate) fn apply_live_limits(download_bps: Option<u64>) {
     if let Some(s) = SESSION.get() {
         s.ratelimits.set_download_bps(bps(download_bps));
+    }
+}
+
+/// Snapshot of the live session, if the engine has started.
+pub(crate) fn session_handle() -> Option<Arc<Session>> {
+    SESSION.get().cloned()
+}
+
+/// Info-hash hexes currently claimed by live spawns. Covers rows whose
+/// engine hasn't finished adding yet (ACTIVE is registered before the
+/// session is even created).
+pub(crate) async fn active_hashes() -> std::collections::HashSet<String> {
+    ACTIVE
+        .lock()
+        .await
+        .values()
+        .map(|a| a.hash_hex.clone())
+        .collect()
+}
+
+/// Info-hash hex for a torrent queue URL: magnets parse the link, archived
+/// .torrent files parse their bytes. `None` when unresolvable — the row
+/// fails at spawn with the real error; the orphan sweep just skips it.
+pub(crate) fn info_hash_for_url(url: &str) -> Option<String> {
+    if is_magnet(url) {
+        return parse_magnet(url).ok()?.as_id20().map(|h| h.as_string());
+    }
+    if is_torrent_url(url) {
+        let bytes = std::fs::read(archive_path_for_url(url)?).ok()?;
+        let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
+        return Some(meta.info_hash.as_string());
+    }
+    None
+}
+
+/// Drop session torrents no queue row claims. Session persistence re-adds
+/// every remembered torrent at engine creation — including entries whose
+/// rows vanished in a crash between row removal and the session delete.
+/// Those orphans would otherwise download/seed with no UI row: `keep`
+/// carries the queue's torrent hashes, live spawns are added here, and
+/// everything else goes. Files stay on disk, like any cancel, so a later
+/// re-add resumes instead of restarting.
+pub(crate) async fn sweep_session_orphans(keep: &std::collections::HashSet<String>) {
+    let Some(session) = session_handle() else {
+        return;
+    };
+    // Auto-restore completes inside Session::new_with_opts, so every entry
+    // listed here is either adopted by a row below or an orphan: a spawn
+    // racing us is already in ACTIVE (registered before ensure_session) or
+    // still queued (its hash came from the caller's queue set).
+    let active = active_hashes().await;
+    let api = Api::new(session.clone(), None);
+    for t in api.api_torrent_list().torrents {
+        if keep.contains(&t.info_hash) || active.contains(&t.info_hash) {
+            continue;
+        }
+        let Some(id) = t.id else { continue };
+        // Session::delete panics (expect) on torrents whose metadata hasn't
+        // resolved yet — re-added magnets start metadata-less until the
+        // swarm re-resolves them. Skip those: the orphan is retried on the
+        // next launch, instead of poisoning the sweep forever.
+        let resolved = session
+            .get(TorrentIdOrHash::Id(id))
+            .is_some_and(|h| h.metadata.load().is_some());
+        if !resolved {
+            continue;
+        }
+        tracing::debug!(info_hash = %t.info_hash, "dropping orphaned session torrent");
+        // Best effort: a racing session delete is harmless, and a missed
+        // orphan is retried on the next launch.
+        let _ = session.delete(TorrentIdOrHash::Id(id), false).await;
     }
 }
 
@@ -924,6 +1006,12 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     }
     if ACTIVE.lock().await.get(&id).is_some_and(|a| a.paused) {
         let _ = session.pause(&handle).await;
+    } else if handle.is_paused() {
+        // Adopted a persisted handle: session restore re-added it paused,
+        // but a spawn always means "run". Fresh adds start live, so this
+        // only fires on the persistence path (e.g. resuming a row that was
+        // paused when the app last closed).
+        let _ = session.unpause(&handle).await;
     }
     let finished = poll_loop(
         session.clone(),
