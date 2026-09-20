@@ -122,6 +122,32 @@ fn trackers_split_and_schemeless_dropped() {
     );
 }
 
+#[test]
+fn blocklist_url_empty_disables() {
+    assert_eq!(blocklist_url_of(""), Ok(None));
+    assert_eq!(blocklist_url_of("   "), Ok(None));
+}
+
+#[test]
+fn blocklist_url_accepts_http_schemes() {
+    assert_eq!(
+        blocklist_url_of("https://example.com/ipfilter.dat"),
+        Ok(Some("https://example.com/ipfilter.dat".to_string()))
+    );
+    // Scheme match is case-insensitive; surrounding whitespace trims.
+    assert_eq!(
+        blocklist_url_of("  HTTP://example.com/list.txt "),
+        Ok(Some("HTTP://example.com/list.txt".to_string()))
+    );
+}
+
+#[test]
+fn blocklist_url_rejects_non_http() {
+    assert!(blocklist_url_of("ftp://example.com/list.txt").is_err());
+    assert!(blocklist_url_of("example.com/list.txt").is_err());
+    assert!(blocklist_url_of("not a url").is_err());
+}
+
 fn manual_proxy(ptype: &str) -> Option<crate::download::ResolvedProxy> {
     crate::download::DownloadOptions {
         tries: 3,
@@ -158,8 +184,9 @@ fn torrent_net_plan_direct_passthrough() {
         "udp://tracker.example:80".to_string(),
         "https://tracker.example/announce".to_string(),
     ]);
-    let plan = plan_torrent_net(true, 6881, true, trackers.clone(), None);
+    let plan = plan_torrent_net(true, true, 6881, true, trackers.clone(), None);
     assert!(plan.dht);
+    assert!(plan.lsd);
     assert_eq!(plan.listen_port, 6881);
     assert!(plan.upnp);
     assert_eq!(plan.trackers, trackers);
@@ -169,7 +196,7 @@ fn torrent_net_plan_direct_passthrough() {
 #[test]
 fn torrent_net_plan_upnp_defaults_off() {
     // Opt-in headline promise: UPnP stays off unless the user enables it.
-    let plan = plan_torrent_net(true, 6881, false, None, None);
+    let plan = plan_torrent_net(true, true, 6881, false, None, None);
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
     assert!(!plan.upnp);
@@ -181,6 +208,7 @@ fn torrent_net_plan_socks_darkens_unproxyable() {
     let socks = manual_proxy("socks5");
     let plan = plan_torrent_net(
         true,
+        true,
         6881,
         true,
         Some(vec![
@@ -189,8 +217,9 @@ fn torrent_net_plan_socks_darkens_unproxyable() {
         ]),
         socks.as_ref(),
     );
-    // DHT, listener and UDP trackers would leak around the tunnel.
+    // DHT, LSD, listener and UDP trackers would leak around the tunnel.
     assert!(!plan.dht);
+    assert!(!plan.lsd);
     assert_eq!(plan.listen_port, 0);
     assert!(!plan.upnp);
     assert_eq!(
@@ -205,6 +234,7 @@ fn torrent_net_plan_socks_all_udp_trackers_means_none() {
     let socks = manual_proxy("socks5");
     let plan = plan_torrent_net(
         true,
+        true,
         6881,
         true,
         Some(vec!["udp://tracker.example:80".to_string()]),
@@ -217,7 +247,7 @@ fn torrent_net_plan_socks_all_udp_trackers_means_none() {
 #[test]
 fn torrent_net_plan_http_proxy_stays_direct() {
     let http = manual_proxy("http");
-    let plan = plan_torrent_net(true, 6881, true, None, http.as_ref());
+    let plan = plan_torrent_net(true, true, 6881, true, None, http.as_ref());
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
     assert!(plan.upnp);
