@@ -12,6 +12,27 @@ pub fn show(
         .title(gettext("Preferences"))
         .build();
 
+    // Power-user knobs live on their own page so the main pages stay
+    // approachable. Every advanced row keeps its safe default, so users
+    // who never open this page still get the optimal behavior.
+    let advanced_page = adw::PreferencesPage::builder()
+        .title(gettext("Advanced"))
+        .icon_name("applications-engineering-symbolic")
+        .build();
+
+    let advanced_general_group = adw::PreferencesGroup::builder()
+        .title(gettext("General"))
+        .build();
+    let advanced_net_group = adw::PreferencesGroup::builder()
+        .title(gettext("Network"))
+        .build();
+    let advanced_media_group = adw::PreferencesGroup::builder()
+        .title(gettext("Media"))
+        .build();
+    let advanced_torrent_group = adw::PreferencesGroup::builder()
+        .title(gettext("Torrent"))
+        .build();
+
     let page = adw::PreferencesPage::builder()
         .title(gettext("Downloads"))
         .icon_name("folder-download-symbolic")
@@ -65,7 +86,7 @@ pub fn show(
             "active",
         )
         .build();
-    dest_group.add(&restrict_filenames);
+    advanced_general_group.add(&restrict_filenames);
     {
         let s = settings.clone();
         let l = dest_label.clone();
@@ -131,7 +152,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::CONNECTIONS, &connections, "value")
         .build();
-    net_group.add(&connections);
+    advanced_net_group.add(&connections);
 
     let limit = adw::EntryRow::builder()
         .title(gettext("Speed limit"))
@@ -168,7 +189,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::RETRIES, &retries, "value")
         .build();
-    net_group.add(&retries);
+    advanced_net_group.add(&retries);
 
     let retry_sleep = adw::SpinRow::builder()
         .title(gettext("Retry delay"))
@@ -178,7 +199,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::RETRY_SLEEP, &retry_sleep, "value")
         .build();
-    net_group.add(&retry_sleep);
+    advanced_net_group.add(&retry_sleep);
 
     let sleep_interval = adw::SpinRow::builder()
         .title(gettext("Sleep interval"))
@@ -192,7 +213,7 @@ pub fn show(
             "value",
         )
         .build();
-    net_group.add(&sleep_interval);
+    advanced_net_group.add(&sleep_interval);
 
     let sleep_requests = adw::SpinRow::builder()
         .title(gettext("Sleep between requests"))
@@ -206,7 +227,7 @@ pub fn show(
             "value",
         )
         .build();
-    net_group.add(&sleep_requests);
+    advanced_net_group.add(&sleep_requests);
 
     let socket_timeout = adw::SpinRow::builder()
         .title(gettext("Socket timeout"))
@@ -220,7 +241,7 @@ pub fn show(
             "value",
         )
         .build();
-    net_group.add(&socket_timeout);
+    advanced_net_group.add(&socket_timeout);
 
     let timeout = adw::SpinRow::builder()
         .title(gettext("Timeout"))
@@ -230,7 +251,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::TIMEOUT, &timeout, "value")
         .build();
-    net_group.add(&timeout);
+    advanced_net_group.add(&timeout);
 
     let ua = adw::EntryRow::builder()
         .title(gettext("User agent"))
@@ -239,7 +260,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::USER_AGENT, &ua, "text")
         .build();
-    net_group.add(&ua);
+    advanced_net_group.add(&ua);
 
     let keep_date = adw::SwitchRow::builder()
         .title(gettext("Keep original file dates"))
@@ -248,7 +269,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::KEEP_SERVER_DATE, &keep_date, "active")
         .build();
-    dest_group.add(&keep_date);
+    advanced_general_group.add(&keep_date);
 
     let proxy_mode = adw::ComboRow::builder()
         .title(gettext("Proxy"))
@@ -527,7 +548,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_DHT, &dht, "active")
         .build();
-    torrent_net_group.add(&dht);
+    advanced_torrent_group.add(&dht);
     let peers = adw::SpinRow::builder()
         .title(gettext("Peer limit"))
         .subtitle(gettext(
@@ -538,7 +559,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_PEER_LIMIT, &peers, "value")
         .build();
-    torrent_net_group.add(&peers);
+    advanced_torrent_group.add(&peers);
     let upload_limit = adw::EntryRow::builder()
         .title(gettext("Upload speed limit"))
         .build();
@@ -579,7 +600,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_TRACKERS, &trackers, "text")
         .build();
-    torrent_net_group.add(&trackers);
+    advanced_torrent_group.add(&trackers);
     let listen_port = adw::SpinRow::builder()
         .title(gettext("Listen port"))
         .subtitle(gettext(
@@ -594,7 +615,7 @@ pub fn show(
             "value",
         )
         .build();
-    torrent_net_group.add(&listen_port);
+    advanced_torrent_group.add(&listen_port);
     let upnp = adw::SwitchRow::builder()
         .title(gettext("UPnP port forwarding"))
         .subtitle(gettext(
@@ -604,9 +625,8 @@ pub fn show(
     settings
         .bind(crate::settings::key::TORRENT_UPNP, &upnp, "active")
         .build();
-    torrent_net_group.add(&upnp);
+    advanced_torrent_group.add(&upnp);
 
-    torrent_page.add(&share_group);
     torrent_page.add(&torrent_net_group);
 
     // Video pages resolve through the yt-dlp support tools; this page
@@ -742,7 +762,7 @@ pub fn show(
         .build();
     video_codec
         .set_selected(crate::video::codec_priority_index(&settings.video_codec_priority()) as u32);
-    video_quality_group.add(&video_codec);
+    advanced_media_group.add(&video_codec);
     {
         let row = video_codec.downgrade();
         settings.connect_changed(
@@ -773,7 +793,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::AUDIO_QUALITY, &audio_quality, "value")
         .build();
-    video_quality_group.add(&audio_quality);
+    advanced_media_group.add(&audio_quality);
     let subtitle_labels = crate::video::subtitle_language_labels();
     let subtitle_refs: Vec<&str> = subtitle_labels.iter().map(String::as_str).collect();
     let subtitle_lang = adw::ComboRow::builder()
@@ -1183,12 +1203,21 @@ pub fn show(
     }
     video_page.add(&video_quality_group);
     video_page.add(&video_auth_group);
-    video_page.add(&video_post_group);
-    video_page.add(&video_live_group);
     video_page.add(&video_tools_group);
     dialog.add(&video_page);
-    // Page order: Downloads, Media, Torrent, Network (Network last).
+    // In-page group order: the General/Network/Media/Torrent taxonomy,
+    // with each family's related groups adjacent (Media keeps
+    // Post-processing and Live; Torrent keeps Sharing).
+    advanced_page.add(&advanced_general_group);
+    advanced_page.add(&advanced_net_group);
+    advanced_page.add(&advanced_media_group);
+    advanced_page.add(&video_post_group);
+    advanced_page.add(&video_live_group);
+    advanced_page.add(&share_group);
+    advanced_page.add(&advanced_torrent_group);
+    // Page order: Downloads, Media, Torrent, Network, Advanced (Advanced last).
     dialog.add(&torrent_page);
     dialog.add(&net_page);
+    dialog.add(&advanced_page);
     dialog.present(Some(parent));
 }
