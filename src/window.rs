@@ -1332,6 +1332,26 @@ struct VideoStep {
     error: adw::ActionRow,
 }
 
+/// Queue a probed link as a plain file and close the dialog: the
+/// fallback when extraction finds no playable media (or fails) on an
+/// unlisted page. Returns false when even the plain intake rejects the
+/// URL, so the caller can show the error instead.
+fn queue_plain(
+    manager: &Rc<DownloadManager>,
+    dest: &Rc<RefCell<String>>,
+    dialog: &glib::WeakRef<adw::Dialog>,
+    file_row: &adw::EntryRow,
+    url: &str,
+) -> Result<(), String> {
+    let typed = file_row.text().trim().to_string();
+    let name = (!typed.is_empty()).then_some(typed);
+    manager.enqueue(url, Some(&dest.borrow()), name.as_deref())?;
+    if let Some(d) = dialog.upgrade() {
+        d.close();
+    }
+    Ok(())
+}
+
 /// Desensitize the details-page Add button while a lookup resolves.
 /// No-op until the button exists (see `lookup_add`); every terminal
 /// lookup state re-enables it.
@@ -1598,7 +1618,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let formats_kick = format_ids.clone();
         let settings2 = manager.settings().clone();
         let lookup_add_kick = lookup_add.clone();
-        Rc::new(move || {
+        let manager_kick = manager.clone();
+        let dest_kick = dest_dir.clone();
+        Rc::new(move |probe_unlisted: bool| {
             let my = generation.get() + 1;
             generation.set(my);
             let (
@@ -1612,6 +1634,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 file_b,
                 formats_b,
                 lookup_add_b,
+                manager_b,
+                dest_b,
             ) = (
                 generation.clone(),
                 last_ok.clone(),
@@ -1623,16 +1647,34 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 file_row2.clone(),
                 formats_kick.clone(),
                 lookup_add_kick.clone(),
+                manager_kick.clone(),
+                dest_kick.clone(),
             );
             glib::spawn_future_local(async move {
                 if dialog_b.upgrade().is_none() {
                     return;
                 }
                 let url = url_b.text().trim().to_string();
-                if url.is_empty() || !crate::video::is_video_page(&url) {
-                    hide_video_step(&step_b);
-                    info_b.borrow_mut().take();
-                    set_lookup_add(&lookup_add_b, true);
+                // Unlisted links probe only on explicit kicks (submit,
+                // retry) — never while typing, where every prefix would
+                // spawn a doomed extraction. Non-HTTP schemes never
+                // probe: magnets and friends belong to their own flows.
+                let probing = probe_unlisted
+                    && !crate::video::is_video_page(&url)
+                    && crate::video::is_http_url(&url);
+                if url.is_empty() || (!crate::video::is_video_page(&url) && !probing) {
+                    // A stale probe result for another URL must not
+                    // linger: without this, navigating back with a fresh
+                    // typed URL would show the old preview as ready.
+                    if !crate::video::preview_fresh(
+                        &info_b.borrow(),
+                        last_b.borrow().as_str(),
+                        &url,
+                    ) {
+                        hide_video_step(&step_b);
+                        info_b.borrow_mut().take();
+                        set_lookup_add(&lookup_add_b, true);
+                    }
                     return;
                 }
                 if crate::video::preview_fresh(&info_b.borrow(), last_b.borrow().as_str(), &url) {
@@ -1645,7 +1687,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 let libs = match crate::video::resolve_libraries() {
                     Ok(libs) => libs,
                     Err(e) => {
-                        if generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         info_b.borrow_mut().take();
@@ -1663,7 +1705,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 {
                     Ok(proxy) => proxy,
                     Err(e) => {
-                        if generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         show_video_error(&step_b, &e);
@@ -1681,8 +1723,31 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 .await
                 {
                     Err(e) => {
-                        if generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
+                        }
+                        // Probed links fall back to today's outcome (queue
+                        // the file directly) only when extraction says
+                        // unsupported — transient failures keep the error
+                        // row with retry instead of mistyping the row as
+                        // plain forever.
+                        if !crate::video::is_video_page(&url)
+                            && e.to_string().to_lowercase().contains("unsupported url")
+                        {
+                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
+                                Ok(()) => return,
+                                Err(pe) => {
+                                    info_b.borrow_mut().take();
+                                    tracing::warn!(
+                                        host = %crate::video::page_host(&url),
+                                        error = %pe.to_string(),
+                                        "plain fallback failed"
+                                    );
+                                    show_video_error(&step_b, &pe);
+                                    set_lookup_add(&lookup_add_b, true);
+                                    return;
+                                }
+                            }
                         }
                         info_b.borrow_mut().take();
                         tracing::warn!(
@@ -1694,8 +1759,26 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         set_lookup_add(&lookup_add_b, true);
                     }
                     Ok(v) => {
-                        if generation_b.get() != my {
+                        if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
+                        }
+                        // Resolved but nothing playable, and not a listed
+                        // video page: same plain fallback as above.
+                        if !v.fetchable && !crate::video::is_video_page(&url) {
+                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
+                                Ok(()) => return,
+                                Err(pe) => {
+                                    info_b.borrow_mut().take();
+                                    tracing::warn!(
+                                        host = %crate::video::page_host(&url),
+                                        error = %pe.to_string(),
+                                        "plain fallback failed"
+                                    );
+                                    show_video_error(&step_b, &pe);
+                                    set_lookup_add(&lookup_add_b, true);
+                                    return;
+                                }
+                            }
                         }
                         // Group header carries the identity (title + page);
                         // rows below carry the choices. Both sinks parse
@@ -1783,11 +1866,15 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             let text = row.text().trim().to_string();
             // The direct-only file row hides in video mode (the details
             // page has its own name row); a non-empty entry is not lost —
-            // the resolve seeds the video name from it.
-            file_row2.set_visible(!crate::video::is_video_page(&text));
-            // Sync skeleton: leaving video-land (or editing a resolved URL)
-            // hides the stale step at once; the debounced kick refills it.
+            // the resolve seeds the video name from it. A probed preview
+            // counts as video mode while its canonical URL still matches.
             let fresh = info2.borrow().as_ref().is_some_and(|v| v.page_url == text);
+            file_row2.set_visible(!(crate::video::is_video_page(&text) || fresh));
+            // Sync skeleton: leaving video-land (or editing a resolved URL)
+            // hides the stale step at once; the debounced kick refills
+            // it. `fresh` is deliberately the stricter canonical compare
+            // (not the round-trip key the kick uses): a mismatch is
+            // always safe to hide, and typing only fires on edit.
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
                 if !fresh {
@@ -1803,7 +1890,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 if dialog_b.upgrade().is_none() || generation_b.get() != my {
                     return;
                 }
-                kick_b();
+                kick_b(false);
             });
         });
     }
@@ -1822,7 +1909,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         video_install_btn.connect_clicked(move |_| {
             if !crate::video::in_flatpak() {
                 let kick_b = kick.clone();
-                crate::install_help::show(&btn, move || kick_b());
+                crate::install_help::show(&btn, move || kick_b(true));
                 return;
             }
             // Flatpak: staged auto-install under a progress popover
@@ -1878,13 +1965,15 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                     return;
                 }
                 btn_b.set_sensitive(true);
-                kick_b();
+                // Re-probe, don't just refresh: an unlisted URL that led
+                // here for missing tools has no preview yet.
+                kick_b(true);
             });
         });
     }
     {
         let kick = kick_video.clone();
-        video_retry_btn.connect_clicked(move |_| kick());
+        video_retry_btn.connect_clicked(move |_| kick(true));
     }
     // One-click restore of the title default (audio-aware, like submit).
     {
@@ -2102,7 +2191,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 if nav2.visible_page_tag().as_deref() != Some("video") {
                     nav2.push(&video_nav_page2);
                     step2.name.grab_focus();
-                    kick();
+                    kick(false);
                     return;
                 }
                 // Same freshness gate as the kick skip above: the stored
@@ -2168,7 +2257,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         }
                     }
                     None => {
-                        kick();
+                        kick(true);
                         show_video_error(
                             &step2,
                             &gettext(
@@ -2176,6 +2265,32 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                             ),
                         );
                     }
+                }
+                return;
+            }
+            // Unlisted http(s) links get one probe for a video path, unless
+            // they are obviously direct files (extension sniff — the
+            // plain engine downloads those better anyway, with no probe
+            // delay): the details page resolves, and either shows the
+            // video step or falls back to a plain queue. Anything else
+            // skips straight to the plain intake below.
+            if crate::video::is_http_url(&url) && !crate::video::is_direct_file_url(&url) {
+                if nav2.visible_page_tag().as_deref() != Some("video") {
+                    nav2.push(&video_nav_page2);
+                    step2.name.grab_focus();
+                    kick(true);
+                } else if !crate::video::preview_fresh(
+                    &info.borrow(),
+                    last_ok.borrow().as_str(),
+                    &url,
+                ) {
+                    // Resubmit while already probing: re-kick so the user
+                    // gets feedback instead of silence.
+                    kick(true);
+                    show_video_error(
+                        &step2,
+                        &gettext("Still looking up the media — wait for the preview, then add."),
+                    );
                 }
                 return;
             }
@@ -2219,12 +2334,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         step.name.connect_apply(move |_| s(false));
     }
     // Contextual verb: the entry button continues to details for video
-    // links and queues anything else straight away.
+    // links and ambiguous http(s) links (probed), and queues obvious
+    // direct files plus anything else straight away.
     {
         let b = add_btn.clone();
         let ur = url_row.clone();
         ur.connect_changed(move |row| {
-            if crate::video::is_video_page(row.text().trim()) {
+            let text = row.text().trim().to_string();
+            if crate::video::is_video_page(&text)
+                || (crate::video::is_http_url(&text) && !crate::video::is_direct_file_url(&text))
+            {
                 b.set_label(&gettext("_Continue"));
             } else {
                 b.set_label(&gettext("_Add Download"));

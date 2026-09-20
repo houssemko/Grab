@@ -922,10 +922,6 @@ msgstr ""
 msgid "Media support tools"
 msgstr ""
 
-#: src/download.rs:1976
-msgid "That link is not a supported media page"
-msgstr ""
-
 #: src/download.rs:1996 src/download.rs:2061
 msgid "Waiting to resolve media…"
 msgstr ""

@@ -2401,7 +2401,11 @@ impl DownloadManager {
         Ok(item)
     }
 
-    /// Intake for video pages: the row stores the *page* URL and a
+    /// Enqueue a video page: dialog-routed (listed domains) or probe-
+    /// proven (unlisted pages with extractable media). No domain gate
+    /// here — the dialog owns routing, and misuse fails loudly at
+    /// resolve instead of silently saving HTML.
+    ///
     /// [`crate::video::VideoSource::Page`] staged before insert, so the
     /// persist inside [`DownloadManager::insert`] already carries it and
     /// [`DownloadManager::start_next`] parks the row for the resolver
@@ -2417,9 +2421,6 @@ impl DownloadManager {
         choices: crate::video::VideoChoices,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
-        if !crate::video::is_video_page(&url) {
-            return Err(gettext("That link is not a supported media page"));
-        }
         let dir = self.resolve_dir(dest_dir);
         let name = filename
             .filter(|s| sane_filename(s))

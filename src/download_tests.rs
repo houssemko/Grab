@@ -668,30 +668,6 @@ fn enqueue_video_spawns_and_fails_without_tools() {
 }
 
 #[test]
-fn enqueue_video_rejects_direct_url() {
-    let _lock = QUEUE_FILE_LOCK.lock().unwrap();
-    let _qf = test_queue_file("enqueue-video-direct");
-    let settings = test_settings();
-    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    assert!(
-        manager
-            .enqueue_video(
-                "https://example.com/f.iso",
-                None,
-                None,
-                crate::video::VideoChoices {
-                    quality: "1080p".to_string(),
-                    audio_only: false,
-                    video_format_id: None,
-                    is_live: false,
-                },
-            )
-            .is_err()
-    );
-    assert_eq!(manager.store().n_items(), 0);
-}
-
-#[test]
 fn video_source_survives_restore_and_retry() {
     let (_q, _l) = test_locks();
     let qf = test_queue_file("video-restore");
@@ -3969,4 +3945,41 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
     drain_engine(&manager, item.id());
     crate::video::clean_staging(&crate::video::staging_dir(item.id()));
     let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn enqueue_video_accepts_unlisted_url() {
+    // No domain gate: any normalizable URL queues as a video row (the
+    // dialog owns routing; misuse fails loudly at resolve instead of
+    // silently saving HTML). Garbage still rejected by normalization.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("enqueue-video-probed");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let choices = crate::video::VideoChoices {
+        quality: "1080p".to_string(),
+        audio_only: false,
+        video_format_id: None,
+        is_live: false,
+    };
+    let item = manager
+        .enqueue_video(
+            "https://example.com/f.iso",
+            Some("/tmp/dl"),
+            None,
+            choices.clone(),
+        )
+        .expect("probed intake");
+    assert_eq!(item.filename(), "f.iso");
+    assert!(
+        manager
+            .enqueue_video("not a url", Some("/tmp/dl"), None, choices)
+            .is_err()
+    );
+    // Drain the spawned worker (fails fast without tools) so no woken
+    // pump tail trips the next test's thread guard.
+    drain_engine(&manager, item.id());
+    manager.cancel_all();
+    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
 }
