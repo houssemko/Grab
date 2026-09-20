@@ -548,12 +548,61 @@ fn resume_plan_resumes_without_temp() {
 }
 
 #[test]
-fn resume_plan_fresh_on_overlong_temp() {
-    // A temp larger than its total is garbage: wipe and start over.
-    let dir = test_manifest_dir("overlong-temp");
+fn unified_temp_limit_math() {
+    // 10% relative plus 8 MiB absolute headroom over the planned total.
+    // (The zero case never occurs on the real path — unknown totals are
+    // `None`, not `Some(0)` — it just pins the floor arithmetic.)
+    assert_eq!(unified_temp_limit(0), 8 * 1024 * 1024);
+    assert_eq!(unified_temp_limit(150), 150 + 15 + 8 * 1024 * 1024);
+    // Saturates instead of overflowing on absurd totals.
+    assert_eq!(unified_temp_limit(u64::MAX), u64::MAX);
+}
+
+#[test]
+fn resume_plan_resumes_temp_within_merge_margin() {
+    // A temp slightly past the planned total is a plausible merged
+    // output (estimate wobble): resume in place, don't wipe a valid
+    // download. Dense zeros, not set_len: a sparse file would trip
+    // `is_sparse_shell` instead of the branch under test.
+    let dir = test_manifest_dir("merge-margin-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
     std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 200]).unwrap();
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dest, &staging);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_resumes_temp_at_limit_boundary() {
+    // Exactly at the bound (`>`, not `>=`) still resumes. Hardcoded
+    // from the 150-byte fixture total: 150 + 15 (10%) + 8 MiB.
+    const AT_LIMIT: usize = 150 + 15 + 8 * 1024 * 1024;
+    assert_eq!(AT_LIMIT as u64, unified_temp_limit(150));
+    let dir = test_manifest_dir("limit-boundary-temp");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; AT_LIMIT]).unwrap();
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dest, &staging);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_on_overlong_temp() {
+    // A temp far past total + margin is garbage: wipe and start over.
+    // Hardcoded, not derived from the function under test, so a
+    // constants change forces a conscious update here: 150 + 15 (10%)
+    // + 8 MiB + 1 = 8388774. Dense zeros (see above for why not
+    // set_len).
+    const OVERLONG: usize = 150 + 15 + 8 * 1024 * 1024 + 1;
+    assert_eq!(OVERLONG, 8_388_774);
+    let dir = test_manifest_dir("overlong-temp");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; OVERLONG]).unwrap();
     let m = test_manifest();
     let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
