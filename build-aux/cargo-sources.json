@@ -3460,19 +3460,6 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/oo7/oo7-0.6.0.crate",
-        "sha256": "78f2bfed90f1618b4b48dcad9307f25e14ae894e2949642c87c351601d62cebd",
-        "dest": "cargo/oo7-0.6.0"
-    },
-    {
-        "type": "inline",
-        "contents": "{\"package\": \"78f2bfed90f1618b4b48dcad9307f25e14ae894e2949642c87c351601d62cebd\", \"files\": {}}",
-        "dest": "cargo/oo7-0.6.0",
-        "dest-filename": ".cargo-checksum.json"
-    },
-    {
-        "type": "archive",
-        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/openssl-probe/openssl-probe-0.2.1.crate",
         "sha256": "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe",
         "dest": "cargo/openssl-probe-0.2.1"

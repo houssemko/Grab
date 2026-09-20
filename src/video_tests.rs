@@ -3289,8 +3289,6 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
         proxy_type: "socks5".into(),
         proxy_host: "127.0.0.1".into(),
         proxy_port: 9050,
-        proxy_username: String::new(),
-        proxy_password: crate::secrets::CachedSecret::Absent,
         cookies_browser: String::new(),
     }
     .proxy_config()
@@ -3310,7 +3308,7 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
 }
 
 #[test]
-fn proxy_cli_args_embeds_auth_userinfo() {
+fn proxy_cli_args_passes_plain_url() {
     let proxy = crate::download::DownloadOptions {
         tries: 3,
         connections: 4,
@@ -3321,19 +3319,18 @@ fn proxy_cli_args_embeds_auth_userinfo() {
         proxy_type: "socks5".into(),
         proxy_host: "127.0.0.1".into(),
         proxy_port: 9050,
-        proxy_username: "user".into(),
-        proxy_password: crate::secrets::CachedSecret::Present("p@ss".into()),
         cookies_browser: String::new(),
     }
     .proxy_config()
     .expect("well-formed")
     .expect("proxied");
-    // yt-dlp gets one --proxy URL with percent-encoded userinfo.
+    // yt-dlp gets one --proxy URL with no userinfo: proxy auth was
+    // dropped, so no credentials ever reach process argv.
     assert_eq!(
         proxy_cli_args(Some(&proxy)),
         vec![
             "--proxy".to_string(),
-            "socks5h://user:p%40ss@127.0.0.1:9050".to_string()
+            "socks5h://127.0.0.1:9050".to_string()
         ]
     );
     // ...and nothing when direct.
