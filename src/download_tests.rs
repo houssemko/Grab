@@ -3589,6 +3589,7 @@ fn proxy_argv_precedes_end_of_options() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        sponsorblock_mark: false,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,

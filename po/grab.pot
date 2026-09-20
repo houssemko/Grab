@@ -1350,6 +1350,14 @@ msgstr ""
 msgid "Cut SponsorBlock-flagged sponsor segments"
 msgstr ""
 
+#: src/preferences.rs:721
+msgid "Mark sponsored segments"
+msgstr ""
+
+#: src/preferences.rs:723
+msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
+msgstr ""
+
 #: src/preferences.rs:700
 msgid "Embed thumbnail"
 msgstr ""

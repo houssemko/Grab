@@ -2664,6 +2664,10 @@ pub struct VideoJob {
     /// sponsor`). Opt-in preference; live rows never take it (the live
     /// edge cannot know future segments).
     pub sponsorblock_remove: bool,
+    /// Mark SponsorBlock-flagged sponsor segments as chapters
+    /// (`--sponsorblock-mark sponsor`). Opt-in preference; live rows never
+    /// take it (the live edge cannot know future segments).
+    pub sponsorblock_mark: bool,
     /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
     /// Opt-in preference; live rows never take it (live captures record
     /// raw transport streams, no post-processing leg exists).
@@ -3191,6 +3195,12 @@ pub(crate) fn unified_download_argv(
         // Opt-in post-processing: cut community-flagged sponsor segments
         // (SponsorBlock "sponsor" category only; the safe default).
         args.push("--sponsorblock-remove".to_string());
+        args.push("sponsor".to_string());
+    }
+    if job.sponsorblock_mark {
+        // Opt-in post-processing: mark community-flagged sponsor segments
+        // as chapters (SponsorBlock "sponsor" category only; the safe default).
+        args.push("--sponsorblock-mark".to_string());
         args.push("sponsor".to_string());
     }
     if job.embed_thumbnail {
@@ -4097,6 +4107,11 @@ pub(crate) fn hls_download_argv(
     if job.sponsorblock_remove {
         // Same opt-in post-processing as the unified VOD legs.
         args.push("--sponsorblock-remove".to_string());
+        args.push("sponsor".to_string());
+    }
+    if job.sponsorblock_mark {
+        // Same opt-in post-processing as the unified VOD legs.
+        args.push("--sponsorblock-mark".to_string());
         args.push("sponsor".to_string());
     }
     if job.embed_thumbnail {
