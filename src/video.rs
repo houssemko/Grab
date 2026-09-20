@@ -2626,6 +2626,10 @@ pub struct VideoJob {
     /// Opt-in preference; live rows never take it (live captures record
     /// raw transport streams, no post-processing leg exists).
     pub embed_subs: bool,
+    /// Cut SponsorBlock-flagged sponsor segments (`--sponsorblock-remove
+    /// sponsor`). Opt-in preference; live rows never take it (the live
+    /// edge cannot know future segments).
+    pub sponsorblock_remove: bool,
     /// Proxy resolved at spawn time (`None` = direct). yt-dlp spawns
     /// take `--proxy` plus NO_PROXY from it.
     pub proxy: Option<crate::download::ResolvedProxy>,
@@ -3103,6 +3107,12 @@ pub(crate) fn unified_download_argv(
         // Opt-in post-processing: mux downloaded subtitle tracks into the
         // finished file. A no-op when subtitle downloads are off.
         args.push("--embed-subs".to_string());
+    }
+    if job.sponsorblock_remove {
+        // Opt-in post-processing: cut community-flagged sponsor segments
+        // (SponsorBlock "sponsor" category only; the safe default).
+        args.push("--sponsorblock-remove".to_string());
+        args.push("sponsor".to_string());
     }
     // No subtitles on audio-only rows (nothing to caption).
     if !job.audio_only
@@ -3963,6 +3973,11 @@ pub(crate) fn hls_download_argv(
     if job.embed_subs {
         // Same opt-in post-processing as the unified VOD legs.
         args.push("--embed-subs".to_string());
+    }
+    if job.sponsorblock_remove {
+        // Same opt-in post-processing as the unified VOD legs.
+        args.push("--sponsorblock-remove".to_string());
+        args.push("sponsor".to_string());
     }
     // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
     // never reach this builder — they run through `live_capture_argv`,

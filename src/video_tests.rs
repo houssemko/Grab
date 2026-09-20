@@ -834,6 +834,7 @@ fn pipeline_reports_missing_tools() {
         cookies_browser: "none".into(),
         subtitles: None,
         embed_subs: false,
+        sponsorblock_remove: false,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2242,6 +2243,7 @@ fn direct_test_job() -> VideoJob {
         cookies_browser: "none".into(),
         subtitles: None,
         embed_subs: false,
+        sponsorblock_remove: false,
         proxy: None,
     }
 }
@@ -2459,6 +2461,7 @@ fn live_test_job() -> VideoJob {
         cookies_browser: "none".into(),
         subtitles: None,
         embed_subs: false,
+        sponsorblock_remove: false,
         proxy: None,
     }
 }
@@ -2850,6 +2853,7 @@ fn vod_hls_pins_planner_variant_id() {
         cookies_browser: "none".into(),
         subtitles: None,
         embed_subs: false,
+        sponsorblock_remove: false,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2910,6 +2914,7 @@ fn vod_hls_refuses_existing_dest() {
         cookies_browser: "none".into(),
         subtitles: None,
         embed_subs: false,
+        sponsorblock_remove: false,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -3490,6 +3495,43 @@ fn unified_argv_passes_concurrent_fragments() {
 }
 
 #[test]
+fn unified_argv_cuts_sponsors_when_enabled() {
+    // Opt-in post-processing: the "sponsor" category only, nothing else.
+    let mut job = direct_test_job();
+    job.sponsorblock_remove = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--sponsorblock-remove")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "sponsor");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(
+        pos < sep,
+        "sponsorblock flag must precede the URL separator"
+    );
+    // Default off: no trace of the flag.
+    job.sponsorblock_remove = false;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
+}
+
+#[test]
 fn hls_argv_passes_concurrent_fragments() {
     // Fragmented HLS like the DASH legs: same parallelism setting.
     let mut job = direct_test_job();
@@ -3504,12 +3546,39 @@ fn hls_argv_passes_concurrent_fragments() {
 }
 
 #[test]
+fn hls_argv_cuts_sponsors_when_enabled() {
+    let mut job = direct_test_job();
+    job.sponsorblock_remove = true;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--sponsorblock-remove")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "sponsor");
+    // Default off: no trace of the flag.
+    job.sponsorblock_remove = false;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
+}
+
+#[test]
 fn live_capture_argv_has_no_concurrent_fragments() {
     // Live edge recording keeps its conservative serial timing: the
     // fragment-tuning change is VOD-only by design.
     let job = live_test_job();
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
+}
+
+#[test]
+fn live_capture_argv_never_cuts_sponsors() {
+    // The live edge cannot know future segments: even opted in, live
+    // captures must not pass the flag.
+    let mut job = live_test_job();
+    job.sponsorblock_remove = true;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--sponsorblock-remove"));
 }
 
 #[test]
@@ -3667,6 +3736,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         cookies_browser: "none".into(),
         subtitles: Some("en".into()),
         embed_subs: false,
+        sponsorblock_remove: false,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

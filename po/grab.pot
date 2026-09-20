@@ -1309,3 +1309,11 @@ msgstr ""
 #: src/preferences.rs:657
 msgid "Mux downloaded subtitles into the video file"
 msgstr ""
+
+#: src/preferences.rs:664
+msgid "Remove sponsored segments"
+msgstr ""
+
+#: src/preferences.rs:665
+msgid "Cut SponsorBlock-flagged sponsor segments"
+msgstr ""

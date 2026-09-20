@@ -660,6 +660,18 @@ pub fn show(
         .bind(crate::settings::key::EMBED_SUBS, &embed_subs, "active")
         .build();
     video_post_group.add(&embed_subs);
+    let sponsorblock = adw::SwitchRow::builder()
+        .title(gettext("Remove sponsored segments"))
+        .subtitle(gettext("Cut SponsorBlock-flagged sponsor segments"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::SPONSORBLOCK_REMOVE,
+            &sponsorblock,
+            "active",
+        )
+        .build();
+    video_post_group.add(&sponsorblock);
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
         .description(gettext("yt-dlp and ffmpeg resolve media pages"))
