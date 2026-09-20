@@ -3383,9 +3383,7 @@ fn unified_runner_downloads_claims_and_collects() {
     let mut merging = false;
     while let Ok(msg) = rx.try_recv() {
         match msg {
-            crate::download::EngineMsg::Progress { downloaded: 7, .. } => {
-                progress = true
-            }
+            crate::download::EngineMsg::Progress { downloaded: 7, .. } => progress = true,
             crate::download::EngineMsg::Phase(p) if p.contains("Merging") => merging = true,
             _ => {}
         }
