@@ -3247,6 +3247,7 @@ impl DownloadManager {
             } else {
                 crate::video::subtitle_lang_active(&self.settings.subtitle_language())
             },
+            embed_subs: self.settings.embed_subs(),
             proxy,
         };
         let handle = tokio_rt().spawn(async move {

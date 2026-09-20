@@ -833,6 +833,7 @@ fn pipeline_reports_missing_tools() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        embed_subs: false,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2240,6 +2241,7 @@ fn direct_test_job() -> VideoJob {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        embed_subs: false,
         proxy: None,
     }
 }
@@ -2456,6 +2458,7 @@ fn live_test_job() -> VideoJob {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        embed_subs: false,
         proxy: None,
     }
 }
@@ -2846,6 +2849,7 @@ fn vod_hls_pins_planner_variant_id() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        embed_subs: false,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2905,6 +2909,7 @@ fn vod_hls_refuses_existing_dest() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        embed_subs: false,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -3390,6 +3395,63 @@ fn live_capture_argv_never_takes_subtitles() {
     assert_no_subtitle_tokens(&argv);
 }
 
+// ── subtitle embedding ───────────────────────────────────────────────
+
+#[test]
+fn unified_argv_embeds_subs_when_enabled() {
+    // Opt-in post-processing: `--embed-subs` muxes downloaded subtitle
+    // tracks into the finished file, ahead of the URL separator.
+    let mut job = direct_test_job();
+    job.embed_subs = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "v123+a456/bv*+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(argv.contains(&"--embed-subs".to_string()));
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    let e = argv.iter().position(|a| a == "--embed-subs").unwrap();
+    assert!(e < sep, "embed flag must precede the URL separator");
+    // Default off: argv stays exactly as before.
+    job.embed_subs = false;
+    let argv = unified_download_argv(
+        &job,
+        "v123+a456/bv*+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--embed-subs"));
+}
+
+#[test]
+fn hls_argv_embeds_subs_when_enabled() {
+    let mut job = direct_test_job();
+    job.quality = "best".into();
+    job.embed_subs = true;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(argv.contains(&"--embed-subs".to_string()));
+    job.embed_subs = false;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--embed-subs"));
+}
+
+#[test]
+fn live_capture_argv_never_takes_embed_subs() {
+    // Live captures record raw transport streams; no post-processing
+    // leg exists, so the embed flag stays off even when enabled.
+    let mut job = live_test_job();
+    job.embed_subs = true;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--embed-subs"));
+}
+
 #[test]
 fn unified_argv_passes_concurrent_fragments() {
     // VOD DASH legs fragment, so they inherit the user's parallel
@@ -3604,6 +3666,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: Some("en".into()),
+        embed_subs: false,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

@@ -2622,6 +2622,10 @@ pub struct VideoJob {
     /// Only legs carrying video content request subtitles; a missing
     /// language is a yt-dlp warning, never a failure.
     pub subtitles: Option<String>,
+    /// Mux downloaded subtitles into the finished file (`--embed-subs`).
+    /// Opt-in preference; live rows never take it (live captures record
+    /// raw transport streams, no post-processing leg exists).
+    pub embed_subs: bool,
     /// Proxy resolved at spawn time (`None` = direct). yt-dlp spawns
     /// take `--proxy` plus NO_PROXY from it.
     pub proxy: Option<crate::download::ResolvedProxy>,
@@ -3094,6 +3098,11 @@ pub(crate) fn unified_download_argv(
         args.push("--merge-output-format".to_string());
         args.push(merge_ext.to_string());
         args.push("--embed-metadata".to_string());
+    }
+    if job.embed_subs {
+        // Opt-in post-processing: mux downloaded subtitle tracks into the
+        // finished file. A no-op when subtitle downloads are off.
+        args.push("--embed-subs".to_string());
     }
     // No subtitles on audio-only rows (nothing to caption).
     if !job.audio_only
@@ -3950,6 +3959,10 @@ pub(crate) fn hls_download_argv(
     } else {
         args.push("--merge-output-format".to_string());
         args.push("mp4".to_string());
+    }
+    if job.embed_subs {
+        // Same opt-in post-processing as the unified VOD legs.
+        args.push("--embed-subs".to_string());
     }
     // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
     // never reach this builder — they run through `live_capture_argv`,

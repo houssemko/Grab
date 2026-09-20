@@ -32,6 +32,7 @@ pub mod key {
     pub const VIDEO_QUALITY: &str = "video-quality";
     pub const VIDEO_CODEC_PRIORITY: &str = "video-codec-priority";
     pub const SUBTITLE_LANGUAGE: &str = "subtitle-language";
+    pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
@@ -125,6 +126,11 @@ impl AppSettings {
     /// to `Option` at spawn time via [`crate::video::subtitle_lang_active`].
     pub fn subtitle_language(&self) -> String {
         self.0.string(key::SUBTITLE_LANGUAGE).to_string()
+    }
+    /// Mux downloaded subtitles into the finished file (`--embed-subs`).
+    /// Opt-in; a no-op when subtitle downloads are off.
+    pub fn embed_subs(&self) -> bool {
+        self.0.boolean(key::EMBED_SUBS)
     }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
