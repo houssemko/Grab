@@ -3365,6 +3365,83 @@ fn dest_part_paths_sit_beside_finished_file() {
 }
 
 #[test]
+fn ytdlp_output_template_doubles_percent_in_stem() {
+    // yt-dlp parses `-o` as a printf-style template: a literal `%` in
+    // the stem (percent-decoded titles, user-typed names like `100%`)
+    // must be `%%` or the template misparses and the download fails.
+    // Real template fields pass through untouched.
+    assert_eq!(
+        ytdlp_output_template(std::path::Path::new("/tmp/dl/100%.hls.%(ext)s")),
+        "/tmp/dl/100%%.hls.%(ext)s"
+    );
+    assert_eq!(
+        ytdlp_output_template(std::path::Path::new("/tmp/dl/Clip.hls.%(ext)s")),
+        "/tmp/dl/Clip.hls.%(ext)s"
+    );
+}
+
+#[test]
+fn ytdlp_output_template_round_trips_existing_double_percent() {
+    // A stem that already contains `%%` doubles again: yt-dlp renders
+    // `%%%%` back to `%%`, so the on-disk name is unchanged.
+    assert_eq!(
+        ytdlp_output_template(std::path::Path::new("/tmp/dl/50%%off.live.mp4")),
+        "/tmp/dl/50%%%%off.live.mp4"
+    );
+}
+
+#[test]
+fn dest_part_path_keeps_literal_percent_for_real_paths() {
+    // The escape lives at the `-o` boundary only: on-disk part names
+    // keep the single `%` so is_grab_part and the discoverers still
+    // match what yt-dlp renders (`%%` -> `%`).
+    let dest = std::path::Path::new("/tmp/dl/100%.mp4");
+    assert_eq!(
+        dest_part_path(dest, "hls", "%(ext)s"),
+        std::path::Path::new("/tmp/dl/100%.hls.%(ext)s")
+    );
+}
+
+#[test]
+fn hls_argv_escapes_percent_in_stem() {
+    let mut job = direct_test_job();
+    job.dest = std::path::PathBuf::from("/tmp/dl/100%.mp4");
+    let dest = job.dest.clone();
+    let argv = hls_download_argv(
+        &job,
+        "h1080",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &dest,
+    );
+    let o = argv.iter().position(|a| a == "-o").expect("-o");
+    assert_eq!(argv[o + 1], "/tmp/dl/100%%.hls.%(ext)s");
+}
+
+#[test]
+fn live_capture_argv_escapes_percent_in_stem() {
+    let job = live_test_job();
+    let out = std::path::Path::new("/tmp/staging/100%.live.mp4");
+    let argv = live_capture_argv(&job, "h720", out);
+    let o = argv.iter().position(|a| a == "-o").expect("-o");
+    assert_eq!(argv[o + 1], "/tmp/staging/100%%.live.mp4");
+}
+
+#[test]
+fn remux_video_labels_are_not_translated() {
+    // Container names are proper nouns: they must never go through
+    // gettext (their msgids were missing from the POT anyway).
+    assert_eq!(
+        remux_video_labels(),
+        vec![
+            "Off".to_string(),
+            "MP4".to_string(),
+            "MKV".to_string(),
+            "WebM".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn clean_dest_parts_keeps_finished_and_foreign_files() {
     let dir = std::env::temp_dir().join(format!("grab-cleanparts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
