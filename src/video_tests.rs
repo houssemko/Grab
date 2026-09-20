@@ -725,6 +725,7 @@ fn test_video_info(page_url: &str) -> VideoInfo {
         expires_at: None,
         formats: vec![],
         is_live: false,
+        fetchable: false,
     }
 }
 
@@ -3937,4 +3938,117 @@ fn unified_runner_sums_two_leg_progress() {
     }
     assert_eq!(max_seen, 150, "progress must sum both legs");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn has_fetchable_media_matrix() {
+    // Dialog probe criterion: mirror the worker's acceptance (plain
+    // HTTPS, URL present, no DRM) without container specifics.
+    let yes = test_video(serde_json::json!([test_format_full(
+        "v",
+        "avc1.640028",
+        "none",
+        Some(720),
+        None,
+        "https",
+        false
+    ),]));
+    assert!(has_fetchable_media(&yes));
+    // Empty extraction: plain file fallback.
+    let none = test_video(serde_json::json!([]));
+    assert!(!has_fetchable_media(&none));
+    // DRM-only page: nothing fetchable. Explicit no-DRM behaves
+    // like absent (the worker treats both as fetchable).
+    let drm = test_video(serde_json::json!([test_format_full(
+        "d",
+        "avc1.640028",
+        "none",
+        Some(720),
+        None,
+        "https",
+        true
+    ),]));
+    assert!(!has_fetchable_media(&drm));
+    // Non-manifest transports (DASH segments, RTMP) are not fetchable.
+    let dash = test_video(serde_json::json!([
+        {
+            "format": "d1",
+            "format_id": "d1",
+            "protocol": "http_dash_segments",
+            "ext": "mp4",
+            "url": "https://cdn.example/d1.mp4",
+            "vcodec": "avc1.640028",
+            "acodec": "none",
+            "http_headers": {},
+        },
+    ]));
+    assert!(!has_fetchable_media(&dash));
+    // Explicit no-DRM behaves like absent.
+    let nodrm = test_video(serde_json::json!([
+        {
+            "format": "v",
+            "format_id": "v",
+            "protocol": "https",
+            "ext": "mp4",
+            "url": "https://cdn.example/v.mp4",
+            "vcodec": "avc1.640028",
+            "acodec": "none",
+            "has_drm": false,
+            "http_headers": {},
+        },
+    ]));
+    assert!(has_fetchable_media(&nodrm));
+    // HLS-manifest page: the worker pulls variants itself.
+    let hls = test_video(serde_json::json!([test_format_full(
+        "h",
+        "avc1",
+        "mp4a.40.2",
+        Some(720),
+        None,
+        "m3u8_native",
+        false
+    ),]));
+    assert!(has_fetchable_media(&hls));
+}
+
+#[test]
+fn is_http_url_matrix() {
+    assert!(is_http_url("https://example.com/f.iso"));
+    assert!(is_http_url("http://example.com/v"));
+    assert!(!is_http_url("magnet:?xt=urn:btih:abc"));
+    assert!(!is_http_url("file:///tmp/x.mp4"));
+    assert!(!is_http_url("not a url"));
+    assert!(!is_http_url(""));
+}
+
+#[test]
+fn is_direct_file_url_matrix() {
+    // Obvious files skip the probe: archives, installers, documents,
+    // and direct media (the plain engine handles those better anyway).
+    for url in [
+        "https://example.com/f.iso",
+        "https://example.com/a.ZIP",
+        "https://example.com/v.mp4?download=1",
+        "https://example.com/song.mp3#t=10",
+        "https://example.com/archive.tar.gz",
+        "https://example.com/x.torrent",
+        "https://example.com/setup.pkg",
+        "http://example.com/doc.pdf",
+    ] {
+        assert!(is_direct_file_url(url), "{url}");
+    }
+    // Pages, streams and odd schemes always probe (or skip probing).
+    for url in [
+        "https://www.youtube.com/watch?v=x",
+        "https://example.com/article",
+        "https://example.com/",
+        "https://example.com",
+        "https://example.com/download",
+        "magnet:?xt=urn:btih:abc",
+        "file:///tmp/x.mp4",
+        "not a url",
+        "",
+    ] {
+        assert!(!is_direct_file_url(url), "{url}");
+    }
 }

@@ -390,6 +390,10 @@ pub struct VideoInfo {
     /// Whether the page is currently live. Decides stop-and-keep
     /// behavior for HLS captures; refreshed on every resolve.
     pub is_live: bool,
+    /// Whether the resolved formats include anything fetchable (see
+    /// [`has_fetchable_media`]): the dialog probe offers the video path
+    /// for unlisted pages on this, instead of the domain list.
+    pub fetchable: bool,
 }
 
 impl VideoInfo {
@@ -415,9 +419,70 @@ impl VideoInfo {
             expires_at,
             formats: video_format_options(v, newest_first),
             is_live: v.is_live.unwrap_or(false),
+            fetchable: has_fetchable_media(v),
         }
     }
 }
+
+/// Whether a resolved page carries anything fetchable: at least one
+/// plain-HTTPS or HLS-manifest format with a URL and no DRM — the same
+/// acceptance the worker applies, minus container specifics the planner
+/// refines. The dialog probe uses this to offer the video path for
+/// unlisted pages; an empty extraction falls back to a plain file
+/// download.
+pub fn has_fetchable_media(video: &Video) -> bool {
+    video.formats.iter().any(|f| {
+        matches!(f.protocol, Protocol::Https | Protocol::M3U8Native)
+            && !matches!(f.has_drm, Some(DrmStatus::Yes))
+            && f.download_info
+                .url
+                .as_deref()
+                .is_some_and(|u| !u.trim().is_empty())
+    })
+}
+
+/// Whether the string is an HTTP(S) URL: the only scheme the dialog
+/// probes for media (magnets and friends belong to their own flows).
+/// Pure for tests.
+pub fn is_http_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|u| matches!(u.scheme(), "http" | "https"))
+}
+
+/// Whether an HTTP(S) URL is obviously a direct file (not a page):
+/// its path ends in a well-known file extension. Such links skip the
+/// media probe entirely — the plain engine downloads them better
+/// anyway (segmented, resumable, throttled). Query/fragment stripped
+/// before matching; comparison is case-insensitive. A page
+/// masquerading with a file extension is the accepted residual (the
+/// probe only runs on ambiguous links). Pure for tests.
+pub fn is_direct_file_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(ext) = parsed
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .and_then(|last| last.rsplit('.').next())
+        .filter(|e| !e.is_empty())
+    else {
+        return false;
+    };
+    DIRECT_FILE_EXTS
+        .binary_search(&ext.to_ascii_lowercase().as_str())
+        .is_ok()
+}
+
+/// Extensions treated as direct files (never probed): installers,
+/// archives, documents, torrents, and bare media. Sorted for
+/// `binary_search`.
+const DIRECT_FILE_EXTS: &[&str] = &[
+    "7z", "aac", "apk", "avi", "bz2", "csv", "deb", "dmg", "doc", "docx", "epub", "exe", "flac",
+    "flv", "gz", "img", "iso", "m4a", "mkv", "mov", "mp3", "mp4", "msi", "ogg", "opus", "pdf",
+    "pkg", "rar", "rpm", "tar", "tgz", "torrent", "txt", "wav", "webm", "xz", "zip", "zst",
+];
 
 /// Whether we run inside the Flatpak sandbox. Only there is the Install
 /// button the viable path (users cannot install host packages into the
