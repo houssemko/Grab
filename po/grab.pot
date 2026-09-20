@@ -32,7 +32,7 @@ msgstr[1] ""
 msgid "Cancel All Downloads?"
 msgstr ""
 
-#: src/application.rs:248 src/application.rs:251 src/application.rs:252 src/application.rs:266 src/application.rs:314 src/application.rs:410 src/window.rs:124 src/window.rs:126 src/window.rs:205 src/window.rs:807 src/window.rs:931 src/window.rs:1264 src/window.rs:2146 src/window.rs:2517 src/window.rs:2647
+#: src/application.rs:248 src/application.rs:251 src/application.rs:252 src/application.rs:266 src/application.rs:314 src/application.rs:410 src/window.rs:124 src/window.rs:126 src/window.rs:205 src/window.rs:807 src/window.rs:931 src/window.rs:1264 src/window.rs:2146 src/window.rs:2517 src/window.rs:2648
 msgid "Cancel"
 msgstr ""
 
@@ -712,7 +712,7 @@ msgstr ""
 msgid "File name"
 msgstr ""
 
-#: src/window.rs:1264 src/window.rs:2146 src/window.rs:2518 src/window.rs:2647
+#: src/window.rs:1264 src/window.rs:2146 src/window.rs:2518 src/window.rs:2648
 msgid "_Cancel"
 msgstr ""
 
@@ -824,7 +824,7 @@ msgid_plural "{} files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2722
+#: src/window.rs:2724
 msgid "Select at least one file"
 msgstr ""
 
@@ -886,17 +886,17 @@ msgstr ""
 msgid "Still looking up the media — wait for the preview, then add."
 msgstr ""
 
-#: src/window.rs:1428 src/window.rs:2798
+#: src/window.rs:1428 src/window.rs:2800
 msgid "Showing the first {n} of {total}"
 msgstr ""
 
-#: src/window.rs:2876
-msgid "Queue {} item"
-msgid_plural "Queue {} items"
+#: src/window.rs:2880
+msgid "_Queue {} item"
+msgid_plural "_Queue {} items"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2913
+#: src/window.rs:2917
 msgid "Select at least one item"
 msgstr ""
 
@@ -1430,16 +1430,16 @@ msgstr ""
 msgid "the link opened a collection, not a single video"
 msgstr ""
 
-#: src/window.rs:2656 src/window.rs:2850
-msgid "Select all"
+#: src/window.rs:2657 src/window.rs:2853
+msgid "Select All"
 msgstr ""
 
-#: src/window.rs:2658 src/window.rs:2852
-msgid "Select none"
+#: src/window.rs:2659 src/window.rs:2855
+msgid "Select None"
 msgstr ""
 
-#: src/window.rs:2678
-msgid "Add {} file"
-msgid_plural "Add {} files"
+#: src/window.rs:2680
+msgid "_Add {} file"
+msgid_plural "_Add {} files"
 msgstr[0] ""
 msgstr[1] ""
