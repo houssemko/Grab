@@ -840,6 +840,7 @@ fn pipeline_reports_missing_tools() {
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
+        remux_video: None,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2258,6 +2259,7 @@ fn direct_test_job() -> VideoJob {
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
+        remux_video: None,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2485,6 +2487,7 @@ fn live_test_job() -> VideoJob {
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
+        remux_video: None,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2886,6 +2889,7 @@ fn vod_hls_pins_planner_variant_id() {
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
+        remux_video: None,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -2956,6 +2960,7 @@ fn vod_hls_refuses_existing_dest() {
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
+        remux_video: None,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,
@@ -3667,6 +3672,35 @@ fn hls_argv_marks_sponsors_when_enabled() {
 }
 
 #[test]
+fn hls_argv_remuxes_video_when_enabled() {
+    let mut job = direct_test_job();
+    job.remux_video = Some("mkv".to_string());
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--remux-video")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "mkv");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "remux flag must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.remux_video = None;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--remux-video"));
+}
+
+#[test]
+fn live_capture_argv_never_remuxes_video() {
+    // Live captures merge straight to disk: even opted in, the flag
+    // must not appear (the builder structurally ignores the field).
+    let mut job = live_test_job();
+    job.remux_video = Some("mkv".to_string());
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--remux-video"));
+}
+
+#[test]
 fn live_capture_argv_has_no_concurrent_fragments() {
     // Live edge recording keeps its conservative serial timing: the
     // fragment-tuning change is VOD-only by design.
@@ -3751,6 +3785,52 @@ fn unified_argv_embeds_chapters_when_enabled() {
         out,
     );
     assert!(!argv.iter().any(|a| a == "--embed-chapters"));
+}
+
+#[test]
+fn unified_argv_remuxes_video_when_enabled() {
+    // Opt-in post-processing: the finished file is remuxed into the
+    // chosen container without re-encoding.
+    let mut job = direct_test_job();
+    job.remux_video = Some("mkv".to_string());
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--remux-video")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "mkv");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "remux flag must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.remux_video = None;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--remux-video"));
+}
+
+#[test]
+fn remux_video_active_allowlists_targets() {
+    // A hand-edited dconf value outside the ComboRow's list resolves to
+    // `None`, so yt-dlp never receives an unrecognised target.
+    assert_eq!(remux_video_active("off"), None);
+    assert_eq!(remux_video_active("mkv"), Some("mkv".to_string()));
+    assert_eq!(remux_video_active("MP4"), Some("mp4".to_string()));
+    assert_eq!(remux_video_active("avi"), None);
+    assert_eq!(remux_video_active(""), None);
 }
 
 #[test]
@@ -4335,6 +4415,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         embed_subs: false,
         sponsorblock_remove: false,
         sponsorblock_mark: false,
+        remux_video: None,
         embed_thumbnail: false,
         embed_chapters: false,
         retry_sleep: 0,

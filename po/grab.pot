@@ -1373,3 +1373,11 @@ msgstr ""
 #: src/preferences.rs:713
 msgid "Write chapter markers into the finished file"
 msgstr ""
+
+#: src/preferences.rs:770
+msgid "Remux video"
+msgstr ""
+
+#: src/preferences.rs:772
+msgid "Change the finished file's container without re-encoding"
+msgstr ""

@@ -762,6 +762,38 @@ pub fn show(
         )
         .build();
     video_post_group.add(&embed_chapters);
+    // ComboRow holds an index, GSettings a string: sync both ways by hand
+    // (same pattern as the subtitle language row).
+    let remux_labels = crate::video::remux_video_labels();
+    let remux_refs: Vec<&str> = remux_labels.iter().map(String::as_str).collect();
+    let remux_row = adw::ComboRow::builder()
+        .title(gettext("Remux video"))
+        .subtitle(gettext(
+            "Change the finished file's container without re-encoding",
+        ))
+        .model(&gtk4::StringList::new(&remux_refs))
+        .build();
+    remux_row.set_selected(crate::video::remux_video_index(&settings.remux_video()) as u32);
+    video_post_group.add(&remux_row);
+    {
+        let row = remux_row.downgrade();
+        settings.connect_changed(Some(crate::settings::key::REMUX_VIDEO), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                row.set_selected(crate::video::remux_video_index(
+                    &s.string(crate::settings::key::REMUX_VIDEO),
+                ) as u32);
+            }
+        });
+    }
+    remux_row.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(
+                crate::settings::key::REMUX_VIDEO,
+                crate::video::remux_video_value(row.selected() as usize),
+            );
+        }
+    });
     let video_live_group = adw::PreferencesGroup::builder()
         .title(gettext("Live"))
         .description(gettext("Live stream recording"))
