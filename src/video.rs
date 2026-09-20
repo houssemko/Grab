@@ -715,16 +715,94 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Install just ffmpeg into the user library dir. See [`install_ytdlp`].
+/// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user
+/// library dir (tarball/dev builds; also used inside Flatpak where the
+/// runtime may not ship ffprobe). The yt-dlp crate's installer only
+/// extracts the `ffmpeg` binary, which leaves `--ffmpeg-location`
+/// pointing at a dir without ffprobe — so Grab downloads the
+/// static-build archive itself and extracts both tools in one pass.
+/// See [`install_ytdlp`].
 pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
-    let handle = crate::download::tokio_rt()
-        .spawn(async move { LibraryInstaller::new(dir).install_ffmpeg(None).await });
+    let handle =
+        crate::download::tokio_rt().spawn(async move { install_ffmpeg_toolchain(dir).await });
     match handle.await {
-        Ok(Ok(path)) => Ok(path),
-        Ok(Err(e)) => Err(VideoError::install(&e)),
+        Ok(res) => res,
         Err(e) => Err(VideoError::runtime(&e)),
     }
+}
+
+/// Download one boul2gom/ffmpeg-builds archive and extract the `ffmpeg`
+/// and `ffprobe` binaries into `dir`. Returns the ffmpeg path. Await
+/// from a spawned task — never block the GTK thread on it.
+async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
+    use yt_dlp::client::deps::ffmpeg::BuildFetcher;
+
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(VideoError::install)?;
+    let release = BuildFetcher::new()
+        .fetch_binary()
+        .await
+        .map_err(VideoError::install)?;
+    let archive = dir.join(&release.name);
+    release
+        .download(&archive)
+        .await
+        .map_err(VideoError::install)?;
+    tokio::task::spawn_blocking(move || extract_ffmpeg_toolchain(&archive, &dir))
+        .await
+        .map_err(VideoError::runtime)?
+        .map_err(VideoError::install)
+}
+
+/// Extract the `ffmpeg` and `ffprobe` binaries from a static-build
+/// archive into `dir`, mark them executable, and delete the archive.
+/// Entries are matched by file name, so both flat zips (`ffmpeg` at the
+/// root, as the crate's own extractor assumes) and `bin/`-style layouts
+/// work. Returns the ffmpeg path; a missing ffmpeg entry is an error,
+/// a missing ffprobe entry is not — callers keep working the way they
+/// did before this toolchain existed.
+fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
+    // Always clean up the (large) archive, even when extraction fails.
+    let result = extract_ffmpeg_toolchain_inner(archive, dir);
+    std::fs::remove_file(archive).ok();
+    result
+}
+
+/// Inner extraction; see [`extract_ffmpeg_toolchain`].
+fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let file = std::fs::File::open(archive)
+        .map_err(|e| format!("couldn't open ffmpeg archive {}: {e}", archive.display()))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|e| format!("couldn't read ffmpeg archive: {e}"))?;
+    let mut ffmpeg_path = None;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("couldn't read ffmpeg archive entry: {e}"))?;
+        if entry.is_dir() {
+            continue;
+        }
+        let tool = match Path::new(entry.name()).file_name().and_then(|n| n.to_str()) {
+            Some("ffmpeg") => "ffmpeg",
+            Some("ffprobe") => "ffprobe",
+            _ => continue,
+        };
+        let dest = dir.join(tool);
+        let mut out = std::fs::File::create(&dest)
+            .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("couldn't extract {}: {e}", dest.display()))?;
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| format!("couldn't mark {} executable: {e}", dest.display()))?;
+        if tool == "ffmpeg" {
+            ffmpeg_path = Some(dest);
+        }
+    }
+    ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
 }
 
 /// Minimum accepted yt-dlp version by release date. Older binaries predate
@@ -1796,12 +1874,26 @@ pub(crate) fn remux_video_active(raw: &str) -> Option<String> {
         .map(|v| v.to_string())
 }
 
+/// First search dir holding a complete ffmpeg toolchain (`ffmpeg` plus
+/// `ffprobe`). yt-dlp resolves both tools from `--ffmpeg-location` and
+/// never falls back to PATH for a missing sibling, so pointing it at a
+/// dir with only `ffmpeg` (e.g. Grab's own user-lib install, which
+/// shadows a perfectly good system install) breaks post-processing with
+/// "ffprobe not found" even when the system ships both binaries.
+fn toolchain_dir_in(dirs: &[PathBuf]) -> Option<PathBuf> {
+    dirs.iter()
+        .find(|d| is_executable(&d.join("ffmpeg")) && is_executable(&d.join("ffprobe")))
+        .cloned()
+}
+
 /// Directory form of a resolved tool binary for `--ffmpeg-location`
-/// (yt-dlp wants the directory; Grab resolves the binary).
+/// (yt-dlp wants the directory; Grab resolves the binary). Prefers a
+/// dir with both ffmpeg and ffprobe; falls back to the binary's own dir
+/// (the previous behavior) when no complete toolchain is on hand.
 fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
-    ffmpeg_bin
-        .parent()
-        .unwrap_or_else(|| Path::new("/usr/bin"))
+    toolchain_dir_in(&tool_search_dirs())
+        .or_else(|| ffmpeg_bin.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("/usr/bin"))
         .to_string_lossy()
         .into_owned()
 }
