@@ -359,14 +359,6 @@ impl VideoError {
             gettext("Media download failed: {detail}").replace("{detail}", &e.to_string()),
         )
     }
-    /// The site offers no replay/DVR, so `--live-from-start` found no
-    /// from-start formats: name the toggle instead of echoing yt-dlp's
-    /// flag back at the user.
-    fn live_from_start_no_replay() -> Self {
-        Self::Message(gettext(
-            "This stream can't be recorded from the start — the site offers no replay. Turn off \"Live from start\" to record from the live edge instead.",
-        ))
-    }
     fn combine(e: impl std::fmt::Display) -> Self {
         Self::Message(
             gettext("Couldn't merge video and audio: {detail}").replace("{detail}", &e.to_string()),
@@ -3925,26 +3917,19 @@ async fn remux_live_capture(
 }
 
 /// yt-dlp's exact stderr line when `--live-from-start` meets a stream
-/// with no replay/DVR behind it (verified against yt-dlp's
-/// `raise_no_formats` call in `process_video_result`): the stable
-/// substring to match on, not the `[twitch:stream] <id>:` prefix.
-const LIVE_FROM_START_NO_FORMATS: &str =
-    "--live-from-start is passed, but there are no formats that can be downloaded from the start";
-
-/// Map a live-capture startup failure to the actionable error: when the
-/// user opted into recording from the start and yt-dlp reports no
-/// from-start formats, say which toggle to flip. Every other startup
-/// failure keeps yt-dlp's own last line. Pure for tests.
-fn live_startup_failure(
+/// Pure decision for the live-edge fallback: a from-start attempt that
+/// recorded nothing and wasn't stopped retries once from the live edge
+/// instead of failing the row. Anything else — a mid-capture failure, a
+/// stopped attempt, or the second attempt itself — keeps its outcome, so
+/// partial recordings are never discarded and Stop is never overridden.
+/// Pure for tests.
+fn fallback_to_live_edge(
     is_live: bool,
     live_from_start: bool,
-    log_tail: &str,
-) -> Option<VideoError> {
-    if is_live && live_from_start && log_tail.contains(LIVE_FROM_START_NO_FORMATS) {
-        Some(VideoError::live_from_start_no_replay())
-    } else {
-        None
-    }
+    aborted: bool,
+    already_retried: bool,
+) -> bool {
+    is_live && live_from_start && !aborted && !already_retried
 }
 
 /// One live capture through the yt-dlp binary: variant choice, audio
@@ -3961,7 +3946,7 @@ async fn run_live_ytdlp(
     staging: &Path,
     job: &VideoJob,
     hls_format_id: &str,
-    abort: oneshot::Receiver<()>,
+    mut abort: oneshot::Receiver<()>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
@@ -3976,8 +3961,6 @@ async fn run_live_ytdlp(
     // shell shows up in the user's folder while recording, and the
     // file-growth watcher announces "Recording…" off this path.
     let out = dest_part_path(&job.dest, "live", ext);
-    let _ = tokio::fs::remove_file(&out).await;
-    let _ = tokio::fs::remove_file(out.with_extension(format!("{ext}.part"))).await;
     // Overwrite pre-flight (Parabolic parity): a finished file already
     // at dest means the capture's rename claim fails at the end — refuse
     // before recording so the pump requeues under a fresh name instead
@@ -3988,146 +3971,184 @@ async fn run_live_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    let mut cmd = tokio::process::Command::new(youtube_bin);
-    cmd.args(live_capture_argv(job, hls_format_id, &out));
-    apply_proxy_env(&mut cmd, job.proxy.as_ref());
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
-    let tx_p = tx.clone();
-    // Recording indicator: live captures often emit no yt-dlp progress
-    // lines for long stretches, leaving the row stuck on "Resolving
-    // media…" while bytes land on disk. The growing output file is the
-    // truth — announce once it has bytes (capped: minutes of silence
-    // means the capture is dead and its own timeouts will fire).
-    {
-        let tx_rec = tx.clone();
-        let out_rec = out.clone();
-        // yt-dlp records into the `.part` shell and only renames to the
-        // `-o` path at the end: the shell is what grows during capture.
-        // The final path covers a capture that finalized instantly.
-        let shell_rec = out.with_extension(format!("{ext}.part"));
-        tokio::spawn(async move {
-            for _ in 0..1200 {
-                let mut bytes = 0u64;
-                for p in [&shell_rec, &out_rec] {
-                    bytes = bytes.max(tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0));
-                }
-                if bytes > 0 {
-                    tx_rec.send(EngineMsg::Phase(gettext("Recording…"))).ok();
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        });
-    }
-    let progress = tokio::spawn(async move {
-        let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let mut have = 0u64;
-        // Announce once recording is confirmed: a parsed progress line
-        // means transfer (same "Recording…" the file watcher sends, so
-        // whichever fires first wins and the second is a no-op).
-        let mut announced = false;
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(p) = parse_ytdlp_template(&line) {
-                if !announced {
-                    announced = true;
-                    tx_p.send(EngineMsg::Phase(gettext("Recording…"))).ok();
-                }
-                if let Some(d) = p.downloaded {
-                    have = have.max(d);
-                }
-                tx_p.send(EngineMsg::Progress {
-                    downloaded: have,
-                    total: None,
-                    uploaded: 0,
-                    upload_bps: 0,
-                })
-                .ok();
-            }
+    // At most two attempts: the from-start capture the user asked for,
+    // then -- only if it recorded nothing and wasn't stopped -- one retry
+    // from the live edge. The downgrade flips solely `live_from_start`
+    // (the other fields the capture argv reads stay as cloned), so every
+    // other `job` use below stays valid on both attempts.
+    let part = out.with_extension(format!("{ext}.part"));
+    let mut downgraded: Option<VideoJob> = None;
+    let src = loop {
+        let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
+        // Fresh shell per attempt: a failed attempt must never leave a
+        // stale (possibly empty) output for the retry to trip over.
+        let _ = tokio::fs::remove_file(&out).await;
+        let _ = tokio::fs::remove_file(&part).await;
+        let mut cmd = tokio::process::Command::new(youtube_bin);
+        cmd.args(live_capture_argv(attempt, hls_format_id, &out));
+        apply_proxy_env(&mut cmd, job.proxy.as_ref());
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
         }
-        have
-    });
-    let logs = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut tail = Vec::new();
-        let mut pending = String::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    trace_format_lines(&mut pending, &buf[..n]);
-                    tail.extend_from_slice(&buf[..n]);
-                    if tail.len() > 8192 {
-                        tail.drain(..tail.len() - 8192);
+        let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+        let tx_p = tx.clone();
+        // Recording indicator: live captures often emit no yt-dlp progress
+        // lines for long stretches, leaving the row stuck on "Resolving
+        // media…" while bytes land on disk. The growing output file is the
+        // truth — announce once it has bytes (capped: minutes of silence
+        // means the capture is dead and its own timeouts will fire).
+        {
+            let tx_rec = tx.clone();
+            let out_rec = out.clone();
+            // yt-dlp records into the `.part` shell and only renames to the
+            // `-o` path at the end: the shell is what grows during capture.
+            // The final path covers a capture that finalized instantly.
+            let shell_rec = out.with_extension(format!("{ext}.part"));
+            tokio::spawn(async move {
+                for _ in 0..1200 {
+                    let mut bytes = 0u64;
+                    for p in [&shell_rec, &out_rec] {
+                        bytes =
+                            bytes.max(tokio::fs::metadata(p).await.map(|m| m.len()).unwrap_or(0));
+                    }
+                    if bytes > 0 {
+                        tx_rec.send(EngineMsg::Phase(gettext("Recording…"))).ok();
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            });
+        }
+        let progress = tokio::spawn(async move {
+            let mut lines = tokio::io::BufReader::new(stdout).lines();
+            let mut have = 0u64;
+            // Announce once recording is confirmed: a parsed progress line
+            // means transfer (same "Recording…" the file watcher sends, so
+            // whichever fires first wins and the second is a no-op).
+            let mut announced = false;
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(p) = parse_ytdlp_template(&line) {
+                    if !announced {
+                        announced = true;
+                        tx_p.send(EngineMsg::Phase(gettext("Recording…"))).ok();
+                    }
+                    if let Some(d) = p.downloaded {
+                        have = have.max(d);
+                    }
+                    tx_p.send(EngineMsg::Progress {
+                        downloaded: have,
+                        total: None,
+                        uploaded: 0,
+                        upload_bps: 0,
+                    })
+                    .ok();
+                }
+            }
+            have
+        });
+        let logs = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+            let mut reader = tokio::io::BufReader::new(stderr);
+            let mut tail = Vec::new();
+            let mut pending = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        trace_format_lines(&mut pending, &buf[..n]);
+                        tail.extend_from_slice(&buf[..n]);
+                        if tail.len() > 8192 {
+                            tail.drain(..tail.len() - 8192);
+                        }
                     }
                 }
             }
-        }
-        String::from_utf8_lossy(&tail).into_owned()
-    });
-    tokio::select! {
-        biased;
-        _ = abort => {
-            kill_tree(&mut child);
-            let _ = child.wait().await;
-        }
-        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                kill_tree(&mut child);
-                progress.abort();
-                logs.abort();
-                return Err(VideoError::runtime(&e));
-            }
-            Err(_) => {
-                // A stalled live capture still yields what it got.
+            String::from_utf8_lossy(&tail).into_owned()
+        });
+        // `aborted` gates the live-edge retry below: a stopped attempt must
+        // never come back as a fresh capture. `&mut abort` keeps the receiver
+        // usable for the second attempt when it didn't fire.
+        let aborted = tokio::select! {
+            biased;
+            _ = &mut abort => {
                 kill_tree(&mut child);
                 let _ = child.wait().await;
+                true
             }
-        },
-    }
-    let _ = join_drain(progress).await;
-    let log_tail = join_drain(logs).await.unwrap_or_default();
-    // Whatever stopped the capture — user stop, stall, stream end, or
-    // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
-    // renames the `.part` shell on clean completion, so prefer the
-    // finished name and fall back to the shell.
-    let part = out.with_extension(format!("{ext}.part"));
-    let src = [out.clone(), part.clone()]
-        .into_iter()
-        .find(|p| file_len(p).is_some_and(|n| n > 0));
-    let Some(src) = src else {
-        let _ = tokio::fs::remove_dir_all(staging).await;
-        // Opt-in from-start on a replay-less stream: name the toggle,
-        // don't echo yt-dlp's flag line.
-        if let Some(e) = live_startup_failure(job.is_live, job.live_from_start, &log_tail) {
-            return Err(e);
-        }
-        // Startup failure: surface yt-dlp's line, not a generic miss.
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("nothing recorded")
-            .trim()
-            .to_string();
-        return Err(VideoError::part_failed(detail));
+            waited = tokio::time::timeout(timeout, child.wait()) => {
+                match waited {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => {
+                        kill_tree(&mut child);
+                        progress.abort();
+                        logs.abort();
+                        return Err(VideoError::runtime(&e));
+                    }
+                    Err(_) => {
+                        // A stalled live capture still yields what it got.
+                        kill_tree(&mut child);
+                        let _ = child.wait().await;
+                    }
+                }
+                false
+            }
+        };
+        let _ = join_drain(progress).await;
+        let log_tail = join_drain(logs).await.unwrap_or_default();
+        // Whatever stopped the capture — user stop, stall, stream end, or
+        // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
+        // renames the `.part` shell on clean completion, so prefer the
+        // finished name and fall back to the shell.
+        let src = [out.clone(), part.clone()]
+            .into_iter()
+            .find(|p| file_len(p).is_some_and(|n| n > 0));
+        let Some(src) = src else {
+            // From-start attempt that never got going: retry once from the
+            // live edge instead of failing the row, and say so on the row.
+            // Only a startup miss qualifies — a mid-capture failure keeps
+            // its error, so partial recordings are never discarded.
+            // Staging is untouched here (nothing was recorded); the
+            // terminal path below sweeps it.
+            if fallback_to_live_edge(
+                attempt.is_live,
+                attempt.live_from_start,
+                aborted,
+                downgraded.is_some(),
+            ) {
+                tx.send(EngineMsg::Phase(gettext(
+                    "\"Live from start\" isn't available for this stream — recording from the live edge…",
+                )))
+                .ok();
+                let mut edge = job.clone();
+                edge.live_from_start = false;
+                downgraded = Some(edge);
+                continue;
+            }
+            let _ = tokio::fs::remove_dir_all(staging).await;
+            // Startup failure: surface yt-dlp's line, not a generic miss.
+            let detail = log_tail
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("nothing recorded")
+                .trim()
+                .to_string();
+            return Err(VideoError::part_failed(detail));
+        };
+        break src;
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
     let final_tmp = staging.join(format!("final.{ext}"));
