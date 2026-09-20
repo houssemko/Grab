@@ -315,6 +315,7 @@ fn serde_page_round_trip() {
         media_url: None,
         expires_at: Some(1_700_000_000),
         quality: "720p".into(),
+        audio_only: false,
         is_live: false,
         video_format_id: Some("137".into()),
     };
@@ -326,25 +327,33 @@ fn serde_page_round_trip() {
 #[test]
 fn serde_page_old_json_gets_defaults() {
     // Queue files written before quality/format existed must still
-    // parse (quality falls back to 1080p, no pin) — and files that
-    // still carry the removed audio_only key must parse too, ignoring it.
-    for json in [
-        r#"{"Page":{"page_url":"https://vimeo.com/99","media_url":null,"expires_at":null}}"#,
+    // parse (quality falls back to 1080p, audio off, no pin).
+    let json = r#"{"Page":{"page_url":"https://vimeo.com/99","media_url":null,"expires_at":null}}"#;
+    let back: VideoSource = serde_json::from_str(json).unwrap();
+    assert_eq!(
+        back,
+        VideoSource::Page {
+            page_url: "https://vimeo.com/99".into(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".into(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+        }
+    );
+    // Files that still carry audio_only:true restore as audio rows.
+    let back: VideoSource = serde_json::from_str(
         r#"{"Page":{"page_url":"https://vimeo.com/99","media_url":null,"expires_at":null,"audio_only":true}}"#,
-    ] {
-        let back: VideoSource = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            back,
-            VideoSource::Page {
-                page_url: "https://vimeo.com/99".into(),
-                media_url: None,
-                expires_at: None,
-                quality: "1080p".into(),
-                is_live: false,
-                video_format_id: None,
-            }
-        );
-    }
+    )
+    .unwrap();
+    assert!(matches!(
+        back,
+        VideoSource::Page {
+            audio_only: true,
+            ..
+        }
+    ));
 }
 
 // ── quality mapping ──────────────────────────────────────────────────
@@ -680,6 +689,7 @@ fn pipeline_reports_missing_tools() {
         item_id,
         page_url: "https://vimeo.com/123456".into(),
         quality: "1080p".into(),
+        audio_only: false,
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
         tries: 1,
         timeout_secs: 5,
@@ -848,10 +858,12 @@ fn ensure_tool_versions_refuses_missing_binary() {
 // ── default video filename ───────────────────────────────────────────
 
 #[test]
-fn default_video_filename_appends_mp4() {
-    assert_eq!(default_video_filename("Clip"), "Clip.mp4");
+fn default_video_filename_by_mode() {
+    assert_eq!(default_video_filename("Clip", false), "Clip.mp4");
+    assert_eq!(default_video_filename("Clip", true), "Clip.m4a");
     // Untouched otherwise: sanitizing is the intake's job.
-    assert_eq!(default_video_filename("a/b"), "a/b.mp4");
+    assert_eq!(default_video_filename("a/b", false), "a/b.mp4");
+    assert_eq!(default_video_filename("", true), ".m4a");
 }
 
 // ── video format options ─────────────────────────────────────────────
@@ -1278,6 +1290,7 @@ fn video_source_page_carries_format_pin() {
         media_url: None,
         expires_at: None,
         quality: "1080p".into(),
+        audio_only: false,
         is_live: false,
         video_format_id: Some("137".into()),
     };
@@ -1647,7 +1660,7 @@ fn plan_adopts_unknown_video_despite_separate_audio() {
     // The TikTok gating bug: both fallbacks keyed off audio absence, so
     // the music track suppressed them and only the music survived.
     let video = tiktok_like_video();
-    let plan = plan_streams(&video, "1080p", None, true, 1);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
     assert!(plan.hls_sel.is_none());
@@ -1658,7 +1671,7 @@ fn plan_pinned_hls_wins_over_muxed_adoption() {
     // The x.com shadowing bug: the pin was dropped by the HTTPS-only
     // lookup and the muxed adoption then vetoed the HLS path.
     let video = x_like_video();
-    let plan = plan_streams(&video, "720p", Some("hls-720"), true, 1);
+    let plan = plan_streams(&video, "720p", false, Some("hls-720"), true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none());
     let hls = plan.hls_sel.expect("pinned hls");
@@ -1671,7 +1684,7 @@ fn plan_muxed_only_still_adopts_without_pin() {
     // over the HLS preset is unchanged) — but at the requested height,
     // not first-in-extractor-order.
     let video = x_like_video();
-    let plan = plan_streams(&video, "1080p", None, true, 1);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.hls_sel.is_none());
@@ -1717,7 +1730,7 @@ fn plan_muxed_adoption_honors_height_cap() {
         ("720p", "m720"),
         ("480p", "m720"),
     ] {
-        let plan = plan_streams(&video, quality, None, true, 1);
+        let plan = plan_streams(&video, quality, false, None, true, 1);
         assert_eq!(
             plan.audio_sel.expect("adopted").format_id,
             want,
@@ -1731,7 +1744,7 @@ fn plan_stale_hls_pin_degrades_to_muxed_adoption() {
     // A vanished HLS pin behaves like no pin: preset, then adoption
     // (at the dialog-picked height, not the lowest listing).
     let video = x_like_video();
-    let plan = plan_streams(&video, "1080p", Some("gone"), true, 1);
+    let plan = plan_streams(&video, "1080p", false, Some("gone"), true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.hls_sel.is_none());
 }
@@ -1742,8 +1755,30 @@ fn plan_splits_stay_split() {
         test_format_full("v", "avc1.640028", "none", Some(1080), None, "https", false),
         test_format_full("a", "none", "mp4a.40.2", None, None, "https", false),
     ]));
-    let plan = plan_streams(&video, "1080p", None, true, 1);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert_eq!(plan.video_sel.expect("video").format_id, "v");
+    assert_eq!(plan.audio_sel.expect("audio").format_id, "a");
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_audio_only_request_skips_video() {
+    // Dialog audio-only choice: video selection skipped, best audio
+    // kept even when a muxed file is also listed, HLS path never runs.
+    let video = test_video(serde_json::json!([
+        test_format_full("a", "none", "mp4a.40.2", None, None, "https", false),
+        test_format_full(
+            "m",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "https",
+            false
+        ),
+    ]));
+    let plan = plan_streams(&video, "1080p", true, None, true, 1);
+    assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("audio").format_id, "a");
     assert!(plan.hls_sel.is_none());
 }
@@ -1770,10 +1805,41 @@ fn plan_hls_preset_still_serves_hls_only_pages() {
             false
         ),
     ]));
-    let plan = plan_streams(&video, "720p", None, true, 1);
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("preset hls").height, Some(1080));
+}
+
+#[test]
+fn plan_audio_only_request_reaches_hls() {
+    // Audio-only on an HLS-only page (no direct audio anywhere) must
+    // yield the HLS variant for the extract path — never fail the row
+    // as unavailable.
+    let video = test_video(serde_json::json!([
+        test_format_full(
+            "h480",
+            "avc1",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "h1080",
+            "avc1",
+            "mp4a.40.2",
+            Some(1080),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]));
+    let plan = plan_streams(&video, "720p", true, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_sel.is_none());
+    assert_eq!(plan.hls_sel.expect("hls for extract").height, Some(1080));
 }
 
 // ── quality for height ───────────────────────────────────────────────
@@ -1865,6 +1931,7 @@ fn direct_test_job() -> VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         quality: "720p".into(),
+        audio_only: false,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         timeout_secs: 60,
@@ -2003,7 +2070,7 @@ fn muxed_below_hls_video() -> yt_dlp::model::Video {
 #[test]
 fn plan_best_prefers_taller_hls_over_muxed() {
     let video = muxed_below_hls_video();
-    let plan = plan_streams(&video, "best", None, true, 1);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert!(plan.audio_sel.is_none(), "adoption yields to the variant");
     assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
@@ -2014,11 +2081,11 @@ fn plan_cap_blocks_taller_hls() {
     // Capped 720p: the 1080p variant exceeds the cap, so the direct
     // 720p file stands.
     let video = muxed_below_hls_video();
-    let plan = plan_streams(&video, "720p", None, true, 1);
+    let plan = plan_streams(&video, "720p", false, None, true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720");
     assert!(plan.hls_sel.is_none());
     // Capped 1080p: the variant is within cap and taller, so it wins.
-    let plan = plan_streams(&video, "1080p", None, true, 1);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
 }
@@ -2027,7 +2094,7 @@ fn plan_cap_blocks_taller_hls() {
 fn plan_tie_keeps_direct_muxed() {
     // Equal heights: direct-file precedence is unchanged.
     let video = x_like_video();
-    let plan = plan_streams(&video, "best", None, true, 1);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "http-720");
     assert!(plan.hls_sel.is_none());
 }
@@ -2079,6 +2146,7 @@ fn live_test_job() -> VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         quality: "720p".into(),
+        audio_only: false,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         timeout_secs: 60,
@@ -2129,6 +2197,7 @@ fn live_remux_argv_copies_with_fixup() {
     let argv = live_remux_argv(
         std::path::Path::new("/tmp/st/live.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4"),
+        false,
         true,
     );
     assert!(argv.windows(2).any(|w| w == ["-map", "0"]));
@@ -2143,7 +2212,17 @@ fn live_remux_argv_copies_with_fixup() {
         std::path::Path::new("/tmp/st/live.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4"),
         false,
+        false,
     );
+    assert!(!argv.iter().any(|a| a == "-bsf:a"));
+    // Audio-only maps audio alone.
+    let argv = live_remux_argv(
+        std::path::Path::new("/tmp/st/live.m4a.part"),
+        std::path::Path::new("/tmp/st/final.m4a"),
+        true,
+        false,
+    );
+    assert!(argv.windows(2).any(|w| w == ["-map", "0:a?"]));
     assert!(!argv.iter().any(|a| a == "-bsf:a"));
 }
 
@@ -2456,6 +2535,7 @@ fn vod_hls_pins_planner_variant_id() {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
+        audio_only: false,
         dest: dir.join("v.mp4"),
         tries: 3,
         timeout_secs: 60,
@@ -2513,6 +2593,7 @@ fn vod_hls_refuses_existing_dest() {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
+        audio_only: false,
         dest: dir.join("v.mp4"),
         tries: 3,
         timeout_secs: 60,
@@ -2655,7 +2736,7 @@ fn plan_unknown_adoption_is_first_match() {
         }),
         test_format_full("music", "none", "mp4a.40.2", None, None, "https", false),
     ]));
-    let plan = plan_streams(&video, "1080p", None, true, 1);
+    let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "low");
 }
@@ -2688,7 +2769,7 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
         !listed.contains(&"v1080-avc".to_string()),
         "fixture must keep the pin unlisted: {listed:?}"
     );
-    let plan = plan_streams(&video, "1080p", Some("v1080-avc"), true, 1);
+    let plan = plan_streams(&video, "1080p", false, Some("v1080-avc"), true, 1);
     let v = plan.video_sel.expect("stale pin resolves");
     assert_eq!(v.format_id, "v1080-avc");
     assert!(plan.audio_sel.is_some(), "split pairs with audio");
@@ -2764,7 +2845,7 @@ fn sanitize_missing_codec_fields_still_parse() {
     sanitize_video_json(&mut value);
     let video: yt_dlp::model::Video = serde_json::from_value(value).expect("sparse parses");
     assert_eq!(video.formats.len(), 1);
-    let plan = plan_streams(&video, "best", None, true, 1);
+    let plan = plan_streams(&video, "best", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "dl");
 }
@@ -2951,6 +3032,53 @@ fn hls_argv_takes_subtitles() {
 }
 
 #[test]
+fn unified_argv_extracts_audio_for_audio_only() {
+    // Dialog audio-only choice on a direct row: extract to m4a (native
+    // containers vary by codec) instead of merging, and never pass
+    // subtitle flags.
+    let mut job = direct_test_job();
+    job.audio_only = true;
+    job.subtitles = Some("en".into());
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "a456/ba/b",
+        false,
+        "",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(argv.contains(&"--extract-audio".to_string()));
+    let af = argv
+        .iter()
+        .position(|a| a == "--audio-format")
+        .expect("format");
+    assert_eq!(argv[af + 1], "m4a");
+    assert!(!argv.iter().any(|a| a == "--merge-output-format"));
+    assert_no_subtitle_tokens(&argv);
+}
+
+#[test]
+fn hls_argv_extracts_audio_for_audio_only() {
+    // Dialog audio-only choice on an HLS row: extract to m4a instead
+    // of merging, and never pass subtitle flags.
+    let mut job = direct_test_job();
+    job.quality = "best".into();
+    job.audio_only = true;
+    job.subtitles = Some("en".into());
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(argv.contains(&"--extract-audio".to_string()));
+    let af = argv
+        .iter()
+        .position(|a| a == "--audio-format")
+        .expect("format");
+    assert_eq!(argv[af + 1], "m4a");
+    assert!(!argv.iter().any(|a| a == "--merge-output-format"));
+    assert_no_subtitle_tokens(&argv);
+}
+
+#[test]
 fn live_capture_argv_never_takes_subtitles() {
     // Captioning a live edge is not a download: even with a language
     // configured, live captures must not pass subtitle flags.
@@ -3103,6 +3231,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
+        audio_only: false,
         dest: dir.join("v.mp4"),
         tries: 3,
         timeout_secs: 60,
@@ -3569,7 +3698,7 @@ fn unified_format_spec_matrix() {
     // lone stale video id doesn't throw away good audio), then the
     // full preset pair.
     assert_eq!(
-        unified_format_spec(Some("v123"), "a456", "1080p"),
+        unified_format_spec(Some("v123"), "a456", "1080p", false),
         (
             "v123+a456/bv*[height<=1080]+a456/bv*[height<=1080]+ba/b".to_string(),
             true
@@ -3577,29 +3706,35 @@ fn unified_format_spec_matrix() {
     );
     // Best quality (no height cap): unbounded video fallback.
     assert_eq!(
-        unified_format_spec(Some("v1"), "a2", "best"),
+        unified_format_spec(Some("v1"), "a2", "best", false),
         ("v1+a2/bv*+a2/bv*+ba/b".to_string(), true)
     );
     // Adopted single file: exact id, best-single fallback (never audio).
     assert_eq!(
-        unified_format_spec(None, "m789", "1080p"),
+        unified_format_spec(None, "m789", "1080p", false),
         ("m789/b".to_string(), false)
+    );
+    // Dialog audio-only choice: exact audio track, audio fallback;
+    // never merges, never drifts into video.
+    assert_eq!(
+        unified_format_spec(Some("v123"), "a456", "1080p", true),
+        ("a456/ba/b".to_string(), false)
     );
     // Hostile ids degrade to preset chains instead of widening `-f`.
     assert_eq!(
-        unified_format_spec(Some("v1/a2"), "a456", "1080p"),
+        unified_format_spec(Some("v1/a2"), "a456", "1080p", false),
         ("bv*[height<=1080]+ba/b".to_string(), true)
     );
     assert_eq!(
-        unified_format_spec(Some("v123"), "a[456]", "1080p"),
+        unified_format_spec(Some("v123"), "a[456]", "1080p", false),
         ("bv*[height<=1080]+ba/b".to_string(), true)
     );
     assert_eq!(
-        unified_format_spec(Some(""), "a456", "1080p"),
+        unified_format_spec(Some(""), "a456", "1080p", false),
         ("bv*[height<=1080]+ba/b".to_string(), true)
     );
     assert_eq!(
-        unified_format_spec(None, "a,456", "1080p"),
+        unified_format_spec(None, "a,456", "1080p", false),
         ("b".to_string(), false)
     );
 }

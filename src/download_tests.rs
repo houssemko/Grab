@@ -642,6 +642,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
             Some("My Video.mp4"),
             crate::video::VideoChoices {
                 quality: "1080p".to_string(),
+                audio_only: false,
                 video_format_id: None,
                 is_live: false,
             },
@@ -680,6 +681,7 @@ fn enqueue_video_rejects_direct_url() {
                 None,
                 crate::video::VideoChoices {
                     quality: "1080p".to_string(),
+                    audio_only: false,
                     video_format_id: None,
                     is_live: false,
                 },
@@ -707,6 +709,7 @@ fn video_source_survives_restore_and_retry() {
                 Some("Clip.mp4"),
                 crate::video::VideoChoices {
                     quality: "720p".to_string(),
+                    audio_only: false,
                     video_format_id: None,
                     is_live: false,
                 },
@@ -757,6 +760,7 @@ fn mismatched_video_source_dropped_on_restore() {
                 media_url: None,
                 expires_at: None,
                 quality: "1080p".into(),
+                audio_only: false,
                 is_live: false,
                 video_format_id: None,
             }),
@@ -795,6 +799,7 @@ fn unremove_restores_video_source() {
             Some("Clip.mp4"),
             crate::video::VideoChoices {
                 quality: "720p".to_string(),
+                audio_only: false,
                 video_format_id: None,
                 is_live: false,
             },
@@ -845,6 +850,7 @@ fn queue_file_never_carries_cookies() {
             Some("Clip.mp4"),
             crate::video::VideoChoices {
                 quality: "1080p".to_string(),
+                audio_only: false,
                 video_format_id: None,
                 is_live: false,
             },
@@ -3102,6 +3108,7 @@ fn remove_cleans_video_staging() {
             media_url: None,
             expires_at: None,
             quality: "1080p".to_string(),
+            audio_only: false,
             is_live: false,
             video_format_id: None,
         },
@@ -3138,6 +3145,7 @@ fn remove_keeps_live_staging_for_finalize() {
             media_url: None,
             expires_at: None,
             quality: "1080p".to_string(),
+            audio_only: false,
             is_live: true,
             video_format_id: None,
         },
@@ -3524,6 +3532,7 @@ fn proxy_argv_precedes_end_of_options() {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
         quality: "best".into(),
+        audio_only: false,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         tries: 3,
         timeout_secs: 60,
@@ -3838,6 +3847,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
             Some("Clip.mp4"),
             crate::video::VideoChoices {
                 quality: "1080p".to_string(),
+                audio_only: false,
                 video_format_id: None,
                 is_live: false,
             },
@@ -3886,6 +3896,7 @@ fn delete_download_trashes_video_sidecars() {
             media_url: None,
             expires_at: None,
             quality: "1080p".to_string(),
+            audio_only: false,
             is_live: false,
             video_format_id: None,
         },
@@ -3947,6 +3958,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
             Some("Clip.mp4"),
             crate::video::VideoChoices {
                 quality: "1080p".to_string(),
+                audio_only: false,
                 video_format_id: None,
                 is_live: false,
             },

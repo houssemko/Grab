@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-19 08:36+0000\n"
+"POT-Creation-Date: 2026-09-20 08:36+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -460,6 +460,10 @@ msgstr ""
 
 #: src/preferences.rs:401
 msgid "Preferred quality"
+msgstr ""
+
+#: src/window.rs
+msgid "Audio only"
 msgstr ""
 
 #: src/preferences.rs:447
@@ -926,8 +930,16 @@ msgstr ""
 msgid "Waiting to resolve media…"
 msgstr ""
 
+#: src/download.rs
+msgid "Waiting to resolve audio…"
+msgstr ""
+
 #: src/download.rs:2715 src/video.rs:1423
 msgid "Resolving media…"
+msgstr ""
+
+#: src/download.rs
+msgid "Resolving audio…"
 msgstr ""
 
 #: src/download_tests.rs:654 src/video.rs:271

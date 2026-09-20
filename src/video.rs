@@ -62,10 +62,14 @@ pub fn quality_value(index: usize) -> &'static str {
 }
 
 /// Default file name for a resolved video when the user left the name
-/// blank: the video title plus the container the worker produces.
-/// The intake sanitizes it further.
-pub fn default_video_filename(title: &str) -> String {
-    format!("{title}.mp4")
+/// blank: the video title plus the container the worker will produce
+/// (.mp4 merged, .m4a audio-only). The intake sanitizes it further.
+pub fn default_video_filename(title: &str, audio_only: bool) -> String {
+    if audio_only {
+        format!("{title}.m4a")
+    } else {
+        format!("{title}.mp4")
+    }
 }
 
 /// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`].
@@ -129,11 +133,14 @@ const VIDEO_DOMAINS: &[&str] = &[
 ];
 
 /// Per-row video choices from the New Download dialog: quality
-/// preset, format pin and liveness. Bundled so intake entry points stay
-/// under the argument-count lint.
+/// preset, audio-only switch, format pin and liveness. Bundled so
+/// intake entry points stay under the argument-count lint.
 #[derive(Debug, Clone)]
 pub struct VideoChoices {
     pub quality: String,
+    /// Per-download audio-only switch from the New Download dialog.
+    /// Deliberately not a preference: no global default exists.
+    pub audio_only: bool,
     pub video_format_id: Option<String>,
     pub is_live: bool,
 }
@@ -147,14 +154,17 @@ pub enum VideoSource {
     Direct,
     /// Media behind a page that needs yt-dlp. The persisted identity is the
     /// *page* URL; `media_url`/`expires_at` are transient — when missing or
-    /// expired the page is extracted again. `quality` is the per-item
-    /// choice (initialized from Preferences, then independent).
+    /// expired the page is extracted again. `quality`/`audio_only` are the
+    /// per-item choices from the New Download dialog (audio has no
+    /// global default by design).
     Page {
         page_url: String,
         media_url: Option<String>,
         expires_at: Option<i64>,
         #[serde(default = "default_video_quality")]
         quality: String,
+        #[serde(default)]
+        audio_only: bool,
         /// Whether the page is a live stream. Persisted so rows restored
         /// across launches keep their live behavior (stop-and-keep
         /// instead of pause/cancel); refreshed on every resolve.
@@ -183,6 +193,7 @@ pub fn classify(url: &str) -> VideoSource {
                     media_url: None,
                     expires_at: None,
                     quality: default_video_quality(),
+                    audio_only: false,
                     is_live: false,
                     video_format_id: None,
                 }
@@ -1724,14 +1735,20 @@ struct StreamPlan {
 fn plan_streams(
     video: &Video,
     quality: &str,
+    audio_only_request: bool,
     video_format_id: Option<&str>,
     newest_codecs: bool,
     item_id: u64,
 ) -> StreamPlan {
     use yt_dlp::VideoSelection as _;
+    // Pins and presets resolve for audio-only rows too: with no direct
+    // audio they feed the HLS extract path (or live capture) instead of
+    // failing the row as unavailable.
     let pinned_hls: Option<HlsSel> =
         video_format_id.and_then(|id| find_hls_format(&video.formats, id));
-    let mut video_sel: Option<StreamSel> = if pinned_hls.is_some() {
+    let mut video_sel: Option<StreamSel> = if audio_only_request {
+        None
+    } else if pinned_hls.is_some() {
         // Explicit HLS pick: no direct selection and no fallback
         // chatter — the HLS path below consumes the pin.
         None
@@ -1773,7 +1790,10 @@ fn plan_streams(
     // a shadowed adoption never leaks its single-part mode into the
     // HLS path.
     let pre_audio_sel = audio_sel.clone();
-    if pinned_hls.is_none() && (audio_sel.is_none() || video_sel.is_none()) {
+    if pinned_hls.is_none()
+        && (audio_sel.is_none() || video_sel.is_none())
+        && (!audio_only_request || audio_sel.is_none())
+    {
         let muxed = video_sel.take_if(|v| v.has_audio).or_else(|| {
             // Height-aware: a bare "first muxed file" pick is lowest
             // first on extractors that list ascending (x.com), ignoring
@@ -1785,7 +1805,11 @@ fn plan_streams(
             single_adopted = true;
         }
     }
-    if pinned_hls.is_none() && video_sel.is_none() && (audio_sel.is_none() || !single_adopted) {
+    if pinned_hls.is_none()
+        && !audio_only_request
+        && video_sel.is_none()
+        && (audio_sel.is_none() || !single_adopted)
+    {
         let unknown = video.formats.iter().find(|f| {
             f.format_type() == FormatType::Unknown
                 && matches!(
@@ -1813,7 +1837,8 @@ fn plan_streams(
     // over-cap variants keep the direct file.
     let hls_preset = select_hls_format(&video.formats, quality_height(quality));
     let mut hls_wins = false;
-    if pinned_hls.is_none()
+    if !audio_only_request
+        && pinned_hls.is_none()
         && single_adopted
         && let (Some(preset), Some(muxed_h)) = (
             hls_preset.as_ref(),
@@ -2215,6 +2240,10 @@ pub struct VideoJob {
     /// Newest codecs first (AV1 over AVC1). False prefers compatible
     /// H.264 for players without newer decoders.
     pub newest_codecs: bool,
+    /// Dialog audio-only choice for this row (no global default; the
+    /// New Download dialog owns it). Skips video selection, merging,
+    /// and subtitles; HLS takes its audio rendition, live records m4a.
+    pub audio_only: bool,
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
@@ -2274,7 +2303,11 @@ pub async fn run_video_download(
 
     // Resolve (with retries, always fresh: without a cache backend every
     // attempt re-extracts, so expired format URLs never survive a retry).
-    phase(gettext("Resolving media…"));
+    phase(if job.audio_only {
+        gettext("Resolving audio…")
+    } else {
+        gettext("Resolving media…")
+    });
     let mut video: Option<Video> = None;
     for attempt in 0..job.tries.max(1) {
         match fetch_video_page(
@@ -2318,6 +2351,7 @@ pub async fn run_video_download(
     } = plan_streams(
         &video,
         &job.quality,
+        job.audio_only,
         job.video_format_id.as_deref(),
         job.newest_codecs,
         job.item_id,
@@ -2474,6 +2508,7 @@ pub async fn run_video_download(
         video_sel.as_ref().map(|s| s.format_id.as_str()),
         audio_sel.format_id.as_str(),
         &job.quality,
+        job.audio_only,
     );
     let combined_total = query.total;
     // NOTE: Grab's speed limit does not apply here — the binary runs
@@ -2540,10 +2575,19 @@ pub(crate) fn unified_format_spec(
     video_id: Option<&str>,
     audio_id: &str,
     quality: &str,
+    audio_only: bool,
 ) -> (String, bool) {
     let vfb = part_fallback_spec(quality, true, false);
     let afb = part_fallback_spec(quality, false, true);
     let aid = selector_id(audio_id);
+    if audio_only {
+        // Dialog audio-only choice: exact audio track first, audio
+        // fallback after; never merges, never drifts into video.
+        return match aid {
+            Some(a) => (format!("{a}/ba/b"), false),
+            None => ("ba/b".to_string(), false),
+        };
+    }
     match video_id {
         // Adopted single file (muxed direct): exact id first, best-single
         // fallback (never drift into a bare audio track).
@@ -2664,12 +2708,22 @@ pub(crate) fn unified_download_argv(
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
-    if merging {
+    if job.audio_only {
+        // Dialog audio-only choice: extract the audio track to m4a
+        // (native containers vary by codec — opus arrives as webm — so
+        // merging to the .m4a dest name would mislabel bytes).
+        args.push("--extract-audio".to_string());
+        args.push("--audio-format".to_string());
+        args.push("m4a".to_string());
+    } else if merging {
         args.push("--merge-output-format".to_string());
         args.push(merge_ext.to_string());
         args.push("--embed-metadata".to_string());
     }
-    if let Some(lang) = job.subtitles.as_deref() {
+    // No subtitles on audio-only rows (nothing to caption).
+    if !job.audio_only
+        && let Some(lang) = job.subtitles.as_deref()
+    {
         args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
@@ -2772,8 +2826,11 @@ async fn run_unified_ytdlp(
         }
         Err(e) => return Err(VideoError::combine(&e)),
     }
-    // Best-effort subtitle sidecar beside the discovered output.
-    if let Some(lang) = job.subtitles.as_deref() {
+    // Best-effort subtitle sidecar beside the discovered output
+    // (video rows only; audio-only rows never request them).
+    if !job.audio_only
+        && let Some(lang) = job.subtitles.as_deref()
+    {
         collect_sidecar(&sidecar_path_for(&final_tmp, lang), &job.dest, lang);
     }
     // Sweep legacy dest-dir parts: pre-migration rows (or foreign
@@ -2983,7 +3040,7 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
 /// ffmpeg argv remuxing a stopped live capture (MPEG-TS bytes, possibly
 /// still in the `.part` shell) into the finished file: stream-copy with
 /// faststart for progressive playback. Pure for tests.
-fn live_remux_argv(ts_path: &Path, dest: &Path, with_bsf: bool) -> Vec<String> {
+fn live_remux_argv(ts_path: &Path, dest: &Path, audio_only: bool, with_bsf: bool) -> Vec<String> {
     let mut argv = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
@@ -2991,9 +3048,12 @@ fn live_remux_argv(ts_path: &Path, dest: &Path, with_bsf: bool) -> Vec<String> {
         "-nostats".to_string(),
         "-i".to_string(),
         ts_path.to_string_lossy().into_owned(),
-        "-map".to_string(),
-        "0".to_string(),
     ];
+    if audio_only {
+        argv.extend(["-map".to_string(), "0:a?".to_string()]);
+    } else {
+        argv.extend(["-map".to_string(), "0".to_string()]);
+    }
     argv.extend([
         "-dn".to_string(),
         "-ignore_unknown".to_string(),
@@ -3021,11 +3081,12 @@ async fn remux_live_capture(
     ffmpeg_bin: &Path,
     ts_path: &Path,
     dest: &Path,
+    audio_only: bool,
     timeout: Duration,
 ) -> Result<(), VideoError> {
     for with_bsf in [true, false] {
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
-        cmd.args(live_remux_argv(ts_path, dest, with_bsf));
+        cmd.args(live_remux_argv(ts_path, dest, audio_only, with_bsf));
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
@@ -3116,7 +3177,7 @@ async fn run_live_ytdlp(
     // resumed into (append-only stream — resume corrupts) nor adopted
     // as a fresh capture that recorded nothing. Staging still hosts the
     // remux temp below.
-    let ext = "mp4";
+    let ext = if job.audio_only { "m4a" } else { "mp4" };
     // Capture beside the finished file (yt-dlp defaults): the `.part`
     // shell shows up in the user's folder while recording, and the
     // file-growth watcher announces "Recording…" off this path.
@@ -3271,7 +3332,8 @@ async fn run_live_ytdlp(
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
     let final_tmp = staging.join(format!("final.{ext}"));
-    if let Err(e) = remux_live_capture(ffmpeg_bin, &src, &final_tmp, timeout).await {
+    if let Err(e) = remux_live_capture(ffmpeg_bin, &src, &final_tmp, job.audio_only, timeout).await
+    {
         let _ = tokio::fs::remove_dir_all(staging).await;
         return Err(e);
     }
@@ -3502,13 +3564,21 @@ pub(crate) fn hls_download_argv(
         job.tries.max(1).to_string(),
         "--print".to_string(),
         "after_move:filepath".to_string(),
-        "--merge-output-format".to_string(),
-        "mp4".to_string(),
     ];
-    // Sidecar subtitles for HLS VOD rows (live rows never reach this
-    // builder — they run through `live_capture_argv`, which deliberately
-    // omits subtitles).
-    if let Some(lang) = job.subtitles.as_deref() {
+    if job.audio_only {
+        args.push("--extract-audio".to_string());
+        args.push("--audio-format".to_string());
+        args.push("m4a".to_string());
+    } else {
+        args.push("--merge-output-format".to_string());
+        args.push("mp4".to_string());
+    }
+    // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
+    // never reach this builder — they run through `live_capture_argv`,
+    // which deliberately omits subtitles).
+    if !job.audio_only
+        && let Some(lang) = job.subtitles.as_deref()
+    {
         args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
