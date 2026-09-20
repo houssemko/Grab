@@ -1257,3 +1257,19 @@ msgstr ""
 #: src/preferences.rs:555
 msgid "Newest codecs first, or widest playback"
 msgstr ""
+
+#: src/preferences.rs:652
+msgid "Post-processing"
+msgstr ""
+
+#: src/preferences.rs:653
+msgid "Applied while finishing downloads"
+msgstr ""
+
+#: src/preferences.rs:656
+msgid "Embed subtitles"
+msgstr ""
+
+#: src/preferences.rs:657
+msgid "Mux downloaded subtitles into the video file"
+msgstr ""

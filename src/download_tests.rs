@@ -3518,6 +3518,7 @@ fn proxy_argv_precedes_end_of_options() {
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
+        embed_subs: false,
         proxy: Some(proxy),
     };
     for argv in [

@@ -648,6 +648,18 @@ pub fn show(
             );
         }
     });
+    let video_post_group = adw::PreferencesGroup::builder()
+        .title(gettext("Post-processing"))
+        .description(gettext("Applied while finishing downloads"))
+        .build();
+    let embed_subs = adw::SwitchRow::builder()
+        .title(gettext("Embed subtitles"))
+        .subtitle(gettext("Mux downloaded subtitles into the video file"))
+        .build();
+    settings
+        .bind(crate::settings::key::EMBED_SUBS, &embed_subs, "active")
+        .build();
+    video_post_group.add(&embed_subs);
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
         .description(gettext("yt-dlp and ffmpeg resolve media pages"))
@@ -874,6 +886,7 @@ pub fn show(
     }
     video_page.add(&video_quality_group);
     video_page.add(&video_auth_group);
+    video_page.add(&video_post_group);
     video_page.add(&video_tools_group);
     dialog.add(&video_page);
     // Page order: Downloads, Media, Torrent, Network (Network last).
