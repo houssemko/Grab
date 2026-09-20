@@ -23,9 +23,6 @@ pub fn show(
     let advanced_general_group = adw::PreferencesGroup::builder()
         .title(gettext("General"))
         .build();
-    let advanced_net_group = adw::PreferencesGroup::builder()
-        .title(gettext("Network"))
-        .build();
     let advanced_media_group = adw::PreferencesGroup::builder()
         .title(gettext("Media"))
         .build();
@@ -151,7 +148,7 @@ pub fn show(
     settings
         .bind(crate::settings::key::CONNECTIONS, &connections, "value")
         .build();
-    advanced_net_group.add(&connections);
+    net_group.add(&connections);
 
     let limit = adw::EntryRow::builder()
         .title(gettext("Speed limit"))
@@ -1070,7 +1067,6 @@ pub fn show(
     // with each family's related groups adjacent (Media keeps
     // Post-processing and Live; Torrent keeps Sharing).
     advanced_page.add(&advanced_general_group);
-    advanced_page.add(&advanced_net_group);
     advanced_page.add(&advanced_media_group);
     advanced_page.add(&video_post_group);
     advanced_page.add(&video_live_group);
