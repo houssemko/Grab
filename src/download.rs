@@ -3570,6 +3570,7 @@ impl DownloadManager {
             retry_sleep: self.settings.retry_sleep().max(0) as u32,
             sleep_interval: self.settings.sleep_interval().max(0) as u32,
             sleep_requests: self.settings.sleep_requests().max(0) as u32,
+            socket_timeout: self.settings.socket_timeout().max(0) as u32,
             proxy,
         };
         let handle = tokio_rt().spawn(async move {
