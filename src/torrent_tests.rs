@@ -133,6 +133,8 @@ fn manual_proxy(ptype: &str) -> Option<crate::download::ResolvedProxy> {
         proxy_type: ptype.into(),
         proxy_host: "127.0.0.1".into(),
         proxy_port: 9050,
+        proxy_username: String::new(),
+        proxy_password: crate::secrets::CachedSecret::Absent,
         cookies_browser: String::new(),
     }
     .proxy_config()

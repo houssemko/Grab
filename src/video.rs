@@ -1954,10 +1954,11 @@ pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> us
         .unwrap_or(0)
 }
 
-/// `--proxy` argv for one yt-dlp spawn. Empty when direct.
+/// `--proxy` argv for one yt-dlp spawn. Empty when direct. Authenticated
+/// proxies carry percent-encoded userinfo (see `cli_url_authed`).
 pub(crate) fn proxy_cli_args(proxy: Option<&crate::download::ResolvedProxy>) -> Vec<String> {
-    match proxy.map(|p| p.cli_url.as_str()) {
-        Some(url) => vec!["--proxy".to_string(), url.to_string()],
+    match proxy.map(|p| p.cli_url_authed()) {
+        Some(url) => vec!["--proxy".to_string(), url],
         None => Vec::new(),
     }
 }

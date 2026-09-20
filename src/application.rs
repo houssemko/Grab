@@ -29,6 +29,14 @@ pub fn setup(app: &adw::Application) {
         let st = Rc::clone(&state);
         app.connect_startup(move |app| {
             let settings = AppSettings::new();
+            // Preload the proxy password into the in-memory cache: proxy
+            // resolution is synchronous, so the async keyring read must be
+            // underway before the first download can need it. Untouched
+            // when no proxy username is configured. `from_settings`
+            // re-arms this for usernames set after startup.
+            if !settings.proxy_username().trim().is_empty() {
+                crate::secrets::ensure_proxy_password_loaded();
+            }
             let store = gio::ListStore::new::<crate::download::DownloadItem>();
             let manager = DownloadManager::new(store, settings.clone());
             manager.restore_queue();

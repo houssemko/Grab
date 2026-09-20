@@ -83,6 +83,11 @@
       <summary>Proxy port</summary>
       <description>Proxy port, e.g. 9050 for Tor.</description>
     </key>
+    <key name="proxy-username" type="s">
+      <default>''</default>
+      <summary>Proxy username</summary>
+      <description>Username for manual proxy authentication. The password is kept in the system keyring, never in settings.</description>
+    </key>
     <key name="keep-server-date" type="b">
       <default>false</default>
       <summary>Keep server file date</summary>
