@@ -177,6 +177,11 @@
       <summary>Mark sponsored segments</summary>
       <description>Mark SponsorBlock-flagged sponsor segments as chapters in new video downloads.</description>
     </key>
+    <key name="remux-video" type="s">
+      <default>'off'</default>
+      <summary>Remux video</summary>
+      <description>Remux finished video downloads into another container without re-encoding. 'off' disables remuxing.</description>
+    </key>
     <key name="embed-thumbnail" type="b">
       <default>false</default>
       <summary>Embed thumbnail</summary>

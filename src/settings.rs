@@ -40,6 +40,7 @@ pub mod key {
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const SPONSORBLOCK_MARK: &str = "sponsorblock-mark";
+    pub const REMUX_VIDEO: &str = "remux-video";
     pub const EMBED_THUMBNAIL: &str = "embed-thumbnail";
     pub const EMBED_CHAPTERS: &str = "embed-chapters";
     pub const LIVE_FROM_START: &str = "live-from-start";
@@ -170,6 +171,10 @@ impl AppSettings {
     /// Mark SponsorBlock-flagged sponsor segments as chapters in yt-dlp downloads.
     pub fn sponsorblock_mark(&self) -> bool {
         self.0.boolean(key::SPONSORBLOCK_MARK)
+    }
+    /// Target container for opt-in remuxing (`--remux-video`); `"off"` disables it.
+    pub fn remux_video(&self) -> String {
+        self.0.string(key::REMUX_VIDEO).to_string()
     }
     /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
     /// Opt-in; live rows never take it (no post-processing leg exists).

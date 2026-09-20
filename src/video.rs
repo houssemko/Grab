@@ -1727,6 +1727,46 @@ pub(crate) fn subtitle_content_languages() -> impl Iterator<Item = &'static str>
         .filter(|l| *l != "off")
 }
 
+/// yt-dlp remux target containers offered in preferences, index-aligned
+/// with [`remux_video_labels`]. `off` disables remuxing.
+pub(crate) const REMUX_VIDEO_VALUES: &[&str] = &["off", "mp4", "mkv", "webm"];
+
+pub fn remux_video_labels() -> Vec<String> {
+    vec![
+        gettext("Off"),
+        gettext("MP4"),
+        gettext("MKV"),
+        gettext("WebM"),
+    ]
+}
+
+/// Combo index for a stored remux target. Unknown or empty values fall
+/// back to Off (the default).
+pub fn remux_video_index(value: &str) -> usize {
+    REMUX_VIDEO_VALUES
+        .iter()
+        .position(|v| *v == value)
+        .unwrap_or(0)
+}
+
+/// Stored code for a combo index. Out-of-range indexes fall back to Off.
+pub fn remux_video_value(index: usize) -> &'static str {
+    REMUX_VIDEO_VALUES.get(index).copied().unwrap_or("off")
+}
+
+/// Active remux target for one job: the raw setting trimmed and
+/// lowercased, then allowlisted against [`REMUX_VIDEO_VALUES`].
+/// `off`, empty and unknown codes (hand-edited dconf) all resolve to
+/// `None`: a code yt-dlp would only warn about is never requested, and
+/// the value reaching `--remux-video` always comes from the fixed list.
+pub(crate) fn remux_video_active(raw: &str) -> Option<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    REMUX_VIDEO_VALUES
+        .iter()
+        .find(|v| **v == norm && **v != "off")
+        .map(|v| v.to_string())
+}
+
 /// Directory form of a resolved tool binary for `--ffmpeg-location`
 /// (yt-dlp wants the directory; Grab resolves the binary).
 fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
@@ -2668,6 +2708,12 @@ pub struct VideoJob {
     /// (`--sponsorblock-mark sponsor`). Opt-in preference; live rows never
     /// take it (the live edge cannot know future segments).
     pub sponsorblock_mark: bool,
+    /// Remux the finished file into another container (`--remux-video`).
+    /// Opt-in preference; `None` disables it and audio-only rows always
+    /// resolve to `None` (no video leg exists). Live rows never take it
+    /// (live captures record raw transport streams, no post-processing
+    /// leg exists).
+    pub remux_video: Option<String>,
     /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
     /// Opt-in preference; live rows never take it (live captures record
     /// raw transport streams, no post-processing leg exists).
@@ -3210,6 +3256,13 @@ pub(crate) fn unified_download_argv(
     if job.embed_chapters {
         // Opt-in post-processing: write chapter markers into the file.
         args.push("--embed-chapters".to_string());
+    }
+    if let Some(fmt) = job.remux_video.as_deref() {
+        // Opt-in post-processing: remux the finished file into another
+        // container without re-encoding. Audio-only rows resolve to
+        // `None` in download.rs (no video leg exists).
+        args.push("--remux-video".to_string());
+        args.push(fmt.to_string());
     }
     // No subtitles on audio-only rows (nothing to caption).
     if !job.audio_only
@@ -4121,6 +4174,11 @@ pub(crate) fn hls_download_argv(
     if job.embed_chapters {
         // Same opt-in post-processing as the unified VOD legs.
         args.push("--embed-chapters".to_string());
+    }
+    if let Some(fmt) = job.remux_video.as_deref() {
+        // Same opt-in post-processing as the unified VOD legs.
+        args.push("--remux-video".to_string());
+        args.push(fmt.to_string());
     }
     // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
     // never reach this builder — they run through `live_capture_argv`,
