@@ -845,29 +845,14 @@ pub fn build_window(
     header.pack_end(&add_btn);
 
     let stack = adw::ViewStack::new();
-    // Illustration style (HIG placeholder pattern for an app's initial
-    // view): bundled SVG via the embedded GResource. from_resource has
-    // no failure return, so presence is probed first and the symbolic
-    // icon remains the fallback.
-    const EMPTY_ART: &str = "/io/github/houssemko/Grab/empty-downloads.svg";
-    let empty_paintable: Option<gtk4::gdk::Paintable> =
-        gio::resources_lookup_data(EMPTY_ART, gio::ResourceLookupFlags::NONE)
-            .ok()
-            .map(|_| gtk4::gdk::Texture::from_resource(EMPTY_ART).upcast());
-    let mut empty_builder = adw::StatusPage::builder()
+    let empty = adw::StatusPage::builder()
+        .icon_name("folder-download-symbolic")
         .title(gettext("No Downloads Yet"))
-        .description(gettext("Add a download to get started"));
-    if let Some(paintable) = empty_paintable {
-        empty_builder = empty_builder.paintable(&paintable);
-    } else {
-        empty_builder = empty_builder.icon_name("folder-download-symbolic");
-    }
-    let empty = empty_builder.build();
+        .description(gettext("Add a download to get started"))
+        .build();
     let empty_add = gtk4::Button::builder()
         .label(gettext("New Download"))
-        // Pill, not suggested: the header already carries the view's one
-        // suggested action, and both show together on the empty state.
-        .css_classes(["pill"])
+        .css_classes(["pill", "suggested-action"])
         .halign(gtk4::Align::Center)
         .build();
     empty.set_child(Some(&empty_add));

@@ -2,6 +2,5 @@
 <gresources>
   <gresource prefix="/io/github/houssemko/Grab">
     <file alias="metainfo.xml">data/io.github.houssemko.Grab.metainfo.xml.in</file>
-    <file alias="empty-downloads.svg">data/empty-downloads.svg</file>
   </gresource>
 </gresources>
