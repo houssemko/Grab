@@ -672,6 +672,30 @@ pub fn show(
         )
         .build();
     video_post_group.add(&sponsorblock);
+    let embed_thumbnail = adw::SwitchRow::builder()
+        .title(gettext("Embed thumbnail"))
+        .subtitle(gettext("Attach the video thumbnail as cover art"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::EMBED_THUMBNAIL,
+            &embed_thumbnail,
+            "active",
+        )
+        .build();
+    video_post_group.add(&embed_thumbnail);
+    let embed_chapters = adw::SwitchRow::builder()
+        .title(gettext("Embed chapters"))
+        .subtitle(gettext("Write chapter markers into the finished file"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::EMBED_CHAPTERS,
+            &embed_chapters,
+            "active",
+        )
+        .build();
+    video_post_group.add(&embed_chapters);
     let video_tools_group = adw::PreferencesGroup::builder()
         .title(gettext("Support tools"))
         .description(gettext("yt-dlp and ffmpeg resolve media pages"))

@@ -1317,3 +1317,19 @@ msgstr ""
 #: src/preferences.rs:665
 msgid "Cut SponsorBlock-flagged sponsor segments"
 msgstr ""
+
+#: src/preferences.rs:676
+msgid "Embed thumbnail"
+msgstr ""
+
+#: src/preferences.rs:677
+msgid "Attach the video thumbnail as cover art"
+msgstr ""
+
+#: src/preferences.rs:688
+msgid "Embed chapters"
+msgstr ""
+
+#: src/preferences.rs:689
+msgid "Write chapter markers into the finished file"
+msgstr ""

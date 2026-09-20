@@ -3249,6 +3249,8 @@ impl DownloadManager {
             },
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),
+            embed_thumbnail: self.settings.embed_thumbnail(),
+            embed_chapters: self.settings.embed_chapters(),
             proxy,
         };
         let handle = tokio_rt().spawn(async move {

@@ -2630,6 +2630,13 @@ pub struct VideoJob {
     /// sponsor`). Opt-in preference; live rows never take it (the live
     /// edge cannot know future segments).
     pub sponsorblock_remove: bool,
+    /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
+    /// Opt-in preference; live rows never take it (live captures record
+    /// raw transport streams, no post-processing leg exists).
+    pub embed_thumbnail: bool,
+    /// Write chapter markers into the finished file (`--embed-chapters`).
+    /// Opt-in preference; live rows never take it (same reason as above).
+    pub embed_chapters: bool,
     /// Proxy resolved at spawn time (`None` = direct). yt-dlp spawns
     /// take `--proxy` plus NO_PROXY from it.
     pub proxy: Option<crate::download::ResolvedProxy>,
@@ -3113,6 +3120,14 @@ pub(crate) fn unified_download_argv(
         // (SponsorBlock "sponsor" category only; the safe default).
         args.push("--sponsorblock-remove".to_string());
         args.push("sponsor".to_string());
+    }
+    if job.embed_thumbnail {
+        // Opt-in post-processing: attach the video thumbnail as cover art.
+        args.push("--embed-thumbnail".to_string());
+    }
+    if job.embed_chapters {
+        // Opt-in post-processing: write chapter markers into the file.
+        args.push("--embed-chapters".to_string());
     }
     // No subtitles on audio-only rows (nothing to caption).
     if !job.audio_only
@@ -3978,6 +3993,14 @@ pub(crate) fn hls_download_argv(
         // Same opt-in post-processing as the unified VOD legs.
         args.push("--sponsorblock-remove".to_string());
         args.push("sponsor".to_string());
+    }
+    if job.embed_thumbnail {
+        // Same opt-in post-processing as the unified VOD legs.
+        args.push("--embed-thumbnail".to_string());
+    }
+    if job.embed_chapters {
+        // Same opt-in post-processing as the unified VOD legs.
+        args.push("--embed-chapters".to_string());
     }
     // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
     // never reach this builder — they run through `live_capture_argv`,
