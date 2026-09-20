@@ -3373,6 +3373,7 @@ impl DownloadManager {
             embed_thumbnail: self.settings.embed_thumbnail(),
             embed_chapters: self.settings.embed_chapters(),
             retry_sleep: self.settings.retry_sleep().max(0) as u32,
+            sleep_interval: self.settings.sleep_interval().max(0) as u32,
             proxy,
         };
         let handle = tokio_rt().spawn(async move {
