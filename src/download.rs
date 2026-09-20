@@ -169,6 +169,110 @@ pub(crate) fn shorten_filename(name: &str) -> String {
     }
 }
 
+/// Fold a filename to plain ASCII, mirroring yt-dlp's `--restrict-filenames`
+/// (`sanitize_filename(restricted=True)`) with a simpler documented fold:
+///
+/// - accented Latin letters map to their base letter (`é` → `e`, `ß` → `ss`,
+///   `æ` → `ae`); every other non-ASCII character becomes `_`
+/// - `"` and control characters are dropped outright (as in yt-dlp)
+/// - runs of `_` collapse to one; leading/trailing `_` are stripped
+///
+/// The split keeps the extension: stem and extension are folded separately,
+/// so `Café & Croissants.mp4` becomes `Cafe_Croissants.mp4`. A stem that
+/// folds to nothing falls back to `"file"`, so the result is never empty.
+pub(crate) fn restrict_filename_ascii(name: &str) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
+        _ => (name, None),
+    };
+    let stem = fold_ascii_part(stem);
+    let stem = if stem.is_empty() {
+        "file".to_string()
+    } else {
+        stem
+    };
+    match ext {
+        Some(e) => format!("{stem}{}", fold_ascii_part(e)),
+        None => stem,
+    }
+}
+
+/// Fold one filename part (stem or extension) to ASCII.
+fn fold_ascii_part(part: &str) -> String {
+    /// Base-letter fold for the accented Latin ranges yt-dlp maps through
+    /// its own accent table; anything unlisted here is not representable
+    /// in ASCII and becomes `_` in the caller.
+    fn fold_accent(c: char) -> Option<&'static str> {
+        match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ǎ' => Some("a"),
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => Some("e"),
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => Some("i"),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'ǒ' => Some("o"),
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'ǔ' => Some("u"),
+            'ý' | 'ÿ' => Some("y"),
+            'ñ' | 'ń' | 'ň' => Some("n"),
+            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => Some("c"),
+            'ß' => Some("ss"),
+            'æ' => Some("ae"),
+            'œ' => Some("oe"),
+            'ð' | 'ď' | 'đ' => Some("d"),
+            'þ' => Some("th"),
+            'ł' => Some("l"),
+            'š' | 'ś' | 'ŝ' | 'ş' => Some("s"),
+            'ž' | 'ź' | 'ż' => Some("z"),
+            'ğ' => Some("g"),
+            'ř' => Some("r"),
+            'ť' | 'ţ' => Some("t"),
+            'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' | 'Ǎ' => Some("A"),
+            'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => Some("E"),
+            'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'Ĭ' | 'Į' => Some("I"),
+            'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' | 'Ǒ' => Some("O"),
+            'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' | 'Ǔ' => Some("U"),
+            'Ý' | 'Ÿ' => Some("Y"),
+            'Ñ' | 'Ń' | 'Ň' => Some("N"),
+            'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => Some("C"),
+            'Æ' => Some("AE"),
+            'Œ' => Some("OE"),
+            'Ð' | 'Ď' | 'Đ' => Some("D"),
+            'Þ' => Some("TH"),
+            'Ł' => Some("L"),
+            'Š' | 'Ś' | 'Ŝ' | 'Ş' => Some("S"),
+            'Ž' | 'Ź' | 'Ż' => Some("Z"),
+            'Ğ' => Some("G"),
+            'Ř' => Some("R"),
+            'Ť' | 'Ţ' => Some("T"),
+            _ => None,
+        }
+    }
+
+    let mut out = String::with_capacity(part.len());
+    for c in part.chars() {
+        if let Some(base) = fold_accent(c) {
+            out.push_str(base);
+        } else if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+            out.push(c);
+        } else if c == '"' || c.is_control() {
+            // Dropped outright, as in yt-dlp's restricted mode.
+        } else {
+            out.push('_');
+        }
+    }
+    let mut collapsed = String::with_capacity(out.len());
+    let mut prev_underscore = false;
+    for c in out.chars() {
+        if c == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        collapsed.push(c);
+    }
+    collapsed.trim_matches('_').to_string()
+}
+
 /// Append ` (n)` before the extension until `taken` returns false.
 ///
 /// Example: `dedupe_filename("f.iso", |n| n == "f.iso")` returns `"f (1).iso"`.
@@ -2427,6 +2531,15 @@ impl DownloadManager {
             .map(|s| s.to_string())
             .unwrap_or_else(|| filename_from_url(&url));
         let name = shorten_filename(&name);
+        let name = if self.settings.restrict_filenames() {
+            // Opt-in ASCII-only filenames. yt-dlp's --restrict-filenames only
+            // sanitizes its own output-template fields, but Grab passes yt-dlp
+            // literal output paths, so the flag would be a no-op here: fold
+            // where Grab actually names the file, before dedupe reserves it.
+            restrict_filename_ascii(&name)
+        } else {
+            name
+        };
         // One readdir per intake: the reservation probe below must not
         // stat the download dir once per dedupe candidate.
         let existing = crate::video::dir_file_names(std::path::Path::new(&dir));

@@ -54,6 +54,18 @@ pub fn show(
     dest_row.add_suffix(&reset_btn);
     dest_row.add_suffix(&dest_btn);
     dest_group.add(&dest_row);
+    let restrict_filenames = adw::SwitchRow::builder()
+        .title(gettext("Restrict filenames to ASCII"))
+        .subtitle(gettext("Use only ASCII characters in filenames"))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::RESTRICT_FILENAMES,
+            &restrict_filenames,
+            "active",
+        )
+        .build();
+    dest_group.add(&restrict_filenames);
     {
         let s = settings.clone();
         let l = dest_label.clone();

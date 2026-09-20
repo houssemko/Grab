@@ -284,6 +284,14 @@ msgstr ""
 msgid "Download folder"
 msgstr ""
 
+#: src/preferences.rs:58
+msgid "Restrict filenames to ASCII"
+msgstr ""
+
+#: src/preferences.rs:59
+msgid "Use only ASCII characters in filenames"
+msgstr ""
+
 #: src/preferences.rs:64 src/window.rs:1598
 msgid "Select Folder"
 msgstr ""
