@@ -2651,6 +2651,12 @@ pub struct VideoJob {
     /// Live rows never take it (extraction pacing is a VOD politeness
     /// knob; the live leg's startup requests stay unthrottled).
     pub sleep_requests: u32,
+    /// Seconds to wait on a stalled connection before giving up
+    /// (`--socket-timeout`). Opt-in preference; 0 uses yt-dlp's default.
+    /// Unlike the sleep knobs above, this one shortens stalls instead of
+    /// adding them, so live rows take it too: a stalled live fragment
+    /// fails fast and the endless fragment retries pick it back up.
+    pub socket_timeout: u32,
     /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
     /// from the same "connections" setting as the app's own segmented HTTP
     /// downloads. Schema range is 1..=16; clamped at spawn.
@@ -3208,6 +3214,12 @@ pub(crate) fn unified_download_argv(
         args.push("--sleep-requests".to_string());
         args.push(job.sleep_requests.to_string());
     }
+    if job.socket_timeout > 0 {
+        // Opt-in resilience: bound how long a stalled connection may hang
+        // before yt-dlp gives up on it and retries.
+        args.push("--socket-timeout".to_string());
+        args.push(job.socket_timeout.to_string());
+    }
     if let Some(limit) = job.speed_limit {
         // Opt-in throttle: cap this leg at the shared speed limit
         // (parsed once at spawn; empty/0/invalid means unlimited).
@@ -3590,6 +3602,13 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
         // The is_live gate keeps the builder self-consistent even if a
         // future caller misroutes a VOD row here.
         args.push("--live-from-start".to_string());
+    }
+    if job.socket_timeout > 0 {
+        // Opt-in resilience: bound stalled live fragments so the endless
+        // fragment retries recover faster. Unlike the sleep knobs (never
+        // on live), a timeout shortens stalls instead of adding them.
+        args.push("--socket-timeout".to_string());
+        args.push(job.socket_timeout.to_string());
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
@@ -4145,6 +4164,11 @@ pub(crate) fn hls_download_argv(
         // Same opt-in extraction pacing as the unified VOD legs.
         args.push("--sleep-requests".to_string());
         args.push(job.sleep_requests.to_string());
+    }
+    if job.socket_timeout > 0 {
+        // Same opt-in stalled-connection bound as the unified VOD legs.
+        args.push("--socket-timeout".to_string());
+        args.push(job.socket_timeout.to_string());
     }
     if let Some(limit) = job.speed_limit {
         // Same opt-in throttle as the unified VOD legs.

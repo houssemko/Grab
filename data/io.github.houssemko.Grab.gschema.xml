@@ -52,6 +52,12 @@
       <summary>Sleep between requests</summary>
       <description>Seconds to sleep between requests during data extraction. 0 disables the pause.</description>
     </key>
+    <key name="socket-timeout" type="i">
+      <default>0</default>
+      <range min="0" max="300"/>
+      <summary>Socket timeout</summary>
+      <description>Seconds to wait on a stalled connection before giving up. 0 uses yt-dlp's default.</description>
+    </key>
     <key name="timeout" type="i">
       <default>30</default>
       <range min="5" max="300"/>

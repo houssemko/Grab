@@ -846,6 +846,7 @@ fn pipeline_reports_missing_tools() {
         retry_sleep: 0,
         sleep_interval: 0,
         sleep_requests: 0,
+        socket_timeout: 0,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2266,6 +2267,7 @@ fn direct_test_job() -> VideoJob {
         retry_sleep: 0,
         sleep_interval: 0,
         sleep_requests: 0,
+        socket_timeout: 0,
         proxy: None,
     }
 }
@@ -2495,6 +2497,7 @@ fn live_test_job() -> VideoJob {
         retry_sleep: 0,
         sleep_interval: 0,
         sleep_requests: 0,
+        socket_timeout: 0,
         proxy: None,
     }
 }
@@ -2898,6 +2901,7 @@ fn vod_hls_pins_planner_variant_id() {
         retry_sleep: 0,
         sleep_interval: 0,
         sleep_requests: 0,
+        socket_timeout: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2970,6 +2974,7 @@ fn vod_hls_refuses_existing_dest() {
         retry_sleep: 0,
         sleep_interval: 0,
         sleep_requests: 0,
+        socket_timeout: 0,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -4114,6 +4119,78 @@ fn live_capture_argv_never_sleep_requests() {
 }
 
 #[test]
+fn unified_argv_socket_timeout_when_set() {
+    // Opt-in resilience: bound stalled connections.
+    let mut job = direct_test_job();
+    job.socket_timeout = 20;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--socket-timeout")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "20");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "socket-timeout must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.socket_timeout = 0;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--socket-timeout"));
+}
+
+#[test]
+fn hls_argv_socket_timeout_when_set() {
+    let mut job = direct_test_job();
+    job.socket_timeout = 20;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--socket-timeout")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "20");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "socket-timeout must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.socket_timeout = 0;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--socket-timeout"));
+}
+
+#[test]
+fn live_capture_argv_socket_timeout_when_set() {
+    // Unlike the sleep knobs, a timeout shortens stalls instead of
+    // adding them, so the live leg takes it too: a stalled fragment
+    // fails fast and the endless fragment retries recover it.
+    let mut job = live_test_job();
+    job.socket_timeout = 20;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let pos = argv
+        .iter()
+        .position(|a| a == "--socket-timeout")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "20");
+    // Default off: no trace of the flag.
+    job.socket_timeout = 0;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--socket-timeout"));
+}
+
+#[test]
 fn unified_argv_ratelimit_when_set() {
     // Opt-in throttle: the shared speed limit caps VOD legs via
     // `--ratelimit` (plain bytes; yt-dlp accepts the raw rate).
@@ -4523,6 +4600,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         retry_sleep: 0,
         sleep_interval: 0,
         sleep_requests: 0,
+        socket_timeout: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

@@ -16,6 +16,7 @@ pub mod key {
     pub const RETRY_SLEEP: &str = "retry-sleep";
     pub const SLEEP_INTERVAL: &str = "sleep-interval";
     pub const SLEEP_REQUESTS: &str = "sleep-requests";
+    pub const SOCKET_TIMEOUT: &str = "socket-timeout";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
     pub const PROXY_MODE: &str = "proxy-mode";
@@ -93,6 +94,11 @@ impl AppSettings {
     /// (`--sleep-requests`). Opt-in; 0 disables the pause.
     pub fn sleep_requests(&self) -> i32 {
         self.0.int(key::SLEEP_REQUESTS)
+    }
+    /// Seconds to wait on a stalled connection before giving up
+    /// (`--socket-timeout`). Opt-in; 0 uses yt-dlp's default.
+    pub fn socket_timeout(&self) -> i32 {
+        self.0.int(key::SOCKET_TIMEOUT)
     }
     pub fn timeout(&self) -> i32 {
         self.0.int(key::TIMEOUT)
