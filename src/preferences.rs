@@ -158,6 +158,16 @@ pub fn show(
         .build();
     net_group.add(&retries);
 
+    let retry_sleep = adw::SpinRow::builder()
+        .title(gettext("Retry delay"))
+        .subtitle(gettext("In seconds"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 60.0, 1.0, 5.0, 0.0))
+        .build();
+    settings
+        .bind(crate::settings::key::RETRY_SLEEP, &retry_sleep, "value")
+        .build();
+    net_group.add(&retry_sleep);
+
     let timeout = adw::SpinRow::builder()
         .title(gettext("Timeout"))
         .subtitle(gettext("In seconds"))

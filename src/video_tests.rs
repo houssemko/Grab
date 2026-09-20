@@ -837,6 +837,7 @@ fn pipeline_reports_missing_tools() {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2248,6 +2249,7 @@ fn direct_test_job() -> VideoJob {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: None,
     }
 }
@@ -2468,6 +2470,7 @@ fn live_test_job() -> VideoJob {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: None,
     }
 }
@@ -2862,6 +2865,7 @@ fn vod_hls_pins_planner_variant_id() {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2925,6 +2929,7 @@ fn vod_hls_refuses_existing_dest() {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -3709,6 +3714,70 @@ fn live_capture_argv_never_embeds_thumbnail_or_chapters() {
 }
 
 #[test]
+fn unified_argv_retry_sleep_fragment_scoped_when_set() {
+    // Opt-in resilience: the delay is scoped to fragment retries
+    // (fragment:N), not every retry type.
+    let mut job = direct_test_job();
+    job.retry_sleep = 5;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--retry-sleep")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "fragment:5");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "retry-sleep must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.retry_sleep = 0;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--retry-sleep"));
+}
+
+#[test]
+fn hls_argv_retry_sleep_when_set() {
+    let mut job = direct_test_job();
+    job.retry_sleep = 10;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    let pos = argv
+        .iter()
+        .position(|a| a == "--retry-sleep")
+        .expect("flag");
+    assert_eq!(argv[pos + 1], "fragment:10");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "retry-sleep must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.retry_sleep = 0;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--retry-sleep"));
+}
+
+#[test]
+fn live_capture_argv_never_retry_sleep() {
+    // Live fragment retries are endless by design; a sleep between them
+    // would stall live catch-up, so even opted in the flag must not appear.
+    let mut job = live_test_job();
+    job.retry_sleep = 5;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--retry-sleep"));
+}
+
+#[test]
 fn subtitle_language_index_value_round_trip() {
     assert_eq!(subtitle_language_index("off"), 0);
     assert_eq!(subtitle_language_value(0), "off");
@@ -3866,6 +3935,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

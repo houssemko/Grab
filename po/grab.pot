@@ -266,7 +266,7 @@ msgstr ""
 msgid "(System Downloads folder)"
 msgstr ""
 
-#: src/preferences.rs:37 src/preferences.rs:463 src/window.rs:1433
+#: src/preferences.rs:37 src/preferences.rs:473 src/window.rs:1433
 #: src/window.rs:1452
 msgid "Choose…"
 msgstr ""
@@ -288,7 +288,7 @@ msgstr ""
 msgid "Select Folder"
 msgstr ""
 
-#: src/preferences.rs:94 src/preferences.rs:281
+#: src/preferences.rs:94 src/preferences.rs:291
 msgid "Network"
 msgstr ""
 
@@ -320,95 +320,95 @@ msgstr ""
 msgid "Retries"
 msgstr ""
 
-#: src/preferences.rs:190
+#: src/preferences.rs:200
 msgid "Notifications"
 msgstr ""
 
-#: src/preferences.rs:193
+#: src/preferences.rs:203
 msgid "Notify when downloads finish"
 msgstr ""
 
-#: src/preferences.rs:201
+#: src/preferences.rs:211
 msgid "When closing with downloads still running"
 msgstr ""
 
-#: src/preferences.rs:209
+#: src/preferences.rs:219
 msgid "Power"
 msgstr ""
 
-#: src/preferences.rs:212
+#: src/preferences.rs:222
 msgid "Prevent sleep during downloads"
 msgstr ""
 
-#: src/preferences.rs:231
+#: src/preferences.rs:241
 msgid "Torrent"
 msgstr ""
 
-#: src/preferences.rs:236
+#: src/preferences.rs:246
 msgid "Sharing"
 msgstr ""
 
-#: src/preferences.rs:239
+#: src/preferences.rs:249
 msgid "Seed finished downloads"
 msgstr ""
 
-#: src/preferences.rs:247
+#: src/preferences.rs:257
 msgid "Seed to ratio"
 msgstr ""
 
-#: src/preferences.rs:284
+#: src/preferences.rs:294
 msgid "Use DHT"
 msgstr ""
 
-#: src/preferences.rs:294
+#: src/preferences.rs:304
 msgid "Peer limit"
 msgstr ""
 
-#: src/preferences.rs:296
+#: src/preferences.rs:306
 msgid ""
 "Maximum peers per download. 0 means unlimited. Applies when a download "
 "starts."
 msgstr ""
 
-#: src/preferences.rs:305
+#: src/preferences.rs:315
 msgid "Extra trackers"
 msgstr ""
 
-#: src/preferences.rs:307
+#: src/preferences.rs:317
 msgid "Comma-separated tracker URLs added to every download"
 msgstr ""
 
-#: src/preferences.rs:315
+#: src/preferences.rs:325
 msgid "Listen port"
 msgstr ""
 
-#: src/preferences.rs:317
+#: src/preferences.rs:327
 msgid ""
 "Port for incoming connections. 0 means disabled. Applies when the torrent "
 "engine first starts."
 msgstr ""
 
-#: src/preferences.rs:379 src/preferences.rs:630
+#: src/preferences.rs:389 src/preferences.rs:640
 msgid "Ready • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:383 src/preferences.rs:634
+#: src/preferences.rs:393 src/preferences.rs:644
 msgid "Update"
 msgstr ""
 
-#: src/preferences.rs:386 src/preferences.rs:637
+#: src/preferences.rs:396 src/preferences.rs:647
 msgid "Not installed"
 msgstr ""
 
-#: src/preferences.rs:387 src/preferences.rs:638 src/window.rs:1387
+#: src/preferences.rs:397 src/preferences.rs:648 src/window.rs:1387
 msgid "Install"
 msgstr ""
 
-#: src/preferences.rs:396
+#: src/preferences.rs:406
 msgid "Quality"
 msgstr ""
 
-#: src/preferences.rs:401
+#: src/preferences.rs:411
 msgid "Preferred quality"
 msgstr ""
 
@@ -416,43 +416,43 @@ msgstr ""
 msgid "Audio only"
 msgstr ""
 
-#: src/preferences.rs:447
+#: src/preferences.rs:457
 msgid "Authentication"
 msgstr ""
 
-#: src/preferences.rs:448
+#: src/preferences.rs:458
 msgid "Age gates and member-only pages"
 msgstr ""
 
-#: src/preferences.rs:545
+#: src/preferences.rs:555
 msgid "Cookies from Browser"
 msgstr ""
 
-#: src/preferences.rs:546
+#: src/preferences.rs:556
 msgid "Reads this browser's profile directly"
 msgstr ""
 
-#: src/preferences.rs:583 src/window.rs:1384
+#: src/preferences.rs:593 src/window.rs:1384
 msgid "Support tools"
 msgstr ""
 
-#: src/preferences.rs:605
+#: src/preferences.rs:615
 msgid "Checking…"
 msgstr ""
 
-#: src/preferences.rs:654 src/window.rs:1756
+#: src/preferences.rs:664 src/window.rs:1756
 msgid "How to Install"
 msgstr ""
 
-#: src/preferences.rs:655 src/window.rs:1757
+#: src/preferences.rs:665 src/window.rs:1757
 msgid "Show terminal install instructions"
 msgstr ""
 
-#: src/preferences.rs:670 src/window.rs:1769
+#: src/preferences.rs:680 src/window.rs:1769
 msgid "Downloading yt-dlp (1 of 2)…"
 msgstr ""
 
-#: src/preferences.rs:704 src/window.rs:1803
+#: src/preferences.rs:714 src/window.rs:1803
 msgid "Downloading ffmpeg (2 of 2)…"
 msgstr ""
 
@@ -888,23 +888,23 @@ msgstr[1] ""
 msgid "Select at least one item"
 msgstr ""
 
-#: src/preferences.rs:392
+#: src/preferences.rs:402
 msgid "Media"
 msgstr ""
 
-#: src/preferences.rs:402
+#: src/preferences.rs:412
 msgid "Used for new media downloads"
 msgstr ""
 
-#: src/preferences.rs:430
+#: src/preferences.rs:440
 msgid "New media downloads skip the video track"
 msgstr ""
 
-#: src/preferences.rs:482
+#: src/preferences.rs:492
 msgid "yt-dlp and ffmpeg resolve media pages"
 msgstr ""
 
-#: src/preferences.rs:485
+#: src/preferences.rs:495
 msgid "Media support tools"
 msgstr ""
 
@@ -936,23 +936,23 @@ msgstr ""
 msgid "No suitable formats found for this media"
 msgstr ""
 
-#: src/preferences.rs:390 src/preferences.rs:645 src/preferences.rs:650
+#: src/preferences.rs:400 src/preferences.rs:655 src/preferences.rs:660
 msgid "Check for Updates"
 msgstr ""
 
-#: src/preferences.rs:598
+#: src/preferences.rs:608
 msgid "Checking for updates…"
 msgstr ""
 
-#: src/preferences.rs:619
+#: src/preferences.rs:629
 msgid "Update available: {installed} → {latest}"
 msgstr ""
 
-#: src/preferences.rs:641
+#: src/preferences.rs:651
 msgid "Up to date • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:649
+#: src/preferences.rs:659
 msgid "Couldn't check for updates"
 msgstr ""
 
@@ -992,7 +992,7 @@ msgstr ""
 msgid "unclassified"
 msgstr ""
 
-#: src/preferences.rs:461
+#: src/preferences.rs:471
 msgid "Preferred video codec"
 msgstr ""
 
@@ -1239,97 +1239,101 @@ msgid "Parallel connections for large files"
 msgstr ""
 
 #: src/preferences.rs:162
-msgid "Timeout"
-msgstr ""
-
-#: src/preferences.rs:163
-msgid "In seconds"
+msgid "Retry delay"
 msgstr ""
 
 #: src/preferences.rs:172
-msgid "User agent"
+msgid "Timeout"
 msgstr ""
 
-#: src/preferences.rs:174
-msgid "Blank uses the default user agent"
-msgstr ""
-
-#: src/preferences.rs:181
-msgid "Keep original file dates"
+#: src/preferences.rs:173
+msgid "In seconds"
 msgstr ""
 
 #: src/preferences.rs:182
+msgid "User agent"
+msgstr ""
+
+#: src/preferences.rs:184
+msgid "Blank uses the default user agent"
+msgstr ""
+
+#: src/preferences.rs:191
+msgid "Keep original file dates"
+msgstr ""
+
+#: src/preferences.rs:192
 msgid "Use the server's date instead of download time"
 msgstr ""
 
-#: src/preferences.rs:298
+#: src/preferences.rs:308
 msgid "Background download notifications"
 msgstr ""
 
-#: src/preferences.rs:311
+#: src/preferences.rs:321
 msgid "Keep the computer awake while downloads are active"
 msgstr ""
 
-#: src/preferences.rs:343
+#: src/preferences.rs:353
 msgid "Stop seeding at this upload ratio. 0 means unlimited."
 msgstr ""
 
-#: src/preferences.rs:360
+#: src/preferences.rs:370
 msgid "Seed time limit"
 msgstr ""
 
-#: src/preferences.rs:362
+#: src/preferences.rs:372
 msgid "Stop seeding this many minutes after finishing. 0 means unlimited."
 msgstr ""
 
-#: src/preferences.rs:375
+#: src/preferences.rs:385
 msgid "Connectivity"
 msgstr ""
 
-#: src/preferences.rs:380
+#: src/preferences.rs:390
 msgid "Find peers without trackers. Takes effect on restart."
 msgstr ""
 
-#: src/preferences.rs:555
+#: src/preferences.rs:565
 msgid "Newest codecs first, or widest playback"
 msgstr ""
 
-#: src/preferences.rs:652
+#: src/preferences.rs:662
 msgid "Post-processing"
 msgstr ""
 
-#: src/preferences.rs:653
+#: src/preferences.rs:663
 msgid "Applied while finishing downloads"
 msgstr ""
 
-#: src/preferences.rs:656
+#: src/preferences.rs:666
 msgid "Embed subtitles"
 msgstr ""
 
-#: src/preferences.rs:657
+#: src/preferences.rs:667
 msgid "Mux downloaded subtitles into the video file"
 msgstr ""
 
-#: src/preferences.rs:664
+#: src/preferences.rs:674
 msgid "Remove sponsored segments"
 msgstr ""
 
-#: src/preferences.rs:665
+#: src/preferences.rs:675
 msgid "Cut SponsorBlock-flagged sponsor segments"
 msgstr ""
 
-#: src/preferences.rs:676
+#: src/preferences.rs:686
 msgid "Embed thumbnail"
 msgstr ""
 
-#: src/preferences.rs:677
+#: src/preferences.rs:687
 msgid "Attach the video thumbnail as cover art"
 msgstr ""
 
-#: src/preferences.rs:688
+#: src/preferences.rs:698
 msgid "Embed chapters"
 msgstr ""
 
-#: src/preferences.rs:689
+#: src/preferences.rs:699
 msgid "Write chapter markers into the finished file"
 msgstr ""

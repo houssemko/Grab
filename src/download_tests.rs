@@ -3523,6 +3523,7 @@ fn proxy_argv_precedes_end_of_options() {
         sponsorblock_remove: false,
         embed_thumbnail: false,
         embed_chapters: false,
+        retry_sleep: 0,
         proxy: Some(proxy),
     };
     for argv in [

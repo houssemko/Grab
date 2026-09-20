@@ -3251,6 +3251,7 @@ impl DownloadManager {
             sponsorblock_remove: self.settings.sponsorblock_remove(),
             embed_thumbnail: self.settings.embed_thumbnail(),
             embed_chapters: self.settings.embed_chapters(),
+            retry_sleep: self.settings.retry_sleep().max(0) as u32,
             proxy,
         };
         let handle = tokio_rt().spawn(async move {
