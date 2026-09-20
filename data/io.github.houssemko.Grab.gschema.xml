@@ -40,6 +40,12 @@
       <summary>Retry delay</summary>
       <description>Seconds to wait between fragment retries. 0 disables the delay.</description>
     </key>
+    <key name="sleep-interval" type="i">
+      <default>0</default>
+      <range min="0" max="300"/>
+      <summary>Sleep interval</summary>
+      <description>Seconds to wait before each download. 0 disables the pause.</description>
+    </key>
     <key name="timeout" type="i">
       <default>30</default>
       <range min="5" max="300"/>

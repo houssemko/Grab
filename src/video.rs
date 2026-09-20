@@ -2601,6 +2601,10 @@ pub struct VideoJob {
     /// never take it (their fragment retries are endless by design, and a
     /// sleep would stall live catch-up).
     pub retry_sleep: u32,
+    /// Seconds to wait before each download (`--sleep-interval`).
+    /// Opt-in preference; 0 disables the pause. Live rows never take it
+    /// (a pre-download sleep would stall live catch-up).
+    pub sleep_interval: u32,
     /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
     /// from the same "connections" setting as the app's own segmented HTTP
     /// downloads. Schema range is 1..=16; clamped at spawn.
@@ -3135,6 +3139,12 @@ pub(crate) fn unified_download_argv(
         // connections instead of hammering the server immediately.
         args.push("--retry-sleep".to_string());
         args.push(format!("fragment:{}", job.retry_sleep));
+    }
+    if job.sleep_interval > 0 {
+        // Opt-in politeness: pause before each download so repeated
+        // fetches don't hammer the server.
+        args.push("--sleep-interval".to_string());
+        args.push(job.sleep_interval.to_string());
     }
     if let Some(limit) = job.speed_limit {
         // Opt-in throttle: cap this leg at the shared speed limit
@@ -4050,6 +4060,11 @@ pub(crate) fn hls_download_argv(
         // Same opt-in fragment-retry delay as the unified VOD legs.
         args.push("--retry-sleep".to_string());
         args.push(format!("fragment:{}", job.retry_sleep));
+    }
+    if job.sleep_interval > 0 {
+        // Same opt-in pre-download pause as the unified VOD legs.
+        args.push("--sleep-interval".to_string());
+        args.push(job.sleep_interval.to_string());
     }
     if let Some(limit) = job.speed_limit {
         // Same opt-in throttle as the unified VOD legs.

@@ -14,6 +14,7 @@ pub mod key {
     pub const SPEED_LIMIT: &str = "speed-limit";
     pub const RETRIES: &str = "retries";
     pub const RETRY_SLEEP: &str = "retry-sleep";
+    pub const SLEEP_INTERVAL: &str = "sleep-interval";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
     pub const PROXY_MODE: &str = "proxy-mode";
@@ -76,6 +77,11 @@ impl AppSettings {
     /// fragment:N`). Opt-in; 0 disables the delay.
     pub fn retry_sleep(&self) -> i32 {
         self.0.int(key::RETRY_SLEEP)
+    }
+    /// Seconds to wait before each download (`--sleep-interval`).
+    /// Opt-in; 0 disables the pause.
+    pub fn sleep_interval(&self) -> i32 {
+        self.0.int(key::SLEEP_INTERVAL)
     }
     pub fn timeout(&self) -> i32 {
         self.0.int(key::TIMEOUT)

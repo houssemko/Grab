@@ -180,6 +180,20 @@ pub fn show(
         .build();
     net_group.add(&retry_sleep);
 
+    let sleep_interval = adw::SpinRow::builder()
+        .title(gettext("Sleep interval"))
+        .subtitle(gettext("In seconds"))
+        .adjustment(&gtk4::Adjustment::new(0.0, 0.0, 300.0, 1.0, 5.0, 0.0))
+        .build();
+    settings
+        .bind(
+            crate::settings::key::SLEEP_INTERVAL,
+            &sleep_interval,
+            "value",
+        )
+        .build();
+    net_group.add(&sleep_interval);
+
     let timeout = adw::SpinRow::builder()
         .title(gettext("Timeout"))
         .subtitle(gettext("In seconds"))
