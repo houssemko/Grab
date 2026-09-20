@@ -15,6 +15,7 @@ pub mod key {
     pub const RETRIES: &str = "retries";
     pub const RETRY_SLEEP: &str = "retry-sleep";
     pub const SLEEP_INTERVAL: &str = "sleep-interval";
+    pub const SLEEP_REQUESTS: &str = "sleep-requests";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
     pub const PROXY_MODE: &str = "proxy-mode";
@@ -85,6 +86,11 @@ impl AppSettings {
     /// Opt-in; 0 disables the pause.
     pub fn sleep_interval(&self) -> i32 {
         self.0.int(key::SLEEP_INTERVAL)
+    }
+    /// Seconds to sleep between requests during data extraction
+    /// (`--sleep-requests`). Opt-in; 0 disables the pause.
+    pub fn sleep_requests(&self) -> i32 {
+        self.0.int(key::SLEEP_REQUESTS)
     }
     pub fn timeout(&self) -> i32 {
         self.0.int(key::TIMEOUT)
