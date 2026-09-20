@@ -2875,10 +2875,10 @@ fn push_playlist_items_page(
         p.set_default_widget(Some(&add_btn));
         let parent_weak = parent.clone();
         nav.connect_popped(move |_, popped| {
-            if popped.tag().as_deref() == Some("playlist") {
-                if let Some(p) = parent_weak.upgrade() {
-                    p.set_default_widget(prev_default.as_ref());
-                }
+            if popped.tag().as_deref() == Some("playlist")
+                && let Some(p) = parent_weak.upgrade()
+            {
+                p.set_default_widget(prev_default.as_ref());
             }
         });
     }
