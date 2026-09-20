@@ -2819,7 +2819,7 @@ pub async fn run_video_download(
         gettext("Resolving media…")
     });
     let mut video: Option<Video> = None;
-    for attempt in 0..3 {
+    for attempt in 0u32..3 {
         match fetch_video_page(
             &youtube_bin,
             &job.page_url,

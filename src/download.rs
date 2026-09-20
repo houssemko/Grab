@@ -986,15 +986,7 @@ async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
                 single_loop(&ctx, &mut tries, None, true).await;
                 return;
             }
-            match probe_ranges(
-                &ctx.client,
-                &ctx.url,
-                &ctx.opts,
-                ctx.cookies.as_ref(),
-                timeout,
-            )
-            .await
-            {
+            match probe_ranges(&ctx.client, &ctx.url, ctx.cookies.as_ref(), timeout).await {
                 Ok(total) => {
                     if plan_pieces(total, connections).is_empty() {
                         single_loop(&ctx, &mut tries, Some(total), true).await;
@@ -1975,7 +1967,6 @@ pub(crate) fn stamp_request(
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
-    opts: &DownloadOptions,
     cookies: Option<&std::sync::Arc<reqwest::cookie::Jar>>,
     timeout: Duration,
 ) -> Result<u64, String> {
