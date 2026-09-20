@@ -541,7 +541,7 @@ pub(crate) fn parse_trackers(raw: &str) -> Option<Vec<String>> {
     (!list.is_empty()).then_some(list)
 }
 
-/// Live-apply the speed caps (speed-limit watcher, any thread): the rate
+/// Live-apply the speed caps (settings watchers, any thread): the rate
 /// limiter is internally synchronized. Peer limit has no live setter in
 /// rqbit, so it applies at session creation and per add instead.
 pub(crate) fn apply_live_limits(download_bps: Option<u64>, upload_bps: Option<u64>) {
@@ -597,10 +597,13 @@ pub(crate) async fn sweep_session_orphans(keep: &std::collections::HashSet<Strin
     // Auto-restore completes inside Session::new_with_opts, so every entry
     // listed here is either adopted by a row below or an orphan: a spawn
     // racing us is already in ACTIVE (registered before ensure_session) or
-    // still queued (its hash came from the caller's queue set).
-    let active = active_hashes().await;
+    // still queued (its hash came from the caller's queue set). ACTIVE is
+    // snapshotted after the listing, so a spawn that claimed a listed
+    // torrent in between is never swept out from under it.
     let api = Api::new(session.clone(), None);
-    for t in api.api_torrent_list().torrents {
+    let torrents = api.api_torrent_list().torrents;
+    let active = active_hashes().await;
+    for t in torrents {
         if keep.contains(&t.info_hash) || active.contains(&t.info_hash) {
             continue;
         }
@@ -613,12 +616,25 @@ pub(crate) async fn sweep_session_orphans(keep: &std::collections::HashSet<Strin
             .get(TorrentIdOrHash::Id(id))
             .is_some_and(|h| h.metadata.load().is_some());
         if !resolved {
+            tracing::debug!(info_hash = %t.info_hash, "keeping metadata-less orphan for the next launch");
             continue;
         }
         tracing::debug!(info_hash = %t.info_hash, "dropping orphaned session torrent");
         // Best effort: a racing session delete is harmless, and a missed
         // orphan is retried on the next launch.
         let _ = session.delete(TorrentIdOrHash::Id(id), false).await;
+    }
+}
+
+/// Unpause an adopted persisted handle, then re-check the row's paused
+/// flag: a pause racing this unpause wins instead of being silently lost.
+/// Pause sets the flag under the ACTIVE lock before touching the session,
+/// so a racing pause is either visible to the re-check or lands its own
+/// session pause after our unpause — both end paused.
+async fn unpause_adopted(session: &Arc<Session>, id: u64, handle: &ManagedTorrentHandle) {
+    let _ = session.unpause(handle).await;
+    if ACTIVE.lock().await.get(&id).is_some_and(|a| a.paused) {
+        let _ = session.pause(handle).await;
     }
 }
 
@@ -651,7 +667,13 @@ pub(crate) fn forget_download(id: u64) {
         if let (Some(a), Some(s)) = (active, SESSION.get())
             && let Some(h) = a.handle
         {
-            let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
+            // Same skip-guard as the orphan sweep: Session::delete panics
+            // on metadata-less magnets. The entry stays for the next sweep.
+            if h.metadata.load().is_some() {
+                let _ = s.delete(TorrentIdOrHash::Hash(h.info_hash()), false).await;
+            } else {
+                tracing::debug!(id, info_hash = %h.info_hash().as_string(), "keeping metadata-less torrent for the orphan sweep");
+            }
         }
     });
 }
@@ -928,7 +950,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     };
     if resumed {
         if let Some(h) = ACTIVE.lock().await.get(&id).and_then(|a| a.handle.clone()) {
-            let _ = session.clone().unpause(&h).await;
+            unpause_adopted(&session, id, &h).await;
             let finished = poll_loop(
                 session.clone(),
                 h,
@@ -1029,7 +1051,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         // but a spawn always means "run". Fresh adds start live, so this
         // only fires on the persistence path (e.g. resuming a row that was
         // paused when the app last closed).
-        let _ = session.unpause(&handle).await;
+        unpause_adopted(&session, id, &handle).await;
     }
     let finished = poll_loop(
         session.clone(),
