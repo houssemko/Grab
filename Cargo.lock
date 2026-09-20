@@ -1279,6 +1279,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "yt-dlp",
+ "zip",
 ]
 
 [[package]]

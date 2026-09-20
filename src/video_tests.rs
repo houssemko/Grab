@@ -1906,6 +1906,84 @@ fn user_installed_tools_win_over_bundle() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn toolchain_dir_prefers_complete_toolchain() {
+    // A dir with only ffmpeg (e.g. an older Grab user-lib install) must
+    // not shadow a later dir that ships both ffmpeg and ffprobe:
+    // yt-dlp resolves ffprobe from --ffmpeg-location alone.
+    let base = std::env::temp_dir().join(format!("grab-toolchain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let lone = base.join("lone");
+    let full = base.join("full");
+    let empty = base.join("empty");
+    for d in [&lone, &full, &empty] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    fake_executable(&lone, "ffmpeg");
+    fake_executable(&full, "ffmpeg");
+    fake_executable(&full, "ffprobe");
+    assert_eq!(
+        toolchain_dir_in(&[lone.clone(), full.clone(), empty]),
+        Some(full.clone())
+    );
+    // No complete toolchain anywhere: None, and the caller falls back
+    // to the resolved ffmpeg's own dir (previous behavior).
+    assert_eq!(toolchain_dir_in(&[lone]), None);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Build a zip archive with the given (entry name, contents) pairs.
+fn make_tool_zip(archive: &std::path::Path, entries: &[(&str, &[u8])]) {
+    let file = std::fs::File::create(archive).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    for (name, contents) in entries {
+        zip.start_file(*name, options).unwrap();
+        std::io::Write::write_all(&mut zip, contents).unwrap();
+    }
+    zip.finish().unwrap();
+}
+
+#[test]
+fn extract_ffmpeg_toolchain_pulls_both_binaries() {
+    let base = std::env::temp_dir().join(format!("grab-fftools-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    // Nested layout (bin/-style); the extractor matches by file name.
+    make_tool_zip(
+        &archive,
+        &[("bin/ffmpeg", b"fake-ffmpeg"), ("ffprobe", b"fake-ffprobe")],
+    );
+    let ffmpeg = extract_ffmpeg_toolchain(&archive, &dir).expect("extracts");
+    assert_eq!(ffmpeg, dir.join("ffmpeg"));
+    assert_eq!(std::fs::read(dir.join("ffprobe")).unwrap(), b"fake-ffprobe");
+    // Executable bits are set and the archive is cleaned up.
+    use std::os::unix::fs::PermissionsExt as _;
+    for tool in ["ffmpeg", "ffprobe"] {
+        let mode = std::fs::metadata(dir.join(tool))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(mode & 0o111, 0, "{tool} is executable");
+    }
+    assert!(!archive.exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
+    let base = std::env::temp_dir().join(format!("grab-fftools-nofmpeg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("out");
+    std::fs::create_dir_all(&dir).unwrap();
+    let archive = base.join("ffmpeg-linux-x86_64.zip");
+    make_tool_zip(&archive, &[("ffprobe", b"fake-ffprobe")]);
+    assert!(extract_ffmpeg_toolchain(&archive, &dir).is_err());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 // ── stream planning (selection gating) ───────────────────────────────
 
 /// TikTok shape: sparse mp4 with neither codec field (typed Unknown,
