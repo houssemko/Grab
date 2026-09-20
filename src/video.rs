@@ -30,9 +30,7 @@ use thiserror::Error;
 use tokio::sync::oneshot;
 use yt_dlp::client::deps::{Libraries, LibraryInstaller};
 use yt_dlp::model::format::{Extension, Format, FormatType, Protocol};
-use yt_dlp::model::selector::{
-    AudioCodecPreference, AudioQuality, VideoCodecPreference, VideoQuality,
-};
+use yt_dlp::model::selector::{VideoCodecPreference, VideoQuality};
 use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
 
 /// Values for the `video-quality` GSettings key and the per-item quality
@@ -1839,9 +1837,8 @@ fn plan_streams(
             )
             .and_then(|f| StreamSel::from_format(f).ok())
     };
-    let mut audio_sel: Option<StreamSel> = video
-        .select_audio_format(AudioQuality::Best, AudioCodecPreference::Any)
-        .and_then(|f| StreamSel::from_format(f).ok());
+    let mut audio_sel: Option<StreamSel> =
+        select_audio_original_first(&video.formats).and_then(|f| StreamSel::from_format(f).ok());
     // Muxed-only sources (one file, both tracks — archive.org, file
     // lockers): adopt the file directly instead of failing on the missing
     // split counterpart. A downloaded track beats a failed row; the
@@ -1987,6 +1984,56 @@ impl StreamSel {
                 .is_some_and(|c| c != "none"),
         })
     }
+}
+
+/// Best direct audio track, original language first.
+///
+/// YouTube ships auto-dubbed audio as separate tracks (verified live:
+/// dub tracks carry the dub `language`, "dubbed" in `format_note`, and
+/// `language_preference` -1; the original carries 10). The crate's
+/// `select_audio_format(Best, …)` ranks quality → bitrate → sample rate
+/// → channels with no language awareness, so a higher-bitrate dub beats
+/// the original. Rank `language_preference` (untagged → 0) above that
+/// same order instead — matching upstream yt-dlp, whose default format
+/// leads with `lang`. Extractors that don't tag score every track 0,
+/// tying straight through to today's bitrate ranking unchanged. Only
+/// directly fetchable tracks qualify (same gate as
+/// [`StreamSel::from_format`]), so HLS/DRM audio still degrades to
+/// absent and the HLS preset in [`plan_streams`] takes over. Pure for
+/// tests.
+fn select_audio_original_first(formats: &[Format]) -> Option<&Format> {
+    formats
+        .iter()
+        .filter(|f| f.is_audio() && StreamSel::from_format(f).is_ok())
+        .max_by(|a, b| {
+            lang_score(a)
+                .cmp(&lang_score(b))
+                .then_with(|| quality_score(a).total_cmp(&quality_score(b)))
+                .then_with(|| abr_score(a).total_cmp(&abr_score(b)))
+                .then_with(|| asr_score(a).cmp(&asr_score(b)))
+                .then_with(|| channels_score(a).cmp(&channels_score(b)))
+        })
+}
+
+/// yt-dlp's internal language preference score, neutral when untagged.
+fn lang_score(f: &Format) -> i64 {
+    f.language_preference.unwrap_or(0)
+}
+
+fn quality_score(f: &Format) -> f64 {
+    f.quality_info.quality.map(|q| *q).unwrap_or(0.0)
+}
+
+fn abr_score(f: &Format) -> f64 {
+    f.rates_info.audio_rate.map(|r| *r).unwrap_or(0.0)
+}
+
+fn asr_score(f: &Format) -> i64 {
+    f.codec_info.asr.unwrap_or(0)
+}
+
+fn channels_score(f: &Format) -> i64 {
+    f.codec_info.audio_channels.unwrap_or(0)
 }
 
 fn filesize_of(f: &Format) -> Option<u64> {

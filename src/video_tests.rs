@@ -149,6 +149,90 @@ fn from_format_rejects_missing_url() {
     assert!(StreamSel::from_format(&f).is_err());
 }
 
+fn test_audio(overrides: serde_json::Value) -> yt_dlp::model::format::Format {
+    let mut base = serde_json::json!({
+        "vcodec": "none",
+        "acodec": "opus",
+    });
+    for (k, v) in overrides.as_object().unwrap() {
+        base[k] = v.clone();
+    }
+    test_format(base)
+}
+
+#[test]
+fn audio_prefers_original_over_higher_bitrate_dub() {
+    // Live YouTube shape (auto-dubbed tracks): the Italian 251
+    // outrates the English original, but preference 10 vs -1 wins.
+    let dub = test_audio(serde_json::json!({
+        "format_id": "251-20", "abr": 137.475,
+        "language": "it", "language_preference": -1,
+    }));
+    let original = test_audio(serde_json::json!({
+        "format_id": "251-21", "abr": 127.412,
+        "language": "en", "language_preference": 10,
+    }));
+    let formats = vec![dub, original];
+    assert_eq!(
+        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        Some("251-21")
+    );
+}
+
+#[test]
+fn audio_untagged_falls_back_to_bitrate() {
+    // Extractors without language scores tie at 0: today's ranking.
+    let low = test_audio(serde_json::json!({"format_id": "140", "abr": 129.0}));
+    let high = test_audio(serde_json::json!({"format_id": "251", "abr": 135.0}));
+    let formats = vec![low, high];
+    assert_eq!(
+        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        Some("251")
+    );
+}
+
+#[test]
+fn audio_untagged_beats_explicit_dub() {
+    // Neutral (no score) outranks an explicitly dubbed track.
+    let dub = test_audio(serde_json::json!({
+        "format_id": "d", "abr": 200.0, "language_preference": -1,
+    }));
+    let plain = test_audio(serde_json::json!({"format_id": "p", "abr": 48.0}));
+    let formats = vec![dub, plain];
+    assert_eq!(
+        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        Some("p")
+    );
+}
+
+#[test]
+fn audio_skips_hls_and_drm_tracks() {
+    // Unfetchable tracks never win, even with top preference: the HLS
+    // preset path below depends on degrading to absent here.
+    let hls = test_audio(serde_json::json!({
+        "format_id": "h", "protocol": "m3u8_native",
+        "language_preference": 10,
+    }));
+    let drm = test_audio(serde_json::json!({
+        "format_id": "x", "has_drm": true, "language_preference": 10,
+    }));
+    let direct = test_audio(serde_json::json!({
+        "format_id": "d", "language_preference": -1,
+    }));
+    let formats = vec![hls, drm, direct];
+    assert_eq!(
+        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        Some("d")
+    );
+    // All unfetchable degrades to absent: the HLS preset path depends
+    // on this None, not on skipping to a worse track.
+    let formats = vec![
+        test_audio(serde_json::json!({"format_id": "h", "protocol": "m3u8_native"})),
+        test_audio(serde_json::json!({"format_id": "x", "has_drm": true})),
+    ];
+    assert_eq!(select_audio_original_first(&formats), None);
+}
+
 #[test]
 fn classify_reddit_video() {
     assert!(is_video_page(
