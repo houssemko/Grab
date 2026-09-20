@@ -3360,7 +3360,6 @@ fn apply_proxy_env_sets_nothing_when_direct() {
 fn apply_proxy_env_stamps_no_proxy_when_proxied() {
     let proxy = crate::download::DownloadOptions {
         connections: 4,
-        timeout: 30,
         limit_rate: String::new(),
         proxy_mode: "manual".into(),
         proxy_type: "socks5".into(),
@@ -3388,7 +3387,6 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
 fn proxy_cli_args_passes_plain_url() {
     let proxy = crate::download::DownloadOptions {
         connections: 4,
-        timeout: 30,
         limit_rate: String::new(),
         proxy_mode: "manual".into(),
         proxy_type: "socks5".into(),

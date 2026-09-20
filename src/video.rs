@@ -3724,14 +3724,6 @@ async fn remux_live_capture(
     unreachable!("bsf retry always returns");
 }
 
-/// One live capture through the yt-dlp binary: variant choice, audio
-/// rendition, keys and fragment retries are yt-dlp's; the MPEG-TS
-/// container keeps every kill point playable, so Stop is kill, adopt
-/// and remux instead of grace-period finalizing.
-///
-/// Stalled captures yield their partial like before; an empty capture
-/// fails. Returns the final size.
-#[allow(clippy::too_many_arguments)]
 /// yt-dlp's exact stderr line when `--live-from-start` meets a stream
 /// with no replay/DVR behind it (verified against yt-dlp's
 /// `raise_no_formats` call in `process_video_result`): the stable
@@ -3755,6 +3747,14 @@ fn live_startup_failure(
     }
 }
 
+/// One live capture through the yt-dlp binary: variant choice, audio
+/// rendition, keys and fragment retries are yt-dlp's; the MPEG-TS
+/// container keeps every kill point playable, so Stop is kill, adopt
+/// and remux instead of grace-period finalizing.
+///
+/// Stalled captures yield their partial like before; an empty capture
+/// fails. Returns the final size.
+#[allow(clippy::too_many_arguments)]
 async fn run_live_ytdlp(
     youtube_bin: &Path,
     ffmpeg_bin: &Path,

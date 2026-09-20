@@ -374,7 +374,7 @@ msgstr ""
 msgid "Peer blocklist"
 msgstr ""
 
-#: src/preferences.rs:590
+#: src/preferences.rs:449
 msgid ""
 "URL of a peer blocklist (eMule ipfilter.dat format); empty means disabled. "
 "Fetched directly, bypassing any proxy."
@@ -1371,6 +1371,67 @@ msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
 msgstr ""
 
 
-#: src/video.rs:355
+#: src/video.rs:356
 msgid "This stream can't be recorded from the start — the site offers no replay. Turn off \"Live from start\" to record from the live edge instead."
+msgstr ""
+
+#: src/preferences.rs:75
+msgid "Avoids broken names on USB drives, network shares and older systems"
+msgstr ""
+
+#: src/preferences.rs:185
+msgid "Handy for archives; otherwise files are dated when you downloaded them"
+msgstr ""
+
+#: src/preferences.rs:342
+msgid "Keep sharing the finished file with other downloaders"
+msgstr ""
+
+#: src/preferences.rs:357
+msgid "Upload relative to download size; 2.0 means twice as much up as down"
+msgstr ""
+
+#: src/preferences.rs:378
+msgid "Counts from the moment your download finished"
+msgstr ""
+
+#: src/preferences.rs:398
+msgid "Lets magnet links and trackerless torrents find peers"
+msgstr ""
+
+
+#: src/preferences.rs:609
+msgid "Ranks available formats; the closest match wins when your pick isn't offered"
+msgstr ""
+
+#: src/preferences.rs:642
+msgid "Applies to audio-only downloads and extracted audio"
+msgstr ""
+
+#: src/preferences.rs:723
+msgid "Needs subtitles enabled under Media → Subtitles; does nothing without them"
+msgstr ""
+
+#: src/preferences.rs:734
+msgid "Works where SponsorBlock has data, mostly YouTube"
+msgstr ""
+
+#: src/preferences.rs:751
+msgid "Lets you skip sponsors with chapter navigation instead of cutting them"
+msgstr ""
+
+#: src/preferences.rs:773
+msgid "Players with chapter support let you jump between sections"
+msgstr ""
+
+#: src/preferences.rs:795
+msgid "Useful when a player or editor dislikes the original container"
+msgstr ""
+
+#: src/preferences.rs:827
+msgid "Needs the site to keep a replay; otherwise recording starts from the live edge"
+msgstr ""
+
+#: src/video.rs:1481
+msgid "the link opened a collection, not a single video"
 msgstr ""

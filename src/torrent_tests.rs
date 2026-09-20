@@ -128,10 +128,7 @@ fn blocklist_url_rejects_non_http() {
 
 fn manual_proxy(ptype: &str) -> Option<crate::download::ResolvedProxy> {
     crate::download::DownloadOptions {
-        tries: 3,
-        timeout: 30,
         limit_rate: String::new(),
-        user_agent: String::new(),
         connections: 4,
         proxy_mode: "manual".into(),
         proxy_type: ptype.into(),
