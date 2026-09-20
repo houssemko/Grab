@@ -465,10 +465,8 @@ fn test_manifest() -> VideoManifest {
         quality: "720p".into(),
         video_format_id: Some("137".into()),
         video_ext: "mp4".into(),
-        video_bytes: 100,
         audio_format_id: "251".into(),
         audio_ext: "webm".into(),
-        audio_bytes: 50,
         final_bytes: None,
     }
 }
@@ -480,19 +478,26 @@ fn test_manifest_dir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+fn test_staging(dir: &std::path::Path) -> std::path::PathBuf {
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    staging
+}
+
 fn test_query<'a>(
     manifest: Option<&'a VideoManifest>,
     dest: &'a std::path::Path,
+    staging: &'a std::path::Path,
 ) -> ResumeQuery<'a> {
     ResumeQuery {
         manifest,
         dest,
+        staging,
         page_url: "https://vimeo.com/99",
         quality: "720p",
         video: Some(("137", "mp4")),
         audio: ("251", "webm"),
-        video_total: Some(100),
-        audio_total: Some(50),
+        total: Some(150),
     }
 }
 
@@ -500,106 +505,91 @@ fn test_query<'a>(
 fn resume_plan_fresh_without_manifest() {
     let dir = test_manifest_dir("fresh");
     let dest = dir.join("Clip.mp4");
-    let q = test_query(None, &dest);
+    let staging = test_staging(&dir);
+    let q = test_query(None, &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn resume_plan_combine_only_with_verified_parts() {
-    let dir = test_manifest_dir("combine");
+fn resume_plan_resumes_partial_temp() {
+    // A unified temp with bytes under the total resumes in place:
+    // yt-dlp continues its own `.part` shell on the next attempt.
+    let dir = test_manifest_dir("partial-temp");
     let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 60]).unwrap();
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dest, &staging);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_resumes_without_temp() {
+    // Matching manifest but no temp on disk: the same spawn downloads
+    // fresh — no wipe needed, nothing to preserve.
+    let dir = test_manifest_dir("no-temp");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dest, &staging);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_on_overlong_temp() {
+    // A temp larger than its total is garbage: wipe and start over.
+    let dir = test_manifest_dir("overlong-temp");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 200]).unwrap();
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dest, &staging);
+    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_fresh_on_sparse_temp() {
+    // Full apparent size, nothing on disk: resuming would adopt zeros.
+    let dir = test_manifest_dir("sparse-temp");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
+    let temp = staging.join("grab-media.mp4");
+    std::fs::File::create(&temp).unwrap().set_len(150).unwrap();
+    assert!(is_sparse_shell(&temp));
+    let m = test_manifest();
+    let q = test_query(Some(&m), &dest, &staging);
+    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resume_plan_ignores_dest_dir_parts() {
+    // Legacy dest-dir parts (or foreign lookalikes) are invisible to
+    // the unified engine: matching manifest, empty staging, resume.
+    let dir = test_manifest_dir("legacy-parts");
+    let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
     std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
     std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 50]).unwrap();
     let m = test_manifest();
-    let q = test_query(Some(&m), &dest);
-    assert_eq!(resume_plan(&q), ResumePlan::CombineOnly);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn resume_plan_resumes_truncated_parts() {
-    let dir = test_manifest_dir("truncated");
-    let dest = dir.join("Clip.mp4");
-    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
-    // Audio part truncated mid-download: resume it, never re-download.
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 49]).unwrap();
-    let m = test_manifest();
-    let q = test_query(Some(&m), &dest);
+    let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn resume_plan_resumes_pending_manifest() {
-    // Pause before any part completed bookkeeping: the pending sidecar
-    // (zero bytes recorded) plus partial files on disk means resume.
-    let dir = test_manifest_dir("pending");
-    let dest = dir.join("Clip.mp4");
-    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 60]).unwrap();
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 30]).unwrap();
-    let mut m = test_manifest();
-    m.video_bytes = 0;
-    m.audio_bytes = 0;
-    let q = test_query(Some(&m), &dest);
-    assert_eq!(resume_plan(&q), ResumePlan::Resume);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn resume_plan_fresh_without_manifest_despite_parts() {
+fn resume_plan_fresh_without_manifest_despite_temp() {
     // Bytes without a matching sidecar are unverifiable (pre-sidecar
     // upgrades, foreign files): wipe and start clean.
     let dir = test_manifest_dir("unverified");
     let dest = dir.join("Clip.mp4");
-    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 60]).unwrap();
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 30]).unwrap();
-    let q = test_query(None, &dest);
-    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn resume_plan_fresh_on_overlong_part() {
-    // A part larger than its total cannot be resumed into: wipe it.
-    let dir = test_manifest_dir("overlong");
-    let dest = dir.join("Clip.mp4");
-    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 60]).unwrap();
-    let m = test_manifest();
-    let q = test_query(Some(&m), &dest);
-    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn resume_plan_fresh_on_sparse_shell() {
-    // The killed-attempt shape: full apparent size, nothing on disk
-    // (pre-allocated by the engine, sidecar gone with the task). The
-    // engine equates size with completeness, so this must never reach
-    // it — wipe and start over instead.
-    let dir = test_manifest_dir("sparse");
-    let dest = dir.join("Clip.mp4");
-    let vpart = dest_part_path(&dest, "video", "mp4");
-    let apart = dest_part_path(&dest, "audio", "webm");
-    std::fs::File::create(&vpart).unwrap().set_len(100).unwrap();
-    std::fs::File::create(&apart).unwrap().set_len(50).unwrap();
-    assert!(is_sparse_shell(&vpart));
-    assert!(is_sparse_shell(&apart));
-    let m = test_manifest();
-    let q = test_query(Some(&m), &dest);
-    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn resume_plan_fresh_when_nothing_on_disk() {
-    let dir = test_manifest_dir("empty");
-    let dest = dir.join("Clip.mp4");
-    let mut m = test_manifest();
-    m.video_bytes = 0;
-    m.audio_bytes = 0;
-    let q = test_query(Some(&m), &dest);
+    let staging = test_staging(&dir);
+    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 60]).unwrap();
+    let q = test_query(None, &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -608,19 +598,18 @@ fn resume_plan_fresh_when_nothing_on_disk() {
 fn resume_plan_fresh_on_selection_change() {
     let dir = test_manifest_dir("reselect");
     let dest = dir.join("Clip.mp4");
-    std::fs::write(dest_part_path(&dest, "video", "mp4"), vec![0u8; 100]).unwrap();
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 50]).unwrap();
+    let staging = test_staging(&dir);
     let m = test_manifest();
-    // Same parts, but the row now wants 1080p: re-download.
+    // Same bytes, but the row now wants 1080p: re-download.
     let q = ResumeQuery {
         quality: "1080p",
-        ..test_query(Some(&m), &dest)
+        ..test_query(Some(&m), &dest, &staging)
     };
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     // Same prefs, but the extractor picked another audio format: re-download.
     let q = ResumeQuery {
         audio: ("250", "webm"),
-        ..test_query(Some(&m), &dest)
+        ..test_query(Some(&m), &dest, &staging)
     };
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
@@ -630,35 +619,35 @@ fn resume_plan_fresh_on_selection_change() {
 fn resume_plan_finished_when_dest_complete() {
     let dir = test_manifest_dir("finished");
     let dest = dir.join("Clip.mp4");
+    let staging = test_staging(&dir);
     std::fs::write(&dest, vec![0u8; 1000]).unwrap();
     let mut m = test_manifest();
     m.final_bytes = Some(1000);
-    let q = test_query(Some(&m), &dest);
+    let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Finished);
-    // Same manifest, foreign file at dest: fall through to parts check
-    // (absent here) instead of adopting someone else's bytes.
+    // Same manifest, foreign file at dest: fall through to the temp
+    // check (absent here) instead of adopting someone else's bytes.
     std::fs::write(&dest, vec![0u8; 999]).unwrap();
-    assert_eq!(resume_plan(&q), ResumePlan::Fresh);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn resume_plan_adopted_single() {
-    // Adopted single file (muxed direct, no video leg): the audio part
-    // present with matching ids combines without re-downloading.
+fn resume_plan_single_file_identity() {
+    // Adopted single file (muxed direct, no video leg): matching
+    // videoless selection resumes; a stale video expectation restarts.
     let dir = test_manifest_dir("adopted-single");
     let dest = dir.join("Clip.m4a");
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 50]).unwrap();
+    let staging = test_staging(&dir);
     let mut m = test_manifest();
     m.video_format_id = None;
     m.video_ext = String::new();
     let q = ResumeQuery {
         video: None,
-        ..test_query(Some(&m), &dest)
+        ..test_query(Some(&m), &dest, &staging)
     };
-    assert_eq!(resume_plan(&q), ResumePlan::CombineOnly);
-    // A stale video expectation against a videoless manifest: re-download.
-    let q = test_query(Some(&m), &dest);
+    assert_eq!(resume_plan(&q), ResumePlan::Resume);
+    let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1869,79 +1858,9 @@ fn hls_selection_ignores_extractor_order() {
     );
 }
 
-// ── direct ffmpeg merge ──────────────────────────────────────────────
-
-#[test]
-fn merge_audio_codec_matrix() {
-    // Mirrors the crate's audio_codec_for_mux without its builder.
-    assert_eq!(merge_audio_codec("m4a", "mp4"), "copy");
-    assert_eq!(merge_audio_codec("aac", "mp4"), "copy");
-    assert_eq!(merge_audio_codec("webm", "webm"), "copy");
-    assert_eq!(merge_audio_codec("opus", "webm"), "copy");
-    assert_eq!(merge_audio_codec("mka", "mka"), "copy");
-    assert_eq!(merge_audio_codec("webm", "mkv"), "copy");
-    // Opus into MP4 (the YouTube split case) re-encodes to AAC.
-    assert_eq!(merge_audio_codec("webm", "mp4"), "aac");
-    assert_eq!(merge_audio_codec("ogg", "mp4"), "aac");
-}
-
-#[test]
-fn merge_argv_maps_audio_first() {
-    let argv = merge_argv(
-        std::path::Path::new("/tmp/st/audio.webm"),
-        std::path::Path::new("/tmp/st/video.mp4"),
-        std::path::Path::new("/tmp/st/muxed.mp4"),
-        "Some Title",
-    );
-    let inputs: Vec<&str> = argv
-        .windows(2)
-        .filter(|w| w[0] == "-i")
-        .map(|w| w[1].as_str())
-        .collect();
-    assert_eq!(inputs, ["/tmp/st/audio.webm", "/tmp/st/video.mp4"]);
-    assert!(argv.windows(2).any(|w| w == ["-map", "0:a"]));
-    assert!(argv.windows(2).any(|w| w == ["-map", "1:v"]));
-    assert!(argv.windows(2).any(|w| w == ["-c:v", "copy"]));
-    assert!(argv.windows(2).any(|w| w == ["-c:a", "aac"]));
-    assert!(argv.contains(&"title=Some Title".to_string()));
-    assert_eq!(argv[argv.len() - 2], "--");
-    assert_eq!(argv[argv.len() - 1], "/tmp/st/muxed.mp4");
-}
-
-fn fake_ffmpeg_merge(dir: &std::path::Path, fail: bool) -> std::path::PathBuf {
-    let bin = dir.join("fake-ffmpeg");
-    std::fs::write(
-        &bin,
-        if fail {
-            r#"#!/bin/sh
-echo "[out#0/mp4] Invalid data found when processing input" >&2
-exit 1
-"#
-        } else {
-            r#"#!/bin/sh
-out=""
-prev=""
-for a in "$@"; do
-    if [ "$prev" = "--" ]; then out="$a"; fi
-    prev="$a"
-done
-echo "$@" >> "$out.argv.log"
-printf 'merged' > "$out"
-exit 0
-"#
-        },
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    bin
-}
 // ── binary part downloads ────────────────────────────────────────────
 
-fn part_test_job() -> VideoJob {
+fn direct_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
@@ -1958,55 +1877,6 @@ fn part_test_job() -> VideoJob {
         proxy: None,
     }
 }
-
-#[test]
-fn part_argv_pins_format_output_and_page() {
-    let job = part_test_job();
-    let out = std::path::Path::new("/tmp/staging/video.mp4");
-    let argv = part_download_argv(
-        &job,
-        "hls-720",
-        out,
-        false,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-    );
-    // Exact id, exact output, page URL last behind `--`.
-    let f = argv.iter().position(|a| a == "-f").expect("has -f");
-    assert_eq!(argv[f + 1], "hls-720");
-    let o = argv.iter().position(|a| a == "-o").expect("has -o");
-    assert_eq!(argv[o + 1], "/tmp/staging/video.mp4");
-    assert_eq!(argv[argv.len() - 2], "--");
-    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
-    assert!(argv.contains(&"--newline".to_string()));
-    assert!(argv.contains(&"--no-playlist".to_string()));
-    let r = argv.iter().position(|a| a == "--retries").expect("retries");
-    assert_eq!(argv[r + 1], "3");
-    // User agent passes through; no browser cookies configured.
-    assert!(
-        argv.windows(2)
-            .any(|w| w[0] == "--user-agent" && w[1] == "Grab-test/1.0")
-    );
-    assert!(!argv.iter().any(|a| a.starts_with("--cookies-from-browser")));
-}
-
-#[test]
-fn part_argv_forwards_browser_cookies() {
-    let mut job = part_test_job();
-    job.cookies_browser = "firefox".into();
-    let argv = part_download_argv(
-        &job,
-        "dl",
-        std::path::Path::new("/tmp/staging/dl.mp4"),
-        false,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-    );
-    assert!(
-        argv.iter()
-            .any(|a| a.starts_with("--cookies-from-browser=firefox"))
-    );
-}
-
-#[test]
 fn part_fallback_specs() {
     assert_eq!(part_fallback_spec("720p", true, false), "bv*[height<=720]");
     assert_eq!(part_fallback_spec("best", true, false), "bv*");
@@ -2014,94 +1884,6 @@ fn part_fallback_specs() {
     // Adopted single files degrade to best-single, never a bare audio
     // track; genuine audio legs prefer audio.
     assert_eq!(part_fallback_spec("720p", false, false), "b");
-}
-
-#[test]
-fn format_unavailable_detection() {
-    assert!(is_format_unavailable(
-        "ERROR: [Video] 1: Requested format is not available"
-    ));
-    assert!(!is_format_unavailable(
-        "ERROR: [Video] 1: Unable to download"
-    ));
-    assert!(!is_format_unavailable("HTTP Error 403: Forbidden"));
-}
-
-// ── binary part plumbing (fake yt-dlp) ───────────────────────────────
-
-/// Fake yt-dlp: logs argv beside the output, then either fails stale
-/// ids with the real unavailability message or emits one `--newline`
-/// progress line and writes 4 bytes to the `-o` path.
-fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
-    let bin = dir.join("fake-ytdlp");
-    std::fs::write(
-        &bin,
-        r#"#!/bin/sh
-out=""
-spec=""
-prev=""
-for a in "$@"; do
-    if [ "$prev" = "-o" ]; then out="$a"; fi
-    if [ "$prev" = "-f" ]; then spec="$a"; fi
-    prev="$a"
-done
-echo "$@" >> "$out.argv.log"
-if [ "$spec" = "gone-id" ]; then
-    echo "ERROR: [Video] 1: Requested format is not available" >&2
-    exit 1
-fi
-echo "[Grab];downloading;4;4;4;1000;0"
-echo "[Grab];finished;4;4;4;NA;0"
-printf 'data' > "$out"
-exit 0
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    bin
-}
-
-#[test]
-fn merge_binary_combines_and_reports_failure() {
-    let dir = std::env::temp_dir().join(format!("grab-fakemerge-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let fake = fake_ffmpeg_merge(&dir, false);
-    let (apart, vpart, out) = (dir.join("a.webm"), dir.join("v.mp4"), dir.join("muxed.mp4"));
-    std::fs::write(&apart, b"a").unwrap();
-    std::fs::write(&vpart, b"v").unwrap();
-    let res = crate::download::tokio_rt().block_on(run_merge_ffmpeg(
-        &fake,
-        &apart,
-        &vpart,
-        &out,
-        "T",
-        std::time::Duration::from_secs(30),
-    ));
-    assert!(matches!(res, Ok(())), "got {res:?}");
-    assert_eq!(std::fs::read(&out).unwrap(), b"merged");
-
-    let fail = fake_ffmpeg_merge(&dir, true);
-    let res = crate::download::tokio_rt().block_on(run_merge_ffmpeg(
-        &fail,
-        &apart,
-        &vpart,
-        &dir.join("muxed2.mp4"),
-        "T",
-        std::time::Duration::from_secs(30),
-    ));
-    match res {
-        Err(e) => assert!(
-            e.to_string().contains("Invalid data found"),
-            "real ffmpeg message surfaces: {e}"
-        ),
-        ok => panic!("expected combine error, got {ok:?}"),
-    }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── extraction spawn (no crate executor) ─────────────────────────────
@@ -2147,80 +1929,6 @@ fn fetch_video_page_parses_dump_json() {
         .expect("fake extract parses");
     assert_eq!(video.id, "abc");
     assert!(video.formats.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn part_binary_download_reports_progress() {
-    let dir = std::env::temp_dir().join(format!("grab-fakeyt-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let fake = fake_ytdlp(&dir);
-    let out = dir.join("video.mp4");
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let report = {
-        let seen = std::sync::Arc::clone(&seen);
-        std::sync::Arc::new(move |d: u64, t: u64| {
-            seen.lock().unwrap().push((d, t));
-        }) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>
-    };
-    let job = part_test_job();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_part_ytdlp(
-        &fake,
-        &job,
-        "v123",
-        "bv*",
-        &out,
-        false,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        report,
-        &mut abort_rx,
-        std::time::Duration::from_secs(30),
-    ));
-    assert!(matches!(res, Ok(Some(()))), "got {res:?}");
-    assert_eq!(std::fs::read(&out).unwrap(), b"data");
-    let seen = seen.lock().unwrap();
-    assert!(
-        seen.iter().any(|(d, t)| *d == 4 && *t == 4),
-        "progress reported: {seen:?}"
-    );
-    let logged = std::fs::read_to_string(dir.join("video.mp4.argv.log")).unwrap();
-    assert!(logged.contains("-f v123"), "{logged}");
-    assert!(logged.contains("-- https://x.com/u/status/1"), "{logged}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn part_binary_retries_stale_id_with_fallback_spec() {
-    let dir = std::env::temp_dir().join(format!("grab-fakeyt-fb-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let fake = fake_ytdlp(&dir);
-    let out = dir.join("audio.m4a");
-    let report =
-        std::sync::Arc::new(|_: u64, _: u64| {}) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
-    let job = part_test_job();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_part_ytdlp(
-        &fake,
-        &job,
-        "gone-id",
-        "ba/b",
-        &out,
-        false,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        report,
-        &mut abort_rx,
-        std::time::Duration::from_secs(30),
-    ));
-    assert!(matches!(res, Ok(Some(()))), "got {res:?}");
-    assert_eq!(std::fs::read(&out).unwrap(), b"data");
-    let logged = std::fs::read_to_string(dir.join("audio.m4a.argv.log")).unwrap();
-    let attempts: Vec<&str> = logged.lines().collect();
-    assert_eq!(attempts.len(), 2, "{logged}");
-    assert!(attempts[0].contains("-f gone-id"), "{logged}");
-    assert!(attempts[1].contains("-f ba/b"), "{logged}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -2987,39 +2695,6 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
 }
 
 #[test]
-fn finish_merge_conflicting_dest_reports_exists() {
-    // A foreign file appearing after intake dedupe must requeue with a
-    // fresh name: finish_merge reports exactly DEST_EXISTS, the part
-    // stays on disk (retryable), and the foreign dest is untouched.
-    let dir = std::env::temp_dir().join(format!("grab-fakeexists-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let staging = dir.join("staging");
-    std::fs::create_dir_all(&staging).unwrap();
-    let apart = staging.join("a.m4a");
-    std::fs::write(&apart, b"audio-part").unwrap();
-    let dest = dir.join("song.m4a");
-    std::fs::write(&dest, b"foreign").unwrap();
-    let res = crate::download::tokio_rt().block_on(finish_merge(
-        std::path::Path::new("/nonexistent-ffmpeg"),
-        &staging,
-        None,
-        &apart,
-        &dest,
-        None,
-        "T",
-        None,
-        std::time::Duration::from_secs(30),
-    ));
-    match res {
-        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS),
-        ok => panic!("expected DEST_EXISTS, got {ok:?}"),
-    }
-    assert_eq!(std::fs::read(&apart).unwrap(), b"audio-part");
-    assert_eq!(std::fs::read(&dest).unwrap(), b"foreign");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn fetch_video_page_surfaces_stderr_tail() {
     // Nonzero exit: the last non-blank stderr line becomes the detail,
     // not a generic wrapper.
@@ -3076,99 +2751,6 @@ fn fetch_video_page_rejects_garbage_stdout() {
 }
 
 #[test]
-fn part_binary_does_not_retry_ordinary_errors() {
-    // Only stale-id ("not available") earns the fallback second spawn;
-    // a 403-style failure returns after exactly one attempt.
-    let dir = std::env::temp_dir().join(format!("grab-fakeyt-403-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let bin = dir.join("fake-ytdlp");
-    std::fs::write(
-        &bin,
-        r#"#!/bin/sh
-out=""
-spec=""
-prev=""
-for a in "$@"; do
-    if [ "$prev" = "-o" ]; then out="$a"; fi
-    if [ "$prev" = "-f" ]; then spec="$a"; fi
-    prev="$a"
-done
-echo "$@" >> "$out.argv.log"
-echo "ERROR: [Video] 1: Unable to download: 403 Forbidden" >&2
-exit 1
-"#,
-    )
-    .unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let out = dir.join("audio.m4a");
-    let report =
-        std::sync::Arc::new(|_: u64, _: u64| {}) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
-    let job = part_test_job();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_part_ytdlp(
-        &bin,
-        &job,
-        "v123",
-        "ba/b",
-        &out,
-        false,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        report,
-        &mut abort_rx,
-        std::time::Duration::from_secs(30),
-    ));
-    assert!(res.is_err(), "got {res:?}");
-    let logged = std::fs::read_to_string(dir.join("audio.m4a.argv.log")).unwrap();
-    assert_eq!(logged.lines().count(), 1, "no fallback retry: {logged}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
-fn part_binary_abort_stays_quiet() {
-    // Dropping the abort sender mid-attempt resolves Ok(None) — the
-    // caller (pauser/canceller) owns the row state, so no error.
-    let dir = std::env::temp_dir().join(format!("grab-fakeyt-abort-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let bin = dir.join("fake-ytdlp");
-    std::fs::write(&bin, "#!/bin/sh\nsleep 60\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let out = dir.join("audio.m4a");
-    let report =
-        std::sync::Arc::new(|_: u64, _: u64| {}) as std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
-    let job = part_test_job();
-    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let handle = std::thread::spawn(move || {
-        crate::download::tokio_rt().block_on(run_part_ytdlp(
-            &bin,
-            &job,
-            "v123",
-            "ba/b",
-            &out,
-            false,
-            std::path::Path::new("/usr/bin/ffmpeg"),
-            report,
-            &mut abort_rx,
-            std::time::Duration::from_secs(30),
-        ))
-    });
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    drop(abort_tx);
-    let res = handle.join().expect("thread joins");
-    assert!(matches!(res, Ok(None)), "abort is quiet, got {res:?}");
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn sanitize_missing_codec_fields_still_parse() {
     // A new sparse extractor omitting codec/container/height keys must
     // parse like TikTok's: Unknown-typed, adoptable, never a row killer.
@@ -3189,15 +2771,15 @@ fn sanitize_missing_codec_fields_still_parse() {
 
 #[test]
 fn resume_plan_unknown_total_resumes_bytes_on_disk() {
-    // No total to judge overlong against (live-adjacent/single-connection
-    // flows): bytes on disk mean resume, never a Fresh wipe.
+    // No total to judge overlong against: temp bytes mean resume, never
+    // a Fresh wipe.
     let dir = test_manifest_dir("unknown-total");
     let dest = dir.join("Clip.mp4");
-    std::fs::write(dest_part_path(&dest, "audio", "webm"), vec![0u8; 49]).unwrap();
+    let staging = test_staging(&dir);
+    std::fs::write(staging.join("grab-media.mp4"), vec![0u8; 49]).unwrap();
     let m = test_manifest();
-    let mut q = test_query(Some(&m), &dest);
-    q.video_total = None;
-    q.audio_total = None;
+    let mut q = test_query(Some(&m), &dest, &staging);
+    q.total = None;
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3324,14 +2906,15 @@ fn download_builders_use_machine_progress_and_ignore_config() {
     // Every yt-dlp spawn parses `--progress-template` lines (never human
     // prose) and ignores ambient user configs that could reshape argv.
     let out = std::path::Path::new("/tmp/staging/video.mp4");
-    let job = part_test_job();
+    let job = direct_test_job();
     for argv in [
-        part_download_argv(
+        unified_download_argv(
             &job,
-            "v123",
-            out,
-            false,
+            "v123+a456/bv*+ba/b",
+            true,
+            "mp4",
             std::path::Path::new("/usr/bin/ffmpeg"),
+            out,
         ),
         live_capture_argv(&job, "h720", out),
         hls_download_argv(&job, "h720", std::path::Path::new("/usr/bin/ffmpeg"), out),
@@ -3345,95 +2928,9 @@ fn download_builders_use_machine_progress_and_ignore_config() {
     }
 }
 // ── subtitle sidecars ────────────────────────────────────────────────
-
-#[test]
-fn part_argv_adds_subtitle_flags_when_requested() {
-    let mut job = part_test_job();
-    job.subtitles = Some("en".into());
-    let out = std::path::Path::new("/tmp/staging/video.mp4");
-    let argv = part_download_argv(
-        &job,
-        "hls-720",
-        out,
-        true,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-    );
-    let sub = argv
-        .iter()
-        .position(|a| a == "--sub-langs")
-        .expect("--sub-langs");
-    assert_eq!(argv[sub + 1], "en");
-    assert!(argv.contains(&"--write-subs".to_string()));
-    assert!(argv.contains(&"--write-auto-subs".to_string()));
-    let conv = argv
-        .iter()
-        .position(|a| a == "--convert-subs")
-        .expect("--convert-subs");
-    assert_eq!(argv[conv + 1], "srt");
-    // Conversion points at Grab's resolved ffmpeg, not PATH (Flatpak).
-    let loc = argv
-        .iter()
-        .position(|a| a == "--ffmpeg-location")
-        .expect("--ffmpeg-location");
-    assert_eq!(argv[loc + 1], "/usr/bin");
-    // Flags must stay ahead of the `--` URL separator: anything after it
-    // is consumed by yt-dlp as an extra URL, never read as an option.
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(sub < sep && conv < sep && loc < sep, "{argv:?}");
-    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
-}
-
-#[test]
-fn part_argv_omits_subtitle_flags_when_not_requested() {
-    let mut job = part_test_job();
-    job.subtitles = Some("fr".into());
-    let out = std::path::Path::new("/tmp/staging/video.mp4");
-    let argv = part_download_argv(
-        &job,
-        "hls-720",
-        out,
-        false,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-    );
-    assert_no_subtitle_tokens(&argv);
-    assert!(
-        !argv.iter().any(|a| a == "--ffmpeg-location"),
-        "no ffmpeg location without subs: {argv:?}"
-    );
-    let mut job = part_test_job();
-    job.subtitles = None;
-    let argv = part_download_argv(
-        &job,
-        "hls-720",
-        out,
-        true,
-        std::path::Path::new("/usr/bin/ffmpeg"),
-    );
-    assert_no_subtitle_tokens(&argv);
-}
-
-#[test]
-fn leg_downloads_subs_matrix() {
-    // Only legs carrying video content take subtitles: the split video
-    // part, or an adopted single file. Audio parts and rows without a
-    // configured language never do.
-    let mut job = part_test_job();
-    job.subtitles = Some("en".into());
-    // Split download: video leg yes, audio leg no.
-    assert!(leg_downloads_subs(&job, true, false));
-    assert!(!leg_downloads_subs(&job, false, false));
-    // Adopted single file (no split video part): the audio leg carries
-    // the whole video.
-    assert!(leg_downloads_subs(&job, false, true));
-    // No configured language: nothing anywhere.
-    job.subtitles = None;
-    assert!(!leg_downloads_subs(&job, true, false));
-    assert!(!leg_downloads_subs(&job, false, true));
-}
-
 #[test]
 fn hls_argv_takes_subtitles() {
-    let mut job = part_test_job();
+    let mut job = direct_test_job();
     job.quality = "best".into();
     job.subtitles = Some("ar".into());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
@@ -3639,6 +3136,55 @@ fn hls_collects_sidecar_beside_finished_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fake yt-dlp for the unified path: expands the `%(ext)s` template,
+/// prints template progress + a merge line + the after_move path, and
+/// writes output bytes plus an `en` sidecar beside the template.
+fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo "$@" >> "$(dirname "$out").argv.log"
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+echo "[Grab];downloading;7;7;7;1000;0"
+echo "[Merger] Merging formats"
+echo "$out"
+printf 'unified' > "$out"
+stem="$(basename "$out" .mp4)"
+printf 'subtitles' > "$(dirname "$out")/$stem.en.srt"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Fake yt-dlp that fails like a 403: surfaces the tail, no retry.
+fn fake_ytdlp_fail(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-fail");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho 'ERROR: [Video] 1: Unable to download: 403 Forbidden' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
 /// Fake yt-dlp for live that behaves like a killed recorder: bytes land
 /// in the `.part` shell, no progress line is ever printed, then it exits
 /// cleanly after a beat (so the file watcher, not the log parser, must
@@ -3799,35 +3345,463 @@ fn collect_sidecar_never_clobbers() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── unified direct downloads (fake yt-dlp) ───────────────────────────
+
 #[test]
-fn sweep_parts_removes_split_parts_only() {
-    // Successful splits must leave no litter: both legs go, the
-    // finished file and sidecars stay, missing files are quiet.
-    let dir = std::env::temp_dir().join(format!("grab-sweepparts-{}", std::process::id()));
+fn unified_runner_downloads_claims_and_collects() {
+    // One spawn: merge flags on the wire, after_move discovery, atomic
+    // claim, sidecar collected beside the finished file, Merging phase
+    // announced, progress reported.
+    let dir = std::env::temp_dir().join(format!("grab-fakeunified-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // Spaced name mirrors real titles (and file_stem edge cases).
-    let vpart = dir.join("How Do LLMs Work?.video.mp4");
-    let apart = dir.join("How Do LLMs Work?.audio.m4a");
-    let dest = dir.join("How Do LLMs Work?.mp4");
-    let sidecar = dir.join("How Do LLMs Work?.en.srt");
-    for p in [&vpart, &apart, &dest, &sidecar] {
-        std::fs::write(p, b"x").unwrap();
+    let fake = fake_ytdlp(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    job.subtitles = Some("en".into());
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        Some(7),
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(7))), "got {res:?}");
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
+    assert_eq!(std::fs::read(dir.join("v.en.srt")).unwrap(), b"subtitles");
+    assert!(!staging.exists(), "staging cleaned");
+    let mut progress = false;
+    let mut merging = false;
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            crate::download::EngineMsg::Progress { downloaded: 7, .. } => {
+                progress = true
+            }
+            crate::download::EngineMsg::Phase(p) if p.contains("Merging") => merging = true,
+            _ => {}
+        }
     }
-    sweep_parts(Some(&vpart), &apart);
-    assert!(!vpart.exists());
-    assert!(!apart.exists());
-    assert!(dest.exists(), "finished file must survive");
-    assert!(sidecar.exists(), "collected sidecar must survive");
-    // Adopted singles (and audio-only rows) sweep nothing: the part
-    // was renamed to the destination, not copied.
-    std::fs::write(&apart, b"x").unwrap();
-    sweep_parts(None, &apart);
-    assert!(apart.exists());
-    // Missing files never panic.
-    sweep_parts(
-        Some(&dir.join("gone.video.mp4")),
-        &dir.join("gone.audio.m4a"),
+    assert!(progress, "progress reported");
+    assert!(merging, "merge phase announced");
+    let logged = std::fs::read_to_string(dir.join("staging.argv.log")).unwrap();
+    assert!(logged.contains("-f v123+a456/bv*+ba/b"), "{logged}");
+    assert!(logged.contains("--merge-output-format mp4"), "{logged}");
+    assert!(logged.contains("grab-media.%(ext)s"), "{logged}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unified_runner_surfaces_failure_tail() {
+    // A 403-style failure surfaces yt-dlp's line and claims nothing.
+    let dir = std::env::temp_dir().join(format!("grab-fakeunified-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_fail(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        None,
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    match res {
+        Err(e) => assert!(e.to_string().contains("403"), "tail surfaces: {e}"),
+        ok => panic!("expected failure, got {ok:?}"),
+    }
+    assert!(!job.dest.exists(), "nothing claimed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unified_runner_abort_stays_quiet() {
+    // Dropping the abort sender mid-spawn resolves Ok(None) — the
+    // caller (pauser/canceller) owns the row state, so no error.
+    let dir = std::env::temp_dir().join(format!("grab-fakeunified-abort-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp");
+    std::fs::write(&bin, "#!/bin/sh\nsleep 60\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let handle = std::thread::spawn(move || {
+        crate::download::tokio_rt().block_on(run_unified_ytdlp(
+            &bin,
+            std::path::Path::new("/usr/bin/ffmpeg"),
+            &staging,
+            &job,
+            "v123+a456/bv*+ba/b",
+            Some("mp4"),
+            None,
+            &mut abort_rx,
+            std::time::Duration::from_secs(30),
+            tx,
+        ))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    drop(abort_tx);
+    let res = handle.join().expect("thread joins");
+    assert!(matches!(res, Ok(None)), "abort is quiet, got {res:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unified_runner_refuses_existing_dest() {
+    // Overwrite pre-flight at the claim: a finished file already at
+    // dest fails the row for requeue instead of clobbering it, and the
+    // foreign file is untouched.
+    let dir = std::env::temp_dir().join(format!("grab-fakeunified-ow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    std::fs::write(&job.dest, b"already").unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        None,
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    match res {
+        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS, "{e}"),
+        ok => panic!("expected pre-flight refusal, got {ok:?}"),
+    }
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"already");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unified_runner_rejects_empty_output() {
+    // A zero-byte "completed" download must fail, not claim an empty
+    // Done row: the old split path enforced the same contract.
+    let dir = std::env::temp_dir().join(format!("grab-fakeunified-empty-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp-empty");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+: > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+        &bin,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        None,
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    match res {
+        Err(e) => assert!(e.to_string().contains("empty stream"), "got {e}"),
+        ok => panic!("expected empty-stream failure, got {ok:?}"),
+    }
+    assert!(!job.dest.exists(), "nothing claimed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── unified direct-download spec ─────────────────────────────────────
+
+#[test]
+fn unified_format_spec_matrix() {
+    // Split: planner pair, then preset-video with the exact audio (so a
+    // lone stale video id doesn't throw away good audio), then the
+    // full preset pair.
+    assert_eq!(
+        unified_format_spec(Some("v123"), "a456", "1080p"),
+        (
+            "v123+a456/bv*[height<=1080]+a456/bv*[height<=1080]+ba/b".to_string(),
+            true
+        )
     );
+    // Best quality (no height cap): unbounded video fallback.
+    assert_eq!(
+        unified_format_spec(Some("v1"), "a2", "best"),
+        ("v1+a2/bv*+a2/bv*+ba/b".to_string(), true)
+    );
+    // Adopted single file: exact id, best-single fallback (never audio).
+    assert_eq!(
+        unified_format_spec(None, "m789", "1080p"),
+        ("m789/b".to_string(), false)
+    );
+    // Hostile ids degrade to preset chains instead of widening `-f`.
+    assert_eq!(
+        unified_format_spec(Some("v1/a2"), "a456", "1080p"),
+        ("bv*[height<=1080]+ba/b".to_string(), true)
+    );
+    assert_eq!(
+        unified_format_spec(Some("v123"), "a[456]", "1080p"),
+        ("bv*[height<=1080]+ba/b".to_string(), true)
+    );
+    assert_eq!(
+        unified_format_spec(Some(""), "a456", "1080p"),
+        ("bv*[height<=1080]+ba/b".to_string(), true)
+    );
+    assert_eq!(
+        unified_format_spec(None, "a,456", "1080p"),
+        ("b".to_string(), false)
+    );
+}
+
+#[test]
+fn merge_output_ext_maps_supported_or_mp4() {
+    assert_eq!(merge_output_ext("mp4"), "mp4");
+    assert_eq!(merge_output_ext("webm"), "webm");
+    assert_eq!(merge_output_ext("mkv"), "mkv");
+    // Unsupported containers fall back to mp4 (a working file beats a
+    // failed merge); matching is case-insensitive.
+    assert_eq!(merge_output_ext("avi"), "mp4");
+    assert_eq!(merge_output_ext("mov"), "mp4");
+    assert_eq!(merge_output_ext("WEBM"), "webm");
+    assert_eq!(merge_output_ext(""), "mp4");
+}
+
+#[test]
+fn unified_candidate_names_claimable_output() {
+    // Merge-fragment leftovers, `.part` shells, sidecars and metadata
+    // droppings are never claimed, on either discovery path.
+    assert!(unified_candidate("grab-media.mp4"));
+    assert!(!unified_candidate("grab-media.f399.mp4"));
+    assert!(!unified_candidate("grab-media.f251.webm"));
+    assert!(!unified_candidate("grab-media.mp4.part"));
+    assert!(!unified_candidate("grab-media.en.srt"));
+    assert!(!unified_candidate("grab-media.ytdl"));
+    assert!(!unified_candidate("grab-media.temp"));
+    assert!(!unified_candidate("other.mp4"));
+}
+
+#[test]
+fn is_ytdlp_fragment_names_merge_temps() {
+    assert!(is_ytdlp_fragment("grab-media.f399.mp4"));
+    assert!(is_ytdlp_fragment("grab-media.f251.webm"));
+    assert!(!is_ytdlp_fragment("grab-media.mp4"));
+    assert!(!is_ytdlp_fragment("grab-media.en.srt"));
+    assert!(!is_ytdlp_fragment("grab-media.mp4.part"));
+    assert!(!is_ytdlp_fragment("grab-media.f.mp4"));
+    assert!(!is_ytdlp_fragment("grab-media.%(ext)s"));
+}
+
+#[test]
+fn discover_unified_output_prefers_after_move_and_excludes() {
+    // after_move wins when valid; otherwise the largest non-excluded
+    // temp wins the scan, whatever else litters staging.
+    let dir = std::env::temp_dir().join(format!("grab-discover-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("grab-media.f399.mp4"), b"fragment").unwrap();
+    std::fs::write(staging.join("grab-media.mp4.part"), b"partial").unwrap();
+    std::fs::write(staging.join("grab-media.en.srt"), b"subs").unwrap();
+    std::fs::write(staging.join("grab-media.mp4"), b"output12").unwrap();
+    let out = staging.join("grab-media.mp4");
+    assert_eq!(
+        discover_unified_output(&staging, Some(out.to_str().unwrap())),
+        Some(out.clone())
+    );
+    // after_move pointing outside staging (or at an excluded name)
+    // falls back to the scan instead of claiming foreign bytes.
+    assert_eq!(
+        discover_unified_output(&staging, Some("/tmp/elsewhere.mp4")),
+        Some(out.clone())
+    );
+    assert_eq!(
+        discover_unified_output(
+            &staging,
+            Some(
+                staging
+                    .join("grab-media.en.srt")
+                    .to_str()
+                    .unwrap()
+                    .to_string()
+            )
+            .as_deref()
+        ),
+        Some(out.clone())
+    );
+    // Nothing claimable at all: no output.
+    let empty = dir.join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    std::fs::write(empty.join("grab-media.f1.mp4"), b"frag").unwrap();
+    assert_eq!(discover_unified_output(&empty, None), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unified_argv_takes_subtitles() {
+    // Full subtitle flags ride ahead of the `--` separator, with the
+    // merge flags, on one invocation.
+    let mut job = direct_test_job();
+    job.subtitles = Some("en".into());
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "v123+a456/bv*+a456/bv*+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let sub = argv
+        .iter()
+        .position(|a| a == "--sub-langs")
+        .expect("--sub-langs");
+    assert_eq!(argv[sub + 1], "en");
+    assert!(argv.contains(&"--write-subs".to_string()));
+    assert!(argv.contains(&"--write-auto-subs".to_string()));
+    let conv = argv
+        .iter()
+        .position(|a| a == "--convert-subs")
+        .expect("--convert-subs");
+    assert_eq!(argv[conv + 1], "srt");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(sub < sep && conv < sep, "{argv:?}");
+    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
+    // No language configured: no subtitle flags anywhere.
+    job.subtitles = None;
+    let argv = unified_download_argv(
+        &job,
+        "v123+a456/bv*+a456/bv*+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert_no_subtitle_tokens(&argv);
+}
+
+/// Fake yt-dlp emitting two format legs like a real merged download:
+/// video counts 0→100, a `finished` line, audio counts 0→50, a
+/// `finished` line, then the merge line and the after_move path.
+fn fake_ytdlp_two_legs(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-two-legs");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+echo "[Grab];downloading;0;100;100;1000;5"
+echo "[Grab];downloading;100;100;100;1000;0"
+echo "[Grab];finished;100;100;100;0;0"
+echo "[Grab];downloading;0;50;50;1000;5"
+echo "[Grab];downloading;50;50;50;1000;0"
+echo "[Grab];finished;50;50;50;0;0"
+echo "[Merger] Merging formats"
+echo "$out"
+printf 'twolegs' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn unified_runner_sums_two_leg_progress() {
+    // `downloaded_bytes` resets per format leg; banking each leg on its
+    // `finished` line must report the SUM (100+50) against the combined
+    // total — plain max would stall the bar at ~66% forever.
+    let dir = std::env::temp_dir().join(format!("grab-faketwolegs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_two_legs(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "v1+a2/bv*+a2/bv*+ba/b",
+        Some("mp4"),
+        Some(150),
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let mut max_seen = 0u64;
+    while let Ok(msg) = rx.try_recv() {
+        if let crate::download::EngineMsg::Progress { downloaded, .. } = msg {
+            max_seen = max_seen.max(downloaded);
+        }
+    }
+    assert_eq!(max_seen, 150, "progress must sum both legs");
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -3536,12 +3536,13 @@ fn proxy_argv_precedes_end_of_options() {
         proxy: Some(proxy),
     };
     for argv in [
-        crate::video::part_download_argv(
+        crate::video::unified_download_argv(
             &job,
-            "v",
-            std::path::Path::new("/tmp/x.mp4"),
-            false,
+            "v+a/bv*+ba/b",
+            true,
+            "mp4",
             std::path::Path::new("/usr/bin/ffmpeg"),
+            std::path::Path::new("/tmp/staging/grab-media.%(ext)s"),
         ),
         crate::video::live_capture_argv(&job, "h", std::path::Path::new("/tmp/x.mp4")),
     ] {

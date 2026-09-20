@@ -1452,7 +1452,7 @@ fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
 /// resolved ffmpeg (guaranteed present by `resolve_libraries`, which
 /// refuses video attempts without it) — so subtitles can never sink a
 /// download.
-fn subtitle_cli_args(lang: &str, ffmpeg_bin: &Path) -> Vec<String> {
+fn subtitle_cli_args(lang: &str) -> Vec<String> {
     vec![
         "--write-subs".to_string(),
         "--sub-langs".to_string(),
@@ -1460,16 +1460,7 @@ fn subtitle_cli_args(lang: &str, ffmpeg_bin: &Path) -> Vec<String> {
         "--write-auto-subs".to_string(),
         "--convert-subs".to_string(),
         "srt".to_string(),
-        "--ffmpeg-location".to_string(),
-        ffmpeg_location_dir(ffmpeg_bin),
     ]
-}
-
-/// Whether a leg downloads subtitles: only legs carrying video content
-/// (the split video part, or an adopted single file), and only when a
-/// language is configured.
-pub(crate) fn leg_downloads_subs(job: &VideoJob, video_leg: bool, single_file: bool) -> bool {
-    job.subtitles.is_some() && (video_leg || single_file)
 }
 
 /// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
@@ -1924,11 +1915,9 @@ pub(crate) struct VideoManifest {
     quality: String,
     video_format_id: Option<String>,
     video_ext: String,
-    video_bytes: u64,
     audio_format_id: String,
     audio_ext: String,
-    audio_bytes: u64,
-    /// Final output size once the muxed file has been renamed into place.
+    /// Final output size once the file has been renamed into place.
     /// Lets a retry after a crash adopt the finished file without any work.
     final_bytes: Option<u64>,
 }
@@ -1953,30 +1942,6 @@ impl VideoManifest {
                 (None, None) => self.video_ext.is_empty(),
                 _ => false,
             }
-    }
-
-    /// Whether the recorded part files are all present with exactly the
-    /// recorded sizes. Equality (not >=) so a truncated or replaced part
-    /// forces a re-download instead of a corrupt merge. Zero-byte records
-    /// never count (a pending manifest carries zeros), and neither do
-    /// sparse shells (pre-allocated zeros from a killed attempt). Paths
-    /// build off the finished file (dest-dir `<stem>.<kind>.<ext>`
-    /// names), never the query dir.
-    fn parts_present(&self, dest: &Path) -> bool {
-        let audio_part = dest_part_path(dest, "audio", &self.audio_ext);
-        let audio_ok = self.audio_bytes > 0
-            && file_len(&audio_part) == Some(self.audio_bytes)
-            && !is_sparse_shell(&audio_part);
-        let video_ok = match &self.video_format_id {
-            Some(_) => {
-                let video_part = dest_part_path(dest, "video", &self.video_ext);
-                self.video_bytes > 0
-                    && file_len(&video_part) == Some(self.video_bytes)
-                    && !is_sparse_shell(&video_part)
-            }
-            None => true,
-        };
-        audio_ok && video_ok
     }
 }
 
@@ -2106,26 +2071,6 @@ pub(crate) fn sidecar_path_for(output: &Path, lang: &str) -> PathBuf {
         .join(format!("{stem}.{lang}.srt"))
 }
 
-/// Delete consumed split parts after a successful merge (`vpart` plus
-/// `apart`; adopted singles are renamed, never copied, so callers pass
-/// `vpart: None` for those and nothing happens). Extracted sync helper
-/// so the deletion set is unit-testable. Failures only warn: the row
-/// is already Done and must not fail over its own temp files.
-pub(crate) fn sweep_parts(vpart: Option<&Path>, apart: &Path) {
-    if vpart.is_none() {
-        return;
-    }
-    for p in vpart.into_iter().chain(std::iter::once(apart)) {
-        if let Err(e) = std::fs::remove_file(p) {
-            tracing::warn!(
-                part = %p.display(),
-                error = %e,
-                "split part left beside the finished file"
-            );
-        }
-    }
-}
-
 /// Best-effort sidecar collection: move an exact sidecar file beside
 /// the finished download. A missing source (the page published no
 /// subtitles) is the normal nothing-to-do; any other failure only
@@ -2201,12 +2146,9 @@ fn is_sparse_shell(path: &Path) -> bool {
 pub(crate) enum ResumePlan {
     /// Finished file already in place (adopt it).
     Finished,
-    /// Parts verified on disk (merge only).
-    CombineOnly,
-    /// Parts started but incomplete: proceed WITHOUT wiping so the
-    /// download engine resumes them in place (Range-append for simple
-    /// streams, segment skip via the `.parts` sidecar). Safe because the
-    /// manifest matched: same formats, same bytes.
+    /// Temp incomplete or absent: spawn the same command and let yt-dlp
+    /// resume its own `.part` shell (or download fresh when nothing is
+    /// there). Safe because the manifest matched: same selection.
     Resume,
     /// (Re)download everything, wiping staging first.
     Fresh,
@@ -2216,15 +2158,15 @@ pub(crate) enum ResumePlan {
 pub(crate) struct ResumeQuery<'a> {
     pub manifest: Option<&'a VideoManifest>,
     pub dest: &'a Path,
+    pub staging: &'a Path,
     pub page_url: &'a str,
     pub quality: &'a str,
     pub video: Option<(&'a str, &'a str)>,
     pub audio: (&'a str, &'a str),
-    /// Freshly selected total sizes, for the over-long check. `None`
+    /// Freshly selected combined total, for the over-long check. `None`
     /// means unknown: without a total, oversize is undetectable and any
     /// existing bytes are reusable.
-    pub video_total: Option<u64>,
-    pub audio_total: Option<u64>,
+    pub total: Option<u64>,
 }
 
 pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
@@ -2239,44 +2181,18 @@ pub(crate) fn resume_plan(q: &ResumeQuery) -> ResumePlan {
     {
         return ResumePlan::Finished;
     }
-    if m.parts_present(q.dest) {
-        return ResumePlan::CombineOnly;
+    // The unified temp (if any) must be sane: over-long means garbage
+    // (nothing valid past the total), and a sparse full-size shell
+    // would resume as zeros. Either way, wipe and start over. Anything
+    // else — partial temp, or nothing at all — spawns the same command
+    // and lets yt-dlp resume or download fresh on its own.
+    if let Some(temp) = discover_unified_output(q.staging, None) {
+        let len = file_len(&temp);
+        if q.total.is_some_and(|t| len.is_some_and(|n| n > t)) || is_sparse_shell(&temp) {
+            return ResumePlan::Fresh;
+        }
     }
-    // Sparse shells (full size, nothing on disk) left by a killed attempt
-    // must not reach the engine: it equates size with completeness and
-    // would "adopt" zeros. Over-long parts cannot be resumed into either
-    // (nothing valid past the total). Either way, wipe and start over.
-    // Anything else with bytes on disk is resumable — the manifest match
-    // above is the identity check.
-    let (_, audio_ext) = q.audio;
-    let audio_part = dest_part_path(q.dest, "audio", audio_ext);
-    let video_part = q
-        .video
-        .map(|(_, video_ext)| dest_part_path(q.dest, "video", video_ext));
-    if is_sparse_shell(&audio_part) || video_part.as_ref().is_some_and(|p| is_sparse_shell(p)) {
-        return ResumePlan::Fresh;
-    }
-    let overlong = |path: &Path, total: Option<u64>| {
-        total.is_some_and(|t| file_len(path).is_some_and(|n| n > t))
-    };
-    if overlong(&audio_part, q.audio_total) {
-        return ResumePlan::Fresh;
-    }
-    if let Some(video_part) = &video_part
-        && overlong(video_part, q.video_total)
-    {
-        return ResumePlan::Fresh;
-    }
-    let video_has = video_part
-        .as_ref()
-        .and_then(|p| file_len(p.as_path()))
-        .is_some_and(|n| n > 0);
-    let audio_has = file_len(&audio_part).is_some_and(|n| n > 0);
-    if video_has || audio_has {
-        ResumePlan::Resume
-    } else {
-        ResumePlan::Fresh
-    }
+    ResumePlan::Resume
 }
 
 /// Inputs for one resolver-worker attempt. Built on the main thread in
@@ -2331,7 +2247,11 @@ pub async fn run_video_download(
     use crate::download::EngineMsg;
 
     let staging = staging_dir(job.item_id);
-    ensure_staging_dir(&staging)?;
+    // Keep the canonical path: `discover_unified_output` compares a
+    // canonicalized `after_move` against it, and on symlinked roots
+    // (`/tmp` → `/private/tmp`, Flatpak) the raw join would fail
+    // closed to scan on every attempt.
+    let staging = ensure_staging_dir(&staging)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
     tracing::info!(
@@ -2460,17 +2380,30 @@ pub async fn run_video_download(
     // (scratch); the parts live beside the finished file (yt-dlp
     // defaults), so every file check builds off the destination.
     let manifest = read_manifest(&staging);
+    // Split rows merge video+audio (both sizes known or neither is
+    // trusted); an adopted single is one muxed file whose extractor
+    // size is the whole file. Anything else leaves the total unknown
+    // rather than understating it — an understated total would both
+    // shrink the bar and trip the over-long Fresh wipe on valid bytes.
+    let single = video_sel.is_none();
     let query = ResumeQuery {
         manifest: manifest.as_ref(),
         dest: &job.dest,
+        staging: &staging,
         page_url: &job.page_url,
         quality: &job.quality,
         video: video_sel
             .as_ref()
             .map(|s| (s.format_id.as_str(), s.ext.as_str())),
         audio: (audio_sel.format_id.as_str(), audio_sel.ext.as_str()),
-        video_total: video_sel.as_ref().and_then(|s| s.size),
-        audio_total: audio_sel.size,
+        total: if single {
+            audio_sel.size
+        } else {
+            match (video_sel.as_ref().and_then(|s| s.size), audio_sel.size) {
+                (Some(v), Some(a)) => Some(v + a),
+                _ => None,
+            }
+        },
     };
     let plan = resume_plan(&query);
     match plan {
@@ -2514,380 +2447,50 @@ pub async fn run_video_download(
                         .as_ref()
                         .map(|s| s.ext.clone())
                         .unwrap_or_default(),
-                    video_bytes: 0,
                     audio_format_id: audio_sel.format_id.clone(),
                     audio_ext: audio_sel.ext.clone(),
-                    audio_bytes: 0,
                     final_bytes: None,
                 },
             )
             .await?;
         }
-        ResumePlan::CombineOnly => {}
         ResumePlan::Resume => {
+            // Overwrite pre-flight, same as Fresh: the Finished check
+            // above already ruled out an adoptable file, so anything at
+            // `dest` is foreign or stale — refuse before a wasted
+            // download so the pump requeues under a fresh name.
+            if job.dest.exists() {
+                clean_dest_parts(&job.dest);
+                return Err(VideoError::exists());
+            }
             phase(gettext("Resuming download…"));
         }
     }
-    let have_parts = plan == ResumePlan::CombineOnly;
-
-    // Byte-weighted progress across both parts: the pump renders the same
-    // rich detail (percent, amounts, speed, ETA) as HTTP rows.
-    let combined_total: Option<u64> =
-        match (video_sel.as_ref().and_then(|s| s.size), audio_sel.size) {
-            (Some(v), Some(a)) => Some(v + a),
-            (None, Some(a)) => Some(a),
-            _ => None,
-        };
-    let v_done = Arc::new(AtomicU64::new(0));
-    let a_done = Arc::new(AtomicU64::new(0));
-    let sent = Arc::new(AtomicU64::new(0));
-    let make_cb = |mine: Arc<AtomicU64>, other: Arc<AtomicU64>| {
-        let tx = tx.clone();
-        let sent = sent.clone();
-        move |done: u64, total: u64| {
-            mine.store(done, Ordering::Relaxed);
-            let prev = sent.load(Ordering::Relaxed);
-            if done.saturating_sub(prev) >= PROGRESS_GRANULARITY || (total > 0 && done >= total) {
-                sent.store(done, Ordering::Relaxed);
-                tx.send(EngineMsg::Progress {
-                    downloaded: done + other.load(Ordering::Relaxed),
-                    total: combined_total,
-                    uploaded: 0,
-                    upload_bps: 0,
-                })
-                .ok();
-            }
-        }
-    };
-
-    // NOTE: Grab's speed limit does not apply here — parts run
+    // One yt-dlp invocation downloads (and merges) the whole selection:
+    // the `-f` merge spec carries the planner pair plus the preset
+    // fallback pair, so yt-dlp itself retries stale ids. Progress is a
+    // single downloaded/total stream like HTTP rows.
+    let (spec, _merging) = unified_format_spec(
+        video_sel.as_ref().map(|s| s.format_id.as_str()),
+        audio_sel.format_id.as_str(),
+        &job.quality,
+    );
+    let combined_total = query.total;
+    // NOTE: Grab's speed limit does not apply here — the binary runs
     // unthrottled. Retries and timeouts still follow the user's settings.
-    let vpart: Option<PathBuf> = video_sel
-        .as_ref()
-        .map(|s| dest_part_path(&job.dest, "video", &s.ext));
-    let apart: PathBuf = dest_part_path(&job.dest, "audio", &audio_sel.ext);
-    // Parts download through the yt-dlp binary (see run_part_ytdlp),
-    // not the crate's fetch manager: only the binary keeps the
-    // extraction cookies and full format headers that hotlink-guarded
-    // CDNs require.
-    let single = vpart.is_none();
-    if !have_parts {
-        if let Some(v) = video_sel.as_ref() {
-            let path = vpart
-                .clone()
-                .unwrap_or_else(|| dest_part_path(&job.dest, "video", &v.ext));
-            let report = Arc::new(make_cb(Arc::clone(&v_done), Arc::clone(&a_done)))
-                as Arc<dyn Fn(u64, u64) + Send + Sync>;
-            let done = run_part_ytdlp(
-                &youtube_bin,
-                &job,
-                &v.format_id,
-                &part_fallback_spec(&job.quality, true, false),
-                &path,
-                leg_downloads_subs(&job, true, single),
-                &ffmpeg_bin,
-                report,
-                &mut abort,
-                timeout,
-            )
-            .await?;
-            if done.is_none() {
-                return Ok(None);
-            }
-        }
-        let report = Arc::new(make_cb(Arc::clone(&a_done), Arc::clone(&v_done)))
-            as Arc<dyn Fn(u64, u64) + Send + Sync>;
-        let done = run_part_ytdlp(
-            &youtube_bin,
-            &job,
-            &audio_sel.format_id,
-            &part_fallback_spec(&job.quality, false, !single),
-            &apart,
-            leg_downloads_subs(&job, false, single),
-            &ffmpeg_bin,
-            report,
-            &mut abort,
-            timeout,
-        )
-        .await?;
-        if done.is_none() {
-            return Ok(None);
-        }
-    }
-
-    let work = async {
-        if !have_parts {
-            // Measure reality, not the plan: a zero-byte "completed" part
-            // must fail now, or the retry would combine empties forever.
-            let video_bytes = vpart.as_ref().and_then(|p| file_len(p)).unwrap_or(0);
-            let audio_bytes = file_len(&apart).unwrap_or(0);
-            if audio_bytes == 0 || (vpart.is_some() && video_bytes == 0) {
-                return Err(VideoError::part_failed("empty stream"));
-            }
-            // Record the sidecar BEFORE merging, so a crash during the
-            // merge still retries without re-downloading.
-            write_manifest(
-                &staging,
-                &VideoManifest {
-                    page_url: job.page_url.clone(),
-                    quality: job.quality.clone(),
-                    video_format_id: video_sel.as_ref().map(|s| s.format_id.clone()),
-                    video_ext: video_sel
-                        .as_ref()
-                        .map(|s| s.ext.clone())
-                        .unwrap_or_default(),
-                    video_bytes,
-                    audio_format_id: audio_sel.format_id.clone(),
-                    audio_ext: audio_sel.ext.clone(),
-                    audio_bytes,
-                    final_bytes: None,
-                },
-            )
-            .await?;
-        }
-        // Only merged video shows a merge phase: adopted singles take
-        // the part directly, so announcing a merge would be wrong.
-        if vpart.is_some() {
-            phase(gettext("Merging…"));
-        }
-        finish_merge(
-            &ffmpeg_bin,
-            &staging,
-            vpart.as_deref(),
-            &apart,
-            &job.dest,
-            video_sel.as_ref().map(|s| s.ext.as_str()),
-            &video.title,
-            job.subtitles.as_deref(),
-            timeout,
-        )
-        .await
-        .map(Some)
-    };
-    // No outer abort arm: the part downloads own the (single, shared)
-    // abort receiver and map it to quiet `Ok(None)` themselves.
-    work.await
-}
-
-/// Merge verified parts and rename the result into place. Adopted
-/// single files take the audio part directly (no ffmpeg round-trip).
-/// Audio codec for the merge: stream-copy when the container takes
-/// the part's codec, AAC re-encode otherwise. Ported from the crate's
-/// `audio_codec_for_mux` (whose `audio_codec_hint` was always `None`
-/// at our call site), kept as a pure function so the matrix stays
-/// unit-tested.
-fn merge_audio_codec(audio_ext: &str, output_ext: &str) -> &'static str {
-    let is_aac = matches!(audio_ext, "m4a" | "aac");
-    let is_opus = matches!(audio_ext, "webm" | "opus" | "ogg");
-    match output_ext {
-        "mp4" | "m4a" | "mov" if is_aac => "copy",
-        "webm" if is_opus => "copy",
-        // Matroska supports any codec natively
-        "mkv" | "mka" => "copy",
-        _ => "aac",
-    }
-}
-
-/// ffmpeg argv merging split parts: `-i` audio first (so `0:a` is the
-/// audio part), stream-copy video, title embedded in the same pass.
-/// Pure for tests: inputs, mapping and the end-of-options separator
-/// are pinned here, not in assertion-hostile spawn code.
-fn merge_argv(audio_part: &Path, video_part: &Path, out: &Path, title: &str) -> Vec<String> {
-    let ext = |p: &Path| {
-        p.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase()
-    };
-    vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "warning".to_string(),
-        "-nostats".to_string(),
-        "-i".to_string(),
-        audio_part.to_string_lossy().into_owned(),
-        "-i".to_string(),
-        video_part.to_string_lossy().into_owned(),
-        "-map".to_string(),
-        "0:a".to_string(),
-        "-map".to_string(),
-        "1:v".to_string(),
-        "-c:v".to_string(),
-        "copy".to_string(),
-        "-c:a".to_string(),
-        merge_audio_codec(&ext(audio_part), &ext(out)).to_string(),
-        "-metadata".to_string(),
-        format!("title={title}"),
-        "--".to_string(),
-        out.to_string_lossy().into_owned(),
-    ]
-}
-
-/// Run the merge through ffmpeg directly: same command the crate's
-/// combine step built, minus the builder round-trip — and failures now
-/// surface ffmpeg's own last line instead of a wrapped crate error.
-async fn run_merge_ffmpeg(
-    ffmpeg_bin: &Path,
-    audio_part: &Path,
-    video_part: &Path,
-    out: &Path,
-    title: &str,
-    timeout: Duration,
-) -> Result<(), VideoError> {
-    let mut cmd = tokio::process::Command::new(ffmpeg_bin);
-    cmd.args(merge_argv(audio_part, video_part, out, title));
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
-    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
-    let logs = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut tail = Vec::new();
-        let mut pending = String::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    trace_format_lines(&mut pending, &buf[..n]);
-                    tail.extend_from_slice(&buf[..n]);
-                    if tail.len() > 8192 {
-                        tail.drain(..tail.len() - 8192);
-                    }
-                }
-            }
-        }
-        String::from_utf8_lossy(&tail).into_owned()
-    });
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        Ok(Err(e)) => {
-            kill_tree(&mut child);
-            let _ = logs.await;
-            return Err(VideoError::runtime(&e));
-        }
-        Err(_) => {
-            kill_tree(&mut child);
-            let _ = logs.await;
-            return Err(VideoError::part_failed("timed out merging"));
-        }
-    };
-    let log_tail = logs.await.unwrap_or_default();
-    if !status.success() {
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("ffmpeg reported failure")
-            .trim()
-            .to_string();
-        return Err(VideoError::combine(detail));
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn finish_merge(
-    ffmpeg_bin: &Path,
-    staging: &Path,
-    vpart: Option<&Path>,
-    apart: &Path,
-    dest: &Path,
-    video_ext: Option<&str>,
-    title: &str,
-    subtitles: Option<&str>,
-    timeout: Duration,
-) -> Result<u64, VideoError> {
-    let final_tmp: PathBuf = match (vpart, video_ext) {
-        (Some(v), Some(ext)) => {
-            let muxed = staging.join(format!("muxed.{ext}"));
-            run_merge_ffmpeg(ffmpeg_bin, apart, v, &muxed, title, timeout).await?;
-            muxed
-        }
-        // Adopted single: the part already is the finished file (container
-        // contract from the intake default: .m4a; players sniff content).
-        _ => apart.to_path_buf(),
-    };
-    // Atomic claim: a foreign file appearing after intake dedupe requeues
-    // with a fresh name through the pump's DEST_EXISTS path, parts intact.
-    // Any other move failure (permissions, full disk, …) is a merge-phase
-    // error, not a staging one.
-    match crate::download::rename_noreplace(&final_tmp, dest) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(VideoError::exists());
-        }
-        Err(e) => return Err(VideoError::combine(&e)),
-    }
-    // Best-effort subtitle sidecar: the subbed leg's `-o` is a part
-    // path, so the sidecar lands under the part namespace — collect it
-    // beside the finished file (outside the namespace, so retries and
-    // row removal keep it). Split rows subtitle the video leg; adopted
-    // single files their only (audio) leg.
-    if let Some(lang) = subtitles {
-        collect_sidecar(&sidecar_path_for(vpart.unwrap_or(apart), lang), dest, lang);
-    }
-    // The parts served their purpose: sweep them now that the finished
-    // file is claimed, so successful splits leave no litter beside the
-    // destination. Split only — adopted singles were renamed, not
-    // copied, so there is nothing to sweep. Best-effort (warn only):
-    // the row is already Done and must not fail over temp files.
-    if vpart.is_some() {
-        sweep_parts(vpart, apart);
-    }
-    // Record the finished size so a later retry adopts the file.
-    let final_bytes = file_len(dest);
-    if let Some(mut m) = read_manifest(staging) {
-        m.final_bytes = final_bytes;
-        let _ = write_manifest(staging, &m).await;
-    }
-    let _ = tokio::fs::remove_dir_all(staging).await;
-    Ok(final_bytes.unwrap_or(0))
-}
-
-/// yt-dlp argv for one split part: exact format id, exact output path.
-/// Pure for tests: flags, inputs and the end-of-options separator are
-/// pinned here, not in assertion-hostile spawn code.
-pub(crate) fn part_download_argv(
-    job: &VideoJob,
-    spec: &str,
-    out: &Path,
-    subs: bool,
-    ffmpeg_bin: &Path,
-) -> Vec<String> {
-    let mut args = vec![
-        "--ignore-config".to_string(),
-        "--no-playlist".to_string(),
-        "--newline".to_string(),
-        "--progress".to_string(),
-        "--progress-template".to_string(),
-        YTDLP_PROGRESS_TEMPLATE.to_string(),
-        "-f".to_string(),
-        spec.to_string(),
-        "-o".to_string(),
-        out.to_string_lossy().into_owned(),
-        "--retries".to_string(),
-        job.tries.max(1).to_string(),
-    ];
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
-    if subs && let Some(lang) = job.subtitles.as_deref() {
-        args.extend(subtitle_cli_args(lang, ffmpeg_bin));
-    }
-    args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
-        Some(job.user_agent.as_str()),
-        &job.page_url,
-    ));
-    args
+    run_unified_ytdlp(
+        &youtube_bin,
+        &ffmpeg_bin,
+        &staging,
+        &job,
+        &spec,
+        video_sel.as_ref().map(|s| s.ext.as_str()),
+        combined_total,
+        &mut abort,
+        timeout,
+        tx,
+    )
+    .await
 }
 
 /// Fallback `-f` spec when the selected id is unknown to yt-dlp's fresh
@@ -2910,24 +2513,301 @@ fn part_fallback_spec(quality: &str, video_part: bool, prefer_audio: bool) -> St
     }
 }
 
-/// Whether a failure tail means the `-f` id didn't resolve (worth one
-/// fallback-spec retry) rather than a fetch failure (not worth one).
-fn is_format_unavailable(detail: &str) -> bool {
-    detail.to_lowercase().contains("not available")
+/// Extractor ids are remote strings: allowlist to selector-safe chars
+/// so a hostile id (hand-edited queue file, exotic extractor) can't
+/// widen a yt-dlp `-f` set (`,`, `[]`, `()`, `/`, `+` all change set
+/// semantics). Shared by the HLS and unified builders; rejection falls
+/// back to preset chains, never row failure.
+fn selector_id(id: &str) -> Option<&str> {
+    let id = id.trim();
+    (!id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':'))
+    .then_some(id)
 }
 
-/// One part attempt: spawn, parse `--newline` progress, collect the log
-/// tail. `Ok(None)` is a user abort (the caller stays quiet); timeouts
-/// and fetch failures are errors.
+/// Single-invocation `-f` spec for direct (non-HLS, non-live) downloads,
+/// plus whether yt-dlp will merge. yt-dlp tries each `/`-separated merge
+/// in order: planner pair first, then preset-video with the exact audio,
+/// then the full preset pair. The middle option preserves a still-good
+/// exact audio pick when only the video id rotated — the old per-leg
+/// loop retried legs independently, and degrading both at once would
+/// throw away bandwidth already validated. A missing (adopted-single)
+/// video id downloads one format; anything failing the id allowlist
+/// degrades to preset chains. Pure for tests.
+pub(crate) fn unified_format_spec(
+    video_id: Option<&str>,
+    audio_id: &str,
+    quality: &str,
+) -> (String, bool) {
+    let vfb = part_fallback_spec(quality, true, false);
+    let afb = part_fallback_spec(quality, false, true);
+    let aid = selector_id(audio_id);
+    match video_id {
+        // Adopted single file (muxed direct): exact id first, best-single
+        // fallback (never drift into a bare audio track).
+        None => match aid {
+            Some(a) => (format!("{a}/b"), false),
+            None => ("b".to_string(), false),
+        },
+        // Split: planner pair, then preset-video with the exact audio,
+        // then the full preset pair. Anything failing the id allowlist
+        // degrades to the preset chain, never row failure.
+        Some(raw) => match (selector_id(raw), aid) {
+            (Some(vid), Some(a)) => (format!("{vid}+{a}/{vfb}+{a}/{vfb}+{afb}"), true),
+            _ => (format!("{vfb}+{afb}"), true),
+        },
+    }
+}
+
+/// Container yt-dlp may merge into: the video ext when supported,
+/// mp4 otherwise (a working file beats a failed merge). The `-o`
+/// template takes `%(ext)s` from the merge, so the claim never depends
+/// on a guessed extension. Pure for tests.
+pub(crate) fn merge_output_ext(video_ext: &str) -> String {
+    match video_ext.to_ascii_lowercase().as_str() {
+        "mp4" | "webm" | "mkv" | "flv" | "ogg" => video_ext.to_ascii_lowercase(),
+        _ => "mp4".to_string(),
+    }
+}
+
+/// Stable `-o` template for the unified download: inside the row's
+/// staging dir (wiped wholesale on mismatch/remove/success), so no
+/// part-namespace coordination is needed. yt-dlp resumes its own
+/// `.part` shell beside it across attempts of the same selection.
+pub(crate) fn unified_output_template(staging: &Path) -> PathBuf {
+    staging.join("grab-media.%(ext)s")
+}
+
+/// Whether a staging filename may be the unified download's claimed
+/// output: under our template prefix, not a merge-fragment leftover,
+/// and not a `.part` shell, subtitle sidecar, or yt-dlp metadata
+/// dropping (same exclusion set as the HLS discoverer). Used for both
+/// the `after_move` fast path and the scan fallback so they agree.
+fn unified_candidate(file_name: &str) -> bool {
+    let ext = Path::new(file_name).extension().and_then(|e| e.to_str());
+    file_name.starts_with("grab-media.")
+        && !is_ytdlp_fragment(file_name)
+        && !matches!(ext, Some("part" | "srt" | "ytdl" | "temp" | "tmp" | "frag"))
+}
+
+/// yt-dlp's own merge temp names (`<stem>.f<id>.<ext>`) inside a `-o`
+/// template dir: never the claimed output, even when a merge fails and
+/// leaves them behind. Pure for tests.
+fn is_ytdlp_fragment(file_name: &str) -> bool {
+    let Some(dot_f) = file_name.find(".f") else {
+        return false;
+    };
+    let after_f = &file_name[dot_f + 2..];
+    let digits = after_f.len()
+        - after_f
+            .trim_start_matches(|c: char| c.is_ascii_digit())
+            .len();
+    digits > 0 && after_f[digits..].starts_with('.')
+}
+
+/// Locate the unified download's output in staging: prefer yt-dlp's
+/// `after_move:filepath` print (canonicalized, must stay in staging),
+/// else scan for the `grab-media.*` temp. Both paths use
+/// [`unified_candidate`], so merge-fragment leftovers, `.part` shells,
+/// subtitle sidecars and metadata droppings are never claimed.
+fn discover_unified_output(staging: &Path, after_move: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = after_move
+        && let Ok(canonical) = std::fs::canonicalize(path)
+        && canonical.starts_with(staging)
+        && canonical.is_file()
+        && let Some(name) = canonical.file_name().and_then(|n| n.to_str())
+        && unified_candidate(name)
+    {
+        return Some(canonical);
+    }
+    std::fs::read_dir(staging)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(unified_candidate)
+        })
+        .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+}
+
+/// yt-dlp argv for one unified direct download: the single `-f` merge
+/// spec into a staging temp, merged and converted by yt-dlp itself.
+/// Pure for tests like the HLS/live builders (same `--`-before-URL
+/// ordering rule).
+pub(crate) fn unified_download_argv(
+    job: &VideoJob,
+    spec: &str,
+    merging: bool,
+    merge_ext: &str,
+    ffmpeg_bin: &Path,
+    out: &Path,
+) -> Vec<String> {
+    let mut args = vec![
+        "--ignore-config".to_string(),
+        "--no-playlist".to_string(),
+        "--newline".to_string(),
+        "--progress".to_string(),
+        "--progress-template".to_string(),
+        YTDLP_PROGRESS_TEMPLATE.to_string(),
+        "-f".to_string(),
+        spec.to_string(),
+        "-o".to_string(),
+        out.to_string_lossy().into_owned(),
+        "--ffmpeg-location".to_string(),
+        ffmpeg_location_dir(ffmpeg_bin),
+        "--retries".to_string(),
+        job.tries.max(1).to_string(),
+        "--print".to_string(),
+        "after_move:filepath".to_string(),
+    ];
+    if merging {
+        args.push("--merge-output-format".to_string());
+        args.push(merge_ext.to_string());
+        args.push("--embed-metadata".to_string());
+    }
+    if let Some(lang) = job.subtitles.as_deref() {
+        args.extend(subtitle_cli_args(lang));
+    }
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
+    args.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        Some(job.user_agent.as_str()),
+        &job.page_url,
+    ));
+    args
+}
+
+/// One direct download through a single yt-dlp invocation: yt-dlp picks
+/// the first working merge from the spec, merges with its own ffmpeg,
+/// and cleans its temp parts itself. Grab claims the output into place
+/// (EXDEV-safe, no clobber), collects the subtitle sidecar beside the
+/// finished file, records the finished size, and wipes staging.
+/// Returns the finished size, or `None` on user abort (the caller stays
+/// quiet).
 #[allow(clippy::too_many_arguments)]
-async fn run_part_attempt(
+async fn run_unified_ytdlp(
+    youtube_bin: &Path,
+    ffmpeg_bin: &Path,
+    staging: &Path,
+    job: &VideoJob,
+    spec: &str,
+    video_ext: Option<&str>,
+    total: Option<u64>,
+    abort: &mut oneshot::Receiver<()>,
+    timeout: Duration,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+) -> Result<Option<u64>, VideoError> {
+    use crate::download::EngineMsg;
+    // Split rows merge (video ext mapped onto yt-dlp's supported set);
+    // adopted singles download one file, nothing to merge.
+    let merging = video_ext.is_some();
+    let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
+    let out_template = unified_output_template(staging);
+    let argv = unified_download_argv(job, spec, merging, &merge_ext, ffmpeg_bin, &out_template);
+    // Single-counter progress with the same granularity gate the split
+    // legs used: the pump renders identical rich detail off these pairs.
+    // `done` is the banked leg sum from the attempt loop; cap it here
+    // against the metadata total (retried ranges can overshoot) so the
+    // bar never passes 100%.
+    let sent = Arc::new(AtomicU64::new(0));
+    let report = {
+        let sent = Arc::clone(&sent);
+        let tx = tx.clone();
+        Arc::new(move |done: u64, _: u64| {
+            let shown = match total {
+                Some(t) if t > 0 => done.min(t),
+                _ => done,
+            };
+            let prev = sent.load(Ordering::Relaxed);
+            if shown.saturating_sub(prev) >= PROGRESS_GRANULARITY
+                || total.is_some_and(|t| t > 0 && shown >= t)
+            {
+                sent.store(shown, Ordering::Relaxed);
+                tx.send(EngineMsg::Progress {
+                    downloaded: shown,
+                    total,
+                    uploaded: 0,
+                    upload_bps: 0,
+                })
+                .ok();
+            }
+        })
+    };
+    let (done, after_move) = run_ytdlp_attempt(
+        youtube_bin,
+        &argv,
+        report,
+        Some(Arc::new({
+            let tx = tx.clone();
+            move || {
+                tx.send(EngineMsg::Phase(gettext("Merging…"))).ok();
+            }
+        })),
+        job.proxy.as_ref(),
+        abort,
+        timeout,
+    )
+    .await?;
+    let Some(()) = done else {
+        return Ok(None);
+    };
+    let final_tmp = discover_unified_output(staging, after_move.as_deref());
+    let Some(final_tmp) = final_tmp else {
+        return Err(VideoError::part_failed("no output file produced"));
+    };
+    // Measure reality, not the plan: a zero-byte "completed" download
+    // must fail now, or the row would sit Done and empty forever.
+    if file_len(&final_tmp) == Some(0) {
+        return Err(VideoError::part_failed("empty stream"));
+    }
+    // Atomic claim into place (EXDEV-safe, no clobber).
+    match crate::download::rename_noreplace(&final_tmp, &job.dest) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(VideoError::exists());
+        }
+        Err(e) => return Err(VideoError::combine(&e)),
+    }
+    // Best-effort subtitle sidecar beside the discovered output.
+    if let Some(lang) = job.subtitles.as_deref() {
+        collect_sidecar(&sidecar_path_for(&final_tmp, lang), &job.dest, lang);
+    }
+    // Sweep legacy dest-dir parts: pre-migration rows (or foreign
+    // lookalikes the Fresh arm never saw, e.g. Resume with matching
+    // manifest) would otherwise sit beside the finished file forever.
+    // The just-collected `<stem>.<lang>.srt` never matches the part
+    // namespace, and the finished file itself is exempt.
+    clean_dest_parts(&job.dest);
+    // Record the finished size so a later retry adopts the file.
+    let final_bytes = file_len(&job.dest);
+    if let Some(mut m) = read_manifest(staging) {
+        m.final_bytes = final_bytes;
+        let _ = write_manifest(staging, &m).await;
+    }
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    Ok(Some(final_bytes.unwrap_or(0)))
+}
+
+/// One yt-dlp spawn: parse template progress, collect the log tail,
+/// capture `--print after_move:filepath`. `Ok((None, _))` is a user
+/// abort (the caller stays quiet); timeouts and fetch failures are
+/// errors. `on_merge` fires once on the first merge line, if given.
+/// Shared by the unified direct path (renamed from the old per-part
+/// attempt helper it replaces).
+#[allow(clippy::too_many_arguments)]
+async fn run_ytdlp_attempt(
     youtube_bin: &Path,
     argv: &[String],
     report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
+    on_merge: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     proxy: Option<&crate::download::ResolvedProxy>,
     abort: &mut oneshot::Receiver<()>,
     timeout: Duration,
-) -> Result<Option<()>, VideoError> {
+) -> Result<(Option<()>, Option<String>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(argv);
@@ -2950,22 +2830,44 @@ async fn run_part_attempt(
         .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        let (mut have, mut total) = (0u64, 0u64);
+        // `downloaded_bytes` resets per format leg, so plain max would
+        // cap merged progress at the largest single leg. Instead bank
+        // each leg's max on its `finished` line and report the running
+        // sum; the reset makes double-banking impossible. The outer
+        // caller caps the sum against its own metadata total.
+        let (mut banked, mut leg_max, mut total) = (0u64, 0u64, 0u64);
+        let mut after_move = None::<String>;
+        let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
+            if !merged && is_ytdlp_merge_line(&line) {
+                merged = true;
+                if let Some(cb) = on_merge.as_ref() {
+                    cb();
+                }
+            }
+            if after_move.is_none()
+                && let Some(path) = parse_ytdlp_after_move(&line)
+            {
+                after_move = Some(path.to_string());
+            }
             if let Some(p) = parse_ytdlp_template(&line) {
-                if let Some(d) = p.downloaded {
-                    have = have.max(d);
-                }
-                if let Some(t) = p.total {
-                    total = total.max(t);
-                }
-                if total > 0 {
-                    // Raw downloaded_bytes can exceed the stated total
-                    // (retried ranges); never report more than 100%.
-                    report(have.min(total), total);
+                if p.finished {
+                    banked += p.downloaded.unwrap_or(0).max(leg_max);
+                    leg_max = 0;
+                } else {
+                    if let Some(d) = p.downloaded {
+                        leg_max = leg_max.max(d);
+                    }
+                    if let Some(t) = p.total {
+                        total = total.max(t);
+                    }
+                    if total > 0 {
+                        report(banked + leg_max, total);
+                    }
                 }
             }
         }
+        after_move
     });
     let logs = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr);
@@ -2994,7 +2896,7 @@ async fn run_part_attempt(
             let _ = child.wait().await;
             progress.abort();
             logs.abort();
-            return Ok(None);
+            return Ok((None, None));
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
             Ok(Ok(status)) => status,
@@ -3012,7 +2914,7 @@ async fn run_part_attempt(
             }
         },
     };
-    let _ = progress.await;
+    let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
         let detail = log_tail
@@ -3024,52 +2926,7 @@ async fn run_part_attempt(
             .to_string();
         return Err(VideoError::part_failed(detail));
     }
-    Ok(Some(()))
-}
-
-/// Download one split part through the yt-dlp binary: extraction,
-/// cookies and format headers stay in one process, so
-/// hotlink-protected CDNs (TikTok's `tt_chain_token` + Referer
-/// package) authorize exactly as they do for yt-dlp CLI. A stale
-/// format id gets one fallback-spec retry before the attempt fails.
-#[allow(clippy::too_many_arguments)]
-async fn run_part_ytdlp(
-    youtube_bin: &Path,
-    job: &VideoJob,
-    spec_primary: &str,
-    spec_fallback: &str,
-    out_path: &Path,
-    subs: bool,
-    ffmpeg_bin: &Path,
-    report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
-    abort: &mut oneshot::Receiver<()>,
-    timeout: Duration,
-) -> Result<Option<()>, VideoError> {
-    for (i, spec) in [spec_primary, spec_fallback].iter().enumerate() {
-        let argv = part_download_argv(job, spec, out_path, subs, ffmpeg_bin);
-        match run_part_attempt(
-            youtube_bin,
-            &argv,
-            Arc::clone(&report),
-            job.proxy.as_ref(),
-            abort,
-            timeout,
-        )
-        .await
-        {
-            Ok(done) => return Ok(done),
-            Err(e) if i == 0 && is_format_unavailable(&e.to_string()) => {
-                tracing::info!(
-                    item_id = job.item_id,
-                    spec = spec_primary,
-                    "part format gone, retrying with fallback spec"
-                );
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    unreachable!("fallback loop always returns");
+    Ok((Some(()), after_move))
 }
 
 /// yt-dlp `-f` spec for one HLS attempt over the page URL (yt-dlp
@@ -3078,15 +2935,10 @@ async fn run_part_ytdlp(
 /// like the picker. A muxed pick may gain a redundant second audio
 /// track via `+ba`, which players ignore — completeness beats purity.
 fn hls_format_spec(quality: &str, pinned: Option<&str>) -> String {
-    // Pinned ids are remote extractor strings: allowlist to selector-safe
-    // chars so a hostile id can't widen the yt-dlp format set (`,`, `[]`,
-    // `()` all change set semantics). Anything else falls through to the
-    // height rule below instead of failing the row.
-    if let Some(id) = pinned.map(str::trim).filter(|s| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ':')
-    }) {
+    // Pinned ids go through the shared selector allowlist (see
+    // `selector_id`); anything else falls through to the height rule
+    // below instead of failing the row.
+    if let Some(id) = pinned.and_then(selector_id) {
         return format!("{id}+ba/b");
     }
     match quality_height(quality) {
@@ -3450,13 +3302,16 @@ pub(crate) const YTDLP_PROGRESS_TEMPLATE: &str = "[Grab];%(progress.status)s;%(p
 /// estimate fallback; `None` means unknown (live/unsized), not zero.
 /// `speed`/`eta` are parsed and pinned by tests but not consumed — the
 /// pump recomputes both from ticks — so they stay (they document the
-/// line shape and cost nothing).
+/// line shape and cost nothing). `finished` marks a leg boundary:
+/// yt-dlp prints one `status=finished` line per completed format, and
+/// `downloaded_bytes` resets for the next leg.
 #[derive(Debug, PartialEq)]
 pub(crate) struct YtProgress {
     pub downloaded: Option<u64>,
     pub total: Option<u64>,
     pub speed: Option<f64>,
     pub eta: Option<u64>,
+    pub finished: bool,
 }
 
 pub(crate) fn parse_ytdlp_template(line: &str) -> Option<YtProgress> {
@@ -3485,6 +3340,7 @@ pub(crate) fn parse_ytdlp_template(line: &str) -> Option<YtProgress> {
         total: total.or(estimate),
         speed,
         eta,
+        finished: status == "finished",
     })
 }
 
@@ -3653,7 +3509,7 @@ pub(crate) fn hls_download_argv(
     // builder — they run through `live_capture_argv`, which deliberately
     // omits subtitles).
     if let Some(lang) = job.subtitles.as_deref() {
-        args.extend(subtitle_cli_args(lang, ffmpeg_bin));
+        args.extend(subtitle_cli_args(lang));
     }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
