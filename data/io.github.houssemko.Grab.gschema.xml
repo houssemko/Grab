@@ -29,6 +29,12 @@
       <summary>Retries</summary>
       <description>How many times a failed download retries.</description>
     </key>
+    <key name="retry-sleep" type="i">
+      <default>0</default>
+      <range min="0" max="60"/>
+      <summary>Retry delay</summary>
+      <description>Seconds to wait between fragment retries. 0 disables the delay.</description>
+    </key>
     <key name="timeout" type="i">
       <default>30</default>
       <range min="5" max="300"/>

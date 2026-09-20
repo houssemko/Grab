@@ -2596,6 +2596,11 @@ pub struct VideoJob {
     pub quality: String,
     pub dest: PathBuf,
     pub tries: u32,
+    /// Seconds to sleep between fragment retries (`--retry-sleep
+    /// fragment:N`). Opt-in preference; 0 disables the delay. Live rows
+    /// never take it (their fragment retries are endless by design, and a
+    /// sleep would stall live catch-up).
+    pub retry_sleep: u32,
     /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
     /// from the same "connections" setting as the app's own segmented HTTP
     /// downloads. Schema range is 1..=16; clamped at spawn.
@@ -3098,6 +3103,12 @@ pub(crate) fn unified_download_argv(
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
+    if job.retry_sleep > 0 {
+        // Opt-in resilience: pause between fragment retries on flaky
+        // connections instead of hammering the server immediately.
+        args.push("--retry-sleep".to_string());
+        args.push(format!("fragment:{}", job.retry_sleep));
+    }
     if job.audio_only {
         // Dialog audio-only choice: extract the audio track to m4a
         // (native containers vary by codec — opus arrives as webm — so
@@ -3977,6 +3988,11 @@ pub(crate) fn hls_download_argv(
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
+    if job.retry_sleep > 0 {
+        // Same opt-in fragment-retry delay as the unified VOD legs.
+        args.push("--retry-sleep".to_string());
+        args.push(format!("fragment:{}", job.retry_sleep));
+    }
     if job.audio_only {
         args.push("--extract-audio".to_string());
         args.push("--audio-format".to_string());

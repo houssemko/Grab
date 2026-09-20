@@ -12,6 +12,7 @@ pub mod key {
     pub const CONNECTIONS: &str = "connections";
     pub const SPEED_LIMIT: &str = "speed-limit";
     pub const RETRIES: &str = "retries";
+    pub const RETRY_SLEEP: &str = "retry-sleep";
     pub const TIMEOUT: &str = "timeout";
     pub const USER_AGENT: &str = "user-agent";
     pub const PROXY_MODE: &str = "proxy-mode";
@@ -63,6 +64,11 @@ impl AppSettings {
     }
     pub fn retries(&self) -> i32 {
         self.0.int(key::RETRIES)
+    }
+    /// Seconds to wait between fragment retries (`--retry-sleep
+    /// fragment:N`). Opt-in; 0 disables the delay.
+    pub fn retry_sleep(&self) -> i32 {
+        self.0.int(key::RETRY_SLEEP)
     }
     pub fn timeout(&self) -> i32 {
         self.0.int(key::TIMEOUT)
