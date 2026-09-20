@@ -34,6 +34,7 @@ pub mod key {
     pub const SUBTITLE_LANGUAGE: &str = "subtitle-language";
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
+    pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
 }
@@ -134,6 +135,10 @@ impl AppSettings {
     }
     pub fn cookies_browser(&self) -> String {
         self.0.string(key::COOKIES_BROWSER).to_string()
+    }
+    /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
+    pub fn sponsorblock_remove(&self) -> bool {
+        self.0.boolean(key::SPONSORBLOCK_REMOVE)
     }
     pub fn window_width(&self) -> i32 {
         self.0.int(key::WINDOW_WIDTH)

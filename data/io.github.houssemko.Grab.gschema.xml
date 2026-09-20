@@ -144,6 +144,11 @@
       <summary>Browser for video page cookies</summary>
       <description>Read cookies straight from this browser's profile for age-gated or member-only video pages. 'none' disables it.</description>
     </key>
+    <key name="sponsorblock-remove" type="b">
+      <default>false</default>
+      <summary>Remove sponsored segments</summary>
+      <description>Cut SponsorBlock-flagged sponsor segments out of new video downloads.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>
