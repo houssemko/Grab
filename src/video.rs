@@ -2646,6 +2646,12 @@ pub struct VideoJob {
     /// Opt-in preference; 0 disables the pause. Live rows never take it
     /// (a pre-download sleep would stall live catch-up).
     pub sleep_interval: u32,
+    /// Upper bound of the random sleep before each download
+    /// (`--max-sleep-interval`). Opt-in preference; 0 disables the bound.
+    /// Only emitted alongside an active `sleep_interval` (yt-dlp rejects
+    /// the max on its own); a contradictory max below the min is clamped
+    /// up to the min so the download never hard-errors.
+    pub max_sleep_interval: u32,
     /// Seconds to sleep between requests during data extraction
     /// (`--sleep-requests`). Opt-in preference; 0 disables the pause.
     /// Live rows never take it (extraction pacing is a VOD politeness
@@ -2657,6 +2663,17 @@ pub struct VideoJob {
     /// adding them, so live rows take it too: a stalled live fragment
     /// fails fast and the endless fragment retries pick it back up.
     pub socket_timeout: u32,
+    /// Minimum download rate in KB/s below which throttling is assumed
+    /// and the video data is re-extracted (`--throttled-rate`). Opt-in
+    /// preference; 0 disables detection. VOD legs only: on live, rate
+    /// dips are normal and re-extracting would disrupt the capture.
+    pub throttled_rate: u32,
+    /// Retries for known extractor errors (`--extractor-retries`).
+    /// Opt-in preference; 0 uses yt-dlp's default of 3. VOD download
+    /// legs only (they re-extract the page URL): the live leg's capture
+    /// is a single continuous extraction whose resilience story is the
+    /// infinite fragment-retry loop.
+    pub extractor_retries: u32,
     /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
     /// from the same "connections" setting as the app's own segmented HTTP
     /// downloads. Schema range is 1..=16; clamped at spawn.
@@ -3207,6 +3224,14 @@ pub(crate) fn unified_download_argv(
         // fetches don't hammer the server.
         args.push("--sleep-interval".to_string());
         args.push(job.sleep_interval.to_string());
+        if job.max_sleep_interval > 0 {
+            // Opt-in upper bound: randomize the pause within [min, max].
+            // yt-dlp rejects --max-sleep-interval without the min, hence
+            // the nesting; clamp a contradictory max up to the min so the
+            // download never hard-errors (uniform(min, min) is just min).
+            args.push("--max-sleep-interval".to_string());
+            args.push(job.max_sleep_interval.max(job.sleep_interval).to_string());
+        }
     }
     if job.sleep_requests > 0 {
         // Opt-in politeness: pace the extractor's requests so bursts of
@@ -3219,6 +3244,18 @@ pub(crate) fn unified_download_argv(
         // before yt-dlp gives up on it and retries.
         args.push("--socket-timeout".to_string());
         args.push(job.socket_timeout.to_string());
+    }
+    if job.throttled_rate > 0 {
+        // Opt-in resilience: below this rate yt-dlp assumes the server is
+        // throttling and re-extracts. VOD only (see the field docs).
+        args.push("--throttled-rate".to_string());
+        args.push(format!("{}K", job.throttled_rate));
+    }
+    if job.extractor_retries > 0 {
+        // Opt-in resilience: retry known extractor errors more (or fewer)
+        // times than yt-dlp's default of 3. VOD legs only (see field docs).
+        args.push("--extractor-retries".to_string());
+        args.push(job.extractor_retries.to_string());
     }
     if let Some(limit) = job.speed_limit {
         // Opt-in throttle: cap this leg at the shared speed limit
@@ -4159,6 +4196,13 @@ pub(crate) fn hls_download_argv(
         // Same opt-in pre-download pause as the unified VOD legs.
         args.push("--sleep-interval".to_string());
         args.push(job.sleep_interval.to_string());
+        if job.max_sleep_interval > 0 {
+            // Same opt-in randomized upper bound as the unified VOD legs
+            // (nested: yt-dlp rejects the max without the min; clamp a
+            // contradictory max up to the min).
+            args.push("--max-sleep-interval".to_string());
+            args.push(job.max_sleep_interval.max(job.sleep_interval).to_string());
+        }
     }
     if job.sleep_requests > 0 {
         // Same opt-in extraction pacing as the unified VOD legs.
@@ -4169,6 +4213,16 @@ pub(crate) fn hls_download_argv(
         // Same opt-in stalled-connection bound as the unified VOD legs.
         args.push("--socket-timeout".to_string());
         args.push(job.socket_timeout.to_string());
+    }
+    if job.throttled_rate > 0 {
+        // Same opt-in throttling detection as the unified VOD legs.
+        args.push("--throttled-rate".to_string());
+        args.push(format!("{}K", job.throttled_rate));
+    }
+    if job.extractor_retries > 0 {
+        // Same opt-in extractor-error retries as the unified VOD legs.
+        args.push("--extractor-retries".to_string());
+        args.push(job.extractor_retries.to_string());
     }
     if let Some(limit) = job.speed_limit {
         // Same opt-in throttle as the unified VOD legs.

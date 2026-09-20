@@ -28,6 +28,18 @@
       <summary>Speed limit</summary>
       <description>Download speed limit (e.g. 500K, 2M). Empty means unlimited.</description>
     </key>
+    <key name="extractor-retries" type="i">
+      <default>0</default>
+      <range min="0" max="20"/>
+      <summary>Extractor retries</summary>
+      <description>Retries for known extractor errors. 0 uses yt-dlp's default of 3.</description>
+    </key>
+    <key name="max-sleep-interval" type="i">
+      <default>0</default>
+      <range min="0" max="300"/>
+      <summary>Max sleep interval</summary>
+      <description>Upper bound of the random sleep before each download. Only used together with Sleep interval; 0 disables the upper bound.</description>
+    </key>
     <key name="retries" type="i">
       <default>3</default>
       <range min="1" max="99"/>
@@ -57,6 +69,12 @@
       <range min="0" max="300"/>
       <summary>Socket timeout</summary>
       <description>Seconds to wait on a stalled connection before giving up. 0 uses yt-dlp's default.</description>
+    </key>
+    <key name="throttled-rate" type="i">
+      <default>0</default>
+      <range min="0" max="10000"/>
+      <summary>Throttled rate</summary>
+      <description>Minimum download rate in KB/s below which throttling is assumed and the video data is re-extracted. 0 disables detection.</description>
     </key>
     <key name="timeout" type="i">
       <default>30</default>
