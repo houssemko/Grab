@@ -418,11 +418,13 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
 /// Network plan for one torrent add, resolved from settings at spawn.
 /// A SOCKS5 proxy takes over TCP peers and HTTP trackers — but the engine
 /// cannot proxy DHT (UDP), inbound connections, or UDP trackers, so those
-/// go dark instead of leaking around the tunnel. HTTP(S) proxies can't be
-/// used at all: passthrough. Pure for tests.
+/// (and the UPnP forwarding that serves them) go dark instead of leaking
+/// around the tunnel. HTTP(S) proxies can't be used at all: passthrough.
+/// Pure for tests.
 pub(crate) struct TorrentNetPlan {
     pub dht: bool,
     pub listen_port: i32,
+    pub upnp: bool,
     pub trackers: Option<Vec<String>>,
     pub socks_proxy: Option<String>,
 }
@@ -430,6 +432,7 @@ pub(crate) struct TorrentNetPlan {
 pub(crate) fn plan_torrent_net(
     dht: bool,
     listen_port: i32,
+    upnp: bool,
     trackers: Option<Vec<String>>,
     proxy: Option<&crate::download::ResolvedProxy>,
 ) -> TorrentNetPlan {
@@ -437,6 +440,7 @@ pub(crate) fn plan_torrent_net(
         return TorrentNetPlan {
             dht,
             listen_port,
+            upnp,
             trackers,
             socks_proxy: None,
         };
@@ -451,6 +455,7 @@ pub(crate) fn plan_torrent_net(
     TorrentNetPlan {
         dht: false,
         listen_port: 0,
+        upnp: false,
         trackers,
         socks_proxy: Some(url),
     }
@@ -462,6 +467,7 @@ async fn ensure_session(
     download_bps: Option<u64>,
     upload_bps: Option<u64>,
     listen_port: i32,
+    upnp: bool,
     socks_proxy: Option<String>,
 ) -> Result<Arc<Session>, String> {
     SESSION
@@ -503,6 +509,7 @@ async fn ensure_session(
             if listen_port > 0 {
                 opts.listen = Some(ListenerOptions {
                     listen_addr: (std::net::Ipv6Addr::UNSPECIFIED, listen_port as u16).into(),
+                    enable_upnp_port_forwarding: upnp,
                     ..Default::default()
                 });
             }
@@ -795,6 +802,10 @@ pub(crate) struct TorrentJob {
     pub download_bps: Option<u64>,
     pub upload_bps: Option<u64>,
     pub listen_port: i32,
+    /// Ask the router to forward the listen port via UPnP (creation-scoped
+    /// like the listener itself: only meaningful with a listen port, and
+    /// forced off under SOCKS5 by the net plan).
+    pub upnp: bool,
     /// Extra tracker URLs from preferences (per-add, so edits apply to new
     /// downloads without restarting the engine).
     pub trackers: Option<Vec<String>>,
@@ -822,6 +833,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         download_bps,
         upload_bps,
         listen_port,
+        upnp,
         trackers,
         socks_proxy,
         only_files,
@@ -937,6 +949,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         download_bps,
         upload_bps,
         listen_port,
+        upnp,
         socks_proxy,
     )
     .await

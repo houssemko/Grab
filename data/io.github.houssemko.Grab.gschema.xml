@@ -152,6 +152,11 @@
       <summary>Torrent listen port</summary>
       <description>Port for incoming torrent connections. 0 means disabled. Applies when the torrent engine first starts.</description>
     </key>
+    <key name="torrent-upnp" type="b">
+      <default>false</default>
+      <summary>UPnP port forwarding</summary>
+      <description>Ask the router to forward the torrent listen port via UPnP. Applies when the torrent engine first starts.</description>
+    </key>
     <key name="video-quality" type="s">
       <default>'1080p'</default>
       <summary>Preferred video quality</summary>

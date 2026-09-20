@@ -160,10 +160,21 @@ fn torrent_net_plan_direct_passthrough() {
         "udp://tracker.example:80".to_string(),
         "https://tracker.example/announce".to_string(),
     ]);
-    let plan = plan_torrent_net(true, 6881, trackers.clone(), None);
+    let plan = plan_torrent_net(true, 6881, true, trackers.clone(), None);
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
+    assert!(plan.upnp);
     assert_eq!(plan.trackers, trackers);
+    assert_eq!(plan.socks_proxy, None);
+}
+
+#[test]
+fn torrent_net_plan_upnp_defaults_off() {
+    // Opt-in headline promise: UPnP stays off unless the user enables it.
+    let plan = plan_torrent_net(true, 6881, false, None, None);
+    assert!(plan.dht);
+    assert_eq!(plan.listen_port, 6881);
+    assert!(!plan.upnp);
     assert_eq!(plan.socks_proxy, None);
 }
 
@@ -173,6 +184,7 @@ fn torrent_net_plan_socks_darkens_unproxyable() {
     let plan = plan_torrent_net(
         true,
         6881,
+        true,
         Some(vec![
             "udp://tracker.example:80".to_string(),
             "https://tracker.example/announce".to_string(),
@@ -182,6 +194,7 @@ fn torrent_net_plan_socks_darkens_unproxyable() {
     // DHT, listener and UDP trackers would leak around the tunnel.
     assert!(!plan.dht);
     assert_eq!(plan.listen_port, 0);
+    assert!(!plan.upnp);
     assert_eq!(
         plan.trackers,
         Some(vec!["https://tracker.example/announce".to_string()])
@@ -195,6 +208,7 @@ fn torrent_net_plan_socks_all_udp_trackers_means_none() {
     let plan = plan_torrent_net(
         true,
         6881,
+        true,
         Some(vec!["udp://tracker.example:80".to_string()]),
         socks.as_ref(),
     );
@@ -205,9 +219,10 @@ fn torrent_net_plan_socks_all_udp_trackers_means_none() {
 #[test]
 fn torrent_net_plan_http_proxy_stays_direct() {
     let http = manual_proxy("http");
-    let plan = plan_torrent_net(true, 6881, None, http.as_ref());
+    let plan = plan_torrent_net(true, 6881, true, None, http.as_ref());
     assert!(plan.dht);
     assert_eq!(plan.listen_port, 6881);
+    assert!(plan.upnp);
     assert_eq!(plan.socks_proxy, None);
 }
 
