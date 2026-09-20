@@ -732,6 +732,24 @@ msgstr ""
 msgid "Download the yt-dlp support tools"
 msgstr ""
 
+#: src/window.rs:1402
+msgid "{} story"
+msgid_plural "{} stories"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:1404
+msgid "{} highlight"
+msgid_plural "{} highlights"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:1406
+msgid "{} item"
+msgid_plural "{} items"
+msgstr[0] ""
+msgstr[1] ""
+
 #: src/window.rs:1434
 msgid "Choose a .torrent file"
 msgstr ""
@@ -754,6 +772,10 @@ msgstr ""
 
 #: src/window.rs:1859
 msgid "Add Torrent"
+msgstr ""
+
+#: src/window.rs:1893
+msgid "No items found in this playlist"
 msgstr ""
 
 #: src/window.rs:1918 src/window.rs:1936 src/window.rs:2127
@@ -850,6 +872,20 @@ msgstr ""
 
 #: src/window.rs:2041
 msgid "Still looking up the media — wait for the preview, then add."
+msgstr ""
+
+#: src/window.rs:2733
+msgid "Showing the first {n} of {total}"
+msgstr ""
+
+#: src/window.rs:2792
+msgid "Queue {} item"
+msgid_plural "Queue {} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:2822
+msgid "Select at least one item"
 msgstr ""
 
 #: src/preferences.rs:392

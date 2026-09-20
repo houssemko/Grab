@@ -214,7 +214,7 @@ pub fn is_video_page(url: &str) -> bool {
 /// the stored canonical URL against the typed text would reject every
 /// canonicalized preview and trap Add in a re-resolve loop. The
 /// round-trip key (which exact text was resolved) is the stable one.
-pub fn preview_fresh(info: &Option<VideoInfo>, last_ok: &str, url: &str) -> bool {
+pub fn preview_fresh(info: &Option<ProbeResult>, last_ok: &str, url: &str) -> bool {
     !url.is_empty() && last_ok == url && info.is_some()
 }
 
@@ -420,6 +420,100 @@ impl VideoInfo {
             fetchable: has_fetchable_media(v),
         }
     }
+}
+
+/// What one probe of a URL resolved to: either a single video page or a
+/// multi-item collection (playlist, stories, highlights). The dialog
+/// branches on this: singles get the format-picker preview, collections
+/// get the item picker.
+#[derive(Clone, Debug)]
+pub enum ProbeResult {
+    Single(VideoInfo),
+    Playlist(PlaylistInfo),
+}
+
+impl ProbeResult {
+    /// Canonical URL of the probed page (the collection URL for
+    /// playlists). Used as the round-trip freshness key.
+    pub fn page_url(&self) -> &str {
+        match self {
+            ProbeResult::Single(v) => &v.page_url,
+            ProbeResult::Playlist(p) => &p.page_url,
+        }
+    }
+
+    /// Display title: video title or collection title.
+    pub fn title(&self) -> &str {
+        match self {
+            ProbeResult::Single(v) => &v.title,
+            ProbeResult::Playlist(p) => &p.title,
+        }
+    }
+
+    /// Whether the probe found anything worth offering: a fetchable
+    /// single, or a collection with at least one queueable item.
+    pub fn fetchable(&self) -> bool {
+        match self {
+            ProbeResult::Single(v) => v.fetchable,
+            ProbeResult::Playlist(p) => !p.items.is_empty(),
+        }
+    }
+}
+
+/// Which flavor of multi-item collection a probe found. Only affects
+/// labels ("3 stories" vs "3 items"); the pipeline treats them alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaylistKind {
+    Playlist,
+    Stories,
+    Highlights,
+}
+
+impl PlaylistKind {
+    /// Classify from the probed URL (what the user typed) with the
+    /// extractor key as backup. Heuristic by design: a wrong guess only
+    /// mislabels the item count.
+    fn classify(page_url: &str, extractor_key: &str) -> Self {
+        let url = page_url.to_lowercase();
+        let key = extractor_key.to_lowercase();
+        if url.contains("highlight") || key.contains("highlight") {
+            Self::Highlights
+        } else if url.contains("/stories/") || key.contains("stories") {
+            Self::Stories
+        } else {
+            Self::Playlist
+        }
+    }
+}
+
+/// One entry of a probed collection. Deliberately small like
+/// [`VideoInfo`]: each queued row re-resolves its own item page at
+/// download time, so the picker only needs identity + label.
+#[derive(Clone, Debug)]
+pub struct PlaylistItem {
+    /// 1-based position (`playlist_index` when the extractor reports it).
+    pub index: usize,
+    pub id: String,
+    pub title: String,
+    /// Canonical per-item page URL — the identity queued and persisted.
+    pub page_url: String,
+    /// Duration in seconds, when the listing reports one (flat listings
+    /// usually don't).
+    pub duration: Option<i64>,
+}
+
+/// A probed multi-item collection: the picker lists [`PlaylistInfo::items`],
+/// the queue gets one row per chosen item.
+#[derive(Clone, Debug)]
+pub struct PlaylistInfo {
+    pub id: String,
+    pub title: String,
+    /// The collection URL that was probed.
+    pub page_url: String,
+    pub kind: PlaylistKind,
+    /// Entries reported by the extractor, before the picker cap.
+    pub total: usize,
+    pub items: Vec<PlaylistItem>,
 }
 
 /// Whether a resolved page carries anything fetchable: at least one
@@ -1163,22 +1257,120 @@ fn sanitize_video_json(value: &mut serde_json::Value) {
     }
 }
 
-/// Fetch one page's `--dump-single-json` through the crate's [`Executor`]
-/// (same spawn/timeout/output semantics as its extractors) with exactly
-/// the arguments its default extractors use, then parse leniently (see
-/// [`sanitize_video_json`]). Used instead of the crate's
-/// `fetch_video_infos`, whose strict model breaks whenever the binary's
-/// JSON gains or drops a field.
-async fn fetch_video_page(
+/// Picker cap: one row per item is cheap, but a thousand-row dialog is
+/// not a picker anymore. The item count shown notes the truncation.
+pub(crate) const MAX_PLAYLIST_ITEMS: usize = 500;
+
+/// True only when the collection held more items than the fetch cap:
+/// lenient parsing can drop unusable entries too, so `total >
+/// items.len()` alone is not evidence of truncation.
+pub(crate) fn playlist_truncated(pl: &PlaylistInfo) -> bool {
+    pl.total > pl.items.len() && pl.items.len() == MAX_PLAYLIST_ITEMS
+}
+
+/// Lenient i64 for extractor JSON (durations arrive as floats from some
+/// extractors, e.g. fractional Instagram reel durations); floats
+/// truncate toward zero, negatives included — callers clamp display.
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|f| f.trunc() as i64))
+}
+
+/// Non-empty string field, borrowed.
+fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+/// Parse one flat-playlist entry into a queueable item. Entries are
+/// usually stubs (`_type: "url"`), but fully-extracted video objects
+/// pass through the same field reads. Nulls, non-objects and entries
+/// without a usable page URL are dropped.
+fn parse_playlist_item(entry: &serde_json::Value, position: usize) -> Option<PlaylistItem> {
+    entry.as_object()?;
+    let is_http = |u: &str| u.starts_with("http://") || u.starts_with("https://");
+    // `webpage_url` is the canonical item page; bare `url` doubles as
+    // one for extractors that only emit it (it is the video id on
+    // YouTube, so the http check matters).
+    let page_url = json_str(entry, "webpage_url")
+        .filter(|u| is_http(u))
+        .or_else(|| json_str(entry, "url").filter(|u| is_http(u)))?;
+    let id = json_str(entry, "id")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("item-{}", position + 1));
+    let title = json_str(entry, "title")
+        .map(str::to_string)
+        .unwrap_or_else(|| id.clone());
+    let index = entry
+        .get("playlist_index")
+        .and_then(json_i64)
+        .and_then(|i| usize::try_from(i).ok())
+        .filter(|&i| i > 0) // `playlist_index` is documented 1-based; 0 is bogus.
+        .unwrap_or(position + 1);
+    Some(PlaylistItem {
+        index,
+        id,
+        title,
+        page_url: page_url.to_string(),
+        duration: entry.get("duration").and_then(json_i64),
+    })
+}
+
+/// Parse playlist-shaped probe JSON (`_type: "playlist"` with an
+/// `entries` array, as `--flat-playlist --dump-single-json` emits).
+/// Returns `None` for single-video JSON so the caller falls through to
+/// the video path.
+fn parse_playlist_json(value: &serde_json::Value, url: &str) -> Option<PlaylistInfo> {
+    let obj = value.as_object()?;
+    let entries = obj.get("entries").and_then(|e| e.as_array())?;
+    // A single video never carries `entries`; belt-and-braces in case an
+    // extractor nests one anyway.
+    if obj.get("_type").and_then(|t| t.as_str()) == Some("video") {
+        return None;
+    }
+    let extractor_key = obj
+        .get("extractor_key")
+        .and_then(|k| k.as_str())
+        .unwrap_or("");
+    let total = entries.len();
+    let items: Vec<PlaylistItem> = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| parse_playlist_item(e, i))
+        .take(MAX_PLAYLIST_ITEMS)
+        .collect();
+    Some(PlaylistInfo {
+        id: json_str(value, "id").unwrap_or("").to_string(),
+        title: json_str(value, "title").unwrap_or(url).to_string(),
+        page_url: json_str(value, "webpage_url").unwrap_or(url).to_string(),
+        kind: PlaylistKind::classify(url, extractor_key),
+        total,
+        items,
+    })
+}
+
+/// Fetch one page's raw `--dump-single-json` through the crate's
+/// [`Executor`] (same spawn/timeout/output semantics as its extractors)
+/// with exactly the arguments its default extractors use, then parse
+/// leniently (see [`sanitize_video_json`]). `--flat-playlist` lists
+/// entries as stubs instead of extracting every one (minutes and
+/// megabytes for big lists); it is a no-op for single videos. Used
+/// instead of the crate's `fetch_video_infos`, whose strict model
+/// breaks whenever the binary's JSON gains or drops a field.
+async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
     cookies_browser: &str,
     timeout: Duration,
     fetch_proxy: Option<&crate::download::ResolvedProxy>,
-) -> Result<Video, VideoError> {
+) -> Result<serde_json::Value, VideoError> {
     let mut args = vec![
         "--ignore-config".to_string(),
         "--no-progress".to_string(),
+        "--flat-playlist".to_string(),
         "--dump-single-json".to_string(),
     ];
     args.extend(proxy_cli_args(fetch_proxy));
@@ -1245,8 +1437,23 @@ async fn fetch_video_page(
             .to_string();
         return Err(VideoError::fetch(detail));
     }
-    let mut value: serde_json::Value =
+    let value: serde_json::Value =
         serde_json::from_str(&String::from_utf8_lossy(&stdout)).map_err(VideoError::fetch)?;
+    Ok(value)
+}
+
+/// Strict single-video model for the download worker. Playlist-shaped
+/// output never reaches it: the dialog probes collections through
+/// [`fetch_video_infos`] and queues one page URL per item instead.
+async fn fetch_video_page(
+    youtube_bin: &Path,
+    url: &str,
+    cookies_browser: &str,
+    timeout: Duration,
+    fetch_proxy: Option<&crate::download::ResolvedProxy>,
+) -> Result<Video, VideoError> {
+    let mut value =
+        fetch_raw_dump_json(youtube_bin, url, cookies_browser, timeout, fetch_proxy).await?;
     sanitize_video_json(&mut value);
     let mut video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
     for format in &mut video.formats {
@@ -1255,24 +1462,25 @@ async fn fetch_video_page(
     Ok(video)
 }
 
-/// Extract metadata for one video page. The media URLs inside the returned
-/// [`VideoInfo`] are only passed on to the download step; the *page URL* is
-/// what survives restarts.
+/// Extract metadata for one URL. Singles and collections share the
+/// probe: the returned [`ProbeResult`] tells the dialog which preview
+/// to show. The media URLs inside are only passed on to the download
+/// step; the *page URL* is what survives restarts.
 pub async fn fetch_video_infos(
     libs: Libraries,
     url: String,
     cookies_browser: String,
     newest_first: bool,
     fetch_proxy: Option<crate::download::ResolvedProxy>,
-) -> Result<VideoInfo, VideoError> {
+) -> Result<ProbeResult, VideoError> {
     let handle = crate::download::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         let out = staging_root();
         ensure_staging_dir(&out)?;
-        let video = match tokio::time::timeout(
+        let mut value = match tokio::time::timeout(
             Duration::from_secs(FETCH_TIMEOUT_SECS),
-            fetch_video_page(
+            fetch_raw_dump_json(
                 &libs.youtube,
                 &url,
                 &cookies_browser,
@@ -1282,13 +1490,24 @@ pub async fn fetch_video_infos(
         )
         .await
         {
-            Ok(Ok(video)) => video,
+            Ok(Ok(value)) => value,
             Ok(Err(e)) => return Err(e),
             Err(_) => {
                 return Err(VideoError::fetch(gettext("the lookup timed out")));
             }
         };
-        Ok::<_, VideoError>(VideoInfo::from(&video, &url, newest_first))
+        // Playlist-shaped output never reaches the video model: its
+        // entries are stubs the crate's strict structs would choke on.
+        if let Some(playlist) = parse_playlist_json(&value, &url) {
+            return Ok::<_, VideoError>(ProbeResult::Playlist(playlist));
+        }
+        sanitize_video_json(&mut value);
+        let video: Video = serde_json::from_value(value).map_err(VideoError::fetch)?;
+        Ok::<_, VideoError>(ProbeResult::Single(VideoInfo::from(
+            &video,
+            &url,
+            newest_first,
+        )))
     });
     match handle.await {
         Ok(r) => r,

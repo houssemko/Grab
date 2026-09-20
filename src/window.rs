@@ -1396,6 +1396,44 @@ fn show_video_error(v: &VideoStep, message: &str) {
     v.error.set_visible(true);
 }
 
+/// Item-count label for a probed collection, kind-aware ("3 stories").
+fn playlist_count_label(kind: crate::video::PlaylistKind, count: usize) -> String {
+    let template = match kind {
+        crate::video::PlaylistKind::Stories => ngettext("{} story", "{} stories", count as u32),
+        crate::video::PlaylistKind::Highlights => {
+            ngettext("{} highlight", "{} highlights", count as u32)
+        }
+        crate::video::PlaylistKind::Playlist => ngettext("{} item", "{} items", count as u32),
+    };
+    template.replace("{}", &count.to_string())
+}
+
+/// Playlist probe state: the group header carries the collection
+/// identity (title + item count). The name row and format picker stay
+/// hidden — renames and format pins don't apply across items — while
+/// the audio switch stays visible and seeds the picker for every
+/// queued item.
+fn show_video_playlist(v: &VideoStep, pl: &crate::video::PlaylistInfo) {
+    hide_video_step(v);
+    v.group
+        .set_title(glib::markup_escape_text(&pl.title).as_str());
+    let mut desc = format!(
+        "{} • {}",
+        playlist_count_label(pl.kind, pl.items.len()),
+        glib::markup_escape_text(&pl.page_url)
+    );
+    if crate::video::playlist_truncated(pl) {
+        desc.push_str(" • ");
+        desc.push_str(
+            &gettext("Showing the first {n} of {total}")
+                .replace("{n}", &pl.items.len().to_string())
+                .replace("{total}", &pl.total.to_string()),
+        );
+    }
+    v.group.set_description(Some(&desc));
+    v.audio.set_visible(true);
+}
+
 /// New-download dialog, optionally pre-filled (drag-and-drop / Open With
 /// hands a URL in; the normal lookup flow then takes over, including
 /// video-page detection, so drops never bypass the media pipeline).
@@ -1595,7 +1633,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // keeps typing; every async touch re-checks the dialog is still open.
     let video_generation = Rc::new(Cell::new(0u64));
     let video_last_ok = Rc::new(RefCell::new(String::new()));
-    let video_info = Rc::new(RefCell::new(None::<crate::video::VideoInfo>));
+    let video_info = Rc::new(RefCell::new(None::<crate::video::ProbeResult>));
     // Index-aligned with the format combo rows: exact format ids, or
     // a single `None` for the Automatic row. Reset on every resolve.
     let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
@@ -1758,13 +1796,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         show_video_error(&step_b, &e.to_string());
                         set_lookup_add(&lookup_add_b, true);
                     }
-                    Ok(v) => {
+                    Ok(probe) => {
                         if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
                         // Resolved but nothing playable, and not a listed
                         // video page: same plain fallback as above.
-                        if !v.fetchable && !crate::video::is_video_page(&url) {
+                        if !probe.fetchable() && !crate::video::is_video_page(&url) {
                             match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
@@ -1780,69 +1818,90 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 }
                             }
                         }
-                        // Group header carries the identity (title + page);
-                        // rows below carry the choices. Both sinks parse
-                        // Pango markup, so escape: page URLs carry `&`
-                        // query separators and titles carry anything.
-                        let desc = match v.duration_string.as_deref().filter(|s| !s.is_empty()) {
-                            Some(d) => format!(
-                                "{} • {}",
-                                glib::markup_escape_text(&v.page_url),
-                                glib::markup_escape_text(d)
-                            ),
-                            None => glib::markup_escape_text(&v.page_url).to_string(),
-                        };
-                        step_b
-                            .group
-                            .set_title(glib::markup_escape_text(&v.title).as_str());
-                        step_b.group.set_description(Some(&desc));
-                        // Seed the file name once: an explicit page-1 name
-                        // wins, else the title default. Never clobbers an
-                        // edit already made here.
-                        if step_b.name.text().trim().is_empty() {
-                            let typed = file_b.text().trim().to_string();
-                            let base = if typed.is_empty() {
-                                crate::video::default_video_filename(
-                                    &v.title,
-                                    step_b.audio.is_active(),
-                                )
-                            } else {
-                                typed
-                            };
-                            step_b.name.set_text(&base);
+                        match probe {
+                            crate::video::ProbeResult::Single(v) => {
+                                // Group header carries the identity (title + page);
+                                // rows below carry the choices. Both sinks parse
+                                // Pango markup, so escape: page URLs carry `&`
+                                // query separators and titles carry anything.
+                                let desc =
+                                    match v.duration_string.as_deref().filter(|s| !s.is_empty()) {
+                                        Some(d) => format!(
+                                            "{} • {}",
+                                            glib::markup_escape_text(&v.page_url),
+                                            glib::markup_escape_text(d)
+                                        ),
+                                        None => glib::markup_escape_text(&v.page_url).to_string(),
+                                    };
+                                step_b
+                                    .group
+                                    .set_title(glib::markup_escape_text(&v.title).as_str());
+                                step_b.group.set_description(Some(&desc));
+                                // Seed the file name once: an explicit page-1 name
+                                // wins, else the title default. Never clobbers an
+                                // edit already made here.
+                                if step_b.name.text().trim().is_empty() {
+                                    let typed = file_b.text().trim().to_string();
+                                    let base = if typed.is_empty() {
+                                        crate::video::default_video_filename(
+                                            &v.title,
+                                            step_b.audio.is_active(),
+                                        )
+                                    } else {
+                                        typed
+                                    };
+                                    step_b.name.set_text(&base);
+                                }
+                                *last_b.borrow_mut() = url;
+                                // Rebuild the format picker from this resolve:
+                                // exact pinnable formats, tallest first, with the
+                                // preference preselecting the closest row — or a
+                                // single Automatic row (global preference, no pin)
+                                // when the page lists nothing pinnable. Selection
+                                // resets — a pin from another video must never
+                                // carry over.
+                                let mut labels = Vec::new();
+                                let mut ids: Vec<Option<String>> = Vec::new();
+                                for opt in &v.formats {
+                                    labels.push(opt.label.clone());
+                                    ids.push(Some(opt.id.clone()));
+                                }
+                                if labels.is_empty() {
+                                    labels.push(gettext("Automatic"));
+                                    ids.push(None);
+                                }
+                                let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                                step_b
+                                    .quality
+                                    .set_model(Some(&gtk4::StringList::new(&refs)));
+                                *formats_b.borrow_mut() = ids;
+                                step_b
+                                    .quality
+                                    .set_selected(crate::video::default_quality_index(
+                                        &v.formats,
+                                        &settings_b.video_quality(),
+                                    ) as u32);
+                                *info_b.borrow_mut() = Some(crate::video::ProbeResult::Single(v));
+                                show_video_ready(&step_b);
+                                set_lookup_add(&lookup_add_b, true);
+                            }
+                            crate::video::ProbeResult::Playlist(pl) => {
+                                if pl.items.is_empty() {
+                                    info_b.borrow_mut().take();
+                                    show_video_error(
+                                        &step_b,
+                                        &gettext("No items found in this playlist"),
+                                    );
+                                    set_lookup_add(&lookup_add_b, true);
+                                    return;
+                                }
+                                *last_b.borrow_mut() = url;
+                                *info_b.borrow_mut() =
+                                    Some(crate::video::ProbeResult::Playlist(pl.clone()));
+                                show_video_playlist(&step_b, &pl);
+                                set_lookup_add(&lookup_add_b, true);
+                            }
                         }
-                        *last_b.borrow_mut() = url;
-                        // Rebuild the format picker from this resolve:
-                        // exact pinnable formats, tallest first, with the
-                        // preference preselecting the closest row — or a
-                        // single Automatic row (global preference, no pin)
-                        // when the page lists nothing pinnable. Selection
-                        // resets — a pin from another video must never
-                        // carry over.
-                        let mut labels = Vec::new();
-                        let mut ids: Vec<Option<String>> = Vec::new();
-                        for opt in &v.formats {
-                            labels.push(opt.label.clone());
-                            ids.push(Some(opt.id.clone()));
-                        }
-                        if labels.is_empty() {
-                            labels.push(gettext("Automatic"));
-                            ids.push(None);
-                        }
-                        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                        step_b
-                            .quality
-                            .set_model(Some(&gtk4::StringList::new(&refs)));
-                        *formats_b.borrow_mut() = ids;
-                        step_b
-                            .quality
-                            .set_selected(crate::video::default_quality_index(
-                                &v.formats,
-                                &settings_b.video_quality(),
-                            ) as u32);
-                        *info_b.borrow_mut() = Some(v);
-                        show_video_ready(&step_b);
-                        set_lookup_add(&lookup_add_b, true);
                     }
                 }
             });
@@ -1868,7 +1927,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             // page has its own name row); a non-empty entry is not lost —
             // the resolve seeds the video name from it. A probed preview
             // counts as video mode while its canonical URL still matches.
-            let fresh = info2.borrow().as_ref().is_some_and(|v| v.page_url == text);
+            let fresh = info2
+                .borrow()
+                .as_ref()
+                .is_some_and(|p| p.page_url() == text);
             file_row2.set_visible(!(crate::video::is_video_page(&text) || fresh));
             // Sync skeleton: leaving video-land (or editing a resolved URL)
             // hides the stale step at once; the debounced kick refills
@@ -1979,9 +2041,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     {
         let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
         step.revert.connect_clicked(move |_| {
-            if let Some(v) = info.borrow().as_ref() {
+            if let Some(p) = info.borrow().as_ref() {
                 name.set_text(&crate::video::default_video_filename(
-                    &v.title,
+                    p.title(),
                     audio.is_active(),
                 ));
                 name.grab_focus();
@@ -1995,13 +2057,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     {
         let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
         audio.connect_active_notify(move |sw| {
-            if let Some(v) = info.borrow().as_ref() {
+            if let Some(p) = info.borrow().as_ref() {
                 let active = sw.is_active();
                 let current = name.text().to_string();
                 if current.trim().is_empty()
-                    || current == crate::video::default_video_filename(&v.title, !active)
+                    || current == crate::video::default_video_filename(p.title(), !active)
                 {
-                    name.set_text(&crate::video::default_video_filename(&v.title, active));
+                    name.set_text(&crate::video::default_video_filename(p.title(), active));
                 }
             }
         });
@@ -2209,57 +2271,73 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         None
                     };
                 match ready {
-                    Some(v) => {
-                        let typed = step2.name.text().trim().to_string();
-                        let audio_only = step2.audio.is_active();
-                        // Default name from the video title; the intake
-                        // sanitizes it and falls back to the URL stem.
-                        let auto = typed
-                            .is_empty()
-                            .then(|| crate::video::default_video_filename(&v.title, audio_only));
-                        let name = if typed.is_empty() {
-                            auto.as_deref()
-                        } else {
-                            Some(typed.as_str())
-                        };
-                        // Exact picks pin the format and carry its height
-                        // as the fallback, so a dropped pin still
-                        // degrades to the chosen height. Audio-only rows
-                        // drop the pin (nothing to pin a track to).
-                        // The Automatic row (no pin: pre-resolve, or pages
-                        // listing nothing pinnable) falls back to the
-                        // global preference. The combo rows and the info
-                        // formats share one order.
-                        let selected = step2.quality.selected() as usize;
-                        let format_id = formats.borrow().get(selected).cloned().flatten();
-                        let format_id = if audio_only { None } else { format_id };
-                        let quality = match format_id.clone() {
-                            Some(id) => v
-                                .formats
-                                .iter()
-                                .find(|opt| opt.id == id)
-                                .map(|opt| crate::video::quality_for_height(opt.height).to_string())
-                                .unwrap_or_else(|| m.settings().video_quality()),
-                            None => m.settings().video_quality(),
-                        };
-                        match m.enqueue_video(
-                            &v.page_url,
-                            Some(&dd.borrow()),
-                            name,
-                            crate::video::VideoChoices {
-                                quality,
-                                audio_only,
-                                video_format_id: format_id,
-                                is_live: v.is_live,
-                            },
-                        ) {
-                            Ok(_) => close(),
-                            Err(e) => {
-                                show_video_error(&step2, &e);
-                                set_lookup_add(&lookup_add_submit, true);
+                    Some(probe) => match probe {
+                        crate::video::ProbeResult::Single(v) => {
+                            let typed = step2.name.text().trim().to_string();
+                            let audio_only = step2.audio.is_active();
+                            // Default name from the video title; the intake
+                            // sanitizes it and falls back to the URL stem.
+                            let auto = typed.is_empty().then(|| {
+                                crate::video::default_video_filename(&v.title, audio_only)
+                            });
+                            let name = if typed.is_empty() {
+                                auto.as_deref()
+                            } else {
+                                Some(typed.as_str())
+                            };
+                            // Exact picks pin the format and carry its height
+                            // as the fallback, so a dropped pin still
+                            // degrades to the chosen height. Audio-only rows
+                            // drop the pin (nothing to pin a track to).
+                            // The Automatic row (no pin: pre-resolve, or pages
+                            // listing nothing pinnable) falls back to the
+                            // global preference. The combo rows and the info
+                            // formats share one order.
+                            let selected = step2.quality.selected() as usize;
+                            let format_id = formats.borrow().get(selected).cloned().flatten();
+                            let format_id = if audio_only { None } else { format_id };
+                            let quality = match format_id.clone() {
+                                Some(id) => v
+                                    .formats
+                                    .iter()
+                                    .find(|opt| opt.id == id)
+                                    .map(|opt| {
+                                        crate::video::quality_for_height(opt.height).to_string()
+                                    })
+                                    .unwrap_or_else(|| m.settings().video_quality()),
+                                None => m.settings().video_quality(),
+                            };
+                            match m.enqueue_video(
+                                &v.page_url,
+                                Some(&dd.borrow()),
+                                name,
+                                crate::video::VideoChoices {
+                                    quality,
+                                    audio_only,
+                                    video_format_id: format_id,
+                                    is_live: v.is_live,
+                                },
+                            ) {
+                                Ok(_) => close(),
+                                Err(e) => {
+                                    show_video_error(&step2, &e);
+                                    set_lookup_add(&lookup_add_submit, true);
+                                }
                             }
                         }
-                    }
+                        // Collections queue through the item picker: one
+                        // row per chosen entry, each re-resolving its own
+                        // page at download time.
+                        crate::video::ProbeResult::Playlist(pl) => {
+                            show_playlist_items_dialog(
+                                m.clone(),
+                                dd.clone(),
+                                dialog_weak.clone(),
+                                pl,
+                                step2.audio.is_active(),
+                            );
+                        }
+                    },
                     None => {
                         kick(true);
                         show_video_error(
@@ -2617,6 +2695,182 @@ pub(crate) fn show_torrent_files_dialog(
 
     // No gtk Window parent exists here (invoked from an adw::Dialog):
     // present standalone like the no-window fallback above.
+    dialog.present(None::<&gtk4::Window>);
+}
+
+/// Seconds as M:SS / H:MM:SS for picker subtitles.
+fn fmt_item_duration(secs: i64) -> String {
+    let secs = secs.max(0) as u64;
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// Item picker for probed playlists, stories and highlights, mirroring
+/// [`show_torrent_files_dialog`]: one switch per entry, all on by
+/// default. Each chosen item becomes its own queue row through the Page
+/// intake, so formats resolve per item at download time — the probe
+/// only listed them. Quality follows the global preference (no pin:
+/// pins don't survive across items); the audio-only choice from the
+/// New Download dialog applies to every queued row.
+fn show_playlist_items_dialog(
+    manager: Rc<DownloadManager>,
+    dest_dir: Rc<RefCell<String>>,
+    parent: glib::WeakRef<adw::Dialog>,
+    playlist: crate::video::PlaylistInfo,
+    audio_only: bool,
+) {
+    let dialog = adw::Dialog::builder().title(&playlist.title).build();
+    dialog.set_follows_content_size(true);
+    dialog.set_content_width(420);
+    dialog.set_content_height(560);
+
+    let page = adw::PreferencesPage::new();
+    let count = playlist.items.len();
+    let group = adw::PreferencesGroup::builder()
+        .title(playlist_count_label(playlist.kind, count))
+        .build();
+    if crate::video::playlist_truncated(&playlist) {
+        group.set_description(Some(
+            &gettext("Showing the first {n} of {total}")
+                .replace("{n}", &count.to_string())
+                .replace("{total}", &playlist.total.to_string()),
+        ));
+    }
+    page.add(&group);
+
+    let mut switches = Vec::new();
+    for item in &playlist.items {
+        let row = adw::SwitchRow::builder()
+            .title(&item.title)
+            .active(true)
+            .build();
+        if let Some(d) = item.duration {
+            row.set_subtitle(&fmt_item_duration(d));
+        }
+        switches.push(row.clone());
+        group.add(&row);
+    }
+    let error_label = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    group.add(&error_label);
+
+    // Scrolled: big playlists must not size the dialog off-screen.
+    let scrolled = gtk4::ScrolledWindow::builder()
+        .child(&page)
+        .vexpand(true)
+        .build();
+
+    let toolbar = adw::ToolbarView::new();
+    let hb = adw::HeaderBar::new();
+    hb.set_show_start_title_buttons(false);
+    hb.set_show_end_title_buttons(false);
+    let cancel_btn = gtk4::Button::builder()
+        .label(gettext("_Cancel"))
+        .use_underline(true)
+        .build();
+    let add_btn = gtk4::Button::builder()
+        .css_classes(["suggested-action"])
+        .build();
+    hb.pack_start(&cancel_btn);
+    hb.pack_end(&add_btn);
+    toolbar.add_top_bar(&hb);
+    toolbar.set_content(Some(&scrolled));
+    dialog.set_child(Some(&toolbar));
+    dialog.set_default_widget(Some(&add_btn));
+
+    // The action counts the live selection; with nothing selected it
+    // reads "Queue 0 items" and clicking it shows the error label,
+    // mirroring the torrent picker.
+    let refresh_add = Rc::new({
+        let add_btn = add_btn.clone();
+        let switches = switches.clone();
+        move || {
+            let n = switches.iter().filter(|s| s.is_active()).count();
+            add_btn.set_label(
+                &ngettext("Queue {} item", "Queue {} items", n as u32)
+                    .replace("{}", &n.to_string()),
+            );
+        }
+    });
+    for row in &switches {
+        let refresh = refresh_add.clone();
+        row.connect_active_notify(move |_| refresh());
+    }
+    refresh_add();
+
+    {
+        let dialog_weak = dialog.downgrade();
+        cancel_btn.connect_clicked(move |_| {
+            if let Some(d) = dialog_weak.upgrade() {
+                d.close();
+            }
+        });
+    }
+    {
+        let dialog_weak = dialog.downgrade();
+        add_btn.connect_clicked(move |_| {
+            let chosen: Vec<(usize, &crate::video::PlaylistItem)> = playlist
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| switches[*i].is_active())
+                .collect();
+            if chosen.is_empty() {
+                error_label.set_text(&gettext("Select at least one item"));
+                error_label.set_visible(true);
+                return;
+            }
+            // One persist for the whole import, not one per row.
+            manager.begin_batch();
+            let mut failed: Option<String> = None;
+            for (i, item) in &chosen {
+                let name = crate::video::default_video_filename(&item.title, audio_only);
+                if let Err(e) = manager.enqueue_video(
+                    &item.page_url,
+                    Some(&dest_dir.borrow()),
+                    Some(&name),
+                    crate::video::VideoChoices {
+                        quality: manager.settings().video_quality(),
+                        audio_only,
+                        video_format_id: None,
+                        // Live streams queued from a playlist take the VOD
+                        // path; the worker re-resolves each item page anyway.
+                        is_live: false,
+                    },
+                ) {
+                    failed = Some(e);
+                    break;
+                }
+                // Rows already queued stay queued on a partial failure:
+                // switch them off so a retry only submits the remainder
+                // instead of duplicating them (dedupe is by filename).
+                switches[*i].set_active(false);
+            }
+            manager.end_batch();
+            if let Some(e) = failed {
+                error_label.set_text(&e);
+                error_label.set_visible(true);
+                return;
+            }
+            if let Some(d) = dialog_weak.upgrade() {
+                d.close();
+            }
+            if let Some(p) = parent.upgrade() {
+                p.close();
+            }
+        });
+    }
+
+    // No gtk Window parent exists here (invoked from an adw::Dialog):
+    // present standalone like the torrent picker above.
     dialog.present(None::<&gtk4::Window>);
 }
 
