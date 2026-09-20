@@ -402,6 +402,7 @@ fn serde_page_round_trip() {
         audio_only: false,
         is_live: false,
         video_format_id: Some("137".into()),
+        playlist_item_id: None,
     };
     let json = serde_json::to_string(&src).unwrap();
     let back: VideoSource = serde_json::from_str(&json).unwrap();
@@ -424,6 +425,7 @@ fn serde_page_old_json_gets_defaults() {
             audio_only: false,
             is_live: false,
             video_format_id: None,
+            playlist_item_id: None,
         }
     );
     // Files that still carry audio_only:true restore as audio rows.
@@ -821,6 +823,7 @@ fn pipeline_reports_missing_tools() {
     let job = VideoJob {
         item_id,
         page_url: "https://vimeo.com/123456".into(),
+        playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
         audio_quality: 5,
@@ -983,6 +986,145 @@ fn parse_playlist_rejects_single_video_json() {
     assert!(parse_playlist_json(&video, "https://www.youtube.com/watch?v=v").is_none());
     let bare = serde_json::json!({"id": "v"});
     assert!(parse_playlist_json(&bare, "https://example.com/v").is_none());
+}
+
+// ── story tray retarget ──────────────────────────────────────────────
+
+#[test]
+fn story_tray_url_extracts_owner_tray() {
+    assert_eq!(
+        story_tray_url("https://www.instagram.com/stories/someuser/12345678901234567/"),
+        Some("https://www.instagram.com/stories/someuser/".to_string())
+    );
+    // Same without the trailing slash.
+    assert_eq!(
+        story_tray_url("https://www.instagram.com/stories/someuser/12345678901234567"),
+        Some("https://www.instagram.com/stories/someuser/".to_string())
+    );
+    // Tray URLs, highlights, non-story Instagram pages, other hosts and
+    // junk have nothing to retarget.
+    assert_eq!(
+        story_tray_url("https://www.instagram.com/stories/someuser/"),
+        None
+    );
+    assert_eq!(
+        story_tray_url("https://www.instagram.com/stories/highlights/123/"),
+        None
+    );
+    assert_eq!(story_tray_url("https://www.instagram.com/p/ABCdef/"), None);
+    assert_eq!(
+        story_tray_url("https://example.com/stories/someuser/123/"),
+        None
+    );
+    assert_eq!(story_tray_url("not a url"), None);
+}
+
+#[test]
+fn retarget_story_items_points_entries_at_tray() {
+    let story_url = "https://www.instagram.com/stories/someuser/12345678901234567/";
+    let mut pl = parse_playlist_json(
+        &playlist_json(
+            serde_json::json!([
+                {"_type": "url_transparent", "id": "s1", "title": "Story 1", "webpage_url": story_url},
+                {"_type": "url_transparent", "id": "s2", "title": "Story 2", "webpage_url": story_url},
+            ]),
+            story_url,
+        ),
+        story_url,
+    )
+    .expect("playlist");
+    assert_eq!(pl.kind, PlaylistKind::Stories);
+    retarget_story_items(story_url, &mut pl);
+    assert_eq!(pl.items.len(), 2);
+    for item in &pl.items {
+        assert_eq!(item.page_url, "https://www.instagram.com/stories/someuser/");
+    }
+}
+
+#[test]
+fn retarget_story_items_leaves_highlights_alone() {
+    // A highlight *is* the collection: its items are not addressable as
+    // live stories, so the collection URL stands.
+    let hl_url = "https://www.instagram.com/stories/highlights/18090946048123978/";
+    let mut pl = parse_playlist_json(
+        &playlist_json(
+            serde_json::json!([
+                {"_type": "url_transparent", "id": "h1", "title": "HL 1", "webpage_url": hl_url},
+            ]),
+            hl_url,
+        ),
+        hl_url,
+    )
+    .expect("playlist");
+    assert_eq!(pl.kind, PlaylistKind::Highlights);
+    retarget_story_items(hl_url, &mut pl);
+    assert_eq!(pl.items[0].page_url, hl_url);
+}
+
+#[test]
+fn retarget_story_items_leaves_plain_playlists_alone() {
+    let url = "https://www.youtube.com/playlist?list=PL1";
+    let mut pl = parse_playlist_json(
+        &playlist_json(
+            serde_json::json!([
+                {"id": "a1", "title": "A", "url": "a1", "webpage_url": "https://www.youtube.com/watch?v=a1"},
+            ]),
+            url,
+        ),
+        url,
+    )
+    .expect("playlist");
+    retarget_story_items(url, &mut pl);
+    assert_eq!(pl.items[0].page_url, "https://www.youtube.com/watch?v=a1");
+}
+
+// ── picked playlist entry ──────────────────────────────────────────
+
+fn story_tray_json() -> serde_json::Value {
+    serde_json::json!({
+        "_type": "playlist",
+        "id": "stories-tray",
+        "webpage_url": "https://www.instagram.com/stories/someuser/",
+        "entries": [
+            {"_type": "url_transparent", "id": "s1", "title": "Story 1", "webpage_url": "https://www.instagram.com/stories/someuser/"},
+            {"_type": "url_transparent", "id": "s2", "title": "Story 2", "webpage_url": "https://www.instagram.com/stories/someuser/"},
+        ],
+    })
+}
+
+#[test]
+fn pick_playlist_entry_finds_picked_story() {
+    let value = story_tray_json();
+    let entry = pick_playlist_entry(&value, Some("s2")).expect("picked entry");
+    assert_eq!(entry.get("id").and_then(|id| id.as_str()), Some("s2"));
+    // No persisted pick: nothing to select.
+    assert!(pick_playlist_entry(&value, None).is_none());
+    // Expired stories vanish from the tray.
+    assert!(pick_playlist_entry(&value, Some("gone")).is_none());
+}
+
+#[test]
+fn picked_story_entry_parses_as_single_video() {
+    // The entry the worker selects must survive the single-video parse
+    // (sanitization iterates its keys) and land in the Video model.
+    let value = story_tray_json();
+    let entry = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
+    let video = parse_single_video(entry).expect("video");
+    assert_eq!(video.id, "s1");
+    assert_eq!(video.title, "Story 1");
+}
+
+#[test]
+fn playlist_resolve_error_distinguishes_expired_from_routing_bug() {
+    // A row picked from a playlist whose entry is gone: the story expired.
+    let expired = format!("{}", playlist_resolve_error(Some("s1")));
+    assert!(expired.contains("no longer available"), "{expired}");
+    // Playlist-shaped output with no persisted pick: a routing bug.
+    let routing = format!("{}", playlist_resolve_error(None));
+    assert!(
+        routing.contains("collection, not a single video"),
+        "{routing}"
+    );
 }
 
 #[test]
@@ -1597,6 +1739,7 @@ fn video_source_page_carries_format_pin() {
         audio_only: false,
         is_live: false,
         video_format_id: Some("137".into()),
+        playlist_item_id: None,
     };
     let json = serde_json::to_string(&src).unwrap();
     assert!(json.contains("\"video_format_id\":\"137\""));
@@ -2312,6 +2455,7 @@ fn direct_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
         audio_quality: 5,
@@ -2380,6 +2524,7 @@ fn fetch_video_page_parses_dump_json() {
             "https://example.com/v",
             "none",
             std::time::Duration::from_secs(30),
+            None,
             None,
         ))
         .expect("fake extract parses");
@@ -2534,6 +2679,7 @@ fn live_test_job() -> VideoJob {
     VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
         audio_quality: 5,
@@ -2930,6 +3076,7 @@ fn vod_hls_pins_planner_variant_id() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
         audio_quality: 5,
@@ -2995,6 +3142,7 @@ fn vod_hls_refuses_existing_dest() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
         audio_quality: 5,
@@ -3209,6 +3357,7 @@ fn fetch_video_page_surfaces_stderr_tail() {
         "none",
         std::time::Duration::from_secs(30),
         None,
+        None,
     ));
     match res {
         Err(e) => assert!(e.to_string().contains("boom detail"), "{e}"),
@@ -3235,6 +3384,7 @@ fn fetch_video_page_rejects_garbage_stdout() {
         "https://example.com/v",
         "none",
         std::time::Duration::from_secs(30),
+        None,
         None,
     ));
     assert!(res.is_err(), "garbage stdout must not parse");
@@ -3296,6 +3446,7 @@ fn fetch_video_page_resolves_without_flat_playlist() {
             "https://example.com/v",
             "none",
             std::time::Duration::from_secs(30),
+            None,
             None,
         ))
         .expect("fake extract parses");
@@ -3363,6 +3514,7 @@ fn fetch_video_page_rejects_playlist_shaped_output() {
         "https://example.com/stories",
         "none",
         std::time::Duration::from_secs(30),
+        None,
         None,
     ));
     match res {
@@ -4580,6 +4732,7 @@ fn hls_collects_sidecar_beside_finished_file() {
     let job = VideoJob {
         item_id: 1,
         page_url: "https://x.com/u/status/1".into(),
+        playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
         audio_quality: 5,

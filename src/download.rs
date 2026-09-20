@@ -2572,6 +2572,7 @@ impl DownloadManager {
                 audio_only: choices.audio_only,
                 is_live: choices.is_live,
                 video_format_id: choices.video_format_id,
+                playlist_item_id: choices.playlist_item_id,
             },
         );
         Ok(self.insert(item))
@@ -2757,17 +2758,19 @@ impl DownloadManager {
             audio_only,
             is_live,
             video_format_id,
+            playlist_item_id,
             ..
         }) = self.video_source(item.id())
         {
-            return self.spawn_video(
+            return self.spawn_video(SpawnVideoParams {
                 item,
                 page_url,
                 quality,
                 audio_only,
                 video_format_id,
                 is_live,
-            );
+                playlist_item_id,
+            });
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(30);
@@ -3320,22 +3323,39 @@ impl DownloadManager {
         self.changed();
         self.pump(item, id, generation, rx);
     }
+}
 
+/// Video-page spawn inputs: everything `spawn_video` needs from the
+/// row's [`VideoSource::Page`]. Bundled into one struct so the growing
+/// field list doesn't trip clippy's too-many-arguments lint at the
+/// call boundary.
+struct SpawnVideoParams {
+    item: DownloadItem,
+    page_url: String,
+    quality: String,
+    audio_only: bool,
+    video_format_id: Option<String>,
+    is_live: bool,
+    playlist_item_id: Option<String>,
+}
+
+impl DownloadManager {
     /// Spawn the resolver worker for a video-page row. Mirrors `spawn`'s
     /// contract (epoch bump, running slot, Downloading status, shared pump)
     /// so pause, cancel, retry, persist and the stale-pump guard keep
     /// working unchanged. The worker speaks [`EngineMsg`] like every other
     /// engine; its abort sender lets pause/cancel stop the extractor
     /// streams promptly instead of only dropping the Grab-side task.
-    fn spawn_video(
-        self: &Rc<Self>,
-        item: DownloadItem,
-        page_url: String,
-        quality: String,
-        audio_only: bool,
-        video_format_id: Option<String>,
-        is_live: bool,
-    ) {
+    fn spawn_video(self: &Rc<Self>, params: SpawnVideoParams) {
+        let SpawnVideoParams {
+            item,
+            page_url,
+            quality,
+            audio_only,
+            video_format_id,
+            is_live,
+            playlist_item_id,
+        } = params;
         let id = item.id();
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
@@ -3366,6 +3386,7 @@ impl DownloadManager {
         let job = crate::video::VideoJob {
             item_id: id,
             page_url,
+            playlist_item_id,
             quality,
             audio_only,
             dest: item.file_path(),
