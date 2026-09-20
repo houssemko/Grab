@@ -467,17 +467,35 @@ pub(crate) fn plan_torrent_net(
     }
 }
 
-async fn ensure_session(
-    dht: bool,
-    peer_limit: Option<usize>,
-    download_bps: Option<u64>,
-    upload_bps: Option<u64>,
-    listen_port: i32,
-    upnp: bool,
-    socks_proxy: Option<String>,
-    blocklist_url: Option<String>,
-    lsd: bool,
-) -> Result<Arc<Session>, String> {
+/// Creation-scoped torrent session inputs: everything `ensure_session`
+/// needs that rqbit only reads when the session starts. Bundled into one
+/// struct so the growing preference list doesn't trip clippy's
+/// too-many-arguments lint at the call boundary.
+#[derive(Clone, Debug)]
+pub(crate) struct SessionConfig {
+    pub dht: bool,
+    pub peer_limit: Option<usize>,
+    pub download_bps: Option<u64>,
+    pub upload_bps: Option<u64>,
+    pub listen_port: i32,
+    pub upnp: bool,
+    pub socks_proxy: Option<String>,
+    pub blocklist_url: Option<String>,
+    pub lsd: bool,
+}
+
+async fn ensure_session(cfg: SessionConfig) -> Result<Arc<Session>, String> {
+    let SessionConfig {
+        dht,
+        peer_limit,
+        download_bps,
+        upload_bps,
+        listen_port,
+        upnp,
+        socks_proxy,
+        blocklist_url,
+        lsd,
+    } = cfg;
     SESSION
         .get_or_try_init(|| async {
             let dir = glib::user_data_dir().join("grab");
@@ -977,7 +995,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             false
         }
     };
-    let session = match ensure_session(
+    let session = match ensure_session(SessionConfig {
         dht,
         peer_limit,
         download_bps,
@@ -987,7 +1005,7 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         socks_proxy,
         blocklist_url,
         lsd,
-    )
+    })
     .await
     {
         Ok(s) => s,
