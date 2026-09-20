@@ -432,6 +432,22 @@ msgstr ""
 msgid "Reads this browser's profile directly"
 msgstr ""
 
+#: src/preferences.rs:710
+msgid "Live"
+msgstr ""
+
+#: src/preferences.rs:711
+msgid "Live stream recording"
+msgstr ""
+
+#: src/preferences.rs:714
+msgid "Live from start"
+msgstr ""
+
+#: src/preferences.rs:715
+msgid "Record live streams from the beginning"
+msgstr ""
+
 #: src/preferences.rs:593 src/window.rs:1384
 msgid "Support tools"
 msgstr ""
@@ -452,7 +468,7 @@ msgstr ""
 msgid "Downloading yt-dlp (1 of 2)…"
 msgstr ""
 
-#: src/preferences.rs:714 src/window.rs:1803
+#: src/preferences.rs:730 src/window.rs:1803
 msgid "Downloading ffmpeg (2 of 2)…"
 msgstr ""
 

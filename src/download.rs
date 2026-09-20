@@ -3238,6 +3238,7 @@ impl DownloadManager {
             user_agent: opts.user_agent.clone(),
             video_format_id,
             is_live,
+            live_from_start: self.settings.live_from_start(),
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
             // Audio-only rows never subtitle (no video leg exists), so

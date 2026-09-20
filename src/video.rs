@@ -2613,6 +2613,10 @@ pub struct VideoJob {
     /// Whether the page is currently live. A live HLS capture finalizes
     /// and keeps its partial on stop instead of discarding it.
     pub is_live: bool,
+    /// Record a live stream from its beginning (`--live-from-start`).
+    /// Opt-in preference; only live rows take it (VOD legs have no live
+    /// edge to rewind to). No-op on sites without DVR support.
+    pub live_from_start: bool,
     /// Newest codecs first (AV1 over AVC1). False prefers compatible
     /// H.264 for players without newer decoders.
     pub newest_codecs: bool,
@@ -3448,6 +3452,13 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
         "-o".to_string(),
         out.to_string_lossy().into_owned(),
     ];
+    if job.is_live && job.live_from_start {
+        // Opt-in live capture: record from the beginning of the stream
+        // where the site supports it (DVR), instead of the live edge.
+        // The is_live gate keeps the builder self-consistent even if a
+        // future caller misroutes a VOD row here.
+        args.push("--live-from-start".to_string());
+    }
     args.extend(proxy_cli_args(job.proxy.as_ref()));
     args.extend(ytdlp_identity_args(
         &job.cookies_browser,

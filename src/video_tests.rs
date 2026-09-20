@@ -830,6 +830,7 @@ fn pipeline_reports_missing_tools() {
         user_agent: "test".into(),
         video_format_id: None,
         is_live: false,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
@@ -2242,6 +2243,7 @@ fn direct_test_job() -> VideoJob {
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
@@ -2463,6 +2465,7 @@ fn live_test_job() -> VideoJob {
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: true,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
@@ -2858,6 +2861,7 @@ fn vod_hls_pins_planner_variant_id() {
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
@@ -2922,6 +2926,7 @@ fn vod_hls_refuses_existing_dest() {
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
@@ -3778,6 +3783,51 @@ fn live_capture_argv_never_retry_sleep() {
 }
 
 #[test]
+fn live_capture_argv_live_from_start_when_enabled() {
+    // Opt-in live capture: record from the beginning of the stream
+    // instead of the live edge.
+    let mut job = live_test_job();
+    job.live_from_start = true;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    let pos = argv
+        .iter()
+        .position(|a| a == "--live-from-start")
+        .expect("flag");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "flag must precede the URL separator");
+    // Disabled: no trace of the flag.
+    job.live_from_start = false;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--live-from-start"));
+}
+
+#[test]
+fn live_from_start_stays_off_non_live_rows() {
+    // The flag is live-only: a non-live row never emits it, even with the
+    // preference opted in — no live edge exists to rewind to.
+    let mut job = direct_test_job();
+    job.live_from_start = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--live-from-start"));
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--live-from-start"));
+    // Even the live builder refuses a misrouted non-live row.
+    let mut live_job = live_test_job();
+    live_job.is_live = false;
+    let argv = live_capture_argv(&live_job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--live-from-start"));
+}
+
+#[test]
 fn subtitle_language_index_value_round_trip() {
     assert_eq!(subtitle_language_index("off"), 0);
     assert_eq!(subtitle_language_value(0), "off");
@@ -3928,6 +3978,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         user_agent: "Grab-test/1.0".into(),
         video_format_id: None,
         is_live: false,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: Some("en".into()),

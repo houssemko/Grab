@@ -3516,6 +3516,7 @@ fn proxy_argv_precedes_end_of_options() {
         user_agent: String::new(),
         video_format_id: None,
         is_live: false,
+        live_from_start: false,
         newest_codecs: true,
         cookies_browser: "none".into(),
         subtitles: None,
