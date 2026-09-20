@@ -149,6 +149,16 @@
       <summary>Remove sponsored segments</summary>
       <description>Cut SponsorBlock-flagged sponsor segments out of new video downloads.</description>
     </key>
+    <key name="embed-thumbnail" type="b">
+      <default>false</default>
+      <summary>Embed thumbnail</summary>
+      <description>Attach the video thumbnail as cover art on new downloads.</description>
+    </key>
+    <key name="embed-chapters" type="b">
+      <default>false</default>
+      <summary>Embed chapters</summary>
+      <description>Write chapter markers into the finished file on new downloads.</description>
+    </key>
     <key name="window-width" type="i">
       <default>900</default>
       <summary>Window width</summary>

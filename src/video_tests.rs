@@ -835,6 +835,8 @@ fn pipeline_reports_missing_tools() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        embed_thumbnail: false,
+        embed_chapters: false,
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2244,6 +2246,8 @@ fn direct_test_job() -> VideoJob {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        embed_thumbnail: false,
+        embed_chapters: false,
         proxy: None,
     }
 }
@@ -2462,6 +2466,8 @@ fn live_test_job() -> VideoJob {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        embed_thumbnail: false,
+        embed_chapters: false,
         proxy: None,
     }
 }
@@ -2854,6 +2860,8 @@ fn vod_hls_pins_planner_variant_id() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        embed_thumbnail: false,
+        embed_chapters: false,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2915,6 +2923,8 @@ fn vod_hls_refuses_existing_dest() {
         subtitles: None,
         embed_subs: false,
         sponsorblock_remove: false,
+        embed_thumbnail: false,
+        embed_chapters: false,
         proxy: None,
     };
     std::fs::write(&job.dest, b"already").unwrap();
@@ -3582,6 +3592,123 @@ fn live_capture_argv_never_cuts_sponsors() {
 }
 
 #[test]
+fn unified_argv_embeds_thumbnail_when_enabled() {
+    // Opt-in post-processing: the thumbnail becomes the file's cover art.
+    let mut job = direct_test_job();
+    job.embed_thumbnail = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--embed-thumbnail")
+        .expect("flag");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "thumbnail flag must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.embed_thumbnail = false;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--embed-thumbnail"));
+}
+
+#[test]
+fn unified_argv_embeds_chapters_when_enabled() {
+    // Opt-in post-processing: chapter markers land in the finished file.
+    let mut job = direct_test_job();
+    job.embed_chapters = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    let pos = argv
+        .iter()
+        .position(|a| a == "--embed-chapters")
+        .expect("flag");
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert!(pos < sep, "chapters flag must precede the URL separator");
+    // Default off: no trace of the flag.
+    job.embed_chapters = false;
+    let argv = unified_download_argv(
+        &job,
+        "bv+ba/b",
+        true,
+        "mp4",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(!argv.iter().any(|a| a == "--embed-chapters"));
+}
+
+#[test]
+fn hls_argv_embeds_thumbnail_and_chapters_when_enabled() {
+    let mut job = direct_test_job();
+    job.embed_thumbnail = true;
+    job.embed_chapters = true;
+    let dest = std::path::Path::new("/tmp/dl/v.mp4");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(argv.iter().any(|a| a == "--embed-thumbnail"));
+    assert!(argv.iter().any(|a| a == "--embed-chapters"));
+    // Default off: no trace of either flag.
+    job.embed_thumbnail = false;
+    job.embed_chapters = false;
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(!argv.iter().any(|a| a == "--embed-thumbnail"));
+    assert!(!argv.iter().any(|a| a == "--embed-chapters"));
+}
+
+#[test]
+fn audio_only_rows_still_get_thumbnail_and_chapters() {
+    // Cover art and chapters are meaningful on audio containers (m4a), so
+    // unlike --embed-subs these flags apply to audio-only rows too. Pinned
+    // here so a future reorder of the flag blocks can't silently drop them.
+    let mut job = direct_test_job();
+    job.audio_only = true;
+    job.embed_thumbnail = true;
+    job.embed_chapters = true;
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let argv = unified_download_argv(
+        &job,
+        "bestaudio",
+        false,
+        "m4a",
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        out,
+    );
+    assert!(argv.iter().any(|a| a == "--embed-thumbnail"));
+    assert!(argv.iter().any(|a| a == "--embed-chapters"));
+}
+
+#[test]
+fn live_capture_argv_never_embeds_thumbnail_or_chapters() {
+    // Live captures record raw transport streams: no post-processing leg
+    // exists, so even opted in these flags must not appear.
+    let mut job = live_test_job();
+    job.embed_thumbnail = true;
+    job.embed_chapters = true;
+    let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
+    assert!(!argv.iter().any(|a| a == "--embed-thumbnail"));
+    assert!(!argv.iter().any(|a| a == "--embed-chapters"));
+}
+
+#[test]
 fn subtitle_language_index_value_round_trip() {
     assert_eq!(subtitle_language_index("off"), 0);
     assert_eq!(subtitle_language_value(0), "off");
@@ -3737,6 +3864,8 @@ fn hls_collects_sidecar_beside_finished_file() {
         subtitles: Some("en".into()),
         embed_subs: false,
         sponsorblock_remove: false,
+        embed_thumbnail: false,
+        embed_chapters: false,
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();

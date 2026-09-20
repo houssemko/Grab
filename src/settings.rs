@@ -35,6 +35,8 @@ pub mod key {
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
     pub const SPONSORBLOCK_REMOVE: &str = "sponsorblock-remove";
+    pub const EMBED_THUMBNAIL: &str = "embed-thumbnail";
+    pub const EMBED_CHAPTERS: &str = "embed-chapters";
     pub const WINDOW_WIDTH: &str = "window-width";
     pub const WINDOW_HEIGHT: &str = "window-height";
 }
@@ -139,6 +141,16 @@ impl AppSettings {
     /// Cut SponsorBlock-flagged sponsor segments out of yt-dlp downloads.
     pub fn sponsorblock_remove(&self) -> bool {
         self.0.boolean(key::SPONSORBLOCK_REMOVE)
+    }
+    /// Attach the video thumbnail as cover art (`--embed-thumbnail`).
+    /// Opt-in; live rows never take it (no post-processing leg exists).
+    pub fn embed_thumbnail(&self) -> bool {
+        self.0.boolean(key::EMBED_THUMBNAIL)
+    }
+    /// Write chapter markers into the finished file (`--embed-chapters`).
+    /// Opt-in; live rows never take it (no post-processing leg exists).
+    pub fn embed_chapters(&self) -> bool {
+        self.0.boolean(key::EMBED_CHAPTERS)
     }
     pub fn window_width(&self) -> i32 {
         self.0.int(key::WINDOW_WIDTH)
