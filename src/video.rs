@@ -1734,9 +1734,10 @@ pub(crate) const REMUX_VIDEO_VALUES: &[&str] = &["off", "mp4", "mkv", "webm"];
 pub fn remux_video_labels() -> Vec<String> {
     vec![
         gettext("Off"),
-        gettext("MP4"),
-        gettext("MKV"),
-        gettext("WebM"),
+        // Container names are proper nouns: never translated.
+        "MP4".to_string(),
+        "MKV".to_string(),
+        "WebM".to_string(),
     ]
 }
 
@@ -2353,6 +2354,10 @@ pub(crate) fn part_path(dir: &Path, kind: &str, ext: &str) -> PathBuf {
 /// folder while transferring, and yt-dlp's native `--continue` resumes
 /// them in place. Deterministic across attempts (crash-resume finds the
 /// same paths); unique per row via intake dedupe of the finished name.
+///
+/// This is a REAL filesystem path (single `%`, no template escapes):
+/// callers feeding it to yt-dlp's `-o` must go through
+/// [`ytdlp_output_template`], since yt-dlp parses `-o` as a template.
 pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
     let dir = dest.parent().unwrap_or_else(|| Path::new(""));
     let stem = dest
@@ -2360,6 +2365,29 @@ pub(crate) fn dest_part_path(dest: &Path, kind: &str, ext: &str) -> PathBuf {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "part".to_string());
     dir.join(format!("{stem}.{kind}.{ext}"))
+}
+
+/// Render a real filesystem path as a yt-dlp `-o` output template.
+/// yt-dlp parses `-o` as a Python printf-style template, so a literal
+/// `%` in the filename stem (percent-decoded titles, user-typed names
+/// like `100%.mp4`) must be doubled (`%%`) or the template misparses
+/// and the download fails. Genuine yt-dlp fields (`%(ext)s`, …​) are
+/// left intact: only a `%` that does not start `%(name)s` is doubled.
+/// yt-dlp renders `%%` back to a single `%`, so the on-disk name still
+/// matches what `dest_part_path` and `is_grab_part` expect. (A user
+/// title that itself contains `%(…)s` text passes through as a field:
+/// inherent yt-dlp template ambiguity, pre-existing behavior.)
+pub(crate) fn ytdlp_output_template(path: &Path) -> String {
+    let s = path.to_string_lossy();
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c == '%' && !matches!(chars.clone().next(), Some('(')) {
+            out.push('%');
+        }
+    }
+    out
 }
 
 /// Grab-namespaced part infixes: the only names `clean_dest_parts` ever
@@ -3631,7 +3659,7 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
         "--retries".to_string(),
         job.tries.max(1).to_string(),
         "-o".to_string(),
-        out.to_string_lossy().into_owned(),
+        ytdlp_output_template(out),
     ];
     if job.is_live && job.live_from_start {
         // Opt-in live capture: record from the beginning of the stream
@@ -4176,7 +4204,7 @@ pub(crate) fn hls_download_argv(
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id)),
         "-o".to_string(),
-        out_template.to_string_lossy().into_owned(),
+        ytdlp_output_template(&out_template),
         "--ffmpeg-location".to_string(),
         ffmpeg_location_dir(ffmpeg_bin),
         "--retries".to_string(),
