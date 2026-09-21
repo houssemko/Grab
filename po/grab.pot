@@ -636,10 +636,6 @@ msgstr ""
 msgid "Download Manager"
 msgstr ""
 
-#: src/window.rs:805 src/window.rs:2481
-msgid "Add Multiple URLs"
-msgstr ""
-
 #: src/window.rs:811
 msgid "Open Download Folder"
 msgstr ""
@@ -798,20 +794,8 @@ msgstr ""
 msgid "_Continue"
 msgstr ""
 
-#: src/window.rs:2488
-msgid "One URL per line"
-msgstr ""
-
 #: src/window.rs:2521
 msgid "_Add Downloads"
-msgstr ""
-
-#: src/window.rs:2556
-msgid "Enter at least one URL"
-msgstr ""
-
-#: src/window.rs:2574
-msgid "Added {added} of {total} URLs ({skipped} invalid lines skipped)"
 msgstr ""
 
 #: src/window.rs:2606
@@ -1453,3 +1437,7 @@ msgid "Expanded into {added} of {total} item"
 msgid_plural "Expanded into {added} of {total} items"
 msgstr[0] ""
 msgstr[1] ""
+
+#: src/application.rs:154
+msgid "Only .torrent files can be opened directly"
+msgstr ""

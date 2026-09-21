@@ -935,7 +935,7 @@ pub(crate) enum EngineMsg {
     /// at Finished when the keep-server-date setting is on. Best-effort:
     /// a missing or unparsable header simply sends nothing.
     LastModified(SystemTime),
-    /// A batch/file-import row resolved live (its source never marked
+    /// A dialog-less row resolved live (its source never marked
     /// it): track it so Stop finalizes the capture instead of killing
     /// it like a stalled VOD attempt.
     LiveDetected,
@@ -2338,9 +2338,10 @@ impl DownloadManager {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
     }
 
-    /// Delay queue persists across bulk inserts (URL-list import): each
-    /// `enqueue` otherwise rewrites + fsyncs the whole queue file, turning
-    /// a 1000-line import into 1000 full rewrites. Nesting-safe counter:
+    /// Delay queue persists across bulk inserts (playlist picker,
+    /// worker expansion): each `enqueue` otherwise rewrites + fsyncs the
+    /// whole queue file, turning a 500-item expansion into 500 full
+    /// rewrites. Nesting-safe counter:
     /// pairs of `begin_batch` / `end_batch` may overlap.
     pub fn begin_batch(&self) {
         self.batch.set(self.batch.get() + 1);
@@ -2587,7 +2588,7 @@ impl DownloadManager {
     }
 
     /// Queue one row per playlist entry when a row resolves
-    /// collection-shaped with no picked entry (batch/file-import rows
+    /// collection-shaped with no picked entry (dialog-less rows
     /// never see the picker). Stories address their segments directly;
     /// other entries keep their listed pages; unusable and
     /// self-referential entries skip, so highlights (whose items point

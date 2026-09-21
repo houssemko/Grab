@@ -259,38 +259,7 @@ fn classify_empty_is_direct() {
 }
 
 #[test]
-fn batch_route_sends_video_pages_to_video_rows() {
-    use BatchRoute::{Plain, Video};
-    // Listed pages route by normalized URL…
-    assert!(matches!(
-        batch_route("https://www.youtube.com/watch?v=abc123"),
-        Video
-    ));
-    // …including bare hosts (normalize adds the scheme first) and
-    // uppercase input.
-    assert!(matches!(batch_route("youtube.com/watch?v=abc123"), Video));
-    assert!(matches!(
-        batch_route("HTTPS://YOUTUBE.COM/watch?v=abc123"),
-        Video
-    ));
-    // Direct files, unlisted pages, magnets and junk stay generic
-    // (junk fails there and counts as skipped).
-    assert!(matches!(batch_route("https://example.com/file.mp4"), Plain));
-    assert!(matches!(
-        batch_route("https://example.com/some/page"),
-        Plain
-    ));
-    // Valid magnet (40-hex hash normalize accepts) stays generic via
-    // classify, not via the normalize-error arm.
-    let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
-    assert!(crate::download::normalize_url(magnet).is_ok());
-    assert!(matches!(batch_route(magnet), Plain));
-    assert!(matches!(batch_route("not a url"), Plain));
-    assert!(matches!(batch_route(""), Plain));
-}
-
-#[test]
-fn url_derived_names_detect_batch_rows() {
+fn url_derived_names_detect_dialog_less_rows() {
     let page = "https://www.youtube.com/watch?v=abc123";
     // Intake-derives straight and with dedupe suffixes.
     assert!(is_url_derived_name("watch", page));
@@ -3787,7 +3756,7 @@ fn dump_json_flat_playlist_flag_per_caller() {
 #[test]
 fn fetch_video_page_returns_playlist_for_expansion() {
     // A collection URL reaching the download worker returns its entries
-    // for expansion (batch/file-import rows never see the picker) — and
+    // for expansion (dialog-less rows never see the picker) — and
     // never parses as a video with an empty format list.
     let bin = fake_argv_dump_bin(
         "grab-playlistshape",
