@@ -43,3 +43,16 @@ jobs:
       # threads, and glib futures are bound to their spawning thread, so
       # parallel runs abort when one test's loop polls another's source.
       - run: cargo test -- --test-threads=1
+  # Guards the offline Flatpak build: a Cargo.lock stale against
+  # Cargo.toml heals silently wherever cargo has network (local builds,
+  # the tarball job) but is fatal under --offline, and an unregenerated
+  # cargo-sources.json leaves the vendor dir short — the exact way
+  # v4.0.0-beta.4 shipped without its bundle. Seconds, no system deps.
+  vendor-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # --locked fails when the lock would need re-resolution; read-only otherwise.
+      - run: cargo metadata --locked --format-version 1 >/dev/null
+      - run: ./build-aux/gen-cargo-sources.py --check
