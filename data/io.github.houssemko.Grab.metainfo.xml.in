@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.0.2" date="2026-09-21">
+      <description>
+        <p>Direct-file probe bypass expanded to 149 extensions with dot-required terminals, so pasted files skip the wasted media probe while pages, feeds and streams stay probeable.</p>
+      </description>
+    </release>
     <release version="4.0.1" date="2026-09-21">
       <description>
         <p>Single-invocation yt-dlp downloads with merge margin, original-language audio preference, playlist/story/highlight queue support with per-segment pages, live capture with edge fallback, remux-aware naming, HIG Preferences rewrite, batch intake routing, and offline-safe Flatpak vendor sync.</p>
