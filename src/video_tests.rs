@@ -5858,21 +5858,52 @@ fn is_direct_file_url_matrix() {
         "https://example.com/x.torrent",
         "https://example.com/setup.pkg",
         "http://example.com/doc.pdf",
+        "https://example.com/com.brave.Origin.flatpakref",
+        "https://example.com/app.AppImage",
+        "https://example.com/photo.heic",
+        "https://example.com/book.epub",
+        "https://example.com/data.sqlite",
     ] {
         assert!(is_direct_file_url(url), "{url}");
     }
-    // Pages, streams and odd schemes always probe (or skip probing).
+    // Pages, scripts, streams, segments, feeds and odd schemes always
+    // probe (or skip probing). Extensionless terminals are not
+    // extensions: `/md` must probe like any page.
     for url in [
         "https://www.youtube.com/watch?v=x",
         "https://example.com/article",
         "https://example.com/",
         "https://example.com",
         "https://example.com/download",
+        "https://example.com/md",
+        "https://example.com/raw",
+        "https://example.com/page.html",
+        "https://example.com/app.php",
+        "https://example.com/feed.xml",
+        "https://example.com/stream.m3u",
+        "https://example.com/stream.m3u8",
+        "https://example.com/list.pls",
+        "https://example.com/seg.ts",
         "magnet:?xt=urn:btih:abc",
         "file:///tmp/x.mp4",
         "not a url",
         "",
     ] {
         assert!(!is_direct_file_url(url), "{url}");
+    }
+}
+
+#[test]
+fn direct_file_exts_stay_sorted() {
+    // `binary_search` requires it; this fails the edit that appends
+    // out of order instead of the user whose probe misroutes.
+    let mut sorted = DIRECT_FILE_EXTS.to_vec();
+    sorted.sort_unstable();
+    if sorted != DIRECT_FILE_EXTS {
+        let at = sorted
+            .iter()
+            .zip(DIRECT_FILE_EXTS.iter())
+            .position(|(a, b)| a != b);
+        panic!("DIRECT_FILE_EXTS out of order at {at:?}");
     }
 }
