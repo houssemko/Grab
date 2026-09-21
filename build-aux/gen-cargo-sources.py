@@ -6,8 +6,13 @@ registry-only locks (all our deps are crates.io): per-crate archives +
 .cargo-checksum.json inlines + a vendored-sources cargo config inline.
 Stdlib only (tomllib), so it runs anywhere. Re-run after every Cargo.lock
 change and commit the result.
-Usage: ./build-aux/gen-cargo-sources.py   (run from the repo root)
+Usage: ./build-aux/gen-cargo-sources.py [--check]   (run from the repo root)
+
+--check exits nonzero when the committed file is stale instead of
+rewriting it; CI runs this so a Cargo.lock change without a regenerated
+vendor file fails fast instead of breaking the release Flatpak build.
 """
+import argparse
 import json
 import sys
 import tomllib
@@ -16,9 +21,14 @@ OUT = "build-aux/cargo-sources.json"
 CRATES_IO = "https://static.crates.io/crates"
 
 
-def main() -> None:
-    with open("Cargo.lock", "rb") as f:
-        lock = tomllib.load(f)
+def render() -> tuple[str, int]:
+    try:
+        with open("Cargo.lock", "rb") as f:
+            lock = tomllib.load(f)
+    except FileNotFoundError:
+        sys.exit("ERROR: Cargo.lock not found; run from the repo root")
+    except tomllib.TOMLDecodeError as e:
+        sys.exit(f"ERROR: cannot parse Cargo.lock: {e}")
     metadata = lock.get("metadata", {})
     sources: list = []
     n = 0
@@ -63,9 +73,33 @@ def main() -> None:
             "dest-filename": "config",
         }
     )
+    return json.dumps(sources, indent=4) + "\n", n
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Regenerate vendored cargo sources for offline Flatpak builds.")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 1 when the committed file differs from a fresh render",
+    )
+    args = parser.parse_args()
+    rendered, n = render()
+    if args.check:
+        try:
+            with open(OUT, encoding="utf-8") as f:
+                committed = f.read()
+        except FileNotFoundError:
+            sys.exit(f"ERROR: {OUT} missing; run {sys.argv[0]} to generate it")
+        if committed != rendered:
+            sys.exit(
+                f"ERROR: {OUT} is stale for the current Cargo.lock ({n} crates); "
+                f"run {sys.argv[0]} from the repo root and commit the result"
+            )
+        print(f"{OUT} in sync with Cargo.lock ({n} crates)")
+        return
     with open(OUT, "w", encoding="utf-8") as f:
-        json.dump(sources, f, indent=4)
-        f.write("\n")
+        f.write(rendered)
     print(f"wrote {OUT} with {n} crates")
 
 
