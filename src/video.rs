@@ -1382,17 +1382,27 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Shared trailing argv for every yt-dlp spawn: browser cookies, user
-/// agent, then the page URL behind `--`. One helper so identity flags
-/// can never drift between extraction, parts, HLS and live-resolve
-/// spawns (or let a hostile URL parse as a flag). `None` user agent
-/// keeps today's extraction behavior (yt-dlp default UA there).
+/// Shared trailing argv for every yt-dlp spawn: YouTube player-client
+/// workaround, browser cookies, user agent, then the page URL behind
+/// `--`. One helper so these flags can never drift between extraction,
+/// parts, HLS and live-resolve spawns (or let a hostile URL parse as a
+/// flag). `None` user agent keeps today's extraction behavior (yt-dlp
+/// default UA there).
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     user_agent: Option<&str>,
     page_url: &str,
 ) -> Vec<String> {
     let mut args = Vec::new();
+    // YouTube force-enables SABR-only streaming for the `web` player
+    // client (yt-dlp#12482): its formats come back URL-less and its
+    // playability status fails the whole extraction ("The page needs to
+    // be reloaded"). The `web` client only enters yt-dlp's default
+    // rotation when a JS runtime is available — e.g. the Flatpak's
+    // bundled deno — so exclude it everywhere and stay on the working
+    // clients. Scoped to the youtube extractor: a no-op for other sites.
+    args.push("--extractor-args".to_string());
+    args.push("youtube:player_client=-web".to_string());
     if let Some(spec) = cookies_browser_spec(cookies_browser) {
         args.push(format!("--cookies-from-browser={spec}"));
     }
