@@ -1447,3 +1447,9 @@ msgid "_Add {} file"
 msgid_plural "_Add {} files"
 msgstr[0] ""
 msgstr[1] ""
+
+#: src/download.rs
+msgid "Expanded into {added} of {total} item"
+msgid_plural "Expanded into {added} of {total} items"
+msgstr[0] ""
+msgstr[1] ""

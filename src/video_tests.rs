@@ -2743,7 +2743,7 @@ fn fetch_video_page_parses_dump_json() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let video = crate::download::tokio_rt()
+    let FetchedVideo::Single(video) = crate::download::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -2752,7 +2752,10 @@ fn fetch_video_page_parses_dump_json() {
             None,
             None,
         ))
-        .expect("fake extract parses");
+        .expect("fake extract parses")
+    else {
+        panic!("single-video dump must parse as Single");
+    };
     assert_eq!(video.id, "abc");
     assert!(video.formats.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
@@ -3665,7 +3668,7 @@ fn fetch_video_page_resolves_without_flat_playlist() {
         })
         .to_string(),
     );
-    let video = crate::download::tokio_rt()
+    let FetchedVideo::Single(video) = crate::download::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -3674,7 +3677,10 @@ fn fetch_video_page_resolves_without_flat_playlist() {
             None,
             None,
         ))
-        .expect("fake extract parses");
+        .expect("fake extract parses")
+    else {
+        panic!("single-video dump must parse as Single");
+    };
     assert_eq!(video.id, "abc");
     let argv = fake_bin_argv(&bin);
     assert!(
@@ -3682,6 +3688,70 @@ fn fetch_video_page_resolves_without_flat_playlist() {
         "download resolve must not pass --flat-playlist, got:\n{argv}"
     );
     let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+}
+
+#[test]
+fn expand_child_target_routes_entries() {
+    fn item(id: &str, page_url: &str) -> PlaylistItem {
+        PlaylistItem {
+            index: 1,
+            id: id.to_string(),
+            title: "t".to_string(),
+            page_url: page_url.to_string(),
+            duration: None,
+        }
+    }
+    let tray = "https://www.instagram.com/stories/someuser/";
+    // Story segments address their own pages, not the tray.
+    assert_eq!(
+        expand_child_target(tray, tray, &item("aye83DjauH", tray)),
+        Some("https://www.instagram.com/stories/someuser/482584233761418119/".to_string())
+    );
+    // Ordinary entries keep their listed pages…
+    assert_eq!(
+        expand_child_target(
+            "https://www.youtube.com/playlist?list=pl",
+            "https://www.youtube.com/playlist?list=pl",
+            &item("v1", "https://www.youtube.com/watch?v=v1")
+        ),
+        Some("https://www.youtube.com/watch?v=v1".to_string())
+    );
+    // …but never the probed collection itself (self-nesting guard:
+    // highlights resolve to their own URL, so they expand to nothing
+    // and keep today's collection error). The undecodable id forces
+    // the page-URL fallback path where the guard lives (any
+    // alphabet-valid id on a stories tray decodes to some segment).
+    assert_eq!(expand_child_target(tray, tray, &item("!!!", tray)), None);
+    assert_eq!(
+        expand_child_target(
+            "https://www.youtube.com/playlist?list=pl",
+            "https://www.youtube.com/playlist?list=pl",
+            &item("pl", "https://www.youtube.com/playlist?list=pl")
+        ),
+        None
+    );
+    // Canonical drift: the extractor's URL need not match the probed
+    // one byte-for-byte (trailing slash dropped here) — the guard
+    // checks both, so highlights still expand to nothing.
+    assert_eq!(
+        expand_child_target(
+            "https://www.youtube.com/playlist?list=pl/",
+            "https://www.youtube.com/playlist?list=pl",
+            &item("pl", "https://www.youtube.com/playlist?list=pl")
+        ),
+        None
+    );
+    // Unusable entries skip (non-story tray so the page-URL fallback
+    // path governs; on a stories tray any alphabet id decodes to some
+    // segment by design — real ids always come from the extractor).
+    assert_eq!(
+        expand_child_target(
+            "https://www.youtube.com/playlist?list=pl",
+            "https://www.youtube.com/playlist?list=pl",
+            &item("s9", "not a url")
+        ),
+        None
+    );
 }
 
 #[test]
@@ -3715,10 +3785,10 @@ fn dump_json_flat_playlist_flag_per_caller() {
 }
 
 #[test]
-fn fetch_video_page_rejects_playlist_shaped_output() {
-    // A collection URL reaching the download worker must fail loudly,
-    // not parse as a video with an empty format list ("the page listed
-    // none").
+fn fetch_video_page_returns_playlist_for_expansion() {
+    // A collection URL reaching the download worker returns its entries
+    // for expansion (batch/file-import rows never see the picker) — and
+    // never parses as a video with an empty format list.
     let bin = fake_argv_dump_bin(
         "grab-playlistshape",
         &serde_json::json!({
@@ -3743,11 +3813,14 @@ fn fetch_video_page_rejects_playlist_shaped_output() {
         None,
     ));
     match res {
-        Err(e) => assert!(
-            e.to_string().contains("collection"),
-            "unexpected error: {e}"
-        ),
-        ok => panic!("playlist-shaped output must not parse as a video, got {ok:?}"),
+        Ok(FetchedVideo::Playlist(pl)) => {
+            assert_eq!(pl.items.len(), 1);
+            assert_eq!(
+                pl.items[0].page_url,
+                "https://www.instagram.com/stories/x/1/"
+            );
+        }
+        other => panic!("playlist-shaped output must expand, got {other:?}"),
     }
     let _ = std::fs::remove_dir_all(bin.parent().unwrap());
 }
