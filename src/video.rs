@@ -3197,7 +3197,7 @@ const PROGRESS_GRANULARITY: u64 = 16384;
 /// # Errors
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
 pub async fn run_video_download(
-    job: VideoJob,
+    mut job: VideoJob,
     mut abort: oneshot::Receiver<()>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
@@ -3265,6 +3265,19 @@ pub async fn run_video_download(
     let Some(video) = video else {
         return Err(VideoError::fetch("empty response"));
     };
+
+    // Batch and file-import rows skip the dialog, so the row source
+    // never marked them live: refresh from resolve metadata instead.
+    // Without this a live row takes the HLS VOD path on an infinite
+    // manifest (frozen "Resolving media…", wrong stop semantics) and
+    // never reaches live capture. Flipping the job field (not a local)
+    // keeps every downstream use — dispatch, from-start argv, abort
+    // handling, remux gating — consistent; the row source itself is
+    // untouched, so the next attempt re-detects idempotently.
+    if !job.is_live && video.is_live.unwrap_or(false) {
+        job.is_live = true;
+        tx.send(EngineMsg::LiveDetected).ok();
+    }
 
     // Batch and file-import rows skip the dialog, so their names are URL
     // stems ("watch"): rename to the title default now that metadata is

@@ -935,6 +935,10 @@ pub(crate) enum EngineMsg {
     /// at Finished when the keep-server-date setting is on. Best-effort:
     /// a missing or unparsable header simply sends nothing.
     LastModified(SystemTime),
+    /// A batch/file-import row resolved live (its source never marked
+    /// it): track it so Stop finalizes the capture instead of killing
+    /// it like a stalled VOD attempt.
+    LiveDetected,
     /// The server object changed mid-download (version check failed). The
     /// UI thread drops the resume bitmap so a later retry starts fresh
     /// instead of failing on the dead file version forever.
@@ -3331,6 +3335,17 @@ impl DownloadManager {
                         // Latest attempt wins; applied at Finished when the
                         // keep-server-date setting is on.
                         this.server_mtime.borrow_mut().insert(id, t);
+                    }
+                    EngineMsg::LiveDetected => {
+                        // Downloading only: a stop/pause during resolve
+                        // must not leave a stale live_rows member behind
+                        // (it would skip staging cleanup on remove and
+                        // take live signal paths). Once per attempt,
+                        // idempotent insert; paused rows re-detect on
+                        // resume.
+                        if item.status() == DownloadStatus::Downloading {
+                            this.live_rows.borrow_mut().insert(id);
+                        }
                     }
                 }
             }
