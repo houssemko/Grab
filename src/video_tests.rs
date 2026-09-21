@@ -1376,6 +1376,57 @@ fn default_video_filename_remux_ext() {
     );
 }
 
+#[test]
+fn container_truth_name_corrects_stale_ext() {
+    use std::path::Path;
+    // Native webm merge under an mp4 intake name: same stem, truer ext.
+    assert_eq!(
+        container_truth_name(
+            Path::new("/dl/Clip [x].mp4"),
+            Path::new("/st/grab-media.webm"),
+        )
+        .as_deref(),
+        Some("Clip [x].webm")
+    );
+    // Agreement (even case-insensitively) and exotic intake names stay.
+    assert_eq!(
+        container_truth_name(Path::new("/dl/Clip.mp4"), Path::new("/st/grab-media.MP4")),
+        None
+    );
+    assert_eq!(
+        container_truth_name(Path::new("/dl/talk.mkv"), Path::new("/st/grab-media.webm")),
+        None
+    );
+    // Unknown containers and extensionless sides never rename.
+    assert_eq!(
+        container_truth_name(Path::new("/dl/Clip.mp4"), Path::new("/st/grab-media.bin")),
+        None
+    );
+    assert_eq!(
+        container_truth_name(Path::new("/dl/Clip"), Path::new("/st/grab-media.webm")),
+        None
+    );
+    assert_eq!(
+        container_truth_name(Path::new("/dl/.mp4"), Path::new("/st/grab-media.webm")),
+        None
+    );
+    // Multi-dot stems keep everything but the last extension; the rule
+    // is container-agnostic within the allowlist.
+    assert_eq!(
+        container_truth_name(
+            Path::new("/dl/my.clip.v2.mp4"),
+            Path::new("/st/grab-media.mkv"),
+        )
+        .as_deref(),
+        Some("my.clip.v2.mkv")
+    );
+    assert_eq!(
+        container_truth_name(Path::new("/dl/Clip.m4a"), Path::new("/st/grab-media.webm"))
+            .as_deref(),
+        Some("Clip.webm")
+    );
+}
+
 // ── video format options ─────────────────────────────────────────────
 
 fn test_video(formats: serde_json::Value) -> yt_dlp::model::Video {
