@@ -2788,11 +2788,14 @@ fn fetch_video_page_parses_dump_json() {
 
 #[test]
 fn identity_args_order_and_trim() {
-    // Cookies, trimmed UA, then `--` + page: identical for every spawn.
+    // Player-client workaround, cookies, trimmed UA, then `--` + page:
+    // identical for every spawn.
     let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![
+            "--extractor-args".to_string(),
+            "youtube:player_client=-web".to_string(),
             "--user-agent".to_string(),
             "Grab/1".to_string(),
             "--".to_string(),
@@ -2803,8 +2806,27 @@ fn identity_args_order_and_trim() {
     let argv = ytdlp_identity_args("none", None, "https://x.com/u/status/1");
     assert_eq!(
         argv,
-        vec!["--".to_string(), "https://x.com/u/status/1".to_string()]
+        vec![
+            "--extractor-args".to_string(),
+            "youtube:player_client=-web".to_string(),
+            "--".to_string(),
+            "https://x.com/u/status/1".to_string(),
+        ]
     );
+}
+
+#[test]
+fn identity_args_excludes_web_player_client() {
+    // The SABR workaround must survive on every spawn: the extractor-arg
+    // pair is always present and always precedes `--`, so the page URL
+    // can never swallow it.
+    let argv = ytdlp_identity_args("firefox", None, "https://youtu.be/abc");
+    let pos = argv
+        .iter()
+        .position(|a| a == "--extractor-args")
+        .expect("extractor-args flag present");
+    assert_eq!(argv[pos + 1], "youtube:player_client=-web");
+    assert!(argv.iter().position(|a| a == "--").unwrap() > pos + 1);
 }
 
 // ── best-overall muxed vs HLS ────────────────────────────────────────
@@ -4124,6 +4146,16 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .position(|a| a == "--progress-template")
             .expect("template flag");
         assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
+        // The YouTube `web` player-client exclusion rides on every spawn:
+        // SABR URL-less formats would otherwise break the whole run
+        // (yt-dlp#12482), wherever a JS runtime is available.
+        let e = argv
+            .iter()
+            .position(|a| a == "--extractor-args")
+            .expect("extractor-args flag");
+        assert_eq!(argv[e + 1], "youtube:player_client=-web", "{argv:?}");
+        let sep = argv.iter().position(|a| a == "--").expect("separator");
+        assert!(sep > e + 1, "{argv:?}");
     }
 }
 // ── subtitle sidecars ────────────────────────────────────────────────
