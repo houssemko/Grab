@@ -61,14 +61,29 @@ pub fn quality_value(index: usize) -> &'static str {
 
 /// Default file name for a resolved video when the user left the name
 /// blank: yt-dlp's default output template (`%(title)s [%(id)s].%(ext)s`)
-/// with the container the worker will produce (.mp4 merged, .m4a
-/// audio-only). Grab keeps passing yt-dlp a literal `-o` path, so the
-/// template is emulated here at naming time rather than expanded by
-/// yt-dlp — the pipeline (dedupe, rename claims, resume) needs the final
-/// name up front. An empty id falls back to the bare title. The intake
-/// sanitizes it further.
-pub fn default_video_filename(title: &str, id: &str, audio_only: bool) -> String {
-    let ext = if audio_only { "m4a" } else { "mp4" };
+/// with the container the worker will produce. Grab keeps passing yt-dlp
+/// a literal `-o` path, so the template is emulated here at naming time
+/// rather than expanded by yt-dlp — the pipeline (dedupe, rename
+/// claims, resume) needs the final name up front. An empty id falls back
+/// to the bare title. The intake sanitizes it further.
+///
+/// The extension is the remux target when the row is a video download
+/// with remux enabled: without it the worker remuxes to mkv and claims
+/// matroska bytes under an mp4 name. Audio-only ignores remux (no video
+/// leg exists) and always takes m4a. The target is lowercased here so
+/// the contract holds no matter the caller (all current callers pass
+/// the allowlisted lowercase already).
+pub fn default_video_filename(
+    title: &str,
+    id: &str,
+    audio_only: bool,
+    remux_ext: Option<&str>,
+) -> String {
+    let ext = if audio_only {
+        "m4a".to_string()
+    } else {
+        remux_ext.unwrap_or("mp4").to_ascii_lowercase()
+    };
     let id = id.trim();
     if id.is_empty() {
         format!("{title}.{ext}")

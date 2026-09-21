@@ -1843,10 +1843,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 if step_b.name.text().trim().is_empty() {
                                     let typed = file_b.text().trim().to_string();
                                     let base = if typed.is_empty() {
+                                        let remux = crate::video::remux_video_active(
+                                            &settings_b.remux_video(),
+                                        );
                                         crate::video::default_video_filename(
                                             &v.title,
                                             &v.id,
                                             step_b.audio.is_active(),
+                                            remux.as_deref(),
                                         )
                                     } else {
                                         typed
@@ -2041,12 +2045,15 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // One-click restore of the title default (audio-aware, like submit).
     {
         let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             if let Some(p) = info.borrow().as_ref() {
+                let remux = crate::video::remux_video_active(&settings.remux_video());
                 name.set_text(&crate::video::default_video_filename(
                     p.title(),
                     p.video_id(),
                     audio.is_active(),
+                    remux.as_deref(),
                 ));
                 name.grab_focus();
             }
@@ -2054,22 +2061,30 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     }
     // Toggling the mode re-seeds an untouched name: the resolve-time
     // seed ran under the other mode, so without this the row keeps a
-    // .mp4 name for an audio download (or vice versa). An edited name
+    // video-container name for an audio download (or vice versa). An edited name
     // is never clobbered.
     {
         let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
+        let settings = manager.settings().clone();
         audio.connect_active_notify(move |sw| {
             if let Some(p) = info.borrow().as_ref() {
                 let active = sw.is_active();
                 let current = name.text().to_string();
+                let remux = crate::video::remux_video_active(&settings.remux_video());
                 if current.trim().is_empty()
                     || current
-                        == crate::video::default_video_filename(p.title(), p.video_id(), !active)
+                        == crate::video::default_video_filename(
+                            p.title(),
+                            p.video_id(),
+                            !active,
+                            remux.as_deref(),
+                        )
                 {
                     name.set_text(&crate::video::default_video_filename(
                         p.title(),
                         p.video_id(),
                         active,
+                        remux.as_deref(),
                     ));
                 }
             }
@@ -2284,8 +2299,15 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                             let audio_only = step2.audio.is_active();
                             // Default name from the video title and id; the intake
                             // sanitizes it and falls back to the URL stem.
+                            let remux =
+                                crate::video::remux_video_active(&m.settings().remux_video());
                             let auto = typed.is_empty().then(|| {
-                                crate::video::default_video_filename(&v.title, &v.id, audio_only)
+                                crate::video::default_video_filename(
+                                    &v.title,
+                                    &v.id,
+                                    audio_only,
+                                    remux.as_deref(),
+                                )
                             });
                             let name = if typed.is_empty() {
                                 auto.as_deref()
@@ -2933,9 +2955,15 @@ fn push_playlist_items_page(
             }
             // One persist for the whole import, not one per row.
             manager.begin_batch();
+            let remux = crate::video::remux_video_active(&manager.settings().remux_video());
             let mut failed: Option<String> = None;
             for (i, item) in &chosen {
-                let name = crate::video::default_video_filename(&item.title, &item.id, audio_only);
+                let name = crate::video::default_video_filename(
+                    &item.title,
+                    &item.id,
+                    audio_only,
+                    remux.as_deref(),
+                );
                 if let Err(e) = manager.enqueue_video(
                     &item.page_url,
                     Some(&dest_dir.borrow()),
