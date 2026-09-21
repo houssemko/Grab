@@ -3128,19 +3128,19 @@ pub async fn run_video_download(
     // in. Dialog-seeded and typed names are untouched — only URL-derived
     // names qualify — and the pump dedupes the suggestion at Finished
     // with collision safety.
-    if let Some(current) = job.dest.file_name().and_then(|n| n.to_str()) {
-        if is_url_derived_name(current, &job.page_url) {
-            // Live rows capture through the dest name with a hardcoded
-            // mp4/m4a container: never suggest a remux extension there.
-            let remux = if job.is_live {
-                None
-            } else {
-                job.remux_video.as_deref()
-            };
-            let better = default_video_filename(&video.title, &video.id, job.audio_only, remux);
-            if better != current {
-                tx.send(EngineMsg::SuggestName(better)).ok();
-            }
+    if let Some(current) = job.dest.file_name().and_then(|n| n.to_str())
+        && is_url_derived_name(current, &job.page_url)
+    {
+        // Live rows capture through the dest name with a hardcoded
+        // mp4/m4a container: never suggest a remux extension there.
+        let remux = if job.is_live {
+            None
+        } else {
+            job.remux_video.as_deref()
+        };
+        let better = default_video_filename(&video.title, &video.id, job.audio_only, remux);
+        if better != current {
+            tx.send(EngineMsg::SuggestName(better)).ok();
         }
     }
 
