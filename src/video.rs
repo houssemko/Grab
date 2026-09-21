@@ -92,6 +92,44 @@ pub fn default_video_filename(
     }
 }
 
+/// Whether a row name is just the page URL derived at intake: batch
+/// and file-import rows skip the dialog, so their names are URL stems
+/// ("watch"). Matches the derived stem modulo intake-dedupe ` (N)`
+/// suffixes. Dialog-seeded and typed names never match (unless
+/// perversely identical to the URL stem). Pure for tests.
+pub(crate) fn is_url_derived_name(current: &str, page_url: &str) -> bool {
+    let derived = crate::download::filename_from_url(page_url);
+    current == derived || strip_dedupe_suffix(current) == derived
+}
+
+/// Intake-dedupe suffix stripped: `watch (12)` → `watch`,
+/// `Clip (3).mp4` → `Clip.mp4`. ASCII-boundary operations only, so
+/// non-ASCII titles are never split mid-codepoint. Pure for tests.
+fn strip_dedupe_suffix(name: &str) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
+        _ => (name, None),
+    };
+    if let Some(open) = stem.rfind(" (") {
+        let inner = &stem[open + 2..];
+        if !inner.is_empty()
+            && inner
+                .strip_suffix(')')
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        {
+            let base = &stem[..open];
+            if base.is_empty() {
+                return name.to_string();
+            }
+            return match ext {
+                Some(e) => format!("{base}{e}"),
+                None => base.to_string(),
+            };
+        }
+    }
+    name.to_string()
+}
+
 /// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`].
 /// Shared by Preferences and the New Download dialog so both combos stay
 /// in the same order.
@@ -3084,6 +3122,27 @@ pub async fn run_video_download(
     let Some(video) = video else {
         return Err(VideoError::fetch("empty response"));
     };
+
+    // Batch and file-import rows skip the dialog, so their names are URL
+    // stems ("watch"): rename to the title default now that metadata is
+    // in. Dialog-seeded and typed names are untouched — only URL-derived
+    // names qualify — and the pump dedupes the suggestion at Finished
+    // with collision safety.
+    if let Some(current) = job.dest.file_name().and_then(|n| n.to_str())
+        && is_url_derived_name(current, &job.page_url)
+    {
+        // Live rows capture through the dest name with a hardcoded
+        // mp4/m4a container: never suggest a remux extension there.
+        let remux = if job.is_live {
+            None
+        } else {
+            job.remux_video.as_deref()
+        };
+        let better = default_video_filename(&video.title, &video.id, job.audio_only, remux);
+        if better != current {
+            tx.send(EngineMsg::SuggestName(better)).ok();
+        }
+    }
 
     // Select streams: newest codec first (AV1, then VP9/HEVC/AVC1 —
     // same ranking as yt-dlp's `+vcodec:av01` sort), best audio. Older
