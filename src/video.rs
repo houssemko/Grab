@@ -1290,10 +1290,11 @@ fn firefox_profile_dirs(base: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// Chromium config subdirs per browser, most common first (sandbox grants
-/// cover the primaries; alternates still resolve outside Flatpak). One
-/// entry covers the whole family: stable, beta, nightly/canary and dev
-/// builds all resolve under it, first hit wins.
+/// Chromium config subdirs per browser, most common first. One entry covers
+/// the whole family: stable, beta, nightly/canary and dev builds all
+/// resolve under it. Within one channel the first profile wins
+/// ([`chromium_profile_dirs`] order); across channels the freshest `Cookies`
+/// database wins — see [`freshest_chromium_profile`].
 fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
     match browser {
         "brave" => &[
@@ -1326,6 +1327,31 @@ fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
     }
 }
 
+/// Best profile directory across every channel subdir of one Chromium
+/// browser: each channel contributes its preferred profile (same order as
+/// [`chromium_profile_dirs` — `Default` first), then the channel whose
+/// `Cookies` database was modified most recently wins. That is the browser
+/// the user actually runs; a stale install whose directory merely exists
+/// (e.g. Brave stable shadowing a daily-driven Origin Beta) must not win.
+/// Ties keep channel order via the stable sort; unreadable mtimes sort
+/// after every readable one, so the outcome stays deterministic.
+fn freshest_chromium_profile(config_home: &Path, browser: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = chromium_subdirs(browser)
+        .iter()
+        .filter_map(|sub| chromium_profile_dirs(config_home, sub).into_iter().next())
+        .collect();
+    candidates.sort_by(|a, b| {
+        let mtime = |profile: &PathBuf| {
+            std::fs::metadata(profile.join("Cookies"))
+                .and_then(|meta| meta.modified())
+                .ok()
+        };
+        // Descending; `Option` orders `None` last.
+        mtime(b).cmp(&mtime(a))
+    });
+    candidates.into_iter().next()
+}
+
 /// Absolute browser profile directory for `--cookies-from-browser`, resolved
 /// against the real host config/home dirs (see [`real_config_home`]) so it
 /// works inside the Flatpak sandbox where `$HOME` is remapped. Testable core:
@@ -1345,9 +1371,7 @@ pub(crate) fn browser_profile_dir_in(
         .into_iter()
         .find_map(|base| firefox_profile_dirs(&base).into_iter().next());
     }
-    chromium_subdirs(browser)
-        .iter()
-        .find_map(|sub| chromium_profile_dirs(config_home, sub).into_iter().next())
+    freshest_chromium_profile(config_home, browser)
 }
 
 /// [`browser_profile_dir_in`] against the real host directories. When
