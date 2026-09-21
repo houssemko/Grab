@@ -60,13 +60,20 @@ pub fn quality_value(index: usize) -> &'static str {
 }
 
 /// Default file name for a resolved video when the user left the name
-/// blank: the video title plus the container the worker will produce
-/// (.mp4 merged, .m4a audio-only). The intake sanitizes it further.
-pub fn default_video_filename(title: &str, audio_only: bool) -> String {
-    if audio_only {
-        format!("{title}.m4a")
+/// blank: yt-dlp's default output template (`%(title)s [%(id)s].%(ext)s`)
+/// with the container the worker will produce (.mp4 merged, .m4a
+/// audio-only). Grab keeps passing yt-dlp a literal `-o` path, so the
+/// template is emulated here at naming time rather than expanded by
+/// yt-dlp — the pipeline (dedupe, rename claims, resume) needs the final
+/// name up front. An empty id falls back to the bare title. The intake
+/// sanitizes it further.
+pub fn default_video_filename(title: &str, id: &str, audio_only: bool) -> String {
+    let ext = if audio_only { "m4a" } else { "mp4" };
+    let id = id.trim();
+    if id.is_empty() {
+        format!("{title}.{ext}")
     } else {
-        format!("{title}.mp4")
+        format!("{title} [{id}].{ext}")
     }
 }
 
@@ -458,6 +465,15 @@ impl ProbeResult {
         match self {
             ProbeResult::Single(v) => &v.title,
             ProbeResult::Playlist(p) => &p.title,
+        }
+    }
+
+    /// Extractor video id for a single-video probe; empty for collections
+    /// (their items carry their own ids, applied per row at queue time).
+    pub fn video_id(&self) -> &str {
+        match self {
+            ProbeResult::Single(v) => &v.id,
+            ProbeResult::Playlist(_) => "",
         }
     }
 

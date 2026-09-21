@@ -1305,11 +1305,20 @@ fn ensure_tool_versions_refuses_missing_binary() {
 
 #[test]
 fn default_video_filename_by_mode() {
-    assert_eq!(default_video_filename("Clip", false), "Clip.mp4");
-    assert_eq!(default_video_filename("Clip", true), "Clip.m4a");
+    assert_eq!(
+        default_video_filename("Clip", "abc123", false),
+        "Clip [abc123].mp4"
+    );
+    assert_eq!(
+        default_video_filename("Clip", "abc123", true),
+        "Clip [abc123].m4a"
+    );
+    // Empty id falls back to the bare title.
+    assert_eq!(default_video_filename("Clip", "", false), "Clip.mp4");
+    assert_eq!(default_video_filename("Clip", "   ", true), "Clip.m4a");
     // Untouched otherwise: sanitizing is the intake's job.
-    assert_eq!(default_video_filename("a/b", false), "a/b.mp4");
-    assert_eq!(default_video_filename("", true), ".m4a");
+    assert_eq!(default_video_filename("a/b", "x", false), "a/b [x].mp4");
+    assert_eq!(default_video_filename("", "x", true), " [x].m4a");
 }
 
 // ── video format options ─────────────────────────────────────────────
