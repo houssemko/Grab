@@ -290,6 +290,37 @@ fn batch_route_sends_video_pages_to_video_rows() {
 }
 
 #[test]
+fn url_derived_names_detect_batch_rows() {
+    let page = "https://www.youtube.com/watch?v=abc123";
+    // Intake-derives straight and with dedupe suffixes.
+    assert!(is_url_derived_name("watch", page));
+    assert!(is_url_derived_name("watch (1)", page));
+    assert!(is_url_derived_name("watch (12)", page));
+    // Dialog-seeded and typed names never match.
+    assert!(!is_url_derived_name("Clip [abc123].mp4", page));
+    assert!(!is_url_derived_name("myvideo", page));
+}
+
+#[test]
+fn strip_dedupe_suffix_leaves_titles_alone() {
+    assert_eq!(strip_dedupe_suffix("watch (12)"), "watch");
+    assert_eq!(strip_dedupe_suffix("Clip (3).mp4"), "Clip.mp4");
+    assert_eq!(
+        strip_dedupe_suffix("My (old) title.mp4"),
+        "My (old) title.mp4"
+    );
+    assert_eq!(strip_dedupe_suffix("a (1) (2).mp4"), "a (1).mp4");
+    // Non-ASCII titles are never split mid-codepoint.
+    assert_eq!(strip_dedupe_suffix("Café (2).mp4"), "Café.mp4");
+    assert_eq!(strip_dedupe_suffix("watch"), "watch");
+    // Boundary shapes stay untouched.
+    assert_eq!(strip_dedupe_suffix("(1)"), "(1)");
+    assert_eq!(strip_dedupe_suffix("Clip."), "Clip.");
+    assert_eq!(strip_dedupe_suffix(" (1)"), " (1)");
+    assert_eq!(strip_dedupe_suffix("watch (1).mp4"), "watch.mp4");
+}
+
+#[test]
 fn classify_bare_host_no_scheme() {
     // Missing scheme → Url::parse fails → Direct (caller must normalize first).
     assert_eq!(classify("youtube.com/watch?v=x"), VideoSource::Direct);
