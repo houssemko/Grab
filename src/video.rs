@@ -241,6 +241,24 @@ pub fn is_video_page(url: &str) -> bool {
     matches!(classify(url), VideoSource::Page { .. })
 }
 
+/// Batch/file-import line routing. Video pages become video rows;
+/// everything else (direct files, magnets, torrents, junk) stays on the
+/// generic intake, which counts junk as skipped. The line is normalized
+/// first so bare hosts (`youtube.com/…`) route like pasted full URLs.
+/// Pure for tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchRoute {
+    Video,
+    Plain,
+}
+
+pub fn batch_route(line: &str) -> BatchRoute {
+    match crate::download::normalize_url(line) {
+        Ok(url) if is_video_page(&url) => BatchRoute::Video,
+        _ => BatchRoute::Plain,
+    }
+}
+
 /// Whether a resolved preview still matches the dialog's current text.
 /// The dialog kick and the submit gate must agree on this: the extractor
 /// canonicalizes page URLs (youtu.be → youtube.com/watch), so comparing
