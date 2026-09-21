@@ -2978,8 +2978,16 @@ fn push_playlist_items_page(
             // One persist for the whole import, not one per row.
             manager.begin_batch();
             let remux = crate::video::remux_video_active(&manager.settings().remux_video());
+            // Story segments are addressable as their own pages: queue
+            // those, so each row re-resolves its own segment instead of
+            // the tray (tray + format ids downloads the first segment
+            // once per row). Attempted unconditionally: highlights and
+            // non-story URLs return None here and keep the tray with the
+            // persisted entry id as fallback.
             let mut failed: Option<String> = None;
             for (i, item) in &chosen {
+                let page_url = crate::video::story_segment_url(&playlist.page_url, &item.id)
+                    .unwrap_or_else(|| item.page_url.clone());
                 let name = crate::video::default_video_filename(
                     &item.title,
                     &item.id,
@@ -2987,7 +2995,7 @@ fn push_playlist_items_page(
                     remux.as_deref(),
                 );
                 if let Err(e) = manager.enqueue_video(
-                    &item.page_url,
+                    &page_url,
                     Some(&dest_dir.borrow()),
                     Some(&name),
                     crate::video::VideoChoices {
@@ -2997,10 +3005,12 @@ fn push_playlist_items_page(
                         // Live streams queued from a playlist take the VOD
                         // path; the worker re-resolves each item page anyway.
                         is_live: false,
-                        // Remember the picked entry: Instagram stories and
-                        // highlights stamp every entry with the collection
-                        // URL, so the worker selects the picked entry out
-                        // of the re-resolved tray by this id.
+                        // Remember the picked entry as fallback: story rows
+                        // normally carry segment pages (see
+                        // `story_segment_url`) and never need it, but
+                        // highlights — and anything unparseable at pick
+                        // time — re-resolve the tray, so the worker
+                        // selects the picked entry out of it by this id.
                         playlist_item_id: Some(item.id.clone()),
                     },
                 ) {

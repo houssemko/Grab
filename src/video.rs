@@ -1578,6 +1578,92 @@ fn story_tray_url(url: &str) -> Option<String> {
     Some(format!("https://www.instagram.com/stories/{user}/"))
 }
 
+/// Instagram story username from a tray (or single-story) URL:
+/// `.../stories/<user>[/<id>/]`. `None` for highlights and non-story
+/// links. Pure for tests.
+fn story_tray_user(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    if !matches!(
+        parsed.host_str(),
+        Some("instagram.com") | Some("www.instagram.com")
+    ) {
+        return None;
+    }
+    let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
+    let ["stories", user, ..] = segments.as_slice() else {
+        return None;
+    };
+    // Instagram usernames: 1–30 chars of letters, digits, periods and
+    // underscores. Anything else is not a user tray — fail early to the
+    // tray + entry-id fallback instead of queueing a late failure.
+    if user.chars().count() > 30
+        || !user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+    {
+        return None;
+    }
+    if user.eq_ignore_ascii_case("highlights") {
+        return None;
+    }
+    Some((*user).to_string())
+}
+
+/// Instagram shortcode alphabet (`_id_to_pk` in yt-dlp's extractor):
+/// standard base64 order with `-_`, no padding.
+const INSTA_SHORTCODE_TABLE: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+/// Numeric media id for an Instagram shortcode, mirroring yt-dlp's
+/// `_id_to_pk` (trailing 28-char private-post suffix stripped first).
+/// Operates on bytes throughout: the alphabet is ASCII-only, and a
+/// byte-index cut on a `&str` could split a codepoint and panic on
+/// untrusted extractor input. `None` on characters outside the
+/// alphabet or overflow (falls back to tray + entry-id selection).
+/// Pure for tests.
+fn insta_shortcode_to_pk(shortcode: &str) -> Option<u64> {
+    let bytes = shortcode.as_bytes();
+    let code: &[u8] = if bytes.len() > 28 {
+        &bytes[..bytes.len() - 28]
+    } else {
+        bytes
+    };
+    // Real shortcodes are ~11 chars; anything much longer is junk, not
+    // a future format — fail closed to the tray fallback instead of
+    // queueing a bogus segment page. (A longer valid format would only
+    // lose the shortcut, never break: fallback is today's behavior.)
+    if code.is_empty() || code.len() > 16 {
+        return None;
+    }
+    let mut pk: u64 = 0;
+    for &b in code {
+        let digit = INSTA_SHORTCODE_TABLE.iter().position(|&t| t == b)? as u64;
+        pk = pk.checked_mul(64)?.checked_add(digit)?;
+    }
+    // No real media id is zero (all-A input decodes to 0).
+    if pk == 0 {
+        return None;
+    }
+    Some(pk)
+}
+
+/// Directly-addressable page for one picked story segment:
+/// `.../stories/<user>/<numeric-id>/`. Rows queued with this re-resolve
+/// the segment itself as a single video — queuing the tray URL instead
+/// downloads whatever the tray resolves to once per row (the first
+/// segment, once per picked row: N copies of story one). Highlights
+/// keep the tray (their items are not addressable as live stories), as
+/// does anything unparseable (worker falls back to tray + entry-id
+/// selection). Pure for tests.
+pub(crate) fn story_segment_url(tray_url: &str, shortcode: &str) -> Option<String> {
+    let user = story_tray_user(tray_url)?;
+    let pk = insta_shortcode_to_pk(shortcode)?;
+    Some(format!("https://www.instagram.com/stories/{user}/{pk}/"))
+}
+
 /// Fetch one page's raw `--dump-single-json` through a direct spawn
 /// (same spawn/timeout/output semantics as the crate's extractors),
 /// then parse leniently (see [`sanitize_video_json`]). Used instead of
@@ -1678,10 +1764,12 @@ async fn fetch_raw_dump_json(
 /// failure a queued story hit. Playlist-shaped output is rejected
 /// outright — a collection URL reaching the worker is a routing bug or
 /// a page that changed shape, never a downloadable video — with one
-/// exception: rows queued from the story/highlight picker carry the
-/// picked entry's id, because Instagram stamps every such entry with
-/// the collection URL and the row's page re-resolves the whole tray.
-/// For those, the picked entry is selected out of the playlist.
+/// exception: highlight rows (and story rows whose segment page didn't
+/// parse at pick time) carry the picked entry's id, because Instagram
+/// stamps every such entry with the collection URL and the row's page
+/// re-resolves the whole tray. For those, the picked entry is selected
+/// out of the playlist. Story rows normally arrive with segment pages
+/// and never take this path.
 async fn fetch_video_page(
     youtube_bin: &Path,
     url: &str,

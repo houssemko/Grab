@@ -1082,6 +1082,85 @@ fn story_tray_url_extracts_owner_tray() {
 }
 
 #[test]
+fn insta_shortcode_to_pk_matches_ytdlp_vector() {
+    // Known pair from yt-dlp's own instagram tests
+    // (`instagram://media?id=482584233761418119` ↔ `aye83DjauH`).
+    assert_eq!(
+        insta_shortcode_to_pk("aye83DjauH"),
+        Some(482584233761418119)
+    );
+    // Private-post suffix (shortcode + 28 chars) decodes to the same pk.
+    let long = format!("aye83DjauH{}", "x".repeat(28));
+    assert_eq!(insta_shortcode_to_pk(&long), Some(482584233761418119));
+    // Outside the alphabet, empty, and overflow-adjacent junk fail.
+    assert_eq!(insta_shortcode_to_pk("abc def!"), None);
+    assert_eq!(insta_shortcode_to_pk(""), None);
+}
+
+#[test]
+fn story_segment_url_points_at_the_segment() {
+    assert_eq!(
+        story_segment_url(
+            "https://www.instagram.com/stories/fruits_zipper/",
+            "aye83DjauH"
+        ),
+        Some("https://www.instagram.com/stories/fruits_zipper/482584233761418119/".to_string())
+    );
+    // Works off a single-story link too (username still parses).
+    assert_eq!(
+        story_segment_url(
+            "https://www.instagram.com/stories/fruits_zipper/3570766765028588805/",
+            "aye83DjauH"
+        ),
+        Some("https://www.instagram.com/stories/fruits_zipper/482584233761418119/".to_string())
+    );
+    // Highlights, non-story links and undecodable ids fall back to the
+    // tray + entry-id selection in the worker.
+    assert_eq!(
+        story_segment_url(
+            "https://www.instagram.com/stories/highlights/18090946048123978/",
+            "aye83DjauH"
+        ),
+        None
+    );
+    assert_eq!(
+        story_segment_url("https://www.instagram.com/p/ABCdef/", "aye83DjauH"),
+        None
+    );
+    assert_eq!(
+        story_segment_url(
+            "https://www.instagram.com/stories/fruits_zipper/",
+            "not a shortcode!"
+        ),
+        None
+    );
+}
+
+#[test]
+fn insta_shortcode_rejects_overflow_and_unicode() {
+    // 14 max-digit chars overflow u64: None (tray fallback), never wrap.
+    assert_eq!(insta_shortcode_to_pk(&"_".repeat(14)), None);
+    // Non-ASCII input: None, never a panic. The long case uses a
+    // 3-byte char so the old byte-index cut would land mid-codepoint.
+    assert_eq!(insta_shortcode_to_pk("é"), None);
+    assert_eq!(insta_shortcode_to_pk(&"€".repeat(10)), None);
+    // Long ASCII junk with the suffix strip still decodes or rejects
+    // without panicking; overlong codes fail closed to the tray path.
+    assert_eq!(insta_shortcode_to_pk(&"A".repeat(64)), None);
+    // All-zero decode is not a real media id.
+    assert_eq!(insta_shortcode_to_pk("A"), None);
+}
+
+#[test]
+fn insta_shortcode_pins_dash_underscore_order() {
+    // The known vector has no `-`/`_`; pin their positions explicitly
+    // (yt-dlp table ends `...89-_`).
+    assert_eq!(insta_shortcode_to_pk("-"), Some(62));
+    assert_eq!(insta_shortcode_to_pk("_"), Some(63));
+    assert_eq!(insta_shortcode_to_pk("A-"), Some(62));
+}
+
+#[test]
 fn retarget_story_items_points_entries_at_tray() {
     let story_url = "https://www.instagram.com/stories/someuser/12345678901234567/";
     let mut pl = parse_playlist_json(
