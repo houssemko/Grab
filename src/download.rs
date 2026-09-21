@@ -3415,6 +3415,9 @@ impl DownloadManager {
             sponsorblock_mark: self.settings.sponsorblock_mark(),
             // Audio-only rows never remux (no video leg exists), so
             // resolve to `None` here rather than gating at every use.
+            // Note the enqueue→spawn gap: the row name took the remux
+            // pref at dialog time, this flag at spawn time — a pref
+            // change on a queued row can disagree on the extension.
             remux_video: if audio_only {
                 None
             } else {

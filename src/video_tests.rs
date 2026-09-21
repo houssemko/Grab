@@ -1306,19 +1306,43 @@ fn ensure_tool_versions_refuses_missing_binary() {
 #[test]
 fn default_video_filename_by_mode() {
     assert_eq!(
-        default_video_filename("Clip", "abc123", false),
+        default_video_filename("Clip", "abc123", false, None),
         "Clip [abc123].mp4"
     );
     assert_eq!(
-        default_video_filename("Clip", "abc123", true),
+        default_video_filename("Clip", "abc123", true, None),
         "Clip [abc123].m4a"
     );
     // Empty id falls back to the bare title.
-    assert_eq!(default_video_filename("Clip", "", false), "Clip.mp4");
-    assert_eq!(default_video_filename("Clip", "   ", true), "Clip.m4a");
+    assert_eq!(default_video_filename("Clip", "", false, None), "Clip.mp4");
+    assert_eq!(
+        default_video_filename("Clip", "   ", true, None),
+        "Clip.m4a"
+    );
     // Untouched otherwise: sanitizing is the intake's job.
-    assert_eq!(default_video_filename("a/b", "x", false), "a/b [x].mp4");
-    assert_eq!(default_video_filename("", "x", true), " [x].m4a");
+    assert_eq!(
+        default_video_filename("a/b", "x", false, None),
+        "a/b [x].mp4"
+    );
+    assert_eq!(default_video_filename("", "x", true, None), " [x].m4a");
+}
+
+#[test]
+fn default_video_filename_remux_ext() {
+    // Remux target decides the video extension so the worker doesn't
+    // claim matroska bytes under an mp4 name; audio-only ignores it.
+    assert_eq!(
+        default_video_filename("Clip", "abc123", false, Some("mkv")),
+        "Clip [abc123].mkv"
+    );
+    assert_eq!(
+        default_video_filename("Clip", "", false, Some("mkv")),
+        "Clip.mkv"
+    );
+    assert_eq!(
+        default_video_filename("Clip", "abc123", true, Some("mkv")),
+        "Clip [abc123].m4a"
+    );
 }
 
 // ── video format options ─────────────────────────────────────────────
