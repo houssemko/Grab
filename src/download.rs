@@ -907,6 +907,10 @@ pub(crate) enum EngineMsg {
     Finished {
         size: u64,
     },
+    /// A video row resolved playlist-shaped with no picked entry: the
+    /// pump queues one row per item (worker tasks never touch the
+    /// main-thread manager) and retires the carrier.
+    ExpandPlaylist(crate::video::PlaylistInfo),
     Failed(String),
     /// A multi worker finished one piece; the UI thread records it for resume.
     PieceDone(u64),
@@ -2578,6 +2582,67 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
+    /// Queue one row per playlist entry when a row resolves
+    /// collection-shaped with no picked entry (batch/file-import rows
+    /// never see the picker). Stories address their segments directly;
+    /// other entries keep their listed pages; unusable and
+    /// self-referential entries skip, so highlights (whose items point
+    /// back at the probed collection) expand to nothing. Returns
+    /// (added, reported total). One persist for the whole import.
+    /// Retrying a Done carrier re-expands (dedupe keeps it safe but
+    /// duplicated); the video source stays so the row remains
+    /// retryable. Choices
+    /// inherit the carrier row (quality preset, audio mode).
+    fn expand_playlist_rows(
+        self: &Rc<Self>,
+        id: u64,
+        item: &DownloadItem,
+        pl: &crate::video::PlaylistInfo,
+    ) -> (usize, usize) {
+        let (quality, audio_only) = match self.video_source(id) {
+            Some(crate::video::VideoSource::Page {
+                quality,
+                audio_only,
+                ..
+            }) => (quality, audio_only),
+            _ => return (0, pl.total),
+        };
+        let dest_dir = item.dest_dir().to_string();
+        self.begin_batch();
+        let mut added = 0;
+        for entry in &pl.items {
+            let Some(url) = crate::video::expand_child_target(&item.url(), &pl.page_url, entry)
+            else {
+                continue;
+            };
+            // Live streams queued from a playlist take the VOD path;
+            // each child re-resolves its own page anyway (same posture
+            // as the picker). Names stay URL-derived: the post-fetch
+            // rename titles them once metadata resolves.
+            if self
+                .enqueue_video(
+                    &url,
+                    Some(&dest_dir),
+                    None,
+                    crate::video::VideoChoices {
+                        quality: quality.clone(),
+                        audio_only,
+                        video_format_id: None,
+                        is_live: false,
+                        playlist_item_id: None,
+                    },
+                )
+                .is_ok()
+            {
+                added += 1;
+            }
+        }
+        self.end_batch();
+        // Reported total, not attempted: a truncated or leniently-parsed
+        // list is honest about its tail ("500 of 600").
+        (added, pl.total)
+    }
+
     /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
     /// A validated piece bitmap resumes segmented instead of restarting.
     /// Names restore verbatim (renaming would break resume identity and
@@ -3056,6 +3121,58 @@ impl DownloadManager {
                         done = true;
                         break;
                     }
+                    EngineMsg::ExpandPlaylist(pl) => {
+                        // Pause/cancel during resolve must not enqueue:
+                        // the carrier stays put and nothing new appears.
+                        // (Pause doesn't bump epoch, so no staleness
+                        // guard saves us — check first.)
+                        if item.status() == DownloadStatus::Cancelled
+                            || item.status() == DownloadStatus::Paused
+                        {
+                            done = true;
+                            break;
+                        }
+                        // Worker-side playlist expansion, on the main
+                        // thread where queueing is legal: one row per
+                        // usable entry, then retire the carrier Done. No
+                        // history record and no notification: the new
+                        // rows are the feedback. Nothing usable expands
+                        // to today's collection error instead.
+                        let (added, total) = this.expand_playlist_rows(id, &item, &pl);
+                        if added == 0 {
+                            let e = crate::video::playlist_resolve_error(None);
+                            if item.status() != DownloadStatus::Cancelled
+                                && item.status() != DownloadStatus::Paused
+                            {
+                                item.set_status(DownloadStatus::Failed);
+                                item.set_detail(e.to_string());
+                                this.torrent_pieces.borrow_mut().remove(&id);
+                                this.notify_finished(&item, Err(e.to_string()));
+                            }
+                        } else if item.status() != DownloadStatus::Cancelled
+                            && item.status() != DownloadStatus::Paused
+                        {
+                            item.set_status(DownloadStatus::Done);
+                            item.set_detail(
+                                ngettext(
+                                    "Expanded into {added} of {total} item",
+                                    "Expanded into {added} of {total} items",
+                                    added as u32,
+                                )
+                                .replace("{added}", &added.to_string())
+                                .replace("{total}", &total.to_string()),
+                            );
+                            item.set_progress(1.0);
+                            this.pending_names.borrow_mut().remove(&id);
+                            this.server_mtime.borrow_mut().remove(&id);
+                            // Like Finished: an older Done carrier for
+                            // the URL leaves so re-expansions replace
+                            // instead of stacking.
+                            this.drop_finished_duplicates(&url, id);
+                        }
+                        done = true;
+                        break;
+                    }
                     EngineMsg::Failed(e) => {
                         // A failed download keeps its URL-derived name.
                         this.pending_names.borrow_mut().remove(&id);
@@ -3454,12 +3571,18 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();
             match crate::video::run_video_download(job, abort_rx, worker_tx).await {
-                Ok(Some(size)) => {
+                Ok(crate::video::VideoOutcome::Finished(size)) => {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
                 // Aborted: the pauser/canceller already set the row status,
                 // so send nothing and let the pump tail no-op.
-                Ok(None) => {}
+                Ok(crate::video::VideoOutcome::Aborted) => {}
+                Ok(crate::video::VideoOutcome::Expand(pl)) => {
+                    // Handed to the pump: queueing rows needs the
+                    // manager, which the worker task must never touch
+                    // (Rc is main-thread only).
+                    tx.send(EngineMsg::ExpandPlaylist(pl)).ok();
+                }
                 Err(e) => {
                     tracing::warn!(item_id = id, error = %e.to_string(), "video attempt failed");
                     tx.send(EngineMsg::Failed(e.to_string())).ok();

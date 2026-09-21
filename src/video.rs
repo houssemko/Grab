@@ -1578,6 +1578,34 @@ fn story_tray_url(url: &str) -> Option<String> {
     Some(format!("https://www.instagram.com/stories/{user}/"))
 }
 
+/// Queue target for one playlist entry under worker expansion: a
+/// directly-addressable page. Story segments resolve to their own pages
+/// (same form the extractor matches); everything else keeps its listed
+/// page. `None` for entries with no http page, or pointing back at the
+/// probed collection itself — compared against both the row's normalized
+/// URL and the extractor's canonical one, since yt-dlp canonicalizes
+/// (`youtu.be`→`watch`, trailing slashes) past what intake normalized.
+/// Highlights resolve to their own URL, so they expand to nothing and
+/// keep today's collection error; a pathological nested playlist would
+/// otherwise re-expand forever (accepted residual: real extractors
+/// don't nest — entries are videos, and the 500-item cap bounds even
+/// a hostile one per generation).
+/// Pure for tests.
+pub(crate) fn expand_child_target(
+    parent_url: &str,
+    playlist_url: &str,
+    item: &PlaylistItem,
+) -> Option<String> {
+    if let Some(segment) = story_segment_url(parent_url, &item.id) {
+        return Some(segment);
+    }
+    let page = item.page_url.as_str();
+    if !is_http_url(page) || page == parent_url || page == playlist_url {
+        return None;
+    }
+    Some(page.to_string())
+}
+
 /// Instagram story username from a tray (or single-story) URL:
 /// `.../stories/<user>[/<id>/]`. `None` for highlights and non-story
 /// links. Pure for tests.
@@ -1758,18 +1786,14 @@ async fn fetch_raw_dump_json(
     Ok(value)
 }
 
-/// Strict single-video model for the download worker. Full
-/// extraction here, not `--flat-playlist`: stub listings parse as a
-/// video with no formats, which is exactly the "the page listed none"
-/// failure a queued story hit. Playlist-shaped output is rejected
-/// outright — a collection URL reaching the worker is a routing bug or
-/// a page that changed shape, never a downloadable video — with one
-/// exception: highlight rows (and story rows whose segment page didn't
-/// parse at pick time) carry the picked entry's id, because Instagram
-/// stamps every such entry with the collection URL and the row's page
-/// re-resolves the whole tray. For those, the picked entry is selected
-/// out of the playlist. Story rows normally arrive with segment pages
-/// and never take this path.
+/// Strict single-video model for the download worker, with one shaped
+/// exception. Full extraction here, not `--flat-playlist`: stub listings
+/// parse as a video with no formats, which is exactly the "the page
+/// listed none" failure a queued story hit. Playlist-shaped output with
+/// a picked entry id selects that entry (highlight rows, and story rows
+/// whose segment page didn't parse at pick time, re-resolve the whole
+/// tray); without one it returns the collection for worker-side
+/// expansion into per-item rows instead of failing.
 async fn fetch_video_page(
     youtube_bin: &Path,
     url: &str,
@@ -1777,7 +1801,7 @@ async fn fetch_video_page(
     timeout: Duration,
     fetch_proxy: Option<&crate::download::ResolvedProxy>,
     playlist_item_id: Option<&str>,
-) -> Result<Video, VideoError> {
+) -> Result<FetchedVideo, VideoError> {
     let value = fetch_raw_dump_json(
         youtube_bin,
         url,
@@ -1787,24 +1811,51 @@ async fn fetch_video_page(
         false,
     )
     .await?;
-    if parse_playlist_json(&value, url).is_some() {
-        if let Some(entry) = pick_playlist_entry(&value, playlist_item_id) {
-            return parse_single_video(entry);
+    if let Some(playlist) = parse_playlist_json(&value, url) {
+        if playlist_item_id.is_some() {
+            if let Some(entry) = pick_playlist_entry(&value, playlist_item_id) {
+                return parse_single_video(entry).map(|v| FetchedVideo::Single(Box::new(v)));
+            }
+            return Err(playlist_resolve_error(playlist_item_id));
         }
-        return Err(playlist_resolve_error(playlist_item_id));
+        return Ok(FetchedVideo::Playlist(playlist));
     }
-    parse_single_video(value)
+    parse_single_video(value).map(|v| FetchedVideo::Single(Box::new(v)))
 }
 
 /// Worker error when the page resolved playlist-shaped and no entry
 /// could be selected: a routing bug when the row was never picked from
 /// a playlist, an expired story when it was.
-fn playlist_resolve_error(playlist_item_id: Option<&str>) -> VideoError {
+pub(crate) fn playlist_resolve_error(playlist_item_id: Option<&str>) -> VideoError {
     VideoError::fetch(gettext(if playlist_item_id.is_some() {
         "the story is no longer available"
     } else {
         "the link opened a collection, not a single video"
     }))
+}
+
+/// What one video worker attempt resolved to. The spawner needs more
+/// than bytes-or-nothing: playlist-shaped pages expand into per-item
+/// rows instead of failing.
+#[derive(Debug)]
+pub enum VideoOutcome {
+    /// Bytes finished (or adopted) at dest.
+    Finished(u64),
+    /// The page resolved playlist-shaped with no picked entry: queue
+    /// one row per item (see `expand_child_target`) instead of failing.
+    Expand(PlaylistInfo),
+    /// Stopped before finishing; the canceller owns the row state.
+    Aborted,
+}
+
+/// What one extractor dump resolved to: a single video, or a
+/// collection whose entries the picker (or worker expansion) consumes.
+/// `parse_playlist_json` decides the shape; single videos never carry
+/// `entries`.
+#[derive(Debug)]
+pub(crate) enum FetchedVideo {
+    Single(Box<Video>),
+    Playlist(PlaylistInfo),
 }
 
 /// The picked playlist entry, for rows queued from a picker whose page
@@ -3149,7 +3200,7 @@ pub async fn run_video_download(
     job: VideoJob,
     mut abort: oneshot::Receiver<()>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
-) -> Result<Option<u64>, VideoError> {
+) -> Result<VideoOutcome, VideoError> {
     use crate::download::EngineMsg;
 
     let staging = staging_dir(job.item_id);
@@ -3196,10 +3247,14 @@ pub async fn run_video_download(
         )
         .await
         {
-            Ok(v) => {
-                video = Some(v);
+            Ok(FetchedVideo::Single(v)) => {
+                video = Some(*v);
                 break;
             }
+            // No picked entry: the spawner expands the collection into
+            // per-item rows instead of failing it (batch/file-import
+            // rows never see the picker).
+            Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl)),
             Err(e) if attempt + 1 < 3 => {
                 tracing::debug!("video resolve failed, retrying: {e}");
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt) + 1)).await;
@@ -3283,7 +3338,8 @@ pub async fn run_video_download(
                 timeout,
                 tx,
             )
-            .await;
+            .await
+            .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
         }
         return run_hls_ytdlp(
             &youtube_bin,
@@ -3295,7 +3351,8 @@ pub async fn run_video_download(
             timeout,
             tx,
         )
-        .await;
+        .await
+        .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished));
     }
     let Some(audio_sel) = audio_sel else {
         return Err(VideoError::unavailable_detail(&video.formats));
@@ -3339,7 +3396,12 @@ pub async fn run_video_download(
     };
     let plan = resume_plan(&query);
     match plan {
-        ResumePlan::Finished => return Ok(file_len(&job.dest)),
+        ResumePlan::Finished => {
+            return Ok(match file_len(&job.dest) {
+                Some(n) => VideoOutcome::Finished(n),
+                None => VideoOutcome::Aborted,
+            });
+        }
         ResumePlan::Fresh => {
             // Overwrite pre-flight (Parabolic parity): a finished file
             // already at `dest` means the atomic claim (rename_noreplace,
@@ -3426,6 +3488,7 @@ pub async fn run_video_download(
         tx,
     )
     .await
+    .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished))
 }
 
 /// Fallback `-f` spec when the selected id is unknown to yt-dlp's fresh
