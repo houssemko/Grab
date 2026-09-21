@@ -1814,13 +1814,13 @@ async fn fetch_video_page(
     if let Some(playlist) = parse_playlist_json(&value, url) {
         if playlist_item_id.is_some() {
             if let Some(entry) = pick_playlist_entry(&value, playlist_item_id) {
-                return parse_single_video(entry).map(FetchedVideo::Single);
+                return parse_single_video(entry).map(|v| FetchedVideo::Single(Box::new(v)));
             }
             return Err(playlist_resolve_error(playlist_item_id));
         }
         return Ok(FetchedVideo::Playlist(playlist));
     }
-    parse_single_video(value).map(FetchedVideo::Single)
+    parse_single_video(value).map(|v| FetchedVideo::Single(Box::new(v)))
 }
 
 /// Worker error when the page resolved playlist-shaped and no entry
@@ -1854,7 +1854,7 @@ pub enum VideoOutcome {
 /// `entries`.
 #[derive(Debug)]
 pub(crate) enum FetchedVideo {
-    Single(Video),
+    Single(Box<Video>),
     Playlist(PlaylistInfo),
 }
 
@@ -3248,7 +3248,7 @@ pub async fn run_video_download(
         .await
         {
             Ok(FetchedVideo::Single(v)) => {
-                video = Some(v);
+                video = Some(*v);
                 break;
             }
             // No picked entry: the spawner expands the collection into
