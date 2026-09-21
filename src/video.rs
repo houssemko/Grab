@@ -3351,6 +3351,51 @@ pub(crate) fn merge_output_ext(video_ext: &str) -> String {
     }
 }
 
+/// Containers the finished-name backstop may correct toward: exactly
+/// the set the worker plans or remuxes to. Anything else discovered
+/// keeps today's name rather than surprising the row.
+const TRUTHFUL_CONTAINERS: &[&str] = &["mp4", "webm", "mkv", "flv", "ogg", "m4a"];
+
+/// Intake-name extensions Grab generates itself absent remux: the only
+/// ones the backstop second-guesses. A remux-aware intake can also
+/// generate mkv/webm, and a user can type anything — both keep their
+/// intent here because neither is distinguishable from an explicit
+/// choice, and both are already correct when the pref hasn't changed
+/// mid-queue (the case this backstop exists for).
+const GENERATED_INTAKE_EXTS: &[&str] = &["mp4", "m4a"];
+
+/// Corrected row name when the discovered container disagrees with the
+/// intake name: same stem, discovered extension. `None` when they agree
+/// (case-insensitively), when either side lacks an extension, when the
+/// intake name carries an explicit (non-generated) extension, or when
+/// the discovered one isn't a planned container. Feeds the pump's
+/// finished-name adoption via `SuggestName`, which dedupes it with
+/// collision safety. Pure for tests.
+pub(crate) fn container_truth_name(dest: &Path, discovered: &Path) -> Option<String> {
+    let found_ext = discovered.extension().and_then(|e| e.to_str())?;
+    let dest_ext = dest.extension().and_then(|e| e.to_str())?;
+    if found_ext.eq_ignore_ascii_case(dest_ext) {
+        return None;
+    }
+    if !GENERATED_INTAKE_EXTS
+        .iter()
+        .any(|e| dest_ext.eq_ignore_ascii_case(e))
+    {
+        return None;
+    }
+    if !TRUTHFUL_CONTAINERS
+        .iter()
+        .any(|e| found_ext.eq_ignore_ascii_case(e))
+    {
+        return None;
+    }
+    let stem = dest.file_stem().and_then(|s| s.to_str())?;
+    if stem.is_empty() {
+        return None;
+    }
+    Some(format!("{stem}.{}", found_ext.to_ascii_lowercase()))
+}
+
 /// Stable `-o` template for the unified download: inside the row's
 /// staging dir (wiped wholesale on mismatch/remove/success), so no
 /// part-namespace coordination is needed. yt-dlp resumes its own
@@ -3606,6 +3651,15 @@ async fn run_unified_ytdlp(
     // must fail now, or the row would sit Done and empty forever.
     if file_len(&final_tmp) == Some(0) {
         return Err(VideoError::part_failed("empty stream"));
+    }
+    // Container-truth backstop: the intake name assumes mp4 (or the
+    // remux target); a native webm merge — or a remux pref changed
+    // mid-queue — would otherwise claim under a stale extension. Same
+    // stem, so stem reservations hold; the pump dedupes and renames at
+    // Finished with collision safety, and exotic typed names are never
+    // second-guessed (see `container_truth_name`).
+    if let Some(truer) = container_truth_name(&job.dest, &final_tmp) {
+        tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
     match crate::download::rename_noreplace(&final_tmp, &job.dest) {
@@ -4632,6 +4686,14 @@ async fn run_hls_ytdlp(
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
     };
+    // Same container-truth backstop as the unified path: the HLS merge
+    // is mp4-only, but `--remux-video` is honored here too, so a remux
+    // pref changed mid-queue would otherwise claim under a stale name.
+    // (Live rows need none of this: ext is fixed to mp4/m4a on both
+    // sides and live never remuxes, so divergence is impossible.)
+    if let Some(truer) = container_truth_name(&job.dest, &final_tmp) {
+        tx.send(EngineMsg::SuggestName(truer)).ok();
+    }
     // Atomic claim into place (EXDEV-safe, no clobber).
     match crate::download::rename_noreplace(&final_tmp, &job.dest) {
         Ok(()) => {}

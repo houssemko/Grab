@@ -3168,6 +3168,31 @@ impl DownloadManager {
                         if name == current || !sane_filename(&name) {
                             continue;
                         }
+                        // Container truth from video engines: same stem,
+                        // truer extension (a native webm merge under an
+                        // mp4 intake name). The finished-name adoption
+                        // below dedupes it; the Chromium rules underneath
+                        // stay for server-advertised names. Gated on
+                        // video rows so plain-engine behavior is
+                        // bit-identical; the extension guard keeps a
+                        // future sender from stripping names through
+                        // this path.
+                        let is_video_row = matches!(
+                            this.video_source(id),
+                            Some(crate::video::VideoSource::Page { .. })
+                        );
+                        if is_video_row
+                            && name.contains('.')
+                            && name_stem(&name) == name_stem(&current)
+                            && name != current
+                        {
+                            // Same shortening the Chromium path applies:
+                            // the stem is unchanged from an already-short
+                            // intake, so this is symmetry, not truncation.
+                            let name = shorten_filename(&name);
+                            this.pending_names.borrow_mut().insert(id, name);
+                            continue;
+                        }
                         // Chromium parity: the server-advertised name wins
                         // over the URL-derived one. Adopt when the current
                         // name is a placeholder/extensionless, or when the
