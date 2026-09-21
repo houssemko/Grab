@@ -1845,6 +1845,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                     let base = if typed.is_empty() {
                                         crate::video::default_video_filename(
                                             &v.title,
+                                            &v.id,
                                             step_b.audio.is_active(),
                                         )
                                     } else {
@@ -2044,6 +2045,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             if let Some(p) = info.borrow().as_ref() {
                 name.set_text(&crate::video::default_video_filename(
                     p.title(),
+                    p.video_id(),
                     audio.is_active(),
                 ));
                 name.grab_focus();
@@ -2061,9 +2063,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 let active = sw.is_active();
                 let current = name.text().to_string();
                 if current.trim().is_empty()
-                    || current == crate::video::default_video_filename(p.title(), !active)
+                    || current
+                        == crate::video::default_video_filename(p.title(), p.video_id(), !active)
                 {
-                    name.set_text(&crate::video::default_video_filename(p.title(), active));
+                    name.set_text(&crate::video::default_video_filename(
+                        p.title(),
+                        p.video_id(),
+                        active,
+                    ));
                 }
             }
         });
@@ -2275,10 +2282,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         crate::video::ProbeResult::Single(v) => {
                             let typed = step2.name.text().trim().to_string();
                             let audio_only = step2.audio.is_active();
-                            // Default name from the video title; the intake
+                            // Default name from the video title and id; the intake
                             // sanitizes it and falls back to the URL stem.
                             let auto = typed.is_empty().then(|| {
-                                crate::video::default_video_filename(&v.title, audio_only)
+                                crate::video::default_video_filename(&v.title, &v.id, audio_only)
                             });
                             let name = if typed.is_empty() {
                                 auto.as_deref()
@@ -2928,7 +2935,7 @@ fn push_playlist_items_page(
             manager.begin_batch();
             let mut failed: Option<String> = None;
             for (i, item) in &chosen {
-                let name = crate::video::default_video_filename(&item.title, audio_only);
+                let name = crate::video::default_video_filename(&item.title, &item.id, audio_only);
                 if let Err(e) = manager.enqueue_video(
                     &item.page_url,
                     Some(&dest_dir.borrow()),
