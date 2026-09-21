@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.0.3" date="2026-09-21">
+      <description>
+        <p>Fixes video extraction failures by excluding YouTube's web player client from every yt-dlp spawn, and bumps the gtk4 stack to the latest stable 0.11.5.</p>
+      </description>
+    </release>
     <release version="4.0.2" date="2026-09-21">
       <description>
         <p>Direct-file probe bypass expanded to 149 extensions with dot-required terminals, so pasted files skip the wasted media probe while pages, feeds and streams stay probeable.</p>
