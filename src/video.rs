@@ -92,8 +92,8 @@ pub fn default_video_filename(
     }
 }
 
-/// Whether a row name is just the page URL derived at intake: batch
-/// and file-import rows skip the dialog, so their names are URL stems
+/// Whether a row name is just the page URL derived at intake:
+/// dialog-less rows skip the picker, so their names are URL stems
 /// ("watch"). Matches the derived stem modulo intake-dedupe ` (N)`
 /// suffixes. Dialog-seeded and typed names never match (unless
 /// perversely identical to the URL stem). Pure for tests.
@@ -277,24 +277,6 @@ pub fn classify(url: &str) -> VideoSource {
 /// Convenience predicate for the enqueue/restore paths.
 pub fn is_video_page(url: &str) -> bool {
     matches!(classify(url), VideoSource::Page { .. })
-}
-
-/// Batch/file-import line routing. Video pages become video rows;
-/// everything else (direct files, magnets, torrents, junk) stays on the
-/// generic intake, which counts junk as skipped. The line is normalized
-/// first so bare hosts (`youtube.com/…`) route like pasted full URLs.
-/// Pure for tests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchRoute {
-    Video,
-    Plain,
-}
-
-pub fn batch_route(line: &str) -> BatchRoute {
-    match crate::download::normalize_url(line) {
-        Ok(url) if is_video_page(&url) => BatchRoute::Video,
-        _ => BatchRoute::Plain,
-    }
 }
 
 /// Whether a resolved preview still matches the dialog's current text.
@@ -3252,8 +3234,8 @@ pub async fn run_video_download(
                 break;
             }
             // No picked entry: the spawner expands the collection into
-            // per-item rows instead of failing it (batch/file-import
-            // rows never see the picker).
+            // per-item rows instead of failing it (dialog-less rows
+            // never see the picker).
             Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl)),
             Err(e) if attempt + 1 < 3 => {
                 tracing::debug!("video resolve failed, retrying: {e}");
@@ -3266,7 +3248,7 @@ pub async fn run_video_download(
         return Err(VideoError::fetch("empty response"));
     };
 
-    // Batch and file-import rows skip the dialog, so the row source
+    // Dialog-less rows skip the picker, so the row source
     // never marked them live: refresh from resolve metadata instead.
     // Without this a live row takes the HLS VOD path on an infinite
     // manifest (frozen "Resolving media…", wrong stop semantics) and
@@ -3279,7 +3261,7 @@ pub async fn run_video_download(
         tx.send(EngineMsg::LiveDetected).ok();
     }
 
-    // Batch and file-import rows skip the dialog, so their names are URL
+    // Dialog-less rows skip the picker, so their names are URL
     // stems ("watch"): rename to the title default now that metadata is
     // in. Dialog-seeded and typed names are untouched — only URL-derived
     // names qualify — and the pump dedupes the suggestion at Finished

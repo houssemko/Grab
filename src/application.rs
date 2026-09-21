@@ -3,7 +3,7 @@
 
 use crate::download::DownloadManager;
 use crate::settings::AppSettings;
-use crate::window::{self, show_add_dialog, show_batch_dialog};
+use crate::window::{self, show_add_dialog};
 use crate::{APP_ID, preferences};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
@@ -45,7 +45,6 @@ pub fn setup(app: &adw::Application) {
             }));
 
             app.set_accels_for_action("app.add-download", &["<Control>n"]);
-            app.set_accels_for_action("app.add-batch", &["<Control><Shift>n"]);
             app.set_accels_for_action("app.search", &["<Control>f"]);
             app.set_accels_for_action("app.quit", &["<Control>q"]);
             app.set_accels_for_action("app.preferences", &["<Control>comma"]);
@@ -91,8 +90,8 @@ pub fn setup(app: &adw::Application) {
                     }
                 }
                 if let Some(path) = f.path() {
-                    // .torrent files go to the torrent intake, not the
-                    // URL-list importer below (binary fails read_to_string).
+                    // .torrent files go to the torrent intake; anything
+                    // else is rejected with a toast below.
                     if path
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
@@ -148,59 +147,12 @@ pub fn setup(app: &adw::Application) {
                         });
                         continue;
                     }
-                    const MAX_LIST_BYTES: u64 = 1_000_000;
-                    const MAX_LIST_LINES: usize = 1000;
-                    // The up-to-1MB read runs on a worker: file I/O never
-                    // blocks the main loop, even for local files.
-                    let (manager, toasts) = (s.manager.clone(), s.toasts.clone());
-                    glib::spawn_future_local(async move {
-                        let text = gio::spawn_blocking(move || {
-                            std::fs::metadata(&path)
-                                .ok()
-                                .filter(|m| m.len() <= MAX_LIST_BYTES)
-                                .and_then(|_| std::fs::read_to_string(&path).ok())
-                        })
-                        .await
-                        .ok()
-                        .flatten();
-                        let Some(text) = text else { return };
-                        // One persist for the whole import, not one per line.
-                        // Video pages become video rows (same routing as
-                        // the batch dialog); the generic intake counts
-                        // junk as skipped via per-line toasts.
-                        manager.begin_batch();
-                        let quality = manager.settings().video_quality();
-                        for line in text
-                            .lines()
-                            .map(str::trim)
-                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                            .take(MAX_LIST_LINES)
-                        {
-                            let res = match crate::video::batch_route(line) {
-                                crate::video::BatchRoute::Video => manager
-                                    .enqueue_video(
-                                        line,
-                                        None,
-                                        None,
-                                        crate::video::VideoChoices {
-                                            quality: quality.clone(),
-                                            audio_only: false,
-                                            video_format_id: None,
-                                            is_live: false,
-                                            playlist_item_id: None,
-                                        },
-                                    )
-                                    .map(|_| ()),
-                                crate::video::BatchRoute::Plain => {
-                                    manager.enqueue(line, None, None).map(|_| ())
-                                }
-                            };
-                            if let Err(e) = res {
-                                toasts.add_toast(adw::Toast::new(&e));
-                            }
-                        }
-                        manager.end_batch();
-                    });
+                    // Only .torrent files open as files now that the
+                    // URL-list importer is gone; anything else explains
+                    // itself instead of queuing garbage rows.
+                    s.toasts.add_toast(adw::Toast::new(&gettext(
+                        "Only .torrent files can be opened directly",
+                    )));
                 }
             }
             s.window.present();
@@ -225,16 +177,6 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         show_add_dialog(s.manager.clone(), None);
-                    }
-                })
-                .build()
-        },
-        {
-            let st = Rc::clone(st);
-            gio::ActionEntry::builder("add-batch")
-                .activate(move |_, _, _| {
-                    if let Some(s) = st.borrow().as_ref() {
-                        show_batch_dialog(s.manager.clone());
                     }
                 })
                 .build()
