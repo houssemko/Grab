@@ -2589,9 +2589,31 @@ pub fn show_batch_dialog(manager: Rc<DownloadManager>) {
                 return;
             }
             m.begin_batch();
+            let quality = m.settings().video_quality();
             let mut added = 0;
             for line in &lines {
-                if m.enqueue(line, None, None).is_ok() {
+                // Route video pages to video rows (default choices: the
+                // batch has no per-line dialog): without this every page
+                // downloads as a plain file. Playlist-shaped links fail
+                // loudly per row in the worker instead of fetching here.
+                let ok = match crate::video::batch_route(line) {
+                    crate::video::BatchRoute::Video => m
+                        .enqueue_video(
+                            line,
+                            None,
+                            None,
+                            crate::video::VideoChoices {
+                                quality: quality.clone(),
+                                audio_only: false,
+                                video_format_id: None,
+                                is_live: false,
+                                playlist_item_id: None,
+                            },
+                        )
+                        .is_ok(),
+                    crate::video::BatchRoute::Plain => m.enqueue(line, None, None).is_ok(),
+                };
+                if ok {
                     added += 1;
                 }
             }

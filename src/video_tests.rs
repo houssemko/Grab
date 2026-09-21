@@ -259,6 +259,37 @@ fn classify_empty_is_direct() {
 }
 
 #[test]
+fn batch_route_sends_video_pages_to_video_rows() {
+    use BatchRoute::{Plain, Video};
+    // Listed pages route by normalized URL…
+    assert!(matches!(
+        batch_route("https://www.youtube.com/watch?v=abc123"),
+        Video
+    ));
+    // …including bare hosts (normalize adds the scheme first) and
+    // uppercase input.
+    assert!(matches!(batch_route("youtube.com/watch?v=abc123"), Video));
+    assert!(matches!(
+        batch_route("HTTPS://YOUTUBE.COM/watch?v=abc123"),
+        Video
+    ));
+    // Direct files, unlisted pages, magnets and junk stay generic
+    // (junk fails there and counts as skipped).
+    assert!(matches!(batch_route("https://example.com/file.mp4"), Plain));
+    assert!(matches!(
+        batch_route("https://example.com/some/page"),
+        Plain
+    ));
+    // Valid magnet (40-hex hash normalize accepts) stays generic via
+    // classify, not via the normalize-error arm.
+    let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+    assert!(crate::download::normalize_url(magnet).is_ok());
+    assert!(matches!(batch_route(magnet), Plain));
+    assert!(matches!(batch_route("not a url"), Plain));
+    assert!(matches!(batch_route(""), Plain));
+}
+
+#[test]
 fn classify_bare_host_no_scheme() {
     // Missing scheme → Url::parse fails → Direct (caller must normalize first).
     assert_eq!(classify("youtube.com/watch?v=x"), VideoSource::Direct);

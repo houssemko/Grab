@@ -165,14 +165,37 @@ pub fn setup(app: &adw::Application) {
                         .flatten();
                         let Some(text) = text else { return };
                         // One persist for the whole import, not one per line.
+                        // Video pages become video rows (same routing as
+                        // the batch dialog); the generic intake counts
+                        // junk as skipped via per-line toasts.
                         manager.begin_batch();
+                        let quality = manager.settings().video_quality();
                         for line in text
                             .lines()
                             .map(str::trim)
                             .filter(|l| !l.is_empty() && !l.starts_with('#'))
                             .take(MAX_LIST_LINES)
                         {
-                            if let Err(e) = manager.enqueue(line, None, None) {
+                            let res = match crate::video::batch_route(line) {
+                                crate::video::BatchRoute::Video => manager
+                                    .enqueue_video(
+                                        line,
+                                        None,
+                                        None,
+                                        crate::video::VideoChoices {
+                                            quality: quality.clone(),
+                                            audio_only: false,
+                                            video_format_id: None,
+                                            is_live: false,
+                                            playlist_item_id: None,
+                                        },
+                                    )
+                                    .map(|_| ()),
+                                crate::video::BatchRoute::Plain => {
+                                    manager.enqueue(line, None, None).map(|_| ())
+                                }
+                            };
+                            if let Err(e) = res {
                                 toasts.add_toast(adw::Toast::new(&e));
                             }
                         }
