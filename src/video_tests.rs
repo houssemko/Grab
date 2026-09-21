@@ -2143,7 +2143,7 @@ fn chromium_subdirs_cover_browser_channels() {
 #[test]
 fn browser_profile_falls_through_to_beta_channel() {
     // No stable install: a beta-only tree still resolves under the
-    // same entry (first hit across channels wins).
+    // same entry.
     let dir = std::env::temp_dir().join(format!("grab-bravebeta-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let p = dir.join("BraveSoftware/Brave-Browser-Beta/Default");
@@ -2155,11 +2155,60 @@ fn browser_profile_falls_through_to_beta_channel() {
 }
 
 #[test]
-fn browser_profile_prefers_stable_over_beta() {
-    // Both present: the documented stable-first priority holds, so a
-    // stale stable install shadows an active beta (first hit wins).
-    let dir = std::env::temp_dir().join(format!("grab-braveboth-{}", std::process::id()));
+fn browser_profile_prefers_freshest_channel() {
+    // Both channels present: the freshest `Cookies` database wins, so an
+    // actively-used beta is no longer shadowed by a stale stable install.
+    let dir = std::env::temp_dir().join(format!("grab-bravefresh-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
+    let stable = dir.join("BraveSoftware/Brave-Browser/Default");
+    let beta = dir.join("BraveSoftware/Brave-Browser-Beta/Default");
+    for p in [&stable, &beta] {
+        std::fs::create_dir_all(p).unwrap();
+        std::fs::write(p.join("Cookies"), b"sqlite").unwrap();
+    }
+    let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(stable.join("Cookies"))
+        .unwrap()
+        .set_modified(stale)
+        .unwrap();
+    let found = browser_profile_dir_in(&dir, &dir, "brave").expect("brave resolves");
+    assert_eq!(found, beta);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browser_profile_fresh_stable_beats_stale_beta() {
+    // Freshness decides, not channel order: a fresh stable still wins over
+    // a stale beta.
+    let dir = std::env::temp_dir().join(format!("grab-bravestale-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let stable = dir.join("BraveSoftware/Brave-Browser/Default");
+    let beta = dir.join("BraveSoftware/Brave-Browser-Beta/Default");
+    for p in [&stable, &beta] {
+        std::fs::create_dir_all(p).unwrap();
+        std::fs::write(p.join("Cookies"), b"sqlite").unwrap();
+    }
+    let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(beta.join("Cookies"))
+        .unwrap()
+        .set_modified(stale)
+        .unwrap();
+    let found = browser_profile_dir_in(&dir, &dir, "brave").expect("brave resolves");
+    assert_eq!(found, stable);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browser_profile_tied_mtimes_keep_channel_order() {
+    // Equal mtimes: the stable sort keeps channel order, so the outcome
+    // stays deterministic (stable first).
+    let dir = std::env::temp_dir().join(format!("grab-bravetie-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let pinned = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
     for sub in [
         "BraveSoftware/Brave-Browser/Default",
         "BraveSoftware/Brave-Browser-Beta/Default",
@@ -2167,6 +2216,12 @@ fn browser_profile_prefers_stable_over_beta() {
         let p = dir.join(sub);
         std::fs::create_dir_all(&p).unwrap();
         std::fs::write(p.join("Cookies"), b"sqlite").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(p.join("Cookies"))
+            .unwrap()
+            .set_modified(pinned)
+            .unwrap();
     }
     let found = browser_profile_dir_in(&dir, &dir, "brave").expect("brave resolves");
     assert_eq!(found, dir.join("BraveSoftware/Brave-Browser/Default"));
