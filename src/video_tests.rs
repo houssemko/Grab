@@ -2151,6 +2151,60 @@ fn browser_profile_prefers_default_over_numbered() {
 }
 
 #[test]
+fn chromium_subdirs_cover_browser_channels() {
+    // One entry per family: stable, beta, nightly/canary, dev and known
+    // rebranded variants resolve under it, most common first.
+    assert_eq!(
+        chromium_subdirs("brave"),
+        &[
+            "BraveSoftware/Brave-Browser",
+            "BraveSoftware/Brave-Browser-Beta",
+            "BraveSoftware/Brave-Browser-Nightly",
+            "BraveSoftware/Brave-Origin-Beta",
+            "BraveSoftware/Brave-Origin-Nightly",
+            "BraveSoftware/Brave-Browser-Origin-Nightly",
+        ]
+    );
+    assert!(chromium_subdirs("edge").contains(&"microsoft-edge-canary"));
+    assert!(chromium_subdirs("opera").contains(&"opera-developer"));
+    assert!(chromium_subdirs("vivaldi").contains(&"vivaldi-snapshot"));
+    assert!(chromium_subdirs("mystery").is_empty());
+}
+
+#[test]
+fn browser_profile_falls_through_to_beta_channel() {
+    // No stable install: a beta-only tree still resolves under the
+    // same entry (first hit across channels wins).
+    let dir = std::env::temp_dir().join(format!("grab-bravebeta-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let p = dir.join("BraveSoftware/Brave-Browser-Beta/Default");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(p.join("Cookies"), b"sqlite").unwrap();
+    let found = browser_profile_dir_in(&dir, &dir, "brave").expect("brave beta resolves");
+    assert_eq!(found, dir.join("BraveSoftware/Brave-Browser-Beta/Default"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browser_profile_prefers_stable_over_beta() {
+    // Both present: the documented stable-first priority holds, so a
+    // stale stable install shadows an active beta (first hit wins).
+    let dir = std::env::temp_dir().join(format!("grab-braveboth-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for sub in [
+        "BraveSoftware/Brave-Browser/Default",
+        "BraveSoftware/Brave-Browser-Beta/Default",
+    ] {
+        let p = dir.join(sub);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("Cookies"), b"sqlite").unwrap();
+    }
+    let found = browser_profile_dir_in(&dir, &dir, "brave").expect("brave resolves");
+    assert_eq!(found, dir.join("BraveSoftware/Brave-Browser/Default"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn browser_profile_unknown_browser_resolves_nothing() {
     let dir = std::env::temp_dir().join(format!("grab-nobrowser-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

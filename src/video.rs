@@ -1157,10 +1157,21 @@ fn firefox_profile_dirs(base: &Path) -> Vec<PathBuf> {
 }
 
 /// Chromium config subdirs per browser, most common first (sandbox grants
-/// cover the primaries; alternates still resolve outside Flatpak).
+/// cover the primaries; alternates still resolve outside Flatpak). One
+/// entry covers the whole family: stable, beta, nightly/canary and dev
+/// builds all resolve under it, first hit wins.
 fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
     match browser {
-        "brave" => &["BraveSoftware/Brave-Browser"],
+        "brave" => &[
+            "BraveSoftware/Brave-Browser",
+            "BraveSoftware/Brave-Browser-Beta",
+            "BraveSoftware/Brave-Browser-Nightly",
+            // Rebranded builds seen in the wild; skipped when absent.
+            // Add non-standard forks only with a reported real path.
+            "BraveSoftware/Brave-Origin-Beta",
+            "BraveSoftware/Brave-Origin-Nightly",
+            "BraveSoftware/Brave-Browser-Origin-Nightly",
+        ],
         "chrome" => &[
             "google-chrome",
             "google-chrome-beta",
@@ -1171,8 +1182,10 @@ fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
             "microsoft-edge",
             "microsoft-edge-beta",
             "microsoft-edge-dev",
+            // Not shipped on Linux today; harmless if absent.
+            "microsoft-edge-canary",
         ],
-        "opera" => &["opera", "opera-beta"],
+        "opera" => &["opera", "opera-beta", "opera-developer"],
         "vivaldi" => &["vivaldi", "vivaldi-snapshot"],
         "whale" => &["naver-whale"],
         _ => &[],
