@@ -4489,26 +4489,7 @@ async fn remux_live_capture(
             .stderr
             .take()
             .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
-        let logs = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut reader = tokio::io::BufReader::new(stderr);
-            let mut tail = Vec::new();
-            let mut pending = String::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        trace_format_lines(&mut pending, &buf[..n]);
-                        tail.extend_from_slice(&buf[..n]);
-                        if tail.len() > 8192 {
-                            tail.drain(..tail.len() - 8192);
-                        }
-                    }
-                }
-            }
-            String::from_utf8_lossy(&tail).into_owned()
-        });
+        let logs = drain_stderr_to_tail(stderr);
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
@@ -4678,26 +4659,7 @@ async fn run_live_ytdlp(
             }
             have
         });
-        let logs = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut reader = tokio::io::BufReader::new(stderr);
-            let mut tail = Vec::new();
-            let mut pending = String::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        trace_format_lines(&mut pending, &buf[..n]);
-                        tail.extend_from_slice(&buf[..n]);
-                        if tail.len() > 8192 {
-                            tail.drain(..tail.len() - 8192);
-                        }
-                    }
-                }
-            }
-            String::from_utf8_lossy(&tail).into_owned()
-        });
+        let logs = drain_stderr_to_tail(stderr);
         // `aborted` gates the live-edge retry below: a stopped attempt must
         // never come back as a fresh capture. `&mut abort` keeps the receiver
         // usable for the second attempt when it didn't fire.
@@ -4914,6 +4876,33 @@ fn is_format_selection_line(line: &str) -> bool {
     line.contains("Downloading ") && line.contains("format(s)")
 }
 
+/// Spawn a task draining a child process's stderr pipe: complete lines
+/// are traced as they arrive (see [`trace_format_lines`]) and the last
+/// 8 KiB are kept. Awaiting the returned handle yields the
+/// lossy-decoded tail for error detail.
+fn drain_stderr_to_tail(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut pending = String::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 8192 {
+                        tail.drain(..tail.len() - 8192);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    })
+}
+
 /// SIGKILL a spawned downloader and the ffmpeg it may have started:
 /// both run in a dedicated process group (`process_group(0)` at
 /// spawn), so one killpg reaps the tree instead of orphaning ffmpeg
@@ -5100,7 +5089,7 @@ async fn run_hls_ytdlp(
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
-    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    use tokio::io::AsyncBufReadExt as _;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
@@ -5197,25 +5186,7 @@ async fn run_hls_ytdlp(
         }
         (max_dl, max_total, after_move)
     });
-    let logs = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut tail = Vec::new();
-        let mut pending = String::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    trace_format_lines(&mut pending, &buf[..n]);
-                    tail.extend_from_slice(&buf[..n]);
-                    if tail.len() > 8192 {
-                        tail.drain(..tail.len() - 8192);
-                    }
-                }
-            }
-        }
-        String::from_utf8_lossy(&tail).into_owned()
-    });
+    let logs = drain_stderr_to_tail(stderr);
     let status = tokio::select! {
         biased;
         _ = abort => {
