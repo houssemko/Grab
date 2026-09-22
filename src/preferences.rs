@@ -36,8 +36,16 @@ fn bind_combo_row(
 }
 
 /// Flag junk rate text immediately instead of failing rows at spawn
-/// time: empty and `0` mean unlimited, anything else must parse.
+/// time: empty and `0` mean unlimited, anything else must parse. The red
+/// border alone isn't perceivable without color, so an error icon with a
+/// tooltip (announced by screen readers) marks invalid input too.
 fn mark_rate_row(live: &adw::EntryRow) {
+    let icon = gtk4::Image::from_icon_name("dialog-error-symbolic");
+    icon.set_tooltip_text(Some(&gettext(
+        "Invalid rate — use e.g. 500K, 2M, or leave empty for unlimited",
+    )));
+    icon.set_visible(false);
+    live.add_suffix(&icon);
     let l = live.clone();
     let mark = move |row: &adw::EntryRow| {
         let t = row.text().to_string();
@@ -45,8 +53,10 @@ fn mark_rate_row(live: &adw::EntryRow) {
         let ok = t.is_empty() || t == "0" || crate::download::parse_rate(t).is_some();
         if ok {
             l.remove_css_class("error");
+            icon.set_visible(false);
         } else {
             l.add_css_class("error");
+            icon.set_visible(true);
         }
     };
     mark(live);
@@ -465,16 +475,25 @@ pub fn show(
             "text",
         )
         .build();
-    // Flag junk immediately instead of failing rows at spawn time.
+    // Flag junk immediately instead of failing rows at spawn time. The
+    // red border alone isn't perceivable without color, so an error
+    // icon with a tooltip (announced by screen readers) marks invalid
+    // input too.
     {
+        let icon = gtk4::Image::from_icon_name("dialog-error-symbolic");
+        icon.set_tooltip_text(Some(&gettext("Invalid URL")));
+        icon.set_visible(false);
+        blocklist.add_suffix(&icon);
         let l = blocklist.clone();
         let mark = move |row: &adw::EntryRow| {
             let t = row.text().to_string();
             let ok = crate::torrent::blocklist_url_of(t.trim()).is_ok();
             if ok {
                 l.remove_css_class("error");
+                icon.set_visible(false);
             } else {
                 l.add_css_class("error");
+                icon.set_visible(true);
             }
         };
         mark(&blocklist);

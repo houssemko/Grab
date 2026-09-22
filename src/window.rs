@@ -542,25 +542,32 @@ fn build_row(
     }
 
     // Enter on a focused finished row opens the downloaded file, the
-    // keyboard counterpart of double-click. The row itself must hold
-    // focus (not a button inside it) so activating a button never opens
-    // the file as a side effect.
+    // keyboard counterpart of double-click; F2 renames the focused row,
+    // the keyboard counterpart of the right-click menu. The row itself
+    // must hold focus (not a button inside it) so activating a button
+    // never opens the file or pops the rename dialog as a side effect.
     {
         let key = gtk4::EventControllerKey::new();
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
         key.connect_key_pressed(move |controller, keyval, _, _| {
-            if keyval != gtk4::gdk::Key::Return && keyval != gtk4::gdk::Key::KP_Enter {
+            let rename = keyval == gtk4::gdk::Key::F2;
+            let open = keyval == gtk4::gdk::Key::Return || keyval == gtk4::gdk::Key::KP_Enter;
+            if !rename && !open {
                 return glib::Propagation::Proceed;
             }
-            let row_focused = controller
+            let Some(row) = controller
                 .widget()
                 .and_downcast::<gtk4::ListBoxRow>()
-                .is_some_and(|r| r.is_focus());
-            if !row_focused {
+                .filter(|r| r.is_focus())
+            else {
                 return glib::Propagation::Proceed;
-            }
-            if let Some(it) = m.find(id)
+            };
+            if rename {
+                if let Some(it) = m.find(id) {
+                    show_rename_dialog(m.clone(), id, it.filename(), &row);
+                }
+            } else if let Some(it) = m.find(id)
                 && it.status() == DownloadStatus::Done
             {
                 launch_path(&it.display_path(), &t, false);
