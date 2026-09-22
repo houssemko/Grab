@@ -270,7 +270,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     if let Some(s) = st.borrow().as_ref() {
                         let n = s.manager.retry_failed();
                         if n > 0 {
-                            s.toasts.add_toast(&adw::Toast::new(
+                            s.toasts.add_toast(adw::Toast::new(
                                 &ngettext(
                                     "Retrying failed download",
                                     "Retrying {n} failed downloads",
