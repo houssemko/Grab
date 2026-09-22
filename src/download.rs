@@ -4028,12 +4028,18 @@ impl DownloadManager {
         self.start_next();
     }
 
-    /// Re-queue every failed or cancelled item.
-    pub fn retry_failed(self: &Rc<Self>) {
+    /// Retry every failed/cancelled row. Returns the retried count for
+    /// the caller's toast.
+    pub fn retry_failed(self: &Rc<Self>) -> usize {
+        let mut n = 0;
         self.for_matching(
             |s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled),
-            |m, id| m.retry(id),
+            |m, id| {
+                m.retry(id);
+                n += 1;
+            },
         );
+        n
     }
 
     /// Drop every finished row (files stay on disk). Still-seeding
