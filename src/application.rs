@@ -302,6 +302,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         &body,
                         &gettext("Clear Finished"),
                         move || {
+                            let snapshots = manager.finished_snapshots();
                             let n = manager.clear_finished();
                             if n == 0 {
                                 return;
@@ -314,6 +315,13 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                                 )
                                 .replace("{n}", &n.to_string()),
                             );
+                            toast.set_button_label(Some(&gettext("Undo")));
+                            let m2 = manager.clone();
+                            toast.connect_button_clicked(move |_| {
+                                for snap in snapshots.clone() {
+                                    m2.unremove(snap);
+                                }
+                            });
                             toasts.add_toast(toast);
                         },
                     );
@@ -385,6 +393,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             &gettext("New Download"),
                             "<Control>n",
                         ));
+                        section.add(adw::ShortcutsItem::new(&gettext("Rename"), "F2"));
                         // Plain items: these actions have no accelerators,
                         // and from_action would render an empty shortcut cell
                         // implying a keybinding that doesn't exist.

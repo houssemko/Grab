@@ -4071,6 +4071,28 @@ impl DownloadManager {
             .count()
     }
 
+    /// Snapshots of every finished row, in list order, for Clear
+    /// Finished's Undo. Done rows hold no engines, bitmaps or partials,
+    /// so the snapshot is just the record [`DownloadManager::unremove`]
+    /// needs to re-insert it.
+    pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
+        (0..self.store.n_items())
+            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            .filter(|it| it.status() == DownloadStatus::Done)
+            .map(|it| RemovedSnapshot {
+                url: it.url().to_string(),
+                dest_dir: it.dest_dir().to_string(),
+                filename: it.filename().to_string(),
+                status: it.status(),
+                progress: it.progress(),
+                detail: it.detail().to_string(),
+                output_dir: it.output_dir().to_string(),
+                segments: self.segments_of(it.id()),
+                video_source: self.video_source(it.id()),
+            })
+            .collect()
+    }
+
     /// Drop finished rows for `url` other than `keep_id`: one finished
     /// record per URL (Parabolic parity). Only Done rows — active,
     /// paused, failed and cancelled rows are user intent and never
