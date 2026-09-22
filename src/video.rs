@@ -4805,6 +4805,25 @@ fn parse_ytdlp_after_move(line: &str) -> Option<&str> {
         .then_some(trimmed)
 }
 
+/// Whether a fresh total starts a new format leg (video→audio)
+/// rather than HLS/DASH estimate wobble. Totals are re-estimated per
+/// fragment while bytes climb monotonically, so wobble moves the total
+/// alone; a new leg restarts BOTH — a much smaller total AND downloaded
+/// back near zero (legs download sequentially, so bytes are high when
+/// the second leg starts). The first known total always (re)inits.
+/// Growth alone never restarts: a bigger second leg keeps the old grid
+/// (cosmetic mis-scale, bar stays right) instead of flashing the map.
+/// Pure for tests.
+fn leg_changed(max_total: Option<u64>, max_dl: u64, total: u64, downloaded: Option<u64>) -> bool {
+    if total == 0 {
+        return false;
+    }
+    match max_total {
+        None | Some(0) => true,
+        Some(m) => total < m / 2 && downloaded.is_some_and(|d| d <= max_dl / 2),
+    }
+}
+
 /// Newly completed piece indices as byte progress grows against a
 /// known total. Shared by the HLS progress tasks so the byte→cell
 /// math stays unit-tested in one place.
@@ -5072,13 +5091,12 @@ async fn run_hls_ytdlp(
                 after_move = Some(path.to_string());
             } else if let Some(p) = parse_ytdlp_template(&line) {
                 if let Some(t) = p.total {
-                    if max_total.is_none() {
-                        if t > 0 {
-                            tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
-                        }
-                    } else if Some(t) != max_total {
-                        // New file (second format leg): restart the map on
-                        // the new total instead of mixing scales.
+                    // A changed total alone is estimate wobble (HLS/DASH
+                    // re-estimate per fragment); only a new format leg
+                    // restarts the block map, never a wobble — otherwise
+                    // every fragment clears the map while the bar stays
+                    // put. See `leg_changed`.
+                    if leg_changed(max_total, max_dl, t, p.downloaded) {
                         tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
                         marked = 0;
                     }
