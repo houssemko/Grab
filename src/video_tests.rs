@@ -2807,6 +2807,23 @@ fn identity_args_order_and_trim() {
     );
 }
 
+// ── browser config home (Flatpak cookie lookup) ──────────────────────
+
+#[test]
+fn browser_config_home_prefers_home_dot_config() {
+    // An existing $HOME/.config wins (mounted Chromium profiles live
+    // there, not under the Flatpak-redirected XDG_CONFIG_HOME).
+    let home = std::env::temp_dir();
+    assert_eq!(
+        browser_config_home_for(&home),
+        home.join(".config").is_dir().then(|| home.join(".config"))
+    );
+    // Absent dir yields nothing (leave the child env untouched).
+    let missing = home.join("grab-no-such-config-dir-8f3a");
+    assert!(!missing.exists());
+    assert_eq!(browser_config_home_for(&missing), None);
+}
+
 // ── best-overall muxed vs HLS ────────────────────────────────────────
 
 /// Direct muxed files top out below the tallest HLS variant (the

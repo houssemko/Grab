@@ -1873,6 +1873,7 @@ async fn fetch_raw_dump_json(
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
+    apply_ytdlp_env(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -2563,6 +2564,28 @@ pub(crate) fn apply_proxy_env(
     {
         cmd.env("NO_PROXY", &p.no_proxy_env)
             .env("no_proxy", &p.no_proxy_env);
+    }
+}
+
+/// Config dir yt-dlp itself must see for `--cookies-from-browser`:
+/// Flatpak redirects `XDG_CONFIG_HOME` app-private, but Chromium
+/// profiles are mounted at `$HOME/.config` — so brave/chrome/edge
+/// lookups fail with "could not find cookies database" and every
+/// video lookup with cookies enabled fails. `$HOME/.config` when it
+/// exists (no-op on dev/tarball builds, where both already agree).
+/// Pure for tests.
+pub(crate) fn browser_config_home_for(home: &Path) -> Option<PathBuf> {
+    let candidate = home.join(".config");
+    candidate.is_dir().then_some(candidate)
+}
+
+/// Point one yt-dlp spawn at the real browser config dir (see
+/// [`browser_config_home_for`]). No-op when `$HOME/.config` is absent.
+pub(crate) fn apply_ytdlp_env(cmd: &mut tokio::process::Command) {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from)
+        && let Some(dir) = browser_config_home_for(&home)
+    {
+        cmd.env("XDG_CONFIG_HOME", dir);
     }
 }
 
@@ -4100,6 +4123,7 @@ async fn run_ytdlp_attempt(
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(argv);
     apply_proxy_env(&mut cmd, proxy);
+    apply_ytdlp_env(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -4460,6 +4484,7 @@ async fn run_live_ytdlp(
         let mut cmd = tokio::process::Command::new(youtube_bin);
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
+        apply_ytdlp_env(&mut cmd);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -4948,6 +4973,7 @@ async fn run_hls_ytdlp(
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
+    apply_ytdlp_env(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

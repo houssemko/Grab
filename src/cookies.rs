@@ -166,6 +166,7 @@ async fn export_cookies(
         .arg("--skip-download")
         .arg("--")
         .arg(page_url);
+    crate::video::apply_ytdlp_env(&mut cmd);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
