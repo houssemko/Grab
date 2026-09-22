@@ -1241,7 +1241,20 @@ pub fn build_window(
     banner.set_button_label(Some(&gettext("Retry Failed")));
     {
         let m = Rc::clone(&manager);
-        banner.connect_button_clicked(move |_| m.retry_failed());
+        let t = Rc::clone(&toasts);
+        banner.connect_button_clicked(move |_| {
+            let n = m.retry_failed();
+            if n > 0 {
+                t.add_toast(adw::Toast::new(
+                    &ngettext(
+                        "Retrying failed download",
+                        "Retrying {n} failed downloads",
+                        n as u32,
+                    )
+                    .replace("{n}", &n.to_string()),
+                ));
+            }
+        });
     }
     banner.set_revealed(false);
 

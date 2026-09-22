@@ -268,7 +268,17 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
             gio::ActionEntry::builder("retry-failed")
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
-                        s.manager.retry_failed();
+                        let n = s.manager.retry_failed();
+                        if n > 0 {
+                            s.toasts.add_toast(adw::Toast::new(
+                                &ngettext(
+                                    "Retrying failed download",
+                                    "Retrying {n} failed downloads",
+                                    n as u32,
+                                )
+                                .replace("{n}", &n.to_string()),
+                            ));
+                        }
                     }
                 })
                 .build()
@@ -399,6 +409,10 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         // implying a keybinding that doesn't exist.
                         section.add(adw::ShortcutsItem::new(&gettext("Cancel All"), ""));
                         section.add(adw::ShortcutsItem::new(&gettext("Retry Failed"), ""));
+                        section.add(adw::ShortcutsItem::from_action(
+                            &gettext("Search"),
+                            "app.search",
+                        ));
                         dialog.add(section);
                         let section2 =
                             adw::ShortcutsSection::new(Some(&gettext("General") as &str));

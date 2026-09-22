@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-22 16:03+0000\n"
+"POT-Creation-Date: 2026-09-22 16:12+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,7 +18,7 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/application.rs:121 src/window.rs:2356
+#: src/application.rs:121 src/window.rs:2369
 msgid "Could not read that .torrent file"
 msgstr ""
 
@@ -36,7 +36,7 @@ msgstr ""
 msgid "Cancel"
 msgstr ""
 
-#: src/application.rs:246 src/application.rs:400 src/window.rs:942
+#: src/application.rs:246 src/application.rs:410 src/window.rs:942
 #. Plain items: these actions have no accelerators,
 #. and from_action would render an empty shortcut cell
 #. implying a keybinding that doesn't exist.
@@ -49,45 +49,45 @@ msgid_plural "Cancelled {n} downloads"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/application.rs:391 src/preferences.rs:96
+#: src/application.rs:401 src/preferences.rs:96
 msgid "Downloads"
 msgstr ""
 
-#: src/application.rs:393 src/window.rs:940 src/window.rs:975 src/window.rs:989 src/window.rs:1693 src/window.rs:2432
+#: src/application.rs:403 src/window.rs:940 src/window.rs:975 src/window.rs:989 src/window.rs:1706 src/window.rs:2445
 msgid "New Download"
 msgstr ""
 
-#: src/application.rs:401 src/window.rs:943 src/window.rs:1241
+#: src/application.rs:411 src/window.rs:943 src/window.rs:1241
 msgid "Retry Failed"
 msgstr ""
 
-#: src/application.rs:404 src/preferences.rs:90
+#: src/application.rs:418 src/preferences.rs:90
 msgid "General"
 msgstr ""
 
-#: src/application.rs:406 src/window.rs:951 src/preferences.rs:78
+#: src/application.rs:420 src/window.rs:951 src/preferences.rs:78
 msgid "Preferences"
 msgstr ""
 
-#: src/application.rs:409
+#: src/application.rs:423
 msgid "Quit"
 msgstr ""
 
-#: src/application.rs:303 src/window.rs:944
+#: src/application.rs:313 src/window.rs:944
 msgid "Clear Finished"
 msgstr ""
 
-#: src/application.rs:301
+#: src/application.rs:311
 msgid "Clear Finished Downloads?"
 msgstr ""
 
-#: src/application.rs:292
+#: src/application.rs:302
 msgid "This will remove the finished download from the list. The file stays on disk."
 msgid_plural "This will remove {n} finished downloads from the list. The files stay on disk."
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/application.rs:312
+#: src/application.rs:322
 msgid "Cleared finished download"
 msgid_plural "Cleared {n} finished downloads"
 msgstr[0] ""
@@ -97,11 +97,21 @@ msgstr[1] ""
 msgid "Only .torrent files can be opened directly"
 msgstr ""
 
-#: src/application.rs:318 src/window.rs:735
+#: src/application.rs:413 src/window.rs:967
+msgid "Search"
+msgstr ""
+
+#: src/application.rs:275 src/window.rs:1250
+msgid "Retrying failed download"
+msgid_plural "Retrying {n} failed downloads"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/application.rs:328 src/window.rs:735
 msgid "Undo"
 msgstr ""
 
-#: src/application.rs:396
+#: src/application.rs:406
 msgid "Rename"
 msgstr ""
 
@@ -129,35 +139,35 @@ msgstr ""
 msgid "Cancelled"
 msgstr ""
 
-#: src/window.rs:1814 src/window.rs:1833 src/preferences.rs:117
+#: src/window.rs:1827 src/window.rs:1846 src/preferences.rs:117
 msgid "Choose…"
 msgstr ""
 
-#: src/window.rs:1834 src/window.rs:1848 src/preferences.rs:118 src/preferences.rs:158
+#: src/window.rs:1847 src/window.rs:1861 src/preferences.rs:118 src/preferences.rs:158
 msgid "Choose download folder"
 msgstr ""
 
-#: src/window.rs:1849 src/preferences.rs:159
+#: src/window.rs:1862 src/preferences.rs:159
 msgid "Select Folder"
 msgstr ""
 
-#: src/window.rs:1768 src/preferences.rs:578
+#: src/window.rs:1781 src/preferences.rs:578
 msgid "Install"
 msgstr ""
 
-#: src/window.rs:1759
+#: src/window.rs:1772
 msgid "Audio only"
 msgstr ""
 
-#: src/window.rs:1765 src/preferences.rs:795
+#: src/window.rs:1778 src/preferences.rs:795
 msgid "Support tools"
 msgstr ""
 
-#: src/window.rs:2241 src/preferences.rs:848
+#: src/window.rs:2254 src/preferences.rs:848
 msgid "How to Install"
 msgstr ""
 
-#: src/window.rs:2242 src/preferences.rs:849
+#: src/window.rs:2255 src/preferences.rs:849
 msgid "Show terminal install instructions"
 msgstr ""
 
@@ -185,7 +195,7 @@ msgstr ""
 msgid "Queue for later"
 msgstr ""
 
-#: src/window.rs:385 src/window.rs:1781
+#: src/window.rs:385 src/window.rs:1794
 msgid "Retry"
 msgstr ""
 
@@ -261,10 +271,6 @@ msgstr ""
 msgid "Search (Ctrl+F)"
 msgstr ""
 
-#: src/window.rs:967
-msgid "Search"
-msgstr ""
-
 #: src/window.rs:973
 msgid "New Download (Ctrl+N)"
 msgstr ""
@@ -305,145 +311,145 @@ msgstr ""
 msgid "Some downloads failed"
 msgstr ""
 
-#: src/window.rs:1370
+#: src/window.rs:1383
 msgid "Rename Download"
 msgstr ""
 
-#: src/window.rs:1380 src/window.rs:1730
+#: src/window.rs:1393 src/window.rs:1743
 msgid "File name"
 msgstr ""
 
-#: src/window.rs:1393 src/window.rs:2393 src/window.rs:2745
+#: src/window.rs:1406 src/window.rs:2406 src/window.rs:2758
 msgid "_Cancel"
 msgstr ""
 
-#: src/window.rs:1397
+#: src/window.rs:1410
 msgid "_Rename"
 msgstr ""
 
-#: src/window.rs:1703
+#: src/window.rs:1716
 msgid "URL"
 msgstr ""
 
-#: src/window.rs:1712
+#: src/window.rs:1725
 msgid "File name (optional)"
 msgstr ""
 
-#: src/window.rs:1736 src/window.rs:1740
+#: src/window.rs:1749 src/window.rs:1753
 msgid "Revert to Title"
 msgstr ""
 
-#: src/window.rs:1753
+#: src/window.rs:1766
 msgid "Uses your preferred quality"
 msgstr ""
 
-#: src/window.rs:1760
+#: src/window.rs:1773
 msgid "Skip the video track"
 msgstr ""
 
-#: src/window.rs:1769
+#: src/window.rs:1782
 msgid "Download the yt-dlp support tools"
 msgstr ""
 
-#: src/window.rs:1653
+#: src/window.rs:1666
 msgid "{} story"
 msgid_plural "{} stories"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:1655
+#: src/window.rs:1668
 msgid "{} highlight"
 msgid_plural "{} highlights"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:1657
+#: src/window.rs:1670
 msgid "{} item"
 msgid_plural "{} items"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:1815
+#: src/window.rs:1828
 msgid "Choose a .torrent file"
 msgstr ""
 
-#: src/window.rs:1819
+#: src/window.rs:1832
 msgid "Torrent file"
 msgstr ""
 
-#: src/window.rs:1837
+#: src/window.rs:1850
 msgid "Save to"
 msgstr ""
 
-#: src/window.rs:2331
+#: src/window.rs:2344
 msgid "Torrent files"
 msgstr ""
 
-#: src/window.rs:2337
+#: src/window.rs:2350
 msgid "Choose torrent file"
 msgstr ""
 
-#: src/window.rs:2338
+#: src/window.rs:2351
 msgid "Add Torrent"
 msgstr ""
 
-#: src/window.rs:2166
+#: src/window.rs:2179
 msgid "No items found in this playlist"
 msgstr ""
 
-#: src/window.rs:2397 src/window.rs:2419 src/window.rs:2646
+#: src/window.rs:2410 src/window.rs:2432 src/window.rs:2659
 msgid "_Add Download"
 msgstr ""
 
-#: src/window.rs:2644
+#: src/window.rs:2657
 msgid "_Continue"
 msgstr ""
 
-#: src/window.rs:2708
+#: src/window.rs:2721
 msgid "Files"
 msgstr ""
 
-#: src/window.rs:2710
+#: src/window.rs:2723
 msgid "{} file"
 msgid_plural "{} files"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:2821
+#: src/window.rs:2834
 msgid "Select at least one file"
 msgstr ""
 
-#: src/window.rs:1722
+#: src/window.rs:1735
 msgid "Looking up media…"
 msgstr ""
 
-#: src/window.rs:1752
+#: src/window.rs:1765
 msgid "Media format"
 msgstr ""
 
-#: src/window.rs:1778
+#: src/window.rs:1791
 msgid "Couldn't load the media preview"
 msgstr ""
 
-#: src/window.rs:2438
+#: src/window.rs:2451
 msgid "Media Details"
 msgstr ""
 
-#: src/window.rs:2529 src/window.rs:2558
+#: src/window.rs:2542 src/window.rs:2571
 msgid "Still looking up the media — wait for the preview, then add."
 msgstr ""
 
-#: src/window.rs:1679 src/window.rs:2897
+#: src/window.rs:1692 src/window.rs:2910
 msgid "Showing the first {n} of {total}"
 msgstr ""
 
-#: src/window.rs:2976
+#: src/window.rs:2989
 msgid "_Queue {} item"
 msgid_plural "_Queue {} items"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/window.rs:3013
+#: src/window.rs:3026
 msgid "Select at least one item"
 msgstr ""
 
@@ -455,19 +461,19 @@ msgstr ""
 msgid "Stop"
 msgstr ""
 
-#: src/window.rs:1754 src/window.rs:2143
+#: src/window.rs:1767 src/window.rs:2156
 msgid "Automatic"
 msgstr ""
 
-#: src/window.rs:2754 src/window.rs:2949
+#: src/window.rs:2767 src/window.rs:2962
 msgid "Select All"
 msgstr ""
 
-#: src/window.rs:2756 src/window.rs:2951
+#: src/window.rs:2769 src/window.rs:2964
 msgid "Select None"
 msgstr ""
 
-#: src/window.rs:2777
+#: src/window.rs:2790
 msgid "_Add {} file"
 msgid_plural "_Add {} files"
 msgstr[0] ""
@@ -1465,3 +1471,4 @@ msgid ""
 "Discover torrent peers on the local network via Local Service Discovery. "
 "Applies when the torrent engine first starts."
 msgstr ""
+
