@@ -170,6 +170,71 @@ fn spawn_fixture(
     panic!("test HTTP server did not listen on port {last_port}");
 }
 
+/// Spawn `python3 -m http.server` serving `dir` (the process working
+/// directory when `None`), hardened against CI fixture flakes.
+///
+/// A bare TCP-connect readiness probe is not enough: the handshake can
+/// complete via the kernel backlog before python's accept loop runs, so the
+/// probe succeeds while the first real request still fails with "error
+/// sending request". A panic here poisons the shared test locks and
+/// cascades into every later test, so wait until the server answers a real
+/// HTTP request, and retry on fresh ports instead of failing outright.
+fn spawn_plain_http_server(
+    dir: Option<&std::path::Path>,
+    port_offset: u16,
+) -> (u16, Rc<RefCell<std::process::Child>>) {
+    for _ in 0..3 {
+        let port = test_port(port_offset);
+        let mut cmd = std::process::Command::new("python3");
+        cmd.args(["-m", "http.server", &port.to_string()]);
+        if let Some(d) = dir {
+            cmd.args(["--directory", &d.to_string_lossy()]);
+        }
+        let server = Rc::new(RefCell::new(
+            cmd.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("python3 http.server"),
+        ));
+        let mut ready = false;
+        for _ in 0..50 {
+            if http_serves(port) {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if ready {
+            return (port, server);
+        }
+        let _ = server.borrow_mut().kill();
+    }
+    panic!("plain test HTTP server never answered on a fresh port");
+}
+
+/// True once `port` answers a real HTTP request with a status line. Unlike
+/// a bare TCP connect, this proves the server's accept loop is running.
+fn http_serves(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let mut stream = match std::net::TcpStream::connect(format!("127.0.0.1:{port}")) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+    if stream.write_all(b"GET / HTTP/1.0\r\n\r\n").is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 5];
+    let mut n = 0;
+    while n < buf.len() {
+        match stream.read(&mut buf[n..]) {
+            Ok(0) | Err(_) => break,
+            Ok(k) => n += k,
+        }
+    }
+    n == buf.len() && &buf == b"HTTP/"
+}
+
 /// Fail the current test, killing its server first (dirs stay for logs).
 fn abort(server: &Rc<RefCell<std::process::Child>>, msg: &str) -> ! {
     let _ = server.borrow_mut().kill();
@@ -2915,20 +2980,7 @@ fn failed_download_reports_cause() {
     let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("http-error");
     let settings = test_settings();
-    let port = test_port(7);
-    let server = std::process::Command::new("python3")
-        .args(["-m", "http.server", &port.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("python3 http.server");
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    let server = Rc::new(RefCell::new(server));
+    let (port, server) = spawn_plain_http_server(None, 7);
     let main_loop = glib::MainLoop::new(None, false);
     let quit = main_loop.clone();
     glib::MainContext::default().spawn_local(async move {
@@ -2981,30 +3033,7 @@ fn restart_with_smaller_file_keeps_partial() {
     std::fs::write(srv.join("t.bin"), vec![7u8; 10 * 1024]).unwrap();
     std::fs::write(dl.join("t.bin"), vec![0u8; 1024 * 1024]).unwrap();
 
-    let port = test_port(53);
-    let server = std::process::Command::new("python3")
-        .args([
-            "-m",
-            "http.server",
-            &port.to_string(),
-            "--directory",
-            &srv.to_string_lossy(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("python3 http.server");
-    let mut ready = false;
-    for _ in 0..100 {
-        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(ready, "test HTTP server did not listen on port {port}");
-
-    let server = Rc::new(RefCell::new(server));
+    let (port, server) = spawn_plain_http_server(Some(&srv), 53);
     let store = gio::ListStore::new::<DownloadItem>();
     let manager = DownloadManager::new(store, settings.clone());
     let url = format!("http://127.0.0.1:{port}/t.bin");
