@@ -97,6 +97,49 @@ fn classify_drm_walled_stays_direct() {
     }
 }
 
+// ── drive direct fallback ────────────────────────────────────────────
+
+#[test]
+fn drive_file_id_matrix() {
+    // Share, edit, uc/open and usercontent forms all yield the id.
+    for url in [
+        "https://drive.google.com/file/d/1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn/view?usp=drive_link",
+        "https://drive.google.com/file/d/1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn/edit",
+        "https://drive.google.com/uc?id=1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn&export=download",
+        "https://drive.google.com/open?id=1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn",
+        "https://drive.usercontent.google.com/download?id=1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn&export=download&confirm=t",
+    ] {
+        assert_eq!(
+            drive_file_id(url).as_deref(),
+            Some("1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn"),
+            "should extract id: {url}"
+        );
+    }
+    // Non-Drive hosts, short ids and id-less Takeout links yield nothing.
+    for url in [
+        "https://example.com/file/d/1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn/view",
+        "https://drive.google.com/file/d/short/view",
+        "https://takeout-download-drive-eu.usercontent.google.com/download/drive-download-20260922T071209Z-1-001.zip?j=abc&user=1",
+        "not a url",
+    ] {
+        assert_eq!(drive_file_id(url), None, "must yield nothing: {url}");
+    }
+}
+
+#[test]
+fn drive_direct_url_builds_export_endpoint() {
+    assert_eq!(
+        drive_direct_url(
+            "https://drive.google.com/file/d/1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn/view?usp=drive_link"
+        )
+        .as_deref(),
+        Some(
+            "https://drive.usercontent.google.com/download?id=1B2kVNoAT800TK2DyjRX0_mL7LWyL_XCn&export=download&confirm=t"
+        )
+    );
+    assert_eq!(drive_direct_url("https://example.com/file"), None);
+}
+
 // ── format guards ────────────────────────────────────────────────────
 
 fn test_format(overrides: serde_json::Value) -> yt_dlp::model::format::Format {

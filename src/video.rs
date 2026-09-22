@@ -296,6 +296,70 @@ fn video_domain(host: &str) -> bool {
         .any(|d| host == *d || host.ends_with(&format!(".{d}")))
 }
 
+/// Google Drive file id from share/download URLs: `file/d/<id>` or
+/// `uc`/`open`/`download?id=<id>`. Drive serves videos and plain
+/// files behind the same URLs, but yt-dlp's Drive extractor is
+/// playback-API-only (PDFs, docs and zips fail it with HTTP 400
+/// instead of formats), so the dialog falls back to this id for a
+/// direct download instead of stranding non-video files. Id shape
+/// mirrors yt-dlp's own pattern (`[a-zA-Z0-9_-]{28,}`). Pure for tests.
+pub fn drive_file_id(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed
+        .host_str()?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if !(host == "drive.google.com"
+        || host.ends_with(".drive.google.com")
+        || host == "docs.google.com"
+        || host.ends_with(".docs.google.com")
+        || host == "drive.usercontent.google.com"
+        || host.ends_with(".drive.usercontent.google.com"))
+    {
+        return None;
+    }
+    let valid = |id: &str| {
+        id.len() >= 28
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    };
+    // /file/d/<id>(/...)
+    if let Some(mut segs) = parsed.path_segments()
+        && segs.next() == Some("file")
+        && segs.next() == Some("d")
+        && let Some(id) = segs.next()
+        && valid(id)
+    {
+        return Some(id.to_string());
+    }
+    // ?id=<id> on the uc/open/download endpoints.
+    if let Some(first) = parsed.path_segments().and_then(|mut s| s.next())
+        && matches!(first, "uc" | "open" | "download")
+    {
+        for (key, value) in parsed.query_pairs() {
+            if key == "id" && valid(&value) {
+                return Some(value.into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Direct download URL for a Drive share link: the export endpoint
+/// with `confirm=t` (same shape yt-dlp uses for its `source`
+/// format, so virus-scan-sized files skip the confirmation page).
+/// The plain engine follows the redirect and the server filename
+/// wins via Content-Disposition. Pure for tests.
+pub fn drive_direct_url(url: &str) -> Option<String> {
+    drive_file_id(url).map(|id| {
+        format!("https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t")
+    })
+}
+
 /// Unix timestamp now, seconds.
 pub fn now_unix() -> i64 {
     SystemTime::now()

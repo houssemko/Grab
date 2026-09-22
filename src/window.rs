@@ -1786,6 +1786,34 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 }
                             }
                         }
+                        // Drive serves videos and plain files behind the
+                        // same share URLs, but yt-dlp's Drive extractor is
+                        // playback-API-only: PDFs, docs and zips fail it
+                        // with HTTP 400 instead of formats. Those fall
+                        // back to a direct export download (the server
+                        // filename wins via Content-Disposition);
+                        // anything else keeps the error row with retry.
+                        if let Some(direct) = crate::video::drive_direct_url(&url)
+                            && {
+                                let msg = e.to_string().to_ascii_lowercase();
+                                msg.contains("400") || msg.contains("bad request")
+                            }
+                        {
+                            match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &direct) {
+                                Ok(()) => return,
+                                Err(pe) => {
+                                    info_b.borrow_mut().take();
+                                    tracing::warn!(
+                                        host = %crate::video::page_host(&url),
+                                        error = %pe.to_string(),
+                                        "drive direct fallback failed"
+                                    );
+                                    show_video_error(&step_b, &pe);
+                                    set_lookup_add(&lookup_add_b, true);
+                                    return;
+                                }
+                            }
+                        }
                         info_b.borrow_mut().take();
                         tracing::warn!(
                             host = %crate::video::page_host(&url),
