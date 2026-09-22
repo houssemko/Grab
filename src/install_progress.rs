@@ -7,13 +7,24 @@
 //! spinner marks the active row and becomes a checkmark (or an error icon)
 //! when its stage finishes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gettextrs::gettext;
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
+
+/// The one install currently in flight (if any) and its progress popover.
+///
+/// All GTK work happens on the main thread, so a `thread_local` is enough —
+/// no locking. `SESSION` holds the popover so a later click on the Install
+/// button re-opens it instead of starting a second install; it also holds a
+/// failed run's popover until the next click retires it with a retry.
+thread_local! {
+    static RUNNING: Cell<bool> = const { Cell::new(false) };
+    static SESSION: RefCell<Option<gtk4::Popover>> = const { RefCell::new(None) };
+}
 
 /// One tool's row: activity indicator, name, status text, pulsing bar and
 /// a wrapping error label that only appears on failure.
@@ -131,16 +142,41 @@ impl ToolRow {
 /// and leaves the popover open; on success both checkmarks linger briefly
 /// before the popover closes.
 ///
+/// The button stays sensitive for the whole run: clicking it while the
+/// install is in flight re-opens the progress popover (re-anchored at the
+/// clicked button) instead of starting a second install. Clicking after a
+/// failure retires the failed popover and retries.
+///
 /// `on_error` reports the failure to the caller (e.g. in the tools-row
 /// subtitle); `on_success` refreshes the caller's tools state after the
-/// popover closes. The button is insensitive for the whole run either way.
+/// popover closes.
 pub fn run(
     button: &gtk4::Button,
     on_error: impl Fn(String) + 'static,
     on_success: impl Fn() + 'static,
 ) {
-    button.set_sensitive(false);
     let btn = button.clone();
+
+    // An install is already running: don't start another one, just bring
+    // its progress popover back at the button that was clicked.
+    if RUNNING.with(|r| r.get()) {
+        SESSION.with(|s| {
+            if let Some(pop) = s.borrow().as_ref() {
+                pop.popdown();
+                pop.set_parent(&btn);
+                pop.popup();
+            }
+        });
+        return;
+    }
+    // A failed run's popover may still be open; this click is a retry, so
+    // retire it in favor of the fresh progress view below.
+    SESSION.with(|s| {
+        if let Some(pop) = s.take() {
+            pop.popdown();
+        }
+    });
+    RUNNING.with(|r| r.set(true));
 
     // Which bar the shared pulse driver ticks; each row sets/clears it as
     // its stage starts and finishes.
@@ -159,6 +195,9 @@ pub fn run(
     pop.set_child(Some(&rows));
     pop.set_parent(&btn);
     pop.popup();
+    // Kept alive for the whole run so a later click re-opens this exact
+    // popover (with its live row states) instead of starting a new install.
+    SESSION.with(|s| *s.borrow_mut() = Some(pop.clone()));
 
     glib::spawn_future_local(async move {
         // Stage 1: yt-dlp.
@@ -183,7 +222,9 @@ pub fn run(
             Err(e) => {
                 let message = e.to_string();
                 yt.set_failed(&message);
-                btn.set_sensitive(true);
+                // The failed popover stays open (and in the session) until
+                // the next click retires it with a retry.
+                RUNNING.with(|r| r.set(false));
                 on_error(message);
                 return;
             }
@@ -198,7 +239,9 @@ pub fn run(
             Err(e) => {
                 let message = e.to_string();
                 ff.set_failed(&message);
-                btn.set_sensitive(true);
+                // The failed popover stays open (and in the session) until
+                // the next click retires it with a retry.
+                RUNNING.with(|r| r.set(false));
                 on_error(message);
                 return;
             }
@@ -210,7 +253,10 @@ pub fn run(
         // then close and hand back to the caller.
         glib::timeout_future(Duration::from_millis(1200)).await;
         pop.popdown();
+        SESSION.with(|s| {
+            s.take();
+        });
+        RUNNING.with(|r| r.set(false));
         on_success();
-        btn.set_sensitive(true);
     });
 }
