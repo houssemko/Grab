@@ -2,6 +2,7 @@ src/main.rs
 src/application.rs
 src/download.rs
 src/install_help.rs
+src/install_progress.rs
 src/preferences.rs
 src/secrets.rs
 src/torrent.rs
