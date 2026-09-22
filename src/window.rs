@@ -482,7 +482,8 @@ fn build_row(
         row.insert_action_group("row", Some(&actions));
     }
 
-    // Click the row body to reveal the block map. Clicks landing on a
+    // Click the row body: single-click reveals the block map on live
+    // rows, double-click opens a finished download. Clicks landing on a
     // button belong to the button: walk up from the pick target and
     // ignore those. Only live rows expand (finished ones have no map),
     // and only with map data to show (resolving or chunk-less rows
@@ -490,11 +491,12 @@ fn build_row(
     {
         let click = gtk4::GestureClick::new();
         let m = Rc::clone(manager);
+        let t = Rc::clone(toasts);
         let rev = map_revealer.clone();
         let blk = blocks.clone();
         let exp = Rc::clone(&expanded);
         let pop_menu = pop.clone();
-        click.connect_pressed(move |gesture, _n_press, x, y| {
+        click.connect_pressed(move |gesture, n_press, x, y| {
             if gesture.current_button() == gtk4::gdk::BUTTON_SECONDARY {
                 pop_menu
                     .set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
@@ -512,21 +514,60 @@ fn build_row(
                 }
                 w = widget.parent();
             }
-            let live = m.find(id).is_some_and(|it| {
-                matches!(
-                    it.status(),
-                    DownloadStatus::Downloading | DownloadStatus::Paused
-                )
-            });
+            let Some(it) = m.find(id) else {
+                return;
+            };
+            // Double-click (or double-tap) a finished row opens the
+            // downloaded file. Only the second press opens: triple-clicks
+            // and beyond do nothing.
+            if n_press == 2 && it.status() == DownloadStatus::Done {
+                launch_path(&it.display_path(), &t, false);
+                return;
+            }
+            let live = matches!(
+                it.status(),
+                DownloadStatus::Downloading | DownloadStatus::Paused
+            );
             // No map without data: resolving rows and chunk-less videos
-            // have nothing to reveal, so the click does nothing.
-            if live && !m.piece_bitmap(id).is_empty() {
+            // have nothing to reveal, so the click does nothing. The
+            // toggle stays on the first press so a double-click never
+            // flips the map twice.
+            if n_press == 1 && live && !m.piece_bitmap(id).is_empty() {
                 exp.set(!exp.get());
                 rev.set_reveal_child(exp.get());
                 blk.queue_draw();
             }
         });
         row.add_controller(click);
+    }
+
+    // Enter on a focused finished row opens the downloaded file, the
+    // keyboard counterpart of double-click. The row itself must hold
+    // focus (not a button inside it) so activating a button never opens
+    // the file as a side effect.
+    {
+        let key = gtk4::EventControllerKey::new();
+        let m = Rc::clone(manager);
+        let t = Rc::clone(toasts);
+        key.connect_key_pressed(move |controller, keyval, _, _| {
+            if keyval != gtk4::gdk::Key::Return && keyval != gtk4::gdk::Key::KP_Enter {
+                return glib::Propagation::Proceed;
+            }
+            let row_focused = controller
+                .widget()
+                .and_downcast::<gtk4::ListBoxRow>()
+                .is_some_and(|r| r.is_focus());
+            if !row_focused {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(it) = m.find(id)
+                && it.status() == DownloadStatus::Done
+            {
+                launch_path(&it.display_path(), &t, false);
+            }
+            glib::Propagation::Stop
+        });
+        row.add_controller(key);
     }
 
     let w = |w: &gtk4::Widget| w.downgrade();
