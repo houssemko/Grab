@@ -1860,6 +1860,65 @@ fn piece_marks_cover_prefix_once() {
 }
 
 #[test]
+fn leg_changed_ignores_wobble_restarts_legs() {
+    // First known total inits the map; unknown (0) never does.
+    assert!(leg_changed(None, 0, 9_000_000, Some(0)));
+    assert!(!leg_changed(None, 0, 0, Some(0)));
+    assert!(leg_changed(Some(0), 0, 9_000_000, Some(0)));
+    // Stable totals across lines: same file, no restart.
+    assert!(!leg_changed(
+        Some(9_000_000),
+        4_000_000,
+        9_000_000,
+        Some(4_100_000)
+    ));
+    // HLS estimate wobble with climbing bytes: growth and partial
+    // drops are the same file, never a restart (this used to clear
+    // the block map every few fragments while the bar stayed put).
+    assert!(!leg_changed(
+        Some(9_000_000),
+        1_000_000,
+        19_000_000,
+        Some(1_100_000)
+    ));
+    assert!(!leg_changed(
+        Some(19_000_000),
+        8_000_000,
+        14_600_000,
+        Some(8_200_000)
+    ));
+    // New leg (audio after video): much smaller total AND downloaded
+    // back near zero.
+    assert!(leg_changed(
+        Some(19_000_000),
+        19_000_000,
+        2_000_000,
+        Some(0)
+    ));
+    assert!(leg_changed(
+        Some(19_000_000),
+        19_000_000,
+        2_000_000,
+        Some(100_000)
+    ));
+    // Total drop without a byte reset is wobble, not a leg.
+    assert!(!leg_changed(
+        Some(19_000_000),
+        19_000_000,
+        2_000_000,
+        Some(18_900_000)
+    ));
+    // Bigger second leg keeps the old grid (documented residual:
+    // cosmetic mis-scale instead of a flashing map).
+    assert!(!leg_changed(
+        Some(19_000_000),
+        19_000_000,
+        30_000_000,
+        Some(0)
+    ));
+}
+
+#[test]
 fn picker_lists_hls_gap_heights() {
     let video = test_video(serde_json::json!([
         test_format_full("v720", "avc1", "none", Some(720), None, "https", false),
