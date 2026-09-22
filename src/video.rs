@@ -1,5 +1,4 @@
-//! Video-page downloads (YouTube, Vimeo, …) powered by the bundled yt-dlp
-//! binaries.
+//! Video-page downloads (YouTube, Vimeo, …) powered by yt-dlp.
 //!
 //! Grab only *extracts* with yt-dlp: format URLs are resolved here and the
 //! bytes are pulled by the existing engine as ordinary queue items. Two
@@ -10,11 +9,11 @@
 //!   identity of a video download is the *page* URL, never the media URL.
 //!   On restore, an expired (or missing) media URL is re-resolved with a
 //!   fresh extraction before resuming.
-//! * **The tools may be missing.** The Flatpak bundle ships `yt-dlp` in
-//!   `/app/bin` and ffmpeg in the runtime, but tarball/dev builds rely on
-//!   the user library directory ([`user_lib_dir`]), populated by
-//!   [`install_ytdlp`] and [`install_ffmpeg`]. Callers detect the gap with
-//!   [`resolve_libraries`] and offer an install action.
+//! * **The tools may be missing.** Neither the Flatpak nor tarball/dev
+//!   builds bundle `yt-dlp` or ffmpeg; both are fetched on demand into the
+//!   user library directory ([`user_lib_dir`]) by [`install_ytdlp`] and
+//!   [`install_ffmpeg`]. Callers detect the gap with [`resolve_libraries`]
+//!   and offer an install action.
 //!
 //! All yt-dlp work runs on Grab's shared Tokio runtime
 //! ([`crate::download::tokio_rt`]) so no GTK thread is ever blocked.
@@ -951,9 +950,10 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
         ffmpeg: format!("{pm} ffmpeg"),
     })
 }
-/// Directory where dev/tarball installs keep the yt-dlp and ffmpeg
-/// binaries: `$XDG_DATA_HOME/grab/libs` (Flatpak bundles live in /app/bin,
-/// so this is unused there).
+/// Directory where on-demand tool installs keep the yt-dlp and ffmpeg
+/// binaries: `$XDG_DATA_HOME/grab/libs`. Both Flatpak and tarball/dev
+/// builds fetch the tools here ([`install_ytdlp`], [`install_ffmpeg`]);
+/// `/app/bin` and PATH remain as fallbacks for system-provided copies.
 pub fn user_lib_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -970,8 +970,8 @@ pub fn user_lib_dir() -> PathBuf {
 const FLATPAK_APP_BIN: &str = "/app/bin";
 
 /// Candidate directories for the tools, in priority order: the user's own
-/// installs first (so Update actually takes effect over the bundle),
-/// then the Flatpak bundle, then PATH (which inside Flatpak includes the
+/// installs first (so Update actually takes effect over any bundled copy),
+/// then `/app/bin` (Flatpak), then PATH (which inside Flatpak includes the
 /// runtime's /usr/bin where ffmpeg ships). A stale user copy cannot pin
 /// old tools: the version floor refuses it with an update prompt.
 fn tool_search_dirs() -> Vec<PathBuf> {
@@ -1002,10 +1002,10 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg))
 }
 
-/// Install just yt-dlp into the user library dir (tarball/dev builds).
-/// Split from ffmpeg so the UI can report honest per-tool stages; the
-/// crate installer exposes no progress of its own. Await from a spawned
-/// task — never block the GTK thread on it.
+/// Install just yt-dlp into the user library dir. Split from ffmpeg so the
+/// UI can report honest per-tool stages; the crate installer exposes no
+/// progress of its own. Await from a spawned task — never block the GTK
+/// thread on it.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
     let handle = crate::download::tokio_rt()
@@ -1018,12 +1018,10 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
 }
 
 /// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user
-/// library dir (tarball/dev builds; also used inside Flatpak where the
-/// runtime may not ship ffprobe). The yt-dlp crate's installer only
-/// extracts the `ffmpeg` binary, which leaves `--ffmpeg-location`
-/// pointing at a dir without ffprobe — so Grab downloads the
-/// static-build archive itself and extracts both tools in one pass.
-/// See [`install_ytdlp`].
+/// library dir. The yt-dlp crate's installer only extracts the `ffmpeg`
+/// binary, which leaves `--ffmpeg-location` pointing at a dir without
+/// ffprobe — so Grab downloads the static-build archive itself and
+/// extracts both tools in one pass. See [`install_ytdlp`].
 pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
     let handle =
@@ -1641,7 +1639,7 @@ fn sanitize_format_entry(entry: &mut serde_json::Map<String, serde_json::Value>)
     }
 }
 
-/// Fill in fields the bundled yt-dlp binary omits but the crate's model
+/// Fill in fields the installed yt-dlp binary omits but the crate's model
 /// demands. Without this, one sparse object (a thumbnail without
 /// `preference`, an x.com page without `live_status`, an Instagram reel
 /// with a fractional duration) fails the entire preview parse. Arrays

@@ -39,21 +39,6 @@
   ],
   "modules": [
     {
-      "name": "yt-dlp",
-      "buildsystem": "simple",
-      "build-commands": [
-        "install -Dm755 yt-dlp_linux /app/bin/yt-dlp",
-        "yt-dlp --version"
-      ],
-      "sources": [
-        {
-          "type": "file",
-          "url": "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux",
-          "sha256": "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a"
-        }
-      ]
-    },
-    {
       "name": "deno",
       "buildsystem": "simple",
       "build-commands": [
