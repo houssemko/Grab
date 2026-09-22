@@ -5081,6 +5081,11 @@ async fn run_hls_ytdlp(
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
+        // Total the live block grid was built for, and bytes within the
+        // current leg: `max_dl` stays monotonic across legs for the bar,
+        // while `leg_have` resets so a second leg's map starts empty
+        // instead of instantly filling from the previous leg's bytes.
+        let (mut grid_total, mut leg_have) = (None::<u64>, 0u64);
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -5091,24 +5096,46 @@ async fn run_hls_ytdlp(
                 after_move = Some(path.to_string());
             } else if let Some(p) = parse_ytdlp_template(&line) {
                 if let Some(t) = p.total {
-                    // A changed total alone is estimate wobble (HLS/DASH
-                    // re-estimate per fragment); only a new format leg
-                    // restarts the block map, never a wobble — otherwise
-                    // every fragment clears the map while the bar stays
-                    // put. See `leg_changed`.
                     if leg_changed(max_total, max_dl, t, p.downloaded) {
+                        // New format leg (video→audio): fresh grid and a
+                        // leg-relative byte basis (see `leg_changed`).
                         tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
                         marked = 0;
+                        leg_have = 0;
+                        grid_total = Some(t);
+                    } else if t > 0 && grid_total.is_none_or(|g| t > g.saturating_mul(2)) {
+                        // Same file, refined-up total (first estimates run
+                        // tiny): rebuild the grid and re-derive marks from
+                        // real bytes, or the map stays flood-lit on its
+                        // stale small grid while the bar climbs. Downward
+                        // wobble never rebuilds (the leg gate above owns
+                        // drops); growth past 2x bounds the rebuilds to a
+                        // handful per download.
+                        tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
+                        grid_total = Some(t);
+                        let len = crate::download::piece_len(t);
+                        marked = 0;
+                        if let Some(count) = leg_have.checked_div(len) {
+                            for idx in 0..count {
+                                tx_p.send(EngineMsg::PieceDone(idx)).ok();
+                                marked += 1;
+                            }
+                        }
                     }
                     max_total = Some(t.max(max_total.unwrap_or(0)));
                 }
                 if let Some(d) = p.downloaded
-                    && let Some(t) = max_total
-                    && t > 0
+                    && let Some(grid) = grid_total
+                    && grid > 0
                 {
-                    let have = max_dl.max(d.min(t));
+                    // Marks align with the displayed grid (not the running
+                    // max): the grid may lag refined-up totals, and marks
+                    // past its end are dropped by the row's bounds check.
+                    leg_have = leg_have.max(d.min(grid));
+                    let have = max_dl.max(d.min(max_total.unwrap_or(grid)));
                     max_dl = have;
-                    for idx in piece_marks(crate::download::piece_len(t), &mut marked, have) {
+                    for idx in piece_marks(crate::download::piece_len(grid), &mut marked, leg_have)
+                    {
                         tx_p.send(EngineMsg::PieceDone(idx)).ok();
                     }
                 }
