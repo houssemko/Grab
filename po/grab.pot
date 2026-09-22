@@ -595,59 +595,59 @@ msgid ""
 "Fetched directly, bypassing any proxy."
 msgstr ""
 
-#: src/preferences.rs:569
+#: src/preferences.rs:570
 msgid "Ready • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:920
+#: src/preferences.rs:921
 msgid "Update"
 msgstr ""
 
-#: src/preferences.rs:577
+#: src/preferences.rs:578
 msgid "Not installed"
 msgstr ""
 
-#: src/preferences.rs:598
+#: src/preferences.rs:599
 msgid "Quality"
 msgstr ""
 
-#: src/preferences.rs:603
+#: src/preferences.rs:604
 msgid "Preferred quality"
 msgstr ""
 
-#: src/preferences.rs:664
+#: src/preferences.rs:665
 msgid "Authentication"
 msgstr ""
 
-#: src/preferences.rs:665
+#: src/preferences.rs:666
 msgid "Age gates and member-only pages"
 msgstr ""
 
-#: src/preferences.rs:670
+#: src/preferences.rs:671
 msgid "Cookies from Browser"
 msgstr ""
 
-#: src/preferences.rs:671
+#: src/preferences.rs:672
 msgid "Reads this browser's profile directly"
 msgstr ""
 
-#: src/preferences.rs:776
+#: src/preferences.rs:777
 msgid "Live"
 msgstr ""
 
-#: src/preferences.rs:777
+#: src/preferences.rs:778
 msgid "Live stream recording"
 msgstr ""
 
-#: src/preferences.rs:780
+#: src/preferences.rs:781
 msgid "Live from start"
 msgstr ""
 
-#: src/preferences.rs:781
+#: src/preferences.rs:782
 msgid "Record live streams from the beginning"
 msgstr ""
 
-#: src/preferences.rs:819
+#: src/preferences.rs:820
 msgid "Checking…"
 msgstr ""
 
@@ -659,15 +659,15 @@ msgstr ""
 msgid "Media"
 msgstr ""
 
-#: src/preferences.rs:604
+#: src/preferences.rs:605
 msgid "Used for new media downloads"
 msgstr ""
 
-#: src/preferences.rs:796
+#: src/preferences.rs:797
 msgid "yt-dlp and ffmpeg resolve media pages"
 msgstr ""
 
-#: src/preferences.rs:799
+#: src/preferences.rs:800
 msgid "Media support tools"
 msgstr ""
 
@@ -675,23 +675,23 @@ msgstr ""
 msgid "Check for Updates"
 msgstr ""
 
-#: src/preferences.rs:876
+#: src/preferences.rs:877
 msgid "Checking for updates…"
 msgstr ""
 
-#: src/preferences.rs:916
-msgid "Update available: {installed} → {latest}"
+#: src/preferences.rs:917
+msgid "Update available: yt-dlp {installed} → {latest}"
 msgstr ""
 
-#: src/preferences.rs:938
+#: src/preferences.rs:939
 msgid "Up to date • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:946
+#: src/preferences.rs:947
 msgid "Couldn't check for updates"
 msgstr ""
 
-#: src/preferences.rs:619
+#: src/preferences.rs:620
 msgid "Preferred video codec"
 msgstr ""
 
@@ -719,23 +719,23 @@ msgstr ""
 msgid "Port"
 msgstr ""
 
-#: src/preferences.rs:892
+#: src/preferences.rs:893
 msgid "Update checks are skipped while a proxy is configured"
 msgstr ""
 
-#: src/preferences.rs:636
+#: src/preferences.rs:637
 msgid "Audio quality"
 msgstr ""
 
-#: src/preferences.rs:637
+#: src/preferences.rs:638
 msgid "0 is best, 10 is worst"
 msgstr ""
 
-#: src/preferences.rs:650
+#: src/preferences.rs:651
 msgid "Subtitles"
 msgstr ""
 
-#: src/preferences.rs:651
+#: src/preferences.rs:652
 msgid "Download subtitles beside the video"
 msgstr ""
 
@@ -779,55 +779,55 @@ msgstr ""
 msgid "Find peers without trackers. Takes effect on restart."
 msgstr ""
 
-#: src/preferences.rs:620
+#: src/preferences.rs:621
 msgid "Newest codecs first, or widest playback"
 msgstr ""
 
-#: src/preferences.rs:684
+#: src/preferences.rs:685
 msgid "Post-processing"
 msgstr ""
 
-#: src/preferences.rs:685
+#: src/preferences.rs:686
 msgid "Applied while finishing downloads"
 msgstr ""
 
-#: src/preferences.rs:688
+#: src/preferences.rs:689
 msgid "Embed subtitles"
 msgstr ""
 
-#: src/preferences.rs:689
+#: src/preferences.rs:690
 msgid "Mux downloaded subtitles into the video file"
 msgstr ""
 
-#: src/preferences.rs:699
+#: src/preferences.rs:700
 msgid "Remove sponsored segments"
 msgstr ""
 
-#: src/preferences.rs:700
+#: src/preferences.rs:701
 msgid "Cut SponsorBlock-flagged sponsor segments"
 msgstr ""
 
-#: src/preferences.rs:714
+#: src/preferences.rs:715
 msgid "Mark sponsored segments"
 msgstr ""
 
-#: src/preferences.rs:716
+#: src/preferences.rs:717
 msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
 msgstr ""
 
-#: src/preferences.rs:738
+#: src/preferences.rs:739
 msgid "Embed chapters"
 msgstr ""
 
-#: src/preferences.rs:739
+#: src/preferences.rs:740
 msgid "Write chapter markers into the finished file"
 msgstr ""
 
-#: src/preferences.rs:757
+#: src/preferences.rs:758
 msgid "Remux video"
 msgstr ""
 
-#: src/preferences.rs:759
+#: src/preferences.rs:760
 msgid "Change the finished file's container without re-encoding"
 msgstr ""
 
@@ -863,35 +863,35 @@ msgstr ""
 msgid "Lets magnet links and trackerless torrents find peers"
 msgstr ""
 
-#: src/preferences.rs:624
+#: src/preferences.rs:625
 msgid "Ranks available formats; the closest match wins when your pick isn't offered"
 msgstr ""
 
-#: src/preferences.rs:641
+#: src/preferences.rs:642
 msgid "Applies to audio-only downloads and extracted audio"
 msgstr ""
 
-#: src/preferences.rs:692
+#: src/preferences.rs:693
 msgid "Needs subtitles enabled under Media → Subtitles; does nothing without them"
 msgstr ""
 
-#: src/preferences.rs:703
+#: src/preferences.rs:704
 msgid "Works where SponsorBlock has data, mostly YouTube"
 msgstr ""
 
-#: src/preferences.rs:720
+#: src/preferences.rs:721
 msgid "Lets you skip sponsors with chapter navigation instead of cutting them"
 msgstr ""
 
-#: src/preferences.rs:742
+#: src/preferences.rs:743
 msgid "Players with chapter support let you jump between sections"
 msgstr ""
 
-#: src/preferences.rs:764
+#: src/preferences.rs:765
 msgid "Useful when a player or editor dislikes the original container"
 msgstr ""
 
-#: src/preferences.rs:784
+#: src/preferences.rs:785
 msgid "Needs the site to keep a replay; otherwise recording starts from the live edge"
 msgstr ""
 
@@ -1198,7 +1198,7 @@ msgstr ""
 msgid "Video tools are too old — update them to continue"
 msgstr ""
 
-#: src/video.rs:1237
+#: src/video.rs:1243
 msgid "None"
 msgstr ""
 
@@ -1206,7 +1206,7 @@ msgstr ""
 msgid "the lookup timed out"
 msgstr ""
 
-#: src/video.rs:3782
+#: src/video.rs:3788
 msgid "Resuming download…"
 msgstr ""
 
@@ -1254,83 +1254,83 @@ msgstr ""
 msgid "unclassified"
 msgstr ""
 
-#: src/video.rs:2366
+#: src/video.rs:2372
 msgid "Newest first"
 msgstr ""
 
-#: src/video.rs:2366
+#: src/video.rs:2372
 msgid "Most compatible"
 msgstr ""
 
-#: src/video.rs:4773
+#: src/video.rs:4779
 msgid "Finalizing…"
 msgstr ""
 
-#: src/video.rs:2390
+#: src/video.rs:2396
 msgid "English"
 msgstr ""
 
-#: src/video.rs:2391
+#: src/video.rs:2397
 msgid "Arabic"
 msgstr ""
 
-#: src/video.rs:2392
+#: src/video.rs:2398
 msgid "German"
 msgstr ""
 
-#: src/video.rs:2393
+#: src/video.rs:2399
 msgid "Spanish"
 msgstr ""
 
-#: src/video.rs:2394
+#: src/video.rs:2400
 msgid "French"
 msgstr ""
 
-#: src/video.rs:2395
+#: src/video.rs:2401
 msgid "Hindi"
 msgstr ""
 
-#: src/video.rs:2396
+#: src/video.rs:2402
 msgid "Indonesian"
 msgstr ""
 
-#: src/video.rs:2397
+#: src/video.rs:2403
 msgid "Italian"
 msgstr ""
 
-#: src/video.rs:2398
+#: src/video.rs:2404
 msgid "Japanese"
 msgstr ""
 
-#: src/video.rs:2399
+#: src/video.rs:2405
 msgid "Korean"
 msgstr ""
 
-#: src/video.rs:2400
+#: src/video.rs:2406
 msgid "Dutch"
 msgstr ""
 
-#: src/video.rs:2401
+#: src/video.rs:2407
 msgid "Polish"
 msgstr ""
 
-#: src/video.rs:2402
+#: src/video.rs:2408
 msgid "Portuguese"
 msgstr ""
 
-#: src/video.rs:2403
+#: src/video.rs:2409
 msgid "Russian"
 msgstr ""
 
-#: src/video.rs:2404
+#: src/video.rs:2410
 msgid "Turkish"
 msgstr ""
 
-#: src/video.rs:2405
+#: src/video.rs:2411
 msgid "Vietnamese"
 msgstr ""
 
-#: src/video.rs:2406
+#: src/video.rs:2412
 msgid "Chinese"
 msgstr ""
 
@@ -1338,19 +1338,19 @@ msgstr ""
 msgid "No suitable formats found for this media (the page listed none)"
 msgstr ""
 
-#: src/video.rs:1558
+#: src/video.rs:1564
 msgid "staging directory escaped its root"
 msgstr ""
 
-#: src/video.rs:4752
+#: src/video.rs:4758
 msgid "\"Live from start\" isn't available for this stream — recording from the live edge…"
 msgstr ""
 
-#: src/video.rs:2116
+#: src/video.rs:2122
 msgid "the link opened a collection, not a single video"
 msgstr ""
 
-#: src/video.rs:2114
+#: src/video.rs:2120
 msgid "the story is no longer available"
 msgstr ""
 

@@ -540,6 +540,7 @@ pub fn show(
     fn installed_tool_versions() -> Option<(String, String)> {
         crate::video::resolve_libraries().ok().map(|libs| {
             let yt = tool_version(&libs.youtube, "--version")
+                .map(|v| format!("yt-dlp {v}"))
                 .unwrap_or_else(|| libs.youtube.display().to_string());
             let ff = tool_version(&libs.ffmpeg, "-version")
                 .unwrap_or_else(|| libs.ffmpeg.display().to_string());
@@ -913,7 +914,7 @@ pub fn show(
                             if crate::video::ytdlp_update_available(&installed, &tag) =>
                         {
                             row_b.set_subtitle(
-                                &gettext("Update available: {installed} → {latest}")
+                                &gettext("Update available: yt-dlp {installed} → {latest}")
                                     .replace("{installed}", installed.trim())
                                     .replace("{latest}", tag.trim()),
                             );
@@ -921,7 +922,7 @@ pub fn show(
                             action_b.set(ToolAction::Update);
                         }
                         (Some(installed), Some(_)) => {
-                            let yt = installed.trim().to_string();
+                            let yt = format!("yt-dlp {}", installed.trim());
                             let ff = gio::spawn_blocking(|| {
                                 crate::video::resolve_libraries()
                                     .ok()
