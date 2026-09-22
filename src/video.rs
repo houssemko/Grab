@@ -44,19 +44,31 @@ pub fn default_video_quality() -> String {
     "1080p".to_string()
 }
 
+/// Combo-box index for a stored value against an ordered value table.
+/// Unknown values fall back to `fallback`, so a hand-edited dconf key
+/// can never desync the combo. Fallbacks differ per combo by design —
+/// pass them through, don't unify them. Pure.
+pub(crate) fn combo_index(values: &[&str], value: &str, fallback: usize) -> usize {
+    values.iter().position(|v| *v == value).unwrap_or(fallback)
+}
+
+/// Stored value for a combo-box index against an ordered value table.
+/// Out-of-range indexes (the model is rebuilt from translations) fall
+/// back instead of panicking. Pure.
+pub(crate) fn combo_value<'a>(values: &[&'a str], index: usize, fallback: &'a str) -> &'a str {
+    values.get(index).copied().unwrap_or(fallback)
+}
+
 /// Model index for a stored quality value. Unknown values fall back to the
 /// 1080p row so a hand-edited dconf key can't desync the combo.
 pub fn quality_index(value: &str) -> usize {
-    VIDEO_QUALITY_VALUES
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(3)
+    combo_index(VIDEO_QUALITY_VALUES, value, 3)
 }
 
 /// Stored value for a combo index. Out-of-range indexes (shouldn't happen,
 /// but the model is rebuilt from translations) fall back to 1080p.
 pub fn quality_value(index: usize) -> &'static str {
-    VIDEO_QUALITY_VALUES.get(index).copied().unwrap_or("1080p")
+    combo_value(VIDEO_QUALITY_VALUES, index, "1080p")
 }
 
 /// Default file name for a resolved video when the user left the name
@@ -1211,15 +1223,12 @@ pub fn cookies_browser_labels() -> Vec<String> {
 /// Combo index for a stored browser value. Unknown values fall back to
 /// None rather than selecting a browser the user didn't pick.
 pub fn cookies_browser_index(value: &str) -> usize {
-    COOKIES_BROWSERS
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(0)
+    combo_index(COOKIES_BROWSERS, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to off.
 pub fn cookies_browser_value(index: usize) -> &'static str {
-    COOKIES_BROWSERS.get(index).copied().unwrap_or("none")
+    combo_value(COOKIES_BROWSERS, index, "none")
 }
 
 /// Real home directory from the passwd database, bypassing any sandbox
@@ -1588,6 +1597,50 @@ fn coerce_int_fields(obj: &mut serde_json::Map<String, serde_json::Value>) {
     }
 }
 
+/// Repair one format entry in place: neutral defaults for required
+/// scalars, transport/container inference for sparse extractors (same
+/// rationale as [`sanitize_video_json`]: one sparse entry must not fail
+/// the whole parse, and formats are read by the pipeline so they are
+/// repaired instead of reset).
+fn sanitize_format_entry(entry: &mut serde_json::Map<String, serde_json::Value>) {
+    coerce_int_fields(entry);
+    entry.entry("format").or_insert(serde_json::json!(""));
+    entry.entry("format_id").or_insert(serde_json::json!(""));
+    entry.entry("http_headers").or_insert(serde_json::json!({}));
+    // Missing transport with an http(s) URL: plain HTTPS fetch
+    // is the only sane default — without it the format is
+    // invisible to every selector below.
+    if !entry.get("protocol").is_some_and(|v| v.is_string()) {
+        let http = entry
+            .get("url")
+            .and_then(|u| u.as_str())
+            .is_some_and(|u| u.starts_with("http://") || u.starts_with("https://"));
+        if http {
+            entry.insert("protocol".to_string(), serde_json::json!("https"));
+        }
+    }
+    if !entry.get("ext").is_some_and(|v| v.is_string()) {
+        // Missing container with a telling URL: sparse
+        // extractors sometimes omit `ext` while pointing at a
+        // plain video file. Sniff the path suffix (containers
+        // only, never manifests or storyboards) so the Unknown
+        // fallback can still adopt instead of failing the row.
+        let suffix = entry
+            .get("url")
+            .and_then(|u| u.as_str())
+            .and_then(|u| u.split(['?', '#']).next())
+            .and_then(|p| p.rsplit('.').next())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if matches!(suffix.as_str(), "mp4" | "webm" | "avi" | "flv" | "ts") {
+            entry.insert("ext".to_string(), serde_json::json!(suffix));
+        }
+    }
+    if entry.contains_key("fragments") {
+        entry.insert("fragments".to_string(), serde_json::json!([]));
+    }
+}
+
 /// Fill in fields the bundled yt-dlp binary omits but the crate's model
 /// demands. Without this, one sparse object (a thumbnail without
 /// `preference`, an x.com page without `live_status`, an Instagram reel
@@ -1639,42 +1692,7 @@ fn sanitize_video_json(value: &mut serde_json::Value) {
         formats.retain(|f| f.is_object());
         for format in formats.iter_mut() {
             if let Some(entry) = format.as_object_mut() {
-                coerce_int_fields(entry);
-                entry.entry("format").or_insert(serde_json::json!(""));
-                entry.entry("format_id").or_insert(serde_json::json!(""));
-                entry.entry("http_headers").or_insert(serde_json::json!({}));
-                // Missing transport with an http(s) URL: plain HTTPS fetch
-                // is the only sane default — without it the format is
-                // invisible to every selector below.
-                if !entry.get("protocol").is_some_and(|v| v.is_string()) {
-                    let http = entry
-                        .get("url")
-                        .and_then(|u| u.as_str())
-                        .is_some_and(|u| u.starts_with("http://") || u.starts_with("https://"));
-                    if http {
-                        entry.insert("protocol".to_string(), serde_json::json!("https"));
-                    }
-                }
-                if !entry.get("ext").is_some_and(|v| v.is_string()) {
-                    // Missing container with a telling URL: sparse
-                    // extractors sometimes omit `ext` while pointing at a
-                    // plain video file. Sniff the path suffix (containers
-                    // only, never manifests or storyboards) so the Unknown
-                    // fallback can still adopt instead of failing the row.
-                    let suffix = entry
-                        .get("url")
-                        .and_then(|u| u.as_str())
-                        .and_then(|u| u.split(['?', '#']).next())
-                        .and_then(|p| p.rsplit('.').next())
-                        .unwrap_or("")
-                        .to_ascii_lowercase();
-                    if matches!(suffix.as_str(), "mp4" | "webm" | "avi" | "flv" | "ts") {
-                        entry.insert("ext".to_string(), serde_json::json!(suffix));
-                    }
-                }
-                if entry.contains_key("fragments") {
-                    entry.insert("fragments".to_string(), serde_json::json!([]));
-                }
+                sanitize_format_entry(entry);
             }
         }
     }
@@ -1795,11 +1813,10 @@ fn retarget_story_items(url: &str, playlist: &mut PlaylistInfo) {
     }
 }
 
-/// `https://www.instagram.com/stories/<user>/<story-id>/` → the owner's
-/// story tray `https://www.instagram.com/stories/<user>/`. Returns `None`
-/// for tray URLs (nothing to retarget), highlights, and anything that
-/// does not parse as an Instagram story link.
-fn story_tray_url(url: &str) -> Option<String> {
+/// Non-empty path segments of an Instagram page URL, if it parses as
+/// http(s) on an Instagram host. Shared preamble for the story helpers
+/// below; each keeps its own shape/charset validation. Pure.
+fn instagram_path_segments(url: &str) -> Option<Vec<String>> {
     let parsed = url::Url::parse(url).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
@@ -1810,10 +1827,27 @@ fn story_tray_url(url: &str) -> Option<String> {
     ) {
         return None;
     }
-    let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
-    let ["stories", user, story_id] = segments.as_slice() else {
+    Some(
+        parsed
+            .path_segments()?
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// `https://www.instagram.com/stories/<user>/<story-id>/` → the owner's
+/// story tray `https://www.instagram.com/stories/<user>/`. Returns `None`
+/// for tray URLs (nothing to retarget), highlights, and anything that
+/// does not parse as an Instagram story link.
+fn story_tray_url(url: &str) -> Option<String> {
+    let segments = instagram_path_segments(url)?;
+    let [stories, user, story_id] = segments.as_slice() else {
         return None;
     };
+    if stories != "stories" {
+        return None;
+    }
     if user.eq_ignore_ascii_case("highlights") {
         return None;
     }
@@ -1855,20 +1889,13 @@ pub(crate) fn expand_child_target(
 /// `.../stories/<user>[/<id>/]`. `None` for highlights and non-story
 /// links. Pure for tests.
 fn story_tray_user(url: &str) -> Option<String> {
-    let parsed = url::Url::parse(url).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
-    if !matches!(
-        parsed.host_str(),
-        Some("instagram.com") | Some("www.instagram.com")
-    ) {
-        return None;
-    }
-    let segments: Vec<&str> = parsed.path_segments()?.filter(|s| !s.is_empty()).collect();
-    let ["stories", user, ..] = segments.as_slice() else {
+    let segments = instagram_path_segments(url)?;
+    let [stories, user, ..] = segments.as_slice() else {
         return None;
     };
+    if stories != "stories" {
+        return None;
+    }
     // Instagram usernames: 1–30 chars of letters, digits, periods and
     // underscores. Anything else is not a user tray — fail early to the
     // tray + entry-id fallback instead of queueing a late failure.
@@ -1968,16 +1995,9 @@ async fn fetch_raw_dump_json(
     // crate's executor: same semantics — concurrent pipe drain,
     // timeout kill, nonzero exit as error — with the failure detail
     // taken from stderr instead of a wrapped crate error.
-    let mut cmd = tokio::process::Command::new(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
     let mut child = cmd.spawn().map_err(VideoError::fetch)?;
     let stdout = child
         .stdout
@@ -2209,15 +2229,16 @@ fn fmt_video_bytes(n: u64) -> String {
     }
 }
 
-/// Listable video-only formats for one video: best per height (codec
-/// rank, then filesize), tallest first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
-/// HLS variants fill heights with no direct stream (the worker pulls
-/// those via ffmpeg); muxed files stay on the automatic path, which
-/// already adopts them. Audio-only formats never appear here.
-pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoFormatOption> {
+/// Best directly-fetchable video-only stream per height (codec rank,
+/// then filesize). Plain HTTPS without DRM only; muxed and audio-only
+/// streams never qualify. Pure.
+fn best_direct_by_height(
+    formats: &[Format],
+    newest_first: bool,
+) -> std::collections::HashMap<u32, &Format> {
     use std::collections::HashMap;
     let mut best: HashMap<u32, &Format> = HashMap::new();
-    for f in &video.formats {
+    for f in formats {
         if f.protocol != Protocol::Https {
             continue;
         }
@@ -2252,6 +2273,41 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
             best.insert(h, f);
         }
     }
+    best
+}
+
+/// Short transport/codec tag for a picker row: HLS variants show their
+/// transport, not a codec that ffmpeg — not the engine — will consume.
+/// Remote extractor strings are allowlisted to label-safe chars so bidi
+/// overrides, newlines or oversized values can't spoof the dropdown.
+/// Pure.
+fn format_short_label(f: &Format) -> String {
+    if f.protocol == Protocol::M3U8Native {
+        return "HLS".to_string();
+    }
+    let raw = f.codec_info.video_codec.as_deref().unwrap_or("?");
+    let clean: String = raw
+        .split('.')
+        .next()
+        .unwrap_or("?")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '+')
+        .take(16)
+        .collect();
+    if clean.is_empty() {
+        "?".to_string()
+    } else {
+        clean
+    }
+}
+
+/// Listable video-only formats for one video: best per height (codec
+/// rank, then filesize), tallest first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
+/// HLS variants fill heights with no direct stream (the worker pulls
+/// those via ffmpeg); muxed files stay on the automatic path, which
+/// already adopts them. Audio-only formats never appear here.
+pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoFormatOption> {
+    let mut best = best_direct_by_height(&video.formats, newest_first);
     // HLS gap-fill: heights with no direct stream still list, so the
     // dialog can pin them and the worker routes them to ffmpeg.
     for f in &video.formats {
@@ -2266,29 +2322,7 @@ pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoForma
     let mut out: Vec<VideoFormatOption> = best
         .into_iter()
         .map(|(height, f)| {
-            // HLS variants show their transport, not a codec that
-            // ffmpeg — not the engine — will consume.
-            let short = if f.protocol == Protocol::M3U8Native {
-                "HLS".to_string()
-            } else {
-                // Remote extractor string in a plain-text row: allowlist
-                // to label-safe chars so bidi overrides, newlines or
-                // oversized values can't spoof the dropdown.
-                let raw = f.codec_info.video_codec.as_deref().unwrap_or("?");
-                let clean: String = raw
-                    .split('.')
-                    .next()
-                    .unwrap_or("?")
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '+')
-                    .take(16)
-                    .collect();
-                if clean.is_empty() {
-                    "?".to_string()
-                } else {
-                    clean
-                }
-            };
+            let short = format_short_label(f);
             let label = match filesize_of(f) {
                 Some(n) => format!("{height}p · {short} · {}", fmt_video_bytes(n)),
                 None => format!("{height}p · {short}"),
@@ -2317,18 +2351,12 @@ pub fn codec_priority_labels() -> Vec<String> {
 /// Combo index for a stored priority value. Unknown values fall back
 /// to newest (the historical behavior).
 pub fn codec_priority_index(value: &str) -> usize {
-    CODEC_PRIORITY_VALUES
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(0)
+    combo_index(CODEC_PRIORITY_VALUES, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to newest.
 pub fn codec_priority_value(index: usize) -> &'static str {
-    CODEC_PRIORITY_VALUES
-        .get(index)
-        .copied()
-        .unwrap_or(CODEC_PRIORITY_NEWEST)
+    combo_value(CODEC_PRIORITY_VALUES, index, CODEC_PRIORITY_NEWEST)
 }
 
 /// yt-dlp subtitle language codes offered in preferences, index-aligned
@@ -2364,15 +2392,25 @@ pub fn subtitle_language_labels() -> Vec<String> {
 /// Combo index for a stored subtitle language code. Unknown or empty
 /// values fall back to English (the default).
 pub fn subtitle_language_index(value: &str) -> usize {
-    SUBTITLE_LANGUAGE_VALUES
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(1)
+    combo_index(SUBTITLE_LANGUAGE_VALUES, value, 1)
 }
 
 /// Stored code for a combo index. Out-of-range indexes fall back to English.
 pub fn subtitle_language_value(index: usize) -> &'static str {
-    SUBTITLE_LANGUAGE_VALUES.get(index).copied().unwrap_or("en")
+    combo_value(SUBTITLE_LANGUAGE_VALUES, index, "en")
+}
+
+/// Active raw setting for one job: trimmed and lowercased, then
+/// allowlisted against `values` minus `"off"`. `off`, empty and unknown
+/// codes (hand-edited dconf) all resolve to `None`: a code yt-dlp would
+/// only warn about is never requested, and the value reaching the CLI —
+/// and any sidecar filename — always comes from the fixed list. Pure.
+fn allowlisted_active(raw: &str, values: &[&str]) -> Option<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    values
+        .iter()
+        .find(|v| **v == norm && **v != "off")
+        .map(|v| v.to_string())
 }
 
 /// Active subtitle language for one job: the raw setting trimmed and
@@ -2382,11 +2420,7 @@ pub fn subtitle_language_value(index: usize) -> &'static str {
 /// the value reaching `--sub-langs` — and the sidecar filename — always
 /// comes from the fixed list.
 pub(crate) fn subtitle_lang_active(raw: &str) -> Option<String> {
-    let norm = raw.trim().to_ascii_lowercase();
-    SUBTITLE_LANGUAGE_VALUES
-        .iter()
-        .find(|v| **v == norm && **v != "off")
-        .map(|v| v.to_string())
+    allowlisted_active(raw, SUBTITLE_LANGUAGE_VALUES)
 }
 
 /// Offered subtitle languages that produce sidecars: the full list
@@ -2416,15 +2450,12 @@ pub fn remux_video_labels() -> Vec<String> {
 /// Combo index for a stored remux target. Unknown or empty values fall
 /// back to Off (the default).
 pub fn remux_video_index(value: &str) -> usize {
-    REMUX_VIDEO_VALUES
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(0)
+    combo_index(REMUX_VIDEO_VALUES, value, 0)
 }
 
 /// Stored code for a combo index. Out-of-range indexes fall back to Off.
 pub fn remux_video_value(index: usize) -> &'static str {
-    REMUX_VIDEO_VALUES.get(index).copied().unwrap_or("off")
+    combo_value(REMUX_VIDEO_VALUES, index, "off")
 }
 
 /// Active remux target for one job: the raw setting trimmed and
@@ -2433,11 +2464,7 @@ pub fn remux_video_value(index: usize) -> &'static str {
 /// `None`: a code yt-dlp would only warn about is never requested, and
 /// the value reaching `--remux-video` always comes from the fixed list.
 pub(crate) fn remux_video_active(raw: &str) -> Option<String> {
-    let norm = raw.trim().to_ascii_lowercase();
-    REMUX_VIDEO_VALUES
-        .iter()
-        .find(|v| **v == norm && **v != "off")
-        .map(|v| v.to_string())
+    allowlisted_active(raw, REMUX_VIDEO_VALUES)
 }
 
 /// First search dir holding a complete ffmpeg toolchain (`ffmpeg` plus
@@ -2483,41 +2510,46 @@ fn subtitle_cli_args(lang: &str) -> Vec<String> {
     ]
 }
 
+/// Rank a codec string against an ordered table of prefix groups:
+/// first matching group wins, anything else ranks past the table.
+/// Powers both priority modes so the two orders can't drift apart
+/// branch by branch. Pure.
+fn codec_rank_in(vcodec: &str, table: &[&[&str]]) -> u8 {
+    let c = vcodec.to_ascii_lowercase();
+    table
+        .iter()
+        .position(|group| group.iter().any(|p| c.starts_with(p)))
+        .map(|i| i as u8)
+        .unwrap_or(table.len() as u8)
+}
+
 /// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
 /// AV1 wins ties at the same height, then VP9, HEVC, AVC1, anything
 /// else. Older codecs are only dropped in favor of newer ones — never
 /// at the cost of resolution, and never into an empty list.
+const NEWEST_ORDER: &[&[&str]] = &[
+    &["av01", "av1"],
+    &["vp9"],
+    &["hev1", "hvc1", "h265"],
+    &["avc1", "h264"],
+];
+
 fn codec_rank_newest(vcodec: &str) -> u8 {
-    let c = vcodec.to_ascii_lowercase();
-    if c.starts_with("av01") || c.starts_with("av1") {
-        0
-    } else if c.starts_with("vp9") {
-        1
-    } else if c.starts_with("hev1") || c.starts_with("hvc1") || c.starts_with("h265") {
-        2
-    } else if c.starts_with("avc1") || c.starts_with("h264") {
-        3
-    } else {
-        4
-    }
+    codec_rank_in(vcodec, NEWEST_ORDER)
 }
 
 /// Compatibility-first rank for players without HEVC/AV1 decoders
 /// (the common Linux gap): H.264 first, then VP9 (software-decoded
 /// everywhere), HEVC, AV1, anything else.
+const COMPATIBLE_ORDER: &[&[&str]] = &[
+    &["avc1", "h264"],
+    &["vp9"],
+    &["hev1", "hvc1", "h265"],
+    &["av01", "av1"],
+];
+
 fn codec_rank_compatible(vcodec: &str) -> u8 {
-    let c = vcodec.to_ascii_lowercase();
-    if c.starts_with("avc1") || c.starts_with("h264") {
-        0
-    } else if c.starts_with("vp9") {
-        1
-    } else if c.starts_with("hev1") || c.starts_with("hvc1") || c.starts_with("h265") {
-        2
-    } else if c.starts_with("av01") || c.starts_with("av1") {
-        3
-    } else {
-        4
-    }
+    codec_rank_in(vcodec, COMPATIBLE_ORDER)
 }
 
 /// Rank one codec under the stored priority mode.
@@ -2573,18 +2605,28 @@ impl HlsSel {
 /// bucket clamp to the tallest/shortest. Every result is a recognized
 /// [`VIDEO_QUALITY_VALUES`] entry (never "best").
 pub fn quality_for_height(height: u32) -> &'static str {
-    const BUCKETS: &[(u32, &str)] = &[
-        (2160, "2160p"),
-        (1440, "1440p"),
-        (1080, "1080p"),
-        (720, "720p"),
-        (480, "480p"),
-    ];
-    BUCKETS
+    QUALITY_HEIGHTS
         .iter()
+        .filter_map(|(v, h)| h.as_ref().map(|h| (*h, *v)))
         .min_by_key(|(b, _)| (b.abs_diff(height), std::cmp::Reverse(*b)))
-        .map(|(_, v)| *v)
+        .map(|(_, v)| v)
         .unwrap_or("1080p")
+}
+
+/// Smallest height at or above the cap, else the tallest; `None`
+/// takes the tallest. Shared by the muxed and HLS pickers over
+/// pre-filtered (height, value) pairs — fetchability filtering stays
+/// with the callers. Pure.
+fn pick_at_or_above<T: Clone>(mut cands: Vec<(T, u32)>, want: Option<u32>) -> Option<T> {
+    cands.sort_by_key(|(_, h)| *h);
+    match want {
+        Some(cap) => cands
+            .iter()
+            .find(|(_, h)| *h >= cap)
+            .or_else(|| cands.last())
+            .map(|(item, _)| item.clone()),
+        None => cands.pop().map(|(item, _)| item),
+    }
 }
 
 /// Best muxed (audio+video) file for a height cap: smallest height at
@@ -2595,25 +2637,15 @@ pub fn quality_for_height(height: u32) -> &'static str {
 /// `best_audio_video_format`, which is first-in-extractor-order (lowest
 /// first on x.com) regardless of the requested height.
 fn select_muxed_format(formats: &[Format], want: Option<u32>) -> Option<StreamSel> {
-    let mut cands: Vec<(&Format, u32)> = formats
+    let cands: Vec<(StreamSel, u32)> = formats
         .iter()
         .filter(|f| f.format_type().is_audio_and_video())
         .filter_map(|f| {
             let h = f.video_resolution.height.filter(|&h| h > 0)?;
-            StreamSel::from_format(f).ok().map(|_| (f, h))
+            StreamSel::from_format(f).ok().map(|sel| (sel, h))
         })
         .collect();
-    cands.sort_by_key(|(_, h)| *h);
-    match want {
-        Some(cap) => cands
-            .iter()
-            .find(|(_, h)| *h >= cap)
-            .or_else(|| cands.last())
-            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
-        None => cands
-            .last()
-            .and_then(|(f, _)| StreamSel::from_format(f).ok()),
-    }
+    pick_at_or_above(cands, want)
 }
 
 /// Height of one format id in fresh metadata, for comparing an
@@ -2664,37 +2696,61 @@ pub(crate) fn apply_proxy_env(
     }
 }
 
+/// yt-dlp spawn with the house stdio/process-group setup: null stdin
+/// (never interactive), piped stdout/stderr for capture, and its own
+/// process group so timeouts can kill the whole tree via `kill_tree`.
+fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(youtube_bin);
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    cmd
+}
+
+/// Canonical quality ladder: stored value to height cap (`None` = Best,
+/// tallest available). Single source for the height cap and the
+/// extractor selector — unknown values fall back to 1080p in both by
+/// design (same fallback as the combo mapping). Pure.
+const QUALITY_HEIGHTS: &[(&str, Option<u32>)] = &[
+    ("best", None),
+    ("2160p", Some(2160)),
+    ("1440p", Some(1440)),
+    ("1080p", Some(1080)),
+    ("720p", Some(720)),
+    ("480p", Some(480)),
+];
+
 /// Stored quality value to a height cap: `None` (Best) takes the
 /// tallest variant available. Unknown values fall back to 1080p (same
 /// fallback as the combo mapping and the extractor selector).
 pub(crate) fn quality_height(value: &str) -> Option<u32> {
-    match value {
-        "best" => None,
-        "2160p" => Some(2160),
-        "1440p" => Some(1440),
-        "1080p" => Some(1080),
-        "720p" => Some(720),
-        "480p" => Some(480),
-        _ => Some(1080),
-    }
+    QUALITY_HEIGHTS
+        .iter()
+        .find(|(v, _)| *v == value)
+        .map(|(_, h)| *h)
+        .unwrap_or(Some(1080))
 }
 
 /// Best HLS variant for a height cap: smallest height at or above the
 /// cap, else the tallest available. Mirrors the crate's
 /// closest-at-or-above preset semantics.
 fn select_hls_format(formats: &[Format], want: Option<u32>) -> Option<HlsSel> {
-    let mut cands: Vec<HlsSel> = formats.iter().filter_map(HlsSel::from_format).collect();
-    // Extractor order is arbitrary: sort ascending so the capped match is
-    // genuinely the smallest height at or above it.
-    cands.sort_by_key(|s| s.height.unwrap_or(0));
-    match want {
-        Some(h) => cands
-            .iter()
-            .find(|s| s.height.is_some_and(|x| x >= h))
-            .or_else(|| cands.iter().max_by_key(|s| s.height.unwrap_or(0)))
-            .cloned(),
-        None => cands.into_iter().max_by_key(|s| s.height.unwrap_or(0)),
-    }
+    // Extractor order is arbitrary: the shared picker sorts ascending
+    // so the capped match is genuinely the smallest height at or above
+    // it. Height-less variants sort as 0, matching the old inline order.
+    let cands: Vec<(HlsSel, u32)> = formats
+        .iter()
+        .filter_map(HlsSel::from_format)
+        .map(|s| {
+            let h = s.height.unwrap_or(0);
+            (s, h)
+        })
+        .collect();
+    pick_at_or_above(cands, want)
 }
 
 /// Find one HLS variant by dialog-pinned id.
@@ -2879,14 +2935,9 @@ fn plan_streams(
 /// Map a stored quality value to the extractor selector. Unknown values
 /// fall back to 1080p (same fallback as the combo mapping).
 pub fn selector_for_quality(value: &str) -> VideoQuality {
-    match value {
-        "best" => VideoQuality::Best,
-        "2160p" => VideoQuality::CustomHeight(2160),
-        "1440p" => VideoQuality::CustomHeight(1440),
-        "1080p" => VideoQuality::CustomHeight(1080),
-        "720p" => VideoQuality::CustomHeight(720),
-        "480p" => VideoQuality::CustomHeight(480),
-        _ => VideoQuality::CustomHeight(1080),
+    match quality_height(value) {
+        None => VideoQuality::Best,
+        Some(h) => VideoQuality::CustomHeight(h),
     }
 }
 
@@ -2953,34 +3004,30 @@ fn select_audio_original_first(formats: &[Format]) -> Option<&Format> {
         .iter()
         .filter(|f| f.is_audio() && StreamSel::from_format(f).is_ok())
         .max_by(|a, b| {
-            lang_score(a)
-                .cmp(&lang_score(b))
-                .then_with(|| quality_score(a).total_cmp(&quality_score(b)))
-                .then_with(|| abr_score(a).total_cmp(&abr_score(b)))
-                .then_with(|| asr_score(a).cmp(&asr_score(b)))
-                .then_with(|| channels_score(a).cmp(&channels_score(b)))
+            let (al, aq, ab, aa, ac) = audio_rank_key(a);
+            let (bl, bq, bb, ba, bc) = audio_rank_key(b);
+            al.cmp(&bl)
+                .then_with(|| aq.total_cmp(&bq))
+                .then_with(|| ab.total_cmp(&bb))
+                .then_with(|| aa.cmp(&ba))
+                .then_with(|| ac.cmp(&bc))
         })
 }
 
-/// yt-dlp's internal language preference score, neutral when untagged.
-fn lang_score(f: &Format) -> i64 {
-    f.language_preference.unwrap_or(0)
-}
-
-fn quality_score(f: &Format) -> f64 {
-    f.quality_info.quality.map(|q| *q).unwrap_or(0.0)
-}
-
-fn abr_score(f: &Format) -> f64 {
-    f.rates_info.audio_rate.map(|r| *r).unwrap_or(0.0)
-}
-
-fn asr_score(f: &Format) -> i64 {
-    f.codec_info.asr.unwrap_or(0)
-}
-
-fn channels_score(f: &Format) -> i64 {
-    f.codec_info.audio_channels.unwrap_or(0)
+/// Audio rank key in yt-dlp `lang`-first order (language, quality,
+/// bitrate, sample rate, channels). Missing fields score neutral, so
+/// untagged tracks fall back to bitrate instead of failing. The
+/// comparator keeps `total_cmp` on the float lanes: NaN can never
+/// appear (serde_json rejects non-finite numbers), but the ordering
+/// stays total regardless. Pure.
+fn audio_rank_key(f: &Format) -> (i64, f64, f64, i64, i64) {
+    (
+        f.language_preference.unwrap_or(0),
+        f.quality_info.quality.map(|q| *q).unwrap_or(0.0),
+        f.rates_info.audio_rate.map(|r| *r).unwrap_or(0.0),
+        f.codec_info.asr.unwrap_or(0),
+        f.codec_info.audio_channels.unwrap_or(0),
+    )
 }
 
 fn filesize_of(f: &Format) -> Option<u64> {
@@ -3080,13 +3127,17 @@ pub(crate) fn ytdlp_output_template(path: &Path) -> String {
 /// touches. The finished file itself (`<stem>.<ext>`) never matches.
 const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live."];
 
-fn is_grab_part(file_name: &str, stem: &str) -> bool {
-    // strip_prefix (not slicing past starts_with): panic-free even if a
-    // future edit reorders the guards.
-    let rest = file_name
+/// Suffix of `file_name` past a `<stem>.` prefix, if it has one.
+/// `strip_prefix` (not slicing past `starts_with`): panic-free even if a
+/// future edit reorders the guards. Pure.
+fn strip_stem_suffix<'a>(file_name: &'a str, stem: &str) -> Option<&'a str> {
+    file_name
         .strip_prefix(stem)
-        .and_then(|r| r.strip_prefix('.'));
-    rest.is_some_and(|r| PART_KINDS.iter().any(|k| r.starts_with(k)))
+        .and_then(|r| r.strip_prefix('.'))
+}
+
+fn is_grab_part(file_name: &str, stem: &str) -> bool {
+    strip_stem_suffix(file_name, stem).is_some_and(|r| PART_KINDS.iter().any(|k| r.starts_with(k)))
 }
 
 /// File names directly inside `dir`: a best-effort snapshot for intake
@@ -3131,8 +3182,7 @@ fn stem_has_subtitle_sidecar(names: &[String], stem: &str) -> bool {
         return false;
     }
     names.iter().any(|n| {
-        n.strip_prefix(stem)
-            .and_then(|r| r.strip_prefix('.'))
+        strip_stem_suffix(n, stem)
             .and_then(|r| r.strip_suffix(".srt"))
             .is_some_and(|lang| subtitle_content_languages().any(|l| l == lang))
     })
@@ -4190,16 +4240,9 @@ async fn run_ytdlp_attempt(
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
-    let mut cmd = tokio::process::Command::new(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(argv);
     apply_proxy_env(&mut cmd, proxy);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
     let mut child = cmd.spawn().map_err(VideoError::runtime)?;
     let stdout = child
         .stdout
@@ -4550,16 +4593,9 @@ async fn run_live_ytdlp(
         // stale (possibly empty) output for the retry to trip over.
         let _ = tokio::fs::remove_file(&out).await;
         let _ = tokio::fs::remove_file(&part).await;
-        let mut cmd = tokio::process::Command::new(youtube_bin);
+        let mut cmd = ytdlp_command(youtube_bin);
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-        #[cfg(unix)]
-        {
-            cmd.process_group(0);
-        }
         let mut child = cmd.spawn().map_err(VideoError::runtime)?;
         let stdout = child
             .stdout
@@ -5056,16 +5092,9 @@ async fn run_hls_ytdlp(
     if job.dest.exists() {
         return Err(VideoError::exists());
     }
-    let mut cmd = tokio::process::Command::new(youtube_bin);
+    let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(unix)]
-    {
-        cmd.process_group(0);
-    }
     let mut child = cmd.spawn().map_err(VideoError::runtime)?;
     let stdout = child
         .stdout

@@ -4,6 +4,62 @@ use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
+/// Two-way sync between a ComboRow index and a GSettings string: the row
+/// shows the stored value, external edits reselect it (weak ref, so
+/// closed dialogs don't leak), user picks write back. `get` reads the
+/// current value for the initial selection; `index_of`/`value_of` are
+/// the combo's mapping fns. A plain GSettings bind can't do this (index
+/// vs string need the mapping in both directions).
+fn bind_combo_row(
+    row: &adw::ComboRow,
+    settings: &crate::settings::AppSettings,
+    key: &'static str,
+    get: impl Fn(&crate::settings::AppSettings) -> String,
+    index_of: fn(&str) -> usize,
+    value_of: fn(usize) -> &'static str,
+) {
+    row.set_selected(index_of(&get(settings)) as u32);
+    {
+        let row = row.downgrade();
+        settings.connect_changed(Some(key), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                row.set_selected(index_of(&s.string(key)) as u32);
+            }
+        });
+    }
+    row.connect_selected_notify({
+        let s = settings.clone();
+        move |row| {
+            let _ = s.set_string(key, value_of(row.selected() as usize));
+        }
+    });
+}
+
+/// Flag junk rate text immediately instead of failing rows at spawn
+/// time: empty and `0` mean unlimited, anything else must parse.
+fn mark_rate_row(live: &adw::EntryRow) {
+    let l = live.clone();
+    let mark = move |row: &adw::EntryRow| {
+        let t = row.text().to_string();
+        let t = t.trim();
+        let ok = t.is_empty() || t == "0" || crate::download::parse_rate(t).is_some();
+        if ok {
+            l.remove_css_class("error");
+        } else {
+            l.add_css_class("error");
+        }
+    };
+    mark(live);
+    live.connect_changed(mark);
+}
+
+/// Whether the proxy mode string selects manual setup (its rows only
+/// exist in manual mode). Takes the raw value so both the GSettings
+/// signal payload and the typed getter feed it.
+fn is_manual_proxy(mode: &str) -> bool {
+    mode == crate::download::PROXY_MODE_MANUAL
+}
+
 pub fn show(
     parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
     settings: &crate::settings::AppSettings,
@@ -161,21 +217,7 @@ pub fn show(
         .bind(crate::settings::key::SPEED_LIMIT, &limit, "text")
         .build();
     // Flag junk immediately instead of failing rows at spawn time.
-    {
-        let l = limit.clone();
-        let mark = move |row: &adw::EntryRow| {
-            let t = row.text().to_string();
-            let t = t.trim();
-            let ok = t.is_empty() || t == "0" || crate::download::parse_rate(t).is_some();
-            if ok {
-                l.remove_css_class("error");
-            } else {
-                l.add_css_class("error");
-            }
-        };
-        mark(&limit);
-        limit.connect_changed(mark);
-    }
+    mark_rate_row(&limit);
     net_group.add(&limit);
 
     let keep_date = adw::SwitchRow::builder()
@@ -199,18 +241,15 @@ pub fn show(
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         proxy_mode.set_model(Some(&gtk4::StringList::new(&refs)));
     }
-    proxy_mode.set_selected(crate::download::proxy_mode_index(&settings.proxy_mode()) as u32);
+    bind_combo_row(
+        &proxy_mode,
+        settings,
+        crate::settings::key::PROXY_MODE,
+        crate::settings::AppSettings::proxy_mode,
+        crate::download::proxy_mode_index,
+        crate::download::proxy_mode_value,
+    );
     net_group.add(&proxy_mode);
-    {
-        let row = proxy_mode.downgrade();
-        settings.connect_changed(Some(crate::settings::key::PROXY_MODE), move |s, _| {
-            if let Some(row) = row.upgrade() {
-                row.set_selected(crate::download::proxy_mode_index(
-                    &s.string(crate::settings::key::PROXY_MODE),
-                ) as u32);
-            }
-        });
-    }
     let proxy_group = adw::PreferencesGroup::builder()
         .title(gettext("Manual proxy"))
         .build();
@@ -220,27 +259,15 @@ pub fn show(
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
         proxy_type.set_model(Some(&gtk4::StringList::new(&refs)));
     }
-    proxy_type.set_selected(crate::download::proxy_type_index(&settings.proxy_type()) as u32);
+    bind_combo_row(
+        &proxy_type,
+        settings,
+        crate::settings::key::PROXY_TYPE,
+        crate::settings::AppSettings::proxy_type,
+        crate::download::proxy_type_index,
+        crate::download::proxy_type_value,
+    );
     proxy_group.add(&proxy_type);
-    {
-        let row = proxy_type.downgrade();
-        settings.connect_changed(Some(crate::settings::key::PROXY_TYPE), move |s, _| {
-            if let Some(row) = row.upgrade() {
-                row.set_selected(crate::download::proxy_type_index(
-                    &s.string(crate::settings::key::PROXY_TYPE),
-                ) as u32);
-            }
-        });
-    }
-    proxy_type.connect_selected_notify({
-        let s = settings.clone();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::PROXY_TYPE,
-                crate::download::proxy_type_value(row.selected() as usize),
-            );
-        }
-    });
     let proxy_host = adw::EntryRow::builder().title(gettext("Host")).build();
     settings
         .bind(crate::settings::key::PROXY_HOST, &proxy_host, "text")
@@ -266,25 +293,20 @@ pub fn show(
         settings.connect_changed(Some(crate::settings::key::PROXY_MODE), move |s, _| {
             sync_proxy_group(
                 &group,
-                s.string(crate::settings::key::PROXY_MODE).as_str()
-                    == crate::download::PROXY_MODE_MANUAL,
+                is_manual_proxy(s.string(crate::settings::key::PROXY_MODE).as_str()),
             );
         });
     }
     proxy_mode.connect_selected_notify({
         let s = settings.clone();
         let group = proxy_group.downgrade();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::PROXY_MODE,
-                crate::download::proxy_mode_value(row.selected() as usize),
-            );
-            sync_proxy_group(&group, s.proxy_mode() == crate::download::PROXY_MODE_MANUAL);
+        move |_row| {
+            sync_proxy_group(&group, is_manual_proxy(&s.proxy_mode()));
         }
     });
     sync_proxy_group(
         &proxy_group.downgrade(),
-        settings.proxy_mode() == crate::download::PROXY_MODE_MANUAL,
+        is_manual_proxy(&settings.proxy_mode()),
     );
     net_page.add(&proxy_group);
 
@@ -427,21 +449,7 @@ pub fn show(
         )
         .build();
     // Flag junk immediately instead of failing rows at spawn time.
-    {
-        let l = upload_limit.clone();
-        let mark = move |row: &adw::EntryRow| {
-            let t = row.text().to_string();
-            let t = t.trim();
-            let ok = t.is_empty() || t == "0" || crate::download::parse_rate(t).is_some();
-            if ok {
-                l.remove_css_class("error");
-            } else {
-                l.add_css_class("error");
-            }
-        };
-        mark(&upload_limit);
-        upload_limit.connect_changed(mark);
-    }
+    mark_rate_row(&upload_limit);
     torrent_net_group.add(&upload_limit);
     let blocklist = adw::EntryRow::builder()
         .title(gettext("Peer blocklist"))
@@ -507,6 +515,18 @@ pub fn show(
         }
         Some(first)
     }
+    /// Installed tool versions for the tools row: `(yt-dlp, ffmpeg)`.
+    /// `None` when the tools are missing; falls back to the binary path
+    /// when `--version` fails.
+    fn installed_tool_versions() -> Option<(String, String)> {
+        crate::video::resolve_libraries().ok().map(|libs| {
+            let yt = tool_version(&libs.youtube, "--version")
+                .unwrap_or_else(|| libs.youtube.display().to_string());
+            let ff = tool_version(&libs.ffmpeg, "-version")
+                .unwrap_or_else(|| libs.ffmpeg.display().to_string());
+            (yt, ff)
+        })
+    }
     /// What the tools-row button does: Install when tools are missing,
     /// Check to probe GitHub for a newer yt-dlp, Update once one is
     /// known. The check-then-act shape keeps a permanent Update button
@@ -549,18 +569,7 @@ pub fn show(
     ) {
         spin.stop();
         spin.set_visible(false);
-        paint_tools_state(
-            row,
-            btn,
-            action,
-            crate::video::resolve_libraries().ok().map(|libs| {
-                let yt = tool_version(&libs.youtube, "--version")
-                    .unwrap_or_else(|| libs.youtube.display().to_string());
-                let ff = tool_version(&libs.ffmpeg, "-version")
-                    .unwrap_or_else(|| libs.ffmpeg.display().to_string());
-                (yt, ff)
-            }),
-        );
+        paint_tools_state(row, btn, action, installed_tool_versions());
     }
     let video_page = adw::PreferencesPage::builder()
         .title(gettext("Media"))
@@ -576,29 +585,15 @@ pub fn show(
         .subtitle(gettext("Used for new media downloads"))
         .model(&gtk4::StringList::new(&video_refs))
         .build();
-    video_quality.set_selected(crate::video::quality_index(&settings.video_quality()) as u32);
+    bind_combo_row(
+        &video_quality,
+        settings,
+        crate::settings::key::VIDEO_QUALITY,
+        crate::settings::AppSettings::video_quality,
+        crate::video::quality_index,
+        crate::video::quality_value,
+    );
     video_quality_group.add(&video_quality);
-    // ComboRow holds an index, GSettings a string: sync both ways by hand
-    // (weak on the settings side so closed dialogs don't leak).
-    {
-        let row = video_quality.downgrade();
-        settings.connect_changed(Some(crate::settings::key::VIDEO_QUALITY), move |s, _| {
-            if let Some(row) = row.upgrade() {
-                row.set_selected(crate::video::quality_index(
-                    &s.string(crate::settings::key::VIDEO_QUALITY),
-                ) as u32);
-            }
-        });
-    }
-    video_quality.connect_selected_notify({
-        let s = settings.clone();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::VIDEO_QUALITY,
-                crate::video::quality_value(row.selected() as usize),
-            );
-        }
-    });
     let codec_labels = crate::video::codec_priority_labels();
     let codec_refs: Vec<&str> = codec_labels.iter().map(String::as_str).collect();
     let video_codec = adw::ComboRow::builder()
@@ -609,31 +604,15 @@ pub fn show(
     video_codec.set_tooltip_text(Some(&gettext(
         "Ranks available formats; the closest match wins when your pick isn't offered",
     )));
-    video_codec
-        .set_selected(crate::video::codec_priority_index(&settings.video_codec_priority()) as u32);
+    bind_combo_row(
+        &video_codec,
+        settings,
+        crate::settings::key::VIDEO_CODEC_PRIORITY,
+        crate::settings::AppSettings::video_codec_priority,
+        crate::video::codec_priority_index,
+        crate::video::codec_priority_value,
+    );
     advanced_media_group.add(&video_codec);
-    {
-        let row = video_codec.downgrade();
-        settings.connect_changed(
-            Some(crate::settings::key::VIDEO_CODEC_PRIORITY),
-            move |s, _| {
-                if let Some(row) = row.upgrade() {
-                    row.set_selected(crate::video::codec_priority_index(
-                        &s.string(crate::settings::key::VIDEO_CODEC_PRIORITY),
-                    ) as u32);
-                }
-            },
-        );
-    }
-    video_codec.connect_selected_notify({
-        let s = settings.clone();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::VIDEO_CODEC_PRIORITY,
-                crate::video::codec_priority_value(row.selected() as usize),
-            );
-        }
-    });
     let audio_quality = adw::SpinRow::builder()
         .title(gettext("Audio quality"))
         .subtitle(gettext("0 is best, 10 is worst"))
@@ -653,31 +632,15 @@ pub fn show(
         .subtitle(gettext("Download subtitles beside the video"))
         .model(&gtk4::StringList::new(&subtitle_refs))
         .build();
-    subtitle_lang
-        .set_selected(crate::video::subtitle_language_index(&settings.subtitle_language()) as u32);
+    bind_combo_row(
+        &subtitle_lang,
+        settings,
+        crate::settings::key::SUBTITLE_LANGUAGE,
+        crate::settings::AppSettings::subtitle_language,
+        crate::video::subtitle_language_index,
+        crate::video::subtitle_language_value,
+    );
     video_quality_group.add(&subtitle_lang);
-    {
-        let row = subtitle_lang.downgrade();
-        settings.connect_changed(
-            Some(crate::settings::key::SUBTITLE_LANGUAGE),
-            move |s, _| {
-                if let Some(row) = row.upgrade() {
-                    row.set_selected(crate::video::subtitle_language_index(
-                        &s.string(crate::settings::key::SUBTITLE_LANGUAGE),
-                    ) as u32);
-                }
-            },
-        );
-    }
-    subtitle_lang.connect_selected_notify({
-        let s = settings.clone();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::SUBTITLE_LANGUAGE,
-                crate::video::subtitle_language_value(row.selected() as usize),
-            );
-        }
-    });
     let video_auth_group = adw::PreferencesGroup::builder()
         .title(gettext("Authentication"))
         .description(gettext("Age gates and member-only pages"))
@@ -689,29 +652,15 @@ pub fn show(
         .subtitle(gettext("Reads this browser's profile directly"))
         .model(&gtk4::StringList::new(&browser_refs))
         .build();
-    browser_row
-        .set_selected(crate::video::cookies_browser_index(&settings.cookies_browser()) as u32);
+    bind_combo_row(
+        &browser_row,
+        settings,
+        crate::settings::key::COOKIES_BROWSER,
+        crate::settings::AppSettings::cookies_browser,
+        crate::video::cookies_browser_index,
+        crate::video::cookies_browser_value,
+    );
     video_auth_group.add(&browser_row);
-    {
-        let row = browser_row.downgrade();
-        settings.connect_changed(Some(crate::settings::key::COOKIES_BROWSER), move |s, _| {
-            if let Some(row) = row.upgrade() {
-                let selected = crate::video::cookies_browser_index(
-                    &s.string(crate::settings::key::COOKIES_BROWSER),
-                ) as u32;
-                row.set_selected(selected);
-            }
-        });
-    }
-    browser_row.connect_selected_notify({
-        let s = settings.clone();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::COOKIES_BROWSER,
-                crate::video::cookies_browser_value(row.selected() as usize),
-            );
-        }
-    });
     let video_post_group = adw::PreferencesGroup::builder()
         .title(gettext("Post-processing"))
         .description(gettext("Applied while finishing downloads"))
@@ -795,27 +744,15 @@ pub fn show(
     remux_row.set_tooltip_text(Some(&gettext(
         "Useful when a player or editor dislikes the original container",
     )));
-    remux_row.set_selected(crate::video::remux_video_index(&settings.remux_video()) as u32);
+    bind_combo_row(
+        &remux_row,
+        settings,
+        crate::settings::key::REMUX_VIDEO,
+        crate::settings::AppSettings::remux_video,
+        crate::video::remux_video_index,
+        crate::video::remux_video_value,
+    );
     video_post_group.add(&remux_row);
-    {
-        let row = remux_row.downgrade();
-        settings.connect_changed(Some(crate::settings::key::REMUX_VIDEO), move |s, _| {
-            if let Some(row) = row.upgrade() {
-                row.set_selected(crate::video::remux_video_index(
-                    &s.string(crate::settings::key::REMUX_VIDEO),
-                ) as u32);
-            }
-        });
-    }
-    remux_row.connect_selected_notify({
-        let s = settings.clone();
-        move |row| {
-            let _ = s.set_string(
-                crate::settings::key::REMUX_VIDEO,
-                crate::video::remux_video_value(row.selected() as usize),
-            );
-        }
-    });
     let video_live_group = adw::PreferencesGroup::builder()
         .title(gettext("Live"))
         .description(gettext("Live stream recording"))
@@ -865,18 +802,10 @@ pub fn show(
         video_tools_spin.set_visible(true);
         video_tools_spin.start();
         gtk4::glib::spawn_future_local(async move {
-            let probed = gio::spawn_blocking(|| {
-                crate::video::resolve_libraries().ok().map(|libs| {
-                    let yt = tool_version(&libs.youtube, "--version")
-                        .unwrap_or_else(|| libs.youtube.display().to_string());
-                    let ff = tool_version(&libs.ffmpeg, "-version")
-                        .unwrap_or_else(|| libs.ffmpeg.display().to_string());
-                    (yt, ff)
-                })
-            })
-            .await
-            .ok()
-            .flatten();
+            let probed = gio::spawn_blocking(installed_tool_versions)
+                .await
+                .ok()
+                .flatten();
             if dialog_weak.upgrade().is_none() {
                 return;
             }

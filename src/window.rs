@@ -21,6 +21,42 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
     b
 }
 
+/// Default file name for a probed video under the current preferences:
+/// title default with the remux target and audio mode applied. The
+/// intake sanitizes it and falls back to the URL stem.
+fn default_name_for(
+    settings: &crate::settings::AppSettings,
+    title: &str,
+    id: &str,
+    audio_only: bool,
+) -> String {
+    let remux = crate::video::remux_video_active(&settings.remux_video());
+    crate::video::default_video_filename(title, id, audio_only, remux.as_deref())
+}
+
+/// Hidden error caption for a preferences group: callers set its text
+/// and show it on failure. One builder so all dialogs stay identical.
+fn error_label(group: &adw::PreferencesGroup) -> gtk4::Label {
+    let label = gtk4::Label::builder()
+        .label("")
+        .css_classes(["error", "caption"])
+        .halign(gtk4::Align::Start)
+        .visible(false)
+        .build();
+    group.add(&label);
+    label
+}
+
+/// Close the dialog when the button is clicked (Cancel/close actions).
+pub(crate) fn close_on_click(btn: &gtk4::Button, dialog: &adw::Dialog) {
+    let weak = dialog.downgrade();
+    btn.connect_clicked(move |_| {
+        if let Some(d) = weak.upgrade() {
+            d.close();
+        }
+    });
+}
+
 /// Open `path` in the file manager (`reveal` shows the containing folder
 /// with the file selected instead of opening the folder itself).
 pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: bool) {
@@ -82,6 +118,15 @@ fn another_queued(manager: &DownloadManager, item: &crate::download::DownloadIte
 /// build_row's tick.
 pub(crate) fn should_pulse(status: DownloadStatus, is_live: bool, progress: f64) -> bool {
     status == DownloadStatus::Downloading && (is_live || progress <= 0.0)
+}
+
+/// Set a row button's icon, tooltip, and screen-reader label from one
+/// verb: the three always agree for state-toggle buttons, so binding
+/// them keeps the accessible name from drifting off the visual one.
+fn set_toggle_verb(btn: &gtk4::Button, icon: &str, tip: &str) {
+    btn.set_icon_name(icon);
+    btn.set_tooltip_text(Some(tip));
+    btn.update_property(&[gtk4::accessible::Property::Label(tip)]);
 }
 
 fn refresh_row(
@@ -146,15 +191,17 @@ fn refresh_row(
     w.delete_btn.set_visible(done);
 
     if item.status() == DownloadStatus::Paused {
-        w.toggle_btn.set_icon_name("media-playback-start-symbolic");
-        w.toggle_btn.set_tooltip_text(Some(&gettext("Resume")));
-        w.toggle_btn
-            .update_property(&[gtk4::accessible::Property::Label(&gettext("Resume"))]);
+        set_toggle_verb(
+            &w.toggle_btn,
+            "media-playback-start-symbolic",
+            &gettext("Resume"),
+        );
     } else {
-        w.toggle_btn.set_icon_name("media-playback-pause-symbolic");
-        w.toggle_btn.set_tooltip_text(Some(&gettext("Pause")));
-        w.toggle_btn
-            .update_property(&[gtk4::accessible::Property::Label(&gettext("Pause"))]);
+        set_toggle_verb(
+            &w.toggle_btn,
+            "media-playback-pause-symbolic",
+            &gettext("Pause"),
+        );
     }
 
     // Block map: only while pieces are still landing. Other states
@@ -171,6 +218,137 @@ fn refresh_row(
     if w.map_revealer.reveals_child() {
         w.blocks.queue_draw();
     }
+}
+
+/// Weak refs to one row's refreshable widgets, in build order: detail,
+/// progress, spinner, toggle, stop, queue, retry, reveal, delete,
+/// revealer, blocks, status, name.
+type RowWeaks = (
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+    glib::WeakRef<gtk4::Widget>,
+);
+
+/// Strongly-held row widgets for one refresh tick: the two text labels
+/// plus the refresh bundle.
+struct LiveRow {
+    status: gtk4::Label,
+    name: gtk4::Label,
+    widgets: RowWidgets,
+}
+
+/// Upgrade a row's weak refs to strong typed widgets. `None` when
+/// widgets are gone (row destroyed — normal, silent) or mistyped (UI
+/// drift — warns here, never panics, per the no-panic-rows rule).
+fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
+    let (
+        w_detail,
+        w_prog,
+        w_spin,
+        w_tog,
+        w_stop,
+        w_queue,
+        w_retry,
+        w_reveal,
+        w_del,
+        w_rev,
+        w_map,
+        w_status,
+        w_name,
+    ) = weaks;
+    let (
+        Some(detail_w),
+        Some(progress_w),
+        Some(spinner_w),
+        Some(tog_w),
+        Some(stop_w),
+        Some(queue_w),
+        Some(retry_w),
+        Some(reveal_w),
+        Some(del_w),
+        Some(rev_w),
+        Some(map_w),
+        Some(status_w),
+        Some(name_w),
+    ) = (
+        w_detail.upgrade(),
+        w_prog.upgrade(),
+        w_spin.upgrade(),
+        w_tog.upgrade(),
+        w_stop.upgrade(),
+        w_queue.upgrade(),
+        w_retry.upgrade(),
+        w_reveal.upgrade(),
+        w_del.upgrade(),
+        w_rev.upgrade(),
+        w_map.upgrade(),
+        w_status.upgrade(),
+        w_name.upgrade(),
+    )
+    else {
+        return None;
+    };
+    let (
+        Ok(status),
+        Ok(name),
+        Ok(detail),
+        Ok(progress),
+        Ok(spinner),
+        Ok(toggle),
+        Ok(stop),
+        Ok(queue),
+        Ok(retry),
+        Ok(reveal),
+        Ok(delete),
+        Ok(map),
+        Ok(blocks),
+    ) = (
+        status_w.downcast::<gtk4::Label>(),
+        name_w.downcast::<gtk4::Label>(),
+        detail_w.downcast::<gtk4::Label>(),
+        progress_w.downcast::<gtk4::ProgressBar>(),
+        spinner_w.downcast::<adw::Spinner>(),
+        tog_w.downcast::<gtk4::Button>(),
+        stop_w.downcast::<gtk4::Button>(),
+        queue_w.downcast::<gtk4::Button>(),
+        retry_w.downcast::<gtk4::Button>(),
+        reveal_w.downcast::<gtk4::Button>(),
+        del_w.downcast::<gtk4::Button>(),
+        rev_w.downcast::<gtk4::Revealer>(),
+        map_w.downcast::<gtk4::DrawingArea>(),
+    )
+    else {
+        tracing::warn!("Grab: unexpected row widget types; skipping row refresh");
+        return None;
+    };
+    Some(LiveRow {
+        status,
+        name,
+        widgets: RowWidgets {
+            detail,
+            progress,
+            spinner,
+            toggle_btn: toggle,
+            stop_btn: stop,
+            queue_btn: queue,
+            retry_btn: retry,
+            reveal_btn: reveal,
+            delete_btn: delete,
+            map_revealer: map,
+            blocks,
+            expanded: Rc::clone(expanded),
+        },
+    })
 }
 
 fn build_row(
@@ -370,107 +548,17 @@ fn build_row(
     let m_sync = Rc::clone(manager);
     let exp_sync = Rc::clone(&expanded);
     let updater = move |it: &crate::download::DownloadItem| {
-        let (
-            w_detail,
-            w_prog,
-            w_spin,
-            w_tog,
-            w_stop,
-            w_queue,
-            w_retry,
-            w_reveal,
-            w_del,
-            w_rev,
-            w_map,
-            w_status,
-            w_name,
-        ) = &weaks;
-        if let (
-            Some(d),
-            Some(p),
-            Some(s),
-            Some(t),
-            Some(x),
-            Some(q),
-            Some(r),
-            Some(o),
-            Some(y),
-            Some(rv),
-            Some(mp),
-            Some(st),
-            Some(n),
-        ) = (
-            w_detail.upgrade(),
-            w_prog.upgrade(),
-            w_spin.upgrade(),
-            w_tog.upgrade(),
-            w_stop.upgrade(),
-            w_queue.upgrade(),
-            w_retry.upgrade(),
-            w_reveal.upgrade(),
-            w_del.upgrade(),
-            w_rev.upgrade(),
-            w_map.upgrade(),
-            w_status.upgrade(),
-            w_name.upgrade(),
-        ) {
-            // A mismatched widget type means the UI definition drifted:
-            // warn and skip this row's refresh instead of panicking.
-            let (
-                Ok(st),
-                Ok(n),
-                Ok(detail),
-                Ok(progress),
-                Ok(spinner),
-                Ok(toggle),
-                Ok(stop),
-                Ok(queue),
-                Ok(retry),
-                Ok(reveal),
-                Ok(delete),
-                Ok(map),
-                Ok(blocks),
-            ) = (
-                st.downcast::<gtk4::Label>(),
-                n.downcast::<gtk4::Label>(),
-                d.downcast::<gtk4::Label>(),
-                p.downcast::<gtk4::ProgressBar>(),
-                s.downcast::<adw::Spinner>(),
-                t.downcast::<gtk4::Button>(),
-                x.downcast::<gtk4::Button>(),
-                q.downcast::<gtk4::Button>(),
-                r.downcast::<gtk4::Button>(),
-                o.downcast::<gtk4::Button>(),
-                y.downcast::<gtk4::Button>(),
-                rv.downcast::<gtk4::Revealer>(),
-                mp.downcast::<gtk4::DrawingArea>(),
-            )
-            else {
-                tracing::warn!("Grab: unexpected row widget types; skipping row refresh");
-                return;
-            };
-            n.set_text(&it.filename());
-            st.set_text(&it.status().label());
-            refresh_row(
-                it,
-                &RowWidgets {
-                    detail,
-                    progress,
-                    spinner,
-                    toggle_btn: toggle,
-                    stop_btn: stop,
-                    queue_btn: queue,
-                    retry_btn: retry,
-                    reveal_btn: reveal,
-                    delete_btn: delete,
-                    map_revealer: map,
-                    blocks,
-                    expanded: Rc::clone(&exp_sync),
-                },
-                another_queued(&m_sync, it),
-                m_sync.is_live_video(it.id()),
-            );
-        }
+        let Some(row) = upgrade_row(&weaks, &exp_sync) else {
+            return;
+        };
+        row.name.set_text(&it.filename());
+        row.status.set_text(&it.status().label());
+        refresh_row(
+            it,
+            &row.widgets,
+            another_queued(&m_sync, it),
+            m_sync.is_live_video(it.id()),
+        );
     };
     let u1 = updater.clone();
     item.connect_progress_notify(move |it| u1(it));
@@ -1247,13 +1335,7 @@ fn show_rename_dialog(
         .build();
     group.add(&name_row);
 
-    let error_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    group.add(&error_label);
+    let error_label = error_label(&group);
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
@@ -1275,14 +1357,7 @@ fn show_rename_dialog(
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&rename_btn));
 
-    {
-        let d = dialog.downgrade();
-        cancel_btn.connect_clicked(move |_| {
-            if let Some(d) = d.upgrade() {
-                d.close();
-            }
-        });
-    }
+    close_on_click(&cancel_btn, &dialog);
     {
         let m = manager.clone();
         let dialog = dialog.downgrade();
@@ -1354,10 +1429,10 @@ fn submit_probed_single(
     let audio_only = step.audio.is_active();
     // Default name from the video title and id; the intake
     // sanitizes it and falls back to the URL stem.
-    let remux = crate::video::remux_video_active(&manager.settings().remux_video());
-    let auto = typed.is_empty().then(|| {
-        crate::video::default_video_filename(&v.title, &v.id, audio_only, remux.as_deref())
-    });
+    let settings = manager.settings();
+    let auto = typed
+        .is_empty()
+        .then(|| default_name_for(settings, &v.title, &v.id, audio_only));
     let name = if typed.is_empty() {
         auto.as_deref()
     } else {
@@ -1405,6 +1480,59 @@ fn submit_probed_single(
             set_lookup_add(lookup_add, true);
         }
     }
+}
+
+/// Dispatch a fresh preview to its submit path: singles queue with
+/// their pinned format, collections open the item picker. The
+/// freshness gate above the call site stays put.
+#[allow(clippy::too_many_arguments)]
+fn submit_probe(
+    manager: &Rc<DownloadManager>,
+    dest: &Rc<RefCell<String>>,
+    dialog: &glib::WeakRef<adw::Dialog>,
+    step: &Rc<VideoStep>,
+    formats: &Rc<RefCell<Vec<Option<String>>>>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    nav: &adw::NavigationView,
+    probe: crate::video::ProbeResult,
+) {
+    match probe {
+        crate::video::ProbeResult::Single(v) => {
+            submit_probed_single(manager, dest, dialog, step, formats, lookup_add, &v);
+        }
+        crate::video::ProbeResult::Playlist(pl) => {
+            // Collections queue through the item picker: one row per
+            // chosen entry, each re-resolving its own page at download
+            // time.
+            push_playlist_items_page(
+                nav,
+                manager.clone(),
+                dest.clone(),
+                dialog.clone(),
+                pl,
+                step.audio.is_active(),
+            );
+        }
+    }
+}
+
+/// Report a failed plain-queue fallback on the details page: drop the
+/// stale probe, log, show the error, re-enable Add.
+fn fallback_plain_failed(
+    info: &Rc<RefCell<Option<crate::video::ProbeResult>>>,
+    step: &Rc<VideoStep>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    url: &str,
+    error: &str,
+) {
+    info.borrow_mut().take();
+    tracing::warn!(
+        host = %crate::video::page_host(url),
+        error = %error,
+        "plain fallback failed"
+    );
+    show_video_error(step, error);
+    set_lookup_add(lookup_add, true);
 }
 
 /// Queue a probed link as a plain file and close the dialog: the
@@ -1687,13 +1815,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         });
     }
 
-    let error_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    group.add(&error_label);
+    let error_label = error_label(&group);
     {
         let el = error_label.clone();
         let ur = url_row.clone();
@@ -1850,14 +1972,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                             match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
-                                    info_b.borrow_mut().take();
-                                    tracing::warn!(
-                                        host = %crate::video::page_host(&url),
-                                        error = %pe.to_string(),
-                                        "plain fallback failed"
+                                    fallback_plain_failed(
+                                        &info_b,
+                                        &step_b,
+                                        &lookup_add_b,
+                                        &url,
+                                        &pe,
                                     );
-                                    show_video_error(&step_b, &pe);
-                                    set_lookup_add(&lookup_add_b, true);
                                     return;
                                 }
                             }
@@ -1909,14 +2030,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                             match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
                                 Ok(()) => return,
                                 Err(pe) => {
-                                    info_b.borrow_mut().take();
-                                    tracing::warn!(
-                                        host = %crate::video::page_host(&url),
-                                        error = %pe.to_string(),
-                                        "plain fallback failed"
+                                    fallback_plain_failed(
+                                        &info_b,
+                                        &step_b,
+                                        &lookup_add_b,
+                                        &url,
+                                        &pe,
                                     );
-                                    show_video_error(&step_b, &pe);
-                                    set_lookup_add(&lookup_add_b, true);
                                     return;
                                 }
                             }
@@ -1946,14 +2066,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 if step_b.name.text().trim().is_empty() {
                                     let typed = file_b.text().trim().to_string();
                                     let base = if typed.is_empty() {
-                                        let remux = crate::video::remux_video_active(
-                                            &settings_b.remux_video(),
-                                        );
-                                        crate::video::default_video_filename(
+                                        default_name_for(
+                                            &settings_b,
                                             &v.title,
                                             &v.id,
                                             step_b.audio.is_active(),
-                                            remux.as_deref(),
                                         )
                                     } else {
                                         typed
@@ -2151,12 +2268,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             if let Some(p) = info.borrow().as_ref() {
-                let remux = crate::video::remux_video_active(&settings.remux_video());
-                name.set_text(&crate::video::default_video_filename(
+                name.set_text(&default_name_for(
+                    &settings,
                     p.title(),
                     p.video_id(),
                     audio.is_active(),
-                    remux.as_deref(),
                 ));
                 name.grab_focus();
             }
@@ -2173,21 +2289,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             if let Some(p) = info.borrow().as_ref() {
                 let active = sw.is_active();
                 let current = name.text().to_string();
-                let remux = crate::video::remux_video_active(&settings.remux_video());
                 if current.trim().is_empty()
-                    || current
-                        == crate::video::default_video_filename(
-                            p.title(),
-                            p.video_id(),
-                            !active,
-                            remux.as_deref(),
-                        )
+                    || current == default_name_for(&settings, p.title(), p.video_id(), !active)
                 {
-                    name.set_text(&crate::video::default_video_filename(
+                    name.set_text(&default_name_for(
+                        &settings,
                         p.title(),
                         p.video_id(),
                         active,
-                        remux.as_deref(),
                     ));
                 }
             }
@@ -2322,14 +2431,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     dialog.set_child(Some(&nav));
     dialog.set_default_widget(Some(&add_btn));
 
-    {
-        let d = dialog.downgrade();
-        cancel_btn.connect_clicked(move |_| {
-            if let Some(d) = d.upgrade() {
-                d.close();
-            }
-        });
-    }
+    close_on_click(&cancel_btn, &dialog);
     // One submit path for the Add button and URL apply: video pages go
     // through the Page intake (a matching preview is required so the row
     // stores the resolved page, not a stale URL), everything else keeps
@@ -2396,32 +2498,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         None
                     };
                 match ready {
-                    Some(probe) => match probe {
-                        crate::video::ProbeResult::Single(v) => {
-                            submit_probed_single(
-                                &m,
-                                &dd,
-                                &dialog_weak,
-                                &step2,
-                                &formats,
-                                &lookup_add_submit,
-                                &v,
-                            );
-                        }
-                        // Collections queue through the item picker: one
-                        // row per chosen entry, each re-resolving its own
-                        // page at download time.
-                        crate::video::ProbeResult::Playlist(pl) => {
-                            push_playlist_items_page(
-                                &nav2,
-                                m.clone(),
-                                dd.clone(),
-                                dialog_weak.clone(),
-                                pl,
-                                step2.audio.is_active(),
-                            );
-                        }
-                    },
+                    Some(probe) => submit_probe(
+                        &m,
+                        &dd,
+                        &dialog_weak,
+                        &step2,
+                        &formats,
+                        &lookup_add_submit,
+                        &nav2,
+                        probe,
+                    ),
                     None => {
                         kick(true);
                         show_video_error(
@@ -2636,13 +2722,7 @@ pub(crate) fn show_torrent_files_dialog(
         checks.push(check);
         group.add(&row);
     }
-    let error_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    group.add(&error_label);
+    let error_label = error_label(&group);
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
@@ -2829,13 +2909,7 @@ fn push_playlist_items_page(
         checks.push(check);
         group.add(&row);
     }
-    let error_label = gtk4::Label::builder()
-        .label("")
-        .css_classes(["error", "caption"])
-        .halign(gtk4::Align::Start)
-        .visible(false)
-        .build();
-    group.add(&error_label);
+    let error_label = error_label(&group);
 
     // Scrolled: big playlists must not size the dialog off-screen, but
     // propagate the natural height (capped) so the dialog grows and
@@ -2929,7 +3003,6 @@ fn push_playlist_items_page(
             }
             // One persist for the whole import, not one per row.
             manager.begin_batch();
-            let remux = crate::video::remux_video_active(&manager.settings().remux_video());
             // Story segments are addressable as their own pages: queue
             // those, so each row re-resolves its own segment instead of
             // the tray (tray + format ids downloads the first segment
@@ -2940,12 +3013,8 @@ fn push_playlist_items_page(
             for (i, item) in &chosen {
                 let page_url = crate::video::story_segment_url(&playlist.page_url, &item.id)
                     .unwrap_or_else(|| item.page_url.clone());
-                let name = crate::video::default_video_filename(
-                    &item.title,
-                    &item.id,
-                    audio_only,
-                    remux.as_deref(),
-                );
+                let settings = manager.settings();
+                let name = default_name_for(settings, &item.title, &item.id, audio_only);
                 if let Err(e) = manager.enqueue_video(
                     &page_url,
                     Some(&dest_dir.borrow()),

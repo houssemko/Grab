@@ -335,3 +335,19 @@ fn bps_maps_limits() {
     assert_eq!(bps(Some(500_000)), NonZeroU32::new(500_000));
     assert_eq!(bps(Some(u64::from(u32::MAX) + 1)), None);
 }
+
+#[test]
+fn seed_limits_hit_matrix() {
+    // Ratio rule only: uploaded past ratio × total finishes.
+    let t0 = std::time::Instant::now();
+    assert!(seed_limits_hit(2.0, 0, t0, 1000, 2000));
+    assert!(!seed_limits_hit(2.0, 0, t0, 1000, 1999));
+    // Disabled ratio (0.0) never fires, even fully seeded.
+    assert!(!seed_limits_hit(0.0, 0, t0, 1000, 100000));
+    // Zero total never fires the ratio rule (no division by zero).
+    assert!(!seed_limits_hit(2.0, 0, t0, 0, 2000));
+    // Time rule only: elapsed past the limit finishes.
+    let old = t0 - std::time::Duration::from_secs(61 * 60);
+    assert!(seed_limits_hit(0.0, 60, old, 1000, 0));
+    assert!(!seed_limits_hit(0.0, 60, t0, 1000, 0));
+}

@@ -30,9 +30,6 @@ static GRESOURCE_DATA: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/grab.gr
 /// install prefix (or GRAB_LOCALEDIR override). Without catalogs gettext
 /// returns the English msgids unchanged (dev/test).
 fn init_locale() {
-    // Explicit override, Flatpak (/app), or the cargo build prefix.
-    // bindtextdomain tolerates a missing dir; without .mo catalogs
-    // gettext returns the English msgids unchanged (dev/test).
     // First existing dir wins: explicit override, Flatpak (/app), or
     // the cargo build prefix. A missing dir is harmless (gettext falls
     // back to the English msgids), so no further fallback is needed.
