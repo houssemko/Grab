@@ -3463,6 +3463,96 @@ fn live_capture_abort_adopts_partial() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fake yt-dlp emitting a scripted progress stream: tiny first total,
+/// growth past it, then a downward estimate wobble with climbing bytes
+/// (the stuck-full shape from a real 104 MB HLS row). Finishes by
+/// writing the `-o` output and printing its path (what discover adopts).
+fn fake_ytdlp_hls_scripted(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-scripted");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo '[Grab];downloading;1000000;2000000;2000000;NA;NA'
+echo '[Grab];downloading;2000000;2000000;2000000;NA;NA'
+echo '[Grab];downloading;2000000;100000000;100000000;NA;NA'
+echo '[Grab];downloading;44000000;100000000;100000000;NA;NA'
+echo '[Grab];downloading;46000000;40000000;40000000;NA;NA'
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_map_survives_estimate_wobble() {
+    // Block-map regression test for the stuck-full row: tiny first
+    // total, refined-up growth, then a downward wobble with climbing
+    // bytes must leave the map at the true fraction (~46%), not flood
+    // it to full. Replays the EngineMsg stream onto a bitmap with the
+    // row's own replace-on-init semantics.
+    use crate::download::EngineMsg;
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-wobble-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_scripted(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let mut inits = Vec::new();
+    let mut marked = std::collections::HashSet::new();
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            EngineMsg::SegmentsInit { total } => {
+                inits.push(total);
+                marked.clear();
+            }
+            EngineMsg::PieceDone(idx) => {
+                marked.insert(idx);
+            }
+            _ => {}
+        }
+    }
+    // One init for the first total, one rescale past it — the downward
+    // wobble must not rebuild the grid.
+    assert_eq!(inits, vec![2_000_000u64, 100_000_000u64], "{inits:?}");
+    // 46 MB of 100 MB on 1 MiB pieces: ~43 of 96 cells, never ~full.
+    let frac = marked.len() as f64 / 96.0;
+    assert!(
+        (0.35..0.6).contains(&frac),
+        "map fraction {frac} ({} marks), expected ~0.46",
+        marked.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fake yt-dlp for VOD HLS: logs argv, expands the `-o` template's
 /// `%(ext)s`, writes bytes there (what discover adopts).
 fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
