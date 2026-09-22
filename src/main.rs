@@ -2,6 +2,7 @@ mod application;
 mod cookies;
 mod download;
 mod install_help;
+mod install_progress;
 mod preferences;
 mod settings;
 mod torrent;

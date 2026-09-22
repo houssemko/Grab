@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: grab\n"
 "Report-Msgid-Bugs-To: https://github.com/houssemko/Grab/issues\n"
-"POT-Creation-Date: 2026-09-20 15:55+0000\n"
+"POT-Creation-Date: 2026-09-22 15:51+0000\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -18,457 +18,1325 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/application.rs:122 src/window.rs:2109
+#: src/application.rs:121 src/window.rs:2349
 msgid "Could not read that .torrent file"
 msgstr ""
 
-#: src/application.rs:242
+#: src/application.rs:235
 msgid "This will cancel the active download."
 msgid_plural "This will cancel {n} active downloads."
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/application.rs:248
+#: src/application.rs:244
 msgid "Cancel All Downloads?"
 msgstr ""
 
-#: src/application.rs:248 src/application.rs:251 src/application.rs:252 src/application.rs:266 src/application.rs:314 src/application.rs:410 src/window.rs:124 src/window.rs:126 src/window.rs:205 src/window.rs:807 src/window.rs:931 src/window.rs:1264 src/window.rs:2146 src/window.rs:2517 src/window.rs:2648
+#: src/application.rs:187 src/window.rs:169 src/window.rs:171 src/window.rs:383
 msgid "Cancel"
 msgstr ""
 
-#: src/application.rs:248 src/application.rs:252 src/application.rs:410 src/window.rs:807
+#: src/application.rs:246 src/application.rs:391 src/window.rs:935
 #. Plain items: these actions have no accelerators,
 #. and from_action would render an empty shortcut cell
 #. implying a keybinding that doesn't exist.
 msgid "Cancel All"
 msgstr ""
 
-#: src/application.rs:266
+#: src/application.rs:254
 msgid "Cancelled download"
 msgid_plural "Cancelled {n} downloads"
 msgstr[0] ""
 msgstr[1] ""
 
-#: src/application.rs:248 src/application.rs:311 src/application.rs:402 src/preferences.rs:37 src/preferences.rs:46 src/preferences.rs:121
+#: src/application.rs:383 src/preferences.rs:86
 msgid "Downloads"
 msgstr ""
 
-#: src/application.rs:404 src/window.rs:804 src/window.rs:838 src/window.rs:840 src/window.rs:854 src/window.rs:1442 src/window.rs:2185
+#: src/application.rs:385 src/window.rs:933 src/window.rs:968 src/window.rs:982 src/window.rs:1686 src/window.rs:2425
 msgid "New Download"
 msgstr ""
 
-#: src/application.rs:411 src/window.rs:808 src/window.rs:1106
+#: src/application.rs:392 src/window.rs:936 src/window.rs:1234
 msgid "Retry Failed"
 msgstr ""
 
-#: src/application.rs:414 src/preferences.rs:24
+#: src/application.rs:395 src/preferences.rs:80
 msgid "General"
 msgstr ""
 
-#: src/application.rs:416 src/preferences.rs:12 src/window.rs:816
+#: src/application.rs:397 src/window.rs:944 src/preferences.rs:68
 msgid "Preferences"
 msgstr ""
 
-#: src/application.rs:419
+#: src/application.rs:400
 msgid "Quit"
 msgstr ""
 
-#: src/download.rs:35 src/window.rs:554 src/window.rs:881 src/window.rs:928
+#: src/application.rs:303 src/window.rs:937
+msgid "Clear Finished"
+msgstr ""
+
+#: src/application.rs:301
+msgid "Clear Finished Downloads?"
+msgstr ""
+
+#: src/application.rs:292
+msgid "This will remove the finished download from the list. The file stays on disk."
+msgid_plural "This will remove {n} finished downloads from the list. The files stay on disk."
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/application.rs:311
+msgid "Cleared finished download"
+msgid_plural "Cleared {n} finished downloads"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/application.rs:154
+msgid "Only .torrent files can be opened directly"
+msgstr ""
+
+#: src/window.rs:1009 src/window.rs:1056 src/download.rs:35
 msgid "Queued"
 msgstr ""
 
-#: src/download.rs:36 src/window.rs:653 src/window.rs:926 src/window.rs:1981 src/window.rs:2015
+#: src/window.rs:1054 src/download.rs:36
 msgid "Downloading"
 msgstr ""
 
-#: src/download.rs:37 src/download.rs:3518 src/window.rs:927
+#: src/window.rs:1055 src/download.rs:37
 msgid "Paused"
 msgstr ""
 
-#: src/download.rs:38 src/window.rs:929
+#: src/window.rs:1057 src/download.rs:38
 msgid "Done"
 msgstr ""
 
-#: src/download.rs:39 src/window.rs:808 src/window.rs:930 src/window.rs:1106
+#: src/window.rs:1058 src/download.rs:39 src/install_progress.rs:120
 msgid "Failed"
 msgstr ""
 
-#: src/download.rs:40 src/window.rs:931
+#: src/window.rs:1059 src/download.rs:40
 msgid "Cancelled"
 msgstr ""
 
-#: src/download.rs:440
-msgid "Magnet link is too long (max {n} characters)"
-msgstr ""
-
-#: src/download.rs:454 src/download.rs:3302
-msgid "Torrent file is missing from the archive"
-msgstr ""
-
-#: src/download.rs:457
-msgid "URL is too long (max {n} characters)"
-msgstr ""
-
-#: src/download.rs:466 src/download.rs:487
-msgid "Invalid URL: {url}"
-msgstr ""
-
-#: src/download.rs:468
-msgid "URLs with a username/password are not supported"
-msgstr ""
-
-#: src/download.rs:472
-msgid "FTP is not supported (use http/https)"
-msgstr ""
-
-#: src/download.rs:473
-msgid "Unsupported scheme: {s} (use http/https)"
-msgstr ""
-
-#: src/download.rs:1143 src/download.rs:2152
-#. Different object than probed: retrying these ranges can
-#. never succeed, so fail terminally right away.
-msgid "File changed on server"
-msgstr ""
-
-#: src/download.rs:1295 src/download.rs:1301 src/download.rs:1307 src/download.rs:3228 src/download.rs:3229 src/video.rs:358
-msgid "Download interrupted"
-msgstr ""
-
-#: src/download.rs:1311 src/download.rs:1554
-msgid "Incomplete download"
-msgstr ""
-
-#: src/download.rs:1367 src/download.rs:2010 src/download.rs:2125
-msgid "Connection timed out"
-msgstr ""
-
-#: src/download.rs:1411
-#. Even a plain GET gets 416: pathological server, stop looping.
-msgid "Server rejects range requests"
-msgstr ""
-
-#: src/download.rs:1439
-msgid "Server returned an unexpected file size"
-msgstr ""
-
-#: src/download.rs:1450
-msgid "Server restarted the download with a smaller file"
-msgstr ""
-
-#: src/download.rs:1514 src/download.rs:1519 src/download.rs:2194
-msgid "Stalled connection timed out"
-msgstr ""
-
-#: src/download.rs:2013
-msgid "Range requests not supported"
-msgstr ""
-
-#: src/download.rs:2024
-msgid "Bad Content-Range"
-msgstr ""
-
-#: src/download.rs:2101
-msgid "Empty response"
-msgstr ""
-
-#: src/download.rs:2157
-msgid "Server ignored range request"
-msgstr ""
-
-#: src/download.rs:2169 src/download.rs:2175
-msgid "Piece stalled"
-msgstr ""
-
-#: src/download.rs:2180
-msgid "Server sent too much data"
-msgstr ""
-
-#: src/download.rs:2206
-msgid "Incomplete piece"
-msgstr ""
-
-#: src/download.rs:2705 src/download.rs:3046
-msgid "Finished • {size}"
-msgstr ""
-
-#: src/download.rs:2705 src/download.rs:2707 src/download.rs:3046 src/download.rs:3048
-msgid "Finished"
-msgstr ""
-
-#: src/download.rs:2768
-msgid "Invalid speed limit: {limit}"
-msgstr ""
-
-#: src/download.rs:2860
-msgid "Starting…"
-msgstr ""
-
-#: src/download.rs:2862
-msgid "Connecting to {host}…"
-msgstr ""
-
-#: src/download.rs:2932
-msgid " • ↑ {upspeed}/s · {up} up{ratio}"
-msgstr ""
-
-#: src/download.rs:2951
-msgid "{pct}% ({amounts}) • {speed} • About {eta} left{filter}{up}"
-msgstr ""
-
-#: src/download.rs:2962
-msgid "{done} • {speed}{filter}{up}"
-msgstr ""
-
-#: src/download.rs:3340
-msgid "Starting torrent…"
-msgstr ""
-
-#: src/download.rs:3474
-msgid "Download finished"
-msgstr ""
-
-#: src/download.rs:3476
-msgid "Download failed"
-msgstr ""
-
-#: src/download.rs:3518
-msgid "Paused • {pct}%"
-msgstr ""
-
-#: src/download.rs:3549 src/download.rs:3848
-msgid "Download not found"
-msgstr ""
-
-#: src/download.rs:3551
-msgid "Renaming torrent downloads isn't supported"
-msgstr ""
-
-#: src/download.rs:3556
-msgid "Pause or wait for the download to finish first"
-msgstr ""
-
-#: src/download.rs:3560
-msgid "Only completed or not-yet-started downloads can be renamed"
-msgstr ""
-
-#: src/download.rs:3569
-msgid "That isn't a valid file name"
-msgstr ""
-
-#: src/preferences.rs:42
-msgid "Destination"
-msgstr ""
-
-#: src/preferences.rs:46 src/preferences.rs:121
-msgid "(System Downloads folder)"
-msgstr ""
-
-#: src/preferences.rs:58 src/window.rs:1563 src/window.rs:1582
+#: src/window.rs:1807 src/window.rs:1826 src/preferences.rs:107
 msgid "Choose…"
 msgstr ""
 
-#: src/preferences.rs:59 src/preferences.rs:96 src/window.rs:1583 src/window.rs:1597
+#: src/window.rs:1827 src/window.rs:1841 src/preferences.rs:108 src/preferences.rs:148
 msgid "Choose download folder"
 msgstr ""
 
-#: src/preferences.rs:65 src/preferences.rs:69
-msgid "Use system default"
-msgstr ""
-
-#: src/preferences.rs:72
-msgid "Download folder"
-msgstr ""
-
-#: src/preferences.rs:79
-msgid "Restrict filenames to ASCII"
-msgstr ""
-
-#: src/preferences.rs:80
-msgid "Use only ASCII characters in filenames"
-msgstr ""
-
-#: src/preferences.rs:97 src/window.rs:1598
+#: src/window.rs:1842 src/preferences.rs:149
 msgid "Select Folder"
 msgstr ""
 
-#: src/preferences.rs:27 src/preferences.rs:127 src/preferences.rs:132
+#: src/window.rs:1761 src/preferences.rs:559
+msgid "Install"
+msgstr ""
+
+#: src/window.rs:1752
+msgid "Audio only"
+msgstr ""
+
+#: src/window.rs:1758 src/preferences.rs:776
+msgid "Support tools"
+msgstr ""
+
+#: src/window.rs:2234 src/preferences.rs:829
+msgid "How to Install"
+msgstr ""
+
+#: src/window.rs:2235 src/preferences.rs:830
+msgid "Show terminal install instructions"
+msgstr ""
+
+#: src/window.rs:76
+msgid "show"
+msgstr ""
+
+#: src/window.rs:78
+msgid "open"
+msgstr ""
+
+#: src/window.rs:81
+msgid "Could not {verb} {what} in the file manager: {e}"
+msgstr ""
+
+#: src/window.rs:197
+msgid "Resume"
+msgstr ""
+
+#: src/window.rs:203 src/window.rs:382
+msgid "Pause"
+msgstr ""
+
+#: src/window.rs:384
+msgid "Queue for later"
+msgstr ""
+
+#: src/window.rs:385 src/window.rs:1774
+msgid "Retry"
+msgstr ""
+
+#: src/window.rs:386
+msgid "Show in Folder"
+msgstr ""
+
+#: src/window.rs:387
+msgid "Move to Trash"
+msgstr ""
+
+#: src/window.rs:388
+msgid "Remove from list"
+msgstr ""
+
+#: src/window.rs:420
+msgid "Downloaded blocks"
+msgstr ""
+
+#: src/window.rs:468
+msgid "Rename…"
+msgstr ""
+
+#: src/window.rs:683
+msgid "Queued for later"
+msgstr ""
+
+#: src/window.rs:685
+msgid "No other downloads waiting"
+msgstr ""
+
+#: src/window.rs:705
+msgid "Moved to Trash"
+msgstr ""
+
+#: src/window.rs:727
+msgid "Removed {name}"
+msgstr ""
+
+#: src/window.rs:728
+msgid "Undo"
+msgstr ""
+
+#: src/window.rs:782
+msgid "Downloading files"
+msgstr ""
+
+#: src/window.rs:882
+msgid "Downloads continue in the background after the window is closed"
+msgstr ""
+
+#: src/window.rs:928
+msgid "Grab"
+msgstr ""
+
+#: src/window.rs:929
+msgid "Download Manager"
+msgstr ""
+
+#: src/window.rs:939
+msgid "Open Download Folder"
+msgstr ""
+
+#: src/window.rs:945
+msgid "Keyboard Shortcuts"
+msgstr ""
+
+#: src/window.rs:946
+msgid "About"
+msgstr ""
+
+#: src/window.rs:951 src/window.rs:953
+msgid "Main Menu"
+msgstr ""
+
+#: src/window.rs:958
+msgid "Search (Ctrl+F)"
+msgstr ""
+
+#: src/window.rs:960
+msgid "Search"
+msgstr ""
+
+#: src/window.rs:966
+msgid "New Download (Ctrl+N)"
+msgstr ""
+
+#: src/window.rs:978
+msgid "No Downloads Yet"
+msgstr ""
+
+#: src/window.rs:979
+msgid "Add a download to get started"
+msgstr ""
+
+#: src/window.rs:1008
+msgid "Active"
+msgstr ""
+
+#: src/window.rs:1010
+msgid "Downloaded"
+msgstr ""
+
+#: src/window.rs:1048
+msgid "Search downloads"
+msgstr ""
+
+#: src/window.rs:1053
+msgid "All"
+msgstr ""
+
+#: src/window.rs:1069
+msgid "Filter by status"
+msgstr ""
+
+#: src/window.rs:1218
+msgid "Downloads continue in the background"
+msgstr ""
+
+#: src/window.rs:1233
+msgid "Some downloads failed"
+msgstr ""
+
+#: src/window.rs:1363
+msgid "Rename Download"
+msgstr ""
+
+#: src/window.rs:1373 src/window.rs:1723
+msgid "File name"
+msgstr ""
+
+#: src/window.rs:1386 src/window.rs:2386 src/window.rs:2738
+msgid "_Cancel"
+msgstr ""
+
+#: src/window.rs:1390
+msgid "_Rename"
+msgstr ""
+
+#: src/window.rs:1696
+msgid "URL"
+msgstr ""
+
+#: src/window.rs:1705
+msgid "File name (optional)"
+msgstr ""
+
+#: src/window.rs:1729 src/window.rs:1733
+msgid "Revert to Title"
+msgstr ""
+
+#: src/window.rs:1746
+msgid "Uses your preferred quality"
+msgstr ""
+
+#: src/window.rs:1753
+msgid "Skip the video track"
+msgstr ""
+
+#: src/window.rs:1762
+msgid "Download the yt-dlp support tools"
+msgstr ""
+
+#: src/window.rs:1646
+msgid "{} story"
+msgid_plural "{} stories"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:1648
+msgid "{} highlight"
+msgid_plural "{} highlights"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:1650
+msgid "{} item"
+msgid_plural "{} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:1808
+msgid "Choose a .torrent file"
+msgstr ""
+
+#: src/window.rs:1812
+msgid "Torrent file"
+msgstr ""
+
+#: src/window.rs:1830
+msgid "Save to"
+msgstr ""
+
+#: src/window.rs:2324
+msgid "Torrent files"
+msgstr ""
+
+#: src/window.rs:2330
+msgid "Choose torrent file"
+msgstr ""
+
+#: src/window.rs:2331
+msgid "Add Torrent"
+msgstr ""
+
+#: src/window.rs:2159
+msgid "No items found in this playlist"
+msgstr ""
+
+#: src/window.rs:2390 src/window.rs:2412 src/window.rs:2639
+msgid "_Add Download"
+msgstr ""
+
+#: src/window.rs:2637
+msgid "_Continue"
+msgstr ""
+
+#: src/window.rs:2701
+msgid "Files"
+msgstr ""
+
+#: src/window.rs:2703
+msgid "{} file"
+msgid_plural "{} files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:2814
+msgid "Select at least one file"
+msgstr ""
+
+#: src/window.rs:1715
+msgid "Looking up media…"
+msgstr ""
+
+#: src/window.rs:1745
+msgid "Media format"
+msgstr ""
+
+#: src/window.rs:1771
+msgid "Couldn't load the media preview"
+msgstr ""
+
+#: src/window.rs:2431
+msgid "Media Details"
+msgstr ""
+
+#: src/window.rs:2522 src/window.rs:2551
+msgid "Still looking up the media — wait for the preview, then add."
+msgstr ""
+
+#: src/window.rs:1672 src/window.rs:2890
+msgid "Showing the first {n} of {total}"
+msgstr ""
+
+#: src/window.rs:2969
+msgid "_Queue {} item"
+msgid_plural "_Queue {} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/window.rs:3006
+msgid "Select at least one item"
+msgstr ""
+
+#: src/window.rs:166
+msgid "Stop recording"
+msgstr ""
+
+#: src/window.rs:163
+msgid "Stop"
+msgstr ""
+
+#: src/window.rs:1747 src/window.rs:2136
+msgid "Automatic"
+msgstr ""
+
+#: src/window.rs:2747 src/window.rs:2942
+msgid "Select All"
+msgstr ""
+
+#: src/window.rs:2749 src/window.rs:2944
+msgid "Select None"
+msgstr ""
+
+#: src/window.rs:2770
+msgid "_Add {} file"
+msgid_plural "_Add {} files"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/preferences.rs:91
+msgid "Destination"
+msgstr ""
+
+#: src/preferences.rs:95 src/preferences.rs:173
+msgid "(System Downloads folder)"
+msgstr ""
+
+#: src/preferences.rs:114 src/preferences.rs:118
+msgid "Use system default"
+msgstr ""
+
+#: src/preferences.rs:121
+msgid "Download folder"
+msgstr ""
+
+#: src/preferences.rs:128
+msgid "Restrict filenames to ASCII"
+msgstr ""
+
+#: src/preferences.rs:129
+msgid "Use only ASCII characters in filenames"
+msgstr ""
+
+#: src/preferences.rs:179
 msgid "Network"
 msgstr ""
 
-#: src/preferences.rs:132
+#: src/preferences.rs:184
 msgid "Network and Queue"
 msgstr ""
 
-#: src/preferences.rs:136
+#: src/preferences.rs:188
 msgid "Simultaneous downloads"
 msgstr ""
 
-#: src/preferences.rs:145
+#: src/preferences.rs:197
 msgid "Connections per download"
 msgstr ""
 
-#: src/preferences.rs:150
+#: src/preferences.rs:202
 msgid "Files under ~16 MB always use one connection"
 msgstr ""
 
-#: src/preferences.rs:158
+#: src/preferences.rs:210
 msgid "Speed limit"
 msgstr ""
 
-#: src/preferences.rs:161
+#: src/preferences.rs:213
 msgid "Per download, e.g. 500K, 2M; empty means unlimited"
 msgstr ""
 
-#: src/preferences.rs:423
+#: src/preferences.rs:314
 msgid "Notifications"
 msgstr ""
 
-#: src/preferences.rs:426
+#: src/preferences.rs:317
 msgid "Notify when downloads finish"
 msgstr ""
 
-#: src/preferences.rs:434
+#: src/preferences.rs:325
 msgid "When closing with downloads still running"
 msgstr ""
 
-#: src/preferences.rs:442
+#: src/preferences.rs:333
 msgid "Power"
 msgstr ""
 
-#: src/preferences.rs:445
+#: src/preferences.rs:336
 msgid "Prevent sleep during downloads"
 msgstr ""
 
-#: src/preferences.rs:33 src/preferences.rs:326 src/preferences.rs:463
+#: src/preferences.rs:354
 msgid "Torrent"
 msgstr ""
 
-#: src/preferences.rs:468
+#: src/preferences.rs:359
 msgid "Sharing"
 msgstr ""
 
-#: src/preferences.rs:471
+#: src/preferences.rs:362
 msgid "Seed finished downloads"
 msgstr ""
 
-#: src/preferences.rs:478
+#: src/preferences.rs:372
 msgid "Seed to ratio"
 msgstr ""
 
-#: src/preferences.rs:515
+#: src/preferences.rs:415
 msgid "Use DHT"
 msgstr ""
 
-#: src/preferences.rs:525
+#: src/preferences.rs:428
 msgid "Find peers on the local network"
 msgstr ""
 
-#: src/preferences.rs:527
+#: src/preferences.rs:430
 msgid ""
 "Discover peers on your local network. Applies when the torrent engine first "
 "starts."
 msgstr ""
 
-#: src/preferences.rs:587
+#: src/preferences.rs:455
 msgid "Peer blocklist"
 msgstr ""
 
-#: src/preferences.rs:449
+#: src/preferences.rs:458
 msgid ""
 "URL of a peer blocklist (eMule ipfilter.dat format); empty means disabled. "
 "Fetched directly, bypassing any proxy."
 msgstr ""
 
-#: src/preferences.rs:696
+#: src/preferences.rs:550
 msgid "Ready • {yt} • {ff}"
 msgstr ""
 
-#: src/preferences.rs:700 src/preferences.rs:1098 src/preferences.rs:1122 src/preferences.rs:1126 src/preferences.rs:1148 src/preferences.rs:1153
+#: src/preferences.rs:901
 msgid "Update"
 msgstr ""
 
-#: src/preferences.rs:704
+#: src/preferences.rs:558
 msgid "Not installed"
 msgstr ""
 
-#: src/preferences.rs:705 src/preferences.rs:1054 src/window.rs:1517 src/window.rs:1968
-msgid "Install"
-msgstr ""
-
-#: src/preferences.rs:736
+#: src/preferences.rs:579
 msgid "Quality"
 msgstr ""
 
-#: src/preferences.rs:741
+#: src/preferences.rs:584
 msgid "Preferred quality"
 msgstr ""
 
-#: src/window.rs:1508
-msgid "Audio only"
-msgstr ""
-
-#: src/preferences.rs:842
+#: src/preferences.rs:645
 msgid "Authentication"
 msgstr ""
 
-#: src/preferences.rs:843
+#: src/preferences.rs:646
 msgid "Age gates and member-only pages"
 msgstr ""
 
-#: src/preferences.rs:848
+#: src/preferences.rs:651
 msgid "Cookies from Browser"
 msgstr ""
 
-#: src/preferences.rs:849
+#: src/preferences.rs:652
 msgid "Reads this browser's profile directly"
 msgstr ""
 
-#: src/preferences.rs:977 src/preferences.rs:978 src/preferences.rs:981
+#: src/preferences.rs:757
 msgid "Live"
 msgstr ""
 
-#: src/preferences.rs:978
+#: src/preferences.rs:758
 msgid "Live stream recording"
 msgstr ""
 
-#: src/preferences.rs:981
+#: src/preferences.rs:761
 msgid "Live from start"
 msgstr ""
 
-#: src/preferences.rs:982
+#: src/preferences.rs:762
 msgid "Record live streams from the beginning"
 msgstr ""
 
-#: src/preferences.rs:993 src/window.rs:1514
-msgid "Support tools"
-msgstr ""
-
-#: src/preferences.rs:1017
+#: src/preferences.rs:800
 msgid "Checking…"
 msgstr ""
 
-#: src/preferences.rs:1054 src/window.rs:1968
-msgid "How to Install"
+#: src/preferences.rs:75
+msgid "Advanced"
 msgstr ""
 
-#: src/preferences.rs:1055 src/window.rs:1969
-msgid "Show terminal install instructions"
+#: src/preferences.rs:83 src/preferences.rs:575
+msgid "Media"
 msgstr ""
 
-#: src/preferences.rs:1162 src/window.rs:1981
-msgid "Downloading yt-dlp (1 of 2)…"
+#: src/preferences.rs:585
+msgid "Used for new media downloads"
 msgstr ""
 
-#: src/preferences.rs:1197 src/window.rs:2015
-msgid "Downloading ffmpeg (2 of 2)…"
+#: src/preferences.rs:777
+msgid "yt-dlp and ffmpeg resolve media pages"
 msgstr ""
 
-#: src/torrent.rs:114
+#: src/preferences.rs:780
+msgid "Media support tools"
+msgstr ""
+
+#: src/preferences.rs:554 src/preferences.rs:923 src/preferences.rs:928
+msgid "Check for Updates"
+msgstr ""
+
+#: src/preferences.rs:857
+msgid "Checking for updates…"
+msgstr ""
+
+#: src/preferences.rs:897
+msgid "Update available: {installed} → {latest}"
+msgstr ""
+
+#: src/preferences.rs:919
+msgid "Up to date • {yt} • {ff}"
+msgstr ""
+
+#: src/preferences.rs:927
+msgid "Couldn't check for updates"
+msgstr ""
+
+#: src/preferences.rs:600
+msgid "Preferred video codec"
+msgstr ""
+
+#: src/preferences.rs:236
+msgid "Proxy"
+msgstr ""
+
+#: src/preferences.rs:237
+msgid "Torrents follow SOCKS5 proxies only"
+msgstr ""
+
+#: src/preferences.rs:254
+msgid "Manual proxy"
+msgstr ""
+
+#: src/preferences.rs:256
+msgid "Type"
+msgstr ""
+
+#: src/preferences.rs:271
+msgid "Host"
+msgstr ""
+
+#: src/preferences.rs:277
+msgid "Port"
+msgstr ""
+
+#: src/preferences.rs:873
+msgid "Update checks are skipped while a proxy is configured"
+msgstr ""
+
+#: src/preferences.rs:617
+msgid "Audio quality"
+msgstr ""
+
+#: src/preferences.rs:618
+msgid "0 is best, 10 is worst"
+msgstr ""
+
+#: src/preferences.rs:631
+msgid "Subtitles"
+msgstr ""
+
+#: src/preferences.rs:632
+msgid "Download subtitles beside the video"
+msgstr ""
+
+#: src/preferences.rs:198
+msgid "Parallel connections for large files"
+msgstr ""
+
+#: src/preferences.rs:224
+msgid "Keep original file dates"
+msgstr ""
+
+#: src/preferences.rs:225
+msgid "Use the server's date instead of download time"
+msgstr ""
+
+#: src/preferences.rs:324
+msgid "Background download notifications"
+msgstr ""
+
+#: src/preferences.rs:338
+msgid "Keep the computer awake while downloads are active"
+msgstr ""
+
+#: src/preferences.rs:374
+msgid "Stop seeding at this upload ratio. 0 means unlimited."
+msgstr ""
+
+#: src/preferences.rs:394
+msgid "Seed time limit"
+msgstr ""
+
+#: src/preferences.rs:396
+msgid "Stop seeding this many minutes after finishing. 0 means unlimited."
+msgstr ""
+
+#: src/preferences.rs:412
+msgid "Connectivity"
+msgstr ""
+
+#: src/preferences.rs:417
+msgid "Find peers without trackers. Takes effect on restart."
+msgstr ""
+
+#: src/preferences.rs:601
+msgid "Newest codecs first, or widest playback"
+msgstr ""
+
+#: src/preferences.rs:665
+msgid "Post-processing"
+msgstr ""
+
+#: src/preferences.rs:666
+msgid "Applied while finishing downloads"
+msgstr ""
+
+#: src/preferences.rs:669
+msgid "Embed subtitles"
+msgstr ""
+
+#: src/preferences.rs:670
+msgid "Mux downloaded subtitles into the video file"
+msgstr ""
+
+#: src/preferences.rs:680
+msgid "Remove sponsored segments"
+msgstr ""
+
+#: src/preferences.rs:681
+msgid "Cut SponsorBlock-flagged sponsor segments"
+msgstr ""
+
+#: src/preferences.rs:695
+msgid "Mark sponsored segments"
+msgstr ""
+
+#: src/preferences.rs:697
+msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
+msgstr ""
+
+#: src/preferences.rs:719
+msgid "Embed chapters"
+msgstr ""
+
+#: src/preferences.rs:720
+msgid "Write chapter markers into the finished file"
+msgstr ""
+
+#: src/preferences.rs:738
+msgid "Remux video"
+msgstr ""
+
+#: src/preferences.rs:740
+msgid "Change the finished file's container without re-encoding"
+msgstr ""
+
+#: src/preferences.rs:438
+msgid "Upload speed limit"
+msgstr ""
+
+#: src/preferences.rs:441
+msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
+msgstr ""
+
+#: src/preferences.rs:132
+msgid "Avoids broken names on USB drives, network shares and older systems"
+msgstr ""
+
+#: src/preferences.rs:228
+msgid "Handy for archives; otherwise files are dated when you downloaded them"
+msgstr ""
+
+#: src/preferences.rs:365
+msgid "Keep sharing the finished file with other downloaders"
+msgstr ""
+
+#: src/preferences.rs:380
+msgid "Upload relative to download size; 2.0 means twice as much up as down"
+msgstr ""
+
+#: src/preferences.rs:401
+msgid "Counts from the moment your download finished"
+msgstr ""
+
+#: src/preferences.rs:421
+msgid "Lets magnet links and trackerless torrents find peers"
+msgstr ""
+
+#: src/preferences.rs:605
+msgid "Ranks available formats; the closest match wins when your pick isn't offered"
+msgstr ""
+
+#: src/preferences.rs:622
+msgid "Applies to audio-only downloads and extracted audio"
+msgstr ""
+
+#: src/preferences.rs:673
+msgid "Needs subtitles enabled under Media → Subtitles; does nothing without them"
+msgstr ""
+
+#: src/preferences.rs:684
+msgid "Works where SponsorBlock has data, mostly YouTube"
+msgstr ""
+
+#: src/preferences.rs:701
+msgid "Lets you skip sponsors with chapter navigation instead of cutting them"
+msgstr ""
+
+#: src/preferences.rs:723
+msgid "Players with chapter support let you jump between sections"
+msgstr ""
+
+#: src/preferences.rs:745
+msgid "Useful when a player or editor dislikes the original container"
+msgstr ""
+
+#: src/preferences.rs:765
+msgid "Needs the site to keep a replay; otherwise recording starts from the live edge"
+msgstr ""
+
+#: src/download.rs:431
+msgid "Magnet link is too long (max {n} characters)"
+msgstr ""
+
+#: src/download.rs:445 src/download.rs:3401
+msgid "Torrent file is missing from the archive"
+msgstr ""
+
+#: src/download.rs:448
+msgid "URL is too long (max {n} characters)"
+msgstr ""
+
+#: src/download.rs:457 src/download.rs:478
+msgid "Invalid URL: {url}"
+msgstr ""
+
+#: src/download.rs:459
+msgid "URLs with a username/password are not supported"
+msgstr ""
+
+#: src/download.rs:463
+msgid "FTP is not supported (use http/https)"
+msgstr ""
+
+#: src/download.rs:464
+msgid "Unsupported scheme: {s} (use http/https)"
+msgstr ""
+
+#: src/download.rs:1130 src/download.rs:2093
+#. Different object than probed: retrying these ranges can
+#. never succeed, so fail terminally right away.
+msgid "File changed on server"
+msgstr ""
+
+#: src/download.rs:820 src/download.rs:3325 src/download.rs:3326 src/video.rs:503
+msgid "Download interrupted"
+msgstr ""
+
+#: src/download.rs:1262 src/download.rs:1474
+msgid "Incomplete download"
+msgstr ""
+
+#: src/download.rs:1947
+msgid "Connection timed out"
+msgstr ""
+
+#: src/download.rs:1351
+#. Even a plain GET gets 416: pathological server, stop looping.
+msgid "Server rejects range requests"
+msgstr ""
+
+#: src/download.rs:1379
+msgid "Server returned an unexpected file size"
+msgstr ""
+
+#: src/download.rs:1390
+msgid "Server restarted the download with a smaller file"
+msgstr ""
+
+#: src/download.rs:1447 src/download.rs:1452 src/download.rs:2135
+msgid "Stalled connection timed out"
+msgstr ""
+
+#: src/download.rs:1965
+msgid "Range requests not supported"
+msgstr ""
+
+#: src/download.rs:1976
+msgid "Bad Content-Range"
+msgstr ""
+
+#: src/download.rs:2053
+msgid "Empty response"
+msgstr ""
+
+#: src/download.rs:2098
+msgid "Server ignored range request"
+msgstr ""
+
+#: src/download.rs:2110 src/download.rs:2116
+msgid "Piece stalled"
+msgstr ""
+
+#: src/download.rs:2121
+msgid "Server sent too much data"
+msgstr ""
+
+#: src/download.rs:2147
+msgid "Incomplete piece"
+msgstr ""
+
+#: src/download.rs:2718 src/download.rs:3061
+msgid "Finished • {size}"
+msgstr ""
+
+#: src/download.rs:2720 src/download.rs:3063
+msgid "Finished"
+msgstr ""
+
+#: src/download.rs:2781
+msgid "Invalid speed limit: {limit}"
+msgstr ""
+
+#: src/download.rs:2875
+msgid "Starting…"
+msgstr ""
+
+#: src/download.rs:2877
+msgid "Connecting to {host}…"
+msgstr ""
+
+#: src/download.rs:2962
+msgid " • ↑ {upspeed}/s · {up} up{ratio}"
+msgstr ""
+
+#: src/download.rs:2981
+msgid "{pct}% ({amounts}) • {speed} • About {eta} left{filter}{up}"
+msgstr ""
+
+#: src/download.rs:2992
+msgid "{done} • {speed}{filter}{up}"
+msgstr ""
+
+#: src/download.rs:3439
+msgid "Starting torrent…"
+msgstr ""
+
+#: src/download.rs:3588
+msgid "Download finished"
+msgstr ""
+
+#: src/download.rs:3590
+msgid "Download failed"
+msgstr ""
+
+#: src/download.rs:3632
+msgid "Paused • {pct}%"
+msgstr ""
+
+#: src/download.rs:3663 src/download.rs:3962
+msgid "Download not found"
+msgstr ""
+
+#: src/download.rs:3665
+msgid "Renaming torrent downloads isn't supported"
+msgstr ""
+
+#: src/download.rs:3670
+msgid "Pause or wait for the download to finish first"
+msgstr ""
+
+#: src/download.rs:3674
+msgid "Only completed or not-yet-started downloads can be renamed"
+msgstr ""
+
+#: src/download.rs:3683
+msgid "That isn't a valid file name"
+msgstr ""
+
+#: src/download.rs:2537 src/download.rs:2669
+msgid "Waiting to resolve media…"
+msgstr ""
+
+#: src/download.rs:2535 src/download.rs:2667
+msgid "Waiting to resolve audio…"
+msgstr ""
+
+#: src/download.rs:3575 src/video.rs:3545
+msgid "Resolving media…"
+msgstr ""
+
+#: src/download.rs:3573 src/video.rs:3543
+msgid "Resolving audio…"
+msgstr ""
+
+#: src/download.rs:509
+msgid "System"
+msgstr ""
+
+#: src/download.rs:509
+msgid "Manual"
+msgstr ""
+
+#: src/download.rs:509 src/video.rs:2389 src/video.rs:2460
+msgid "Off"
+msgstr ""
+
+#: src/download.rs:724
+msgid "Proxy host is empty"
+msgstr ""
+
+#: src/download.rs:727
+msgid "Proxy port is out of range (1–65535)"
+msgstr ""
+
+#: src/download.rs:754
+msgid "Unknown proxy type: {t}"
+msgstr ""
+
+#: src/download.rs:1581
+msgid "1 hour"
+msgid_plural "{n} hours"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/download.rs:1583
+msgid "1 minute"
+msgid_plural "{n} minutes"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/download.rs:1585
+msgid "1 second"
+msgid_plural "{n} seconds"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/download.rs:736
+msgid "Proxy host contains invalid characters"
+msgstr ""
+
+#: src/download.rs:3128
+msgid "Expanded into {added} of {total} item"
+msgid_plural "Expanded into {added} of {total} items"
+msgstr[0] ""
+msgstr[1] ""
+
+#: src/install_progress.rs:47
+msgid "Waiting…"
+msgstr ""
+
+#: src/install_progress.rs:93
+msgid "Downloading…"
+msgstr ""
+
+#: src/install_progress.rs:104
+msgid "Installed • {version}"
+msgstr ""
+
+#: src/install_progress.rs:105
+msgid "Installed"
+msgstr ""
+
+#: src/install_progress.rs:148
+msgid "yt-dlp install progress"
+msgstr ""
+
+#: src/install_progress.rs:149
+msgid "ffmpeg install progress"
+msgstr ""
+
+#: src/video.rs:149
+msgid "Best"
+msgstr ""
+
+#: src/video.rs:150
+msgid "2160p"
+msgstr ""
+
+#: src/video.rs:151
+msgid "1440p"
+msgstr ""
+
+#: src/video.rs:152
+msgid "1080p"
+msgstr ""
+
+#: src/video.rs:153
+msgid "720p"
+msgstr ""
+
+#: src/video.rs:154
+msgid "480p"
+msgstr ""
+
+#: src/video.rs:418
+msgid "Couldn't read the video page: {detail}"
+msgstr ""
+
+#: src/video.rs:429
+msgid "Couldn't prepare video staging: {detail}"
+msgstr ""
+
+#: src/video.rs:494
+msgid "Media download failed: {detail}"
+msgstr ""
+
+#: src/video.rs:499
+msgid "Couldn't merge video and audio: {detail}"
+msgstr ""
+
+#: src/video.rs:506
+msgid "Video tools are too old — update them to continue"
+msgstr ""
+
+#: src/video.rs:1237
+msgid "None"
+msgstr ""
+
+#: src/video.rs:2052 src/video.rs:2205
+msgid "the lookup timed out"
+msgstr ""
+
+#: src/video.rs:3782
+msgid "Resuming download…"
+msgstr ""
+
+#: src/video.rs:4184 src/video.rs:5141
+msgid "Merging…"
+msgstr ""
+
+#: src/video.rs:414
+msgid "Media downloads need the yt-dlp support tools"
+msgstr ""
+
+#: src/video.rs:423
+msgid "Couldn't install the media support tools: {detail}"
+msgstr ""
+
+#: src/video.rs:436
+msgid "No suitable formats found for this media"
+msgstr ""
+
+#: src/video.rs:487
+msgid "No suitable formats found for this media ({total} listed: {reasons})"
+msgstr ""
+
+#: src/video.rs:476
+msgid "manifest"
+msgstr ""
+
+#: src/video.rs:477
+msgid "DRM"
+msgstr ""
+
+#: src/video.rs:478
+msgid "no link"
+msgstr ""
+
+#: src/video.rs:479
+msgid "video-only"
+msgstr ""
+
+#: src/video.rs:4647 src/video.rs:4665
+msgid "Recording…"
+msgstr ""
+
+#: src/video.rs:480
+msgid "unclassified"
+msgstr ""
+
+#: src/video.rs:2366
+msgid "Newest first"
+msgstr ""
+
+#: src/video.rs:2366
+msgid "Most compatible"
+msgstr ""
+
+#: src/video.rs:4773
+msgid "Finalizing…"
+msgstr ""
+
+#: src/video.rs:2390
+msgid "English"
+msgstr ""
+
+#: src/video.rs:2391
+msgid "Arabic"
+msgstr ""
+
+#: src/video.rs:2392
+msgid "German"
+msgstr ""
+
+#: src/video.rs:2393
+msgid "Spanish"
+msgstr ""
+
+#: src/video.rs:2394
+msgid "French"
+msgstr ""
+
+#: src/video.rs:2395
+msgid "Hindi"
+msgstr ""
+
+#: src/video.rs:2396
+msgid "Indonesian"
+msgstr ""
+
+#: src/video.rs:2397
+msgid "Italian"
+msgstr ""
+
+#: src/video.rs:2398
+msgid "Japanese"
+msgstr ""
+
+#: src/video.rs:2399
+msgid "Korean"
+msgstr ""
+
+#: src/video.rs:2400
+msgid "Dutch"
+msgstr ""
+
+#: src/video.rs:2401
+msgid "Polish"
+msgstr ""
+
+#: src/video.rs:2402
+msgid "Portuguese"
+msgstr ""
+
+#: src/video.rs:2403
+msgid "Russian"
+msgstr ""
+
+#: src/video.rs:2404
+msgid "Turkish"
+msgstr ""
+
+#: src/video.rs:2405
+msgid "Vietnamese"
+msgstr ""
+
+#: src/video.rs:2406
+msgid "Chinese"
+msgstr ""
+
+#: src/video.rs:445
+msgid "No suitable formats found for this media (the page listed none)"
+msgstr ""
+
+#: src/video.rs:1558
+msgid "staging directory escaped its root"
+msgstr ""
+
+#: src/video.rs:4752
+msgid "\"Live from start\" isn't available for this stream — recording from the live edge…"
+msgstr ""
+
+#: src/video.rs:2116
+msgid "the link opened a collection, not a single video"
+msgstr ""
+
+#: src/video.rs:2114
+msgid "the story is no longer available"
+msgstr ""
+
+#: src/torrent.rs:110
 msgid "Only BitTorrent v1 magnets are supported"
 msgstr ""
 
-#: src/torrent.rs:174
+#: src/torrent.rs:186
 msgid "Torrent file is too large (max 10 MB)"
 msgstr ""
 
@@ -476,576 +1344,54 @@ msgstr ""
 msgid "Peer blocklist must be an http(s) URL"
 msgstr ""
 
-#: src/torrent.rs:774
+#: src/torrent.rs:813
 msgid "Torrent failed"
 msgstr ""
 
-#: src/torrent.rs:966 src/torrent.rs:1061
+#: src/torrent.rs:1022 src/torrent.rs:1110
 msgid "Torrent is already in the queue"
 msgstr ""
 
-#: src/torrent.rs:1020
+#: src/torrent.rs:1070
 msgid "Torrent is no longer managed"
 msgstr ""
 
-#: src/torrent.rs:1074
+#: src/torrent.rs:1122
 msgid "Torrent produced no files"
 msgstr ""
 
-#: src/video.rs:78
-msgid "Best"
-msgstr ""
-
-#: src/video.rs:79
-msgid "2160p"
-msgstr ""
-
-#: src/video.rs:80
-msgid "1440p"
-msgstr ""
-
-#: src/video.rs:81
-msgid "1080p"
-msgstr ""
-
-#: src/video.rs:82
-msgid "720p"
-msgstr ""
-
-#: src/video.rs:83
-msgid "480p"
-msgstr ""
-
-#: src/video.rs:283
-msgid "Couldn't read the video page: {detail}"
-msgstr ""
-
-#: src/video.rs:294
-msgid "Couldn't prepare video staging: {detail}"
-msgstr ""
-
-#: src/video.rs:359
-msgid "Media download failed: {detail}"
-msgstr ""
-
-#: src/video.rs:354
-msgid "Couldn't merge video and audio: {detail}"
-msgstr ""
-
-#: src/video.rs:361
-msgid "Video tools are too old — update them to continue"
-msgstr ""
-
-#: src/video.rs:834
-msgid "None"
-msgstr ""
-
-#: src/video.rs:1428 src/video.rs:1499
-msgid "the lookup timed out"
-msgstr ""
-
-#: src/video.rs:3025
-msgid "Resuming download…"
-msgstr ""
-
-#: src/video.rs:3432 src/video.rs:4373
-msgid "Merging…"
-msgstr ""
-
-#: src/window.rs:40
-msgid "show"
-msgstr ""
-
-#: src/window.rs:42
-msgid "open"
-msgstr ""
-
-#: src/window.rs:45
-msgid "Could not {verb} {what} in the file manager: {e}"
-msgstr ""
-
-#: src/window.rs:150 src/window.rs:152
-msgid "Resume"
-msgstr ""
-
-#: src/window.rs:155 src/window.rs:157 src/window.rs:204 src/window.rs:927
-msgid "Pause"
-msgstr ""
-
-#: src/window.rs:206
-msgid "Queue for later"
-msgstr ""
-
-#: src/window.rs:207 src/window.rs:808 src/window.rs:1106 src/window.rs:1530
-msgid "Retry"
-msgstr ""
-
-#: src/window.rs:208
-msgid "Show in Folder"
-msgstr ""
-
-#: src/window.rs:209
-msgid "Move to Trash"
-msgstr ""
-
-#: src/window.rs:210
-msgid "Remove from list"
-msgstr ""
-
-#: src/window.rs:242
-msgid "Downloaded blocks"
-msgstr ""
-
-#: src/window.rs:290
-msgid "Rename…"
-msgstr ""
-
-#: src/window.rs:554
-msgid "Queued for later"
-msgstr ""
-
-#: src/window.rs:556
-msgid "No other downloads waiting"
-msgstr ""
-
-#: src/window.rs:576
-msgid "Moved to Trash"
-msgstr ""
-
-#: src/window.rs:598
-msgid "Removed {name}"
-msgstr ""
-
-#: src/window.rs:599
-msgid "Undo"
-msgstr ""
-
-#: src/window.rs:653
-msgid "Downloading files"
-msgstr ""
-
-#: src/window.rs:753
-msgid "Downloads continue in the background after the window is closed"
-msgstr ""
-
-#: src/window.rs:799
-msgid "Grab"
-msgstr ""
-
-#: src/window.rs:800
-msgid "Download Manager"
-msgstr ""
-
-#: src/window.rs:811
-msgid "Open Download Folder"
-msgstr ""
-
-#: src/window.rs:817
-msgid "Keyboard Shortcuts"
-msgstr ""
-
-#: src/window.rs:818
-msgid "About"
-msgstr ""
-
-#: src/window.rs:823 src/window.rs:825
-msgid "Main Menu"
-msgstr ""
-
-#: src/window.rs:830
-msgid "Search (Ctrl+F)"
-msgstr ""
-
-#: src/window.rs:830 src/window.rs:832 src/window.rs:920
-msgid "Search"
-msgstr ""
-
-#: src/window.rs:838
-msgid "New Download (Ctrl+N)"
-msgstr ""
-
-#: src/window.rs:850
-msgid "No Downloads Yet"
-msgstr ""
-
-#: src/window.rs:851
-msgid "Add a download to get started"
-msgstr ""
-
-#: src/window.rs:880
-msgid "Active"
-msgstr ""
-
-#: src/window.rs:242 src/window.rs:882
-msgid "Downloaded"
-msgstr ""
-
-#: src/window.rs:920
-msgid "Search downloads"
-msgstr ""
-
-#: src/window.rs:807 src/window.rs:925
-msgid "All"
-msgstr ""
-
-#: src/window.rs:941
-msgid "Filter by status"
-msgstr ""
-
-#: src/window.rs:753 src/window.rs:1090
-msgid "Downloads continue in the background"
-msgstr ""
-
-#: src/window.rs:1105
-msgid "Some downloads failed"
-msgstr ""
-
-#: src/window.rs:1235
-msgid "Rename Download"
-msgstr ""
-
-#: src/window.rs:1245 src/window.rs:1461 src/window.rs:1479
-msgid "File name"
-msgstr ""
-
-#: src/window.rs:1264 src/window.rs:2146 src/window.rs:2519 src/window.rs:2649
-msgid "_Cancel"
-msgstr ""
-
-#: src/window.rs:1268
-msgid "_Rename"
-msgstr ""
-
-#: src/window.rs:805 src/window.rs:1452 src/window.rs:2481 src/window.rs:2488 src/window.rs:2556 src/window.rs:2574
-msgid "URL"
-msgstr ""
-
-#: src/window.rs:1461
-msgid "File name (optional)"
-msgstr ""
-
-#: src/window.rs:1485 src/window.rs:1489
-msgid "Revert to Title"
-msgstr ""
-
-#: src/window.rs:1502
-msgid "Uses your preferred quality"
-msgstr ""
-
-#: src/window.rs:1509
-msgid "Skip the video track"
-msgstr ""
-
-#: src/window.rs:1518
-msgid "Download the yt-dlp support tools"
-msgstr ""
-
-#: src/window.rs:1402
-msgid "{} story"
-msgid_plural "{} stories"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window.rs:1404
-msgid "{} highlight"
-msgid_plural "{} highlights"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window.rs:1406
-msgid "{} item"
-msgid_plural "{} items"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window.rs:1564
-msgid "Choose a .torrent file"
-msgstr ""
-
-#: src/window.rs:1568 src/window.rs:2084
-msgid "Torrent file"
-msgstr ""
-
-#: src/window.rs:1586
-msgid "Save to"
-msgstr ""
-
-#: src/window.rs:2084
-msgid "Torrent files"
-msgstr ""
-
-#: src/window.rs:2090
-msgid "Choose torrent file"
-msgstr ""
-
-#: src/window.rs:2091
-msgid "Add Torrent"
-msgstr ""
-
-#: src/window.rs:1893
-msgid "No items found in this playlist"
-msgstr ""
-
-#: src/window.rs:2150 src/window.rs:2172 src/window.rs:2431 src/window.rs:2521
-msgid "_Add Download"
-msgstr ""
-
-#: src/window.rs:2429
-msgid "_Continue"
-msgstr ""
-
-#: src/window.rs:2521
-msgid "_Add Downloads"
-msgstr ""
-
-#: src/window.rs:2606
-msgid "Files"
-msgstr ""
-
-#: src/window.rs:2606
-msgid "{} file"
-msgid_plural "{} files"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window.rs:2725
-msgid "Select at least one file"
-msgstr ""
-
-#: src/install_help.rs:20
+#: src/install_help.rs:32
 msgid "Install Support Tools"
 msgstr ""
 
-#: src/install_help.rs:30
+#: src/install_help.rs:42
 msgid "_Close"
 msgstr ""
 
-#: src/install_help.rs:34
+#: src/install_help.rs:46
 msgid "_Check Again"
 msgstr ""
 
-#: src/install_help.rs:72
+#: src/install_help.rs:68
 msgid "Run these commands in a terminal, then press Check Again."
 msgstr ""
 
-#: src/install_help.rs:81
+#: src/install_help.rs:77
 msgid "Install both tools manually"
 msgstr ""
 
-#: src/install_help.rs:83
+#: src/install_help.rs:79
 msgid ""
 "Grab couldn't detect your distribution. Install both tools, make sure they "
 "are on your PATH, then press Check Again."
 msgstr ""
 
-#: src/install_help.rs:109 src/install_help.rs:112
+#: src/install_help.rs:105 src/install_help.rs:108
 msgid "Copy command"
 msgstr ""
 
-#: src/install_help.rs:133
+#: src/install_help.rs:129
 msgid "Open"
-msgstr ""
-
-#: src/preferences.rs:19
-msgid "Advanced"
-msgstr ""
-
-#: src/window.rs:1471
-msgid "Looking up media…"
-msgstr ""
-
-#: src/window.rs:1501
-msgid "Media format"
-msgstr ""
-
-#: src/window.rs:1527
-msgid "Couldn't load the media preview"
-msgstr ""
-
-#: src/window.rs:2191
-msgid "Media Details"
-msgstr ""
-
-#: src/window.rs:2347 src/window.rs:2374
-msgid "Still looking up the media — wait for the preview, then add."
-msgstr ""
-
-#: src/window.rs:1428 src/window.rs:2801
-msgid "Showing the first {n} of {total}"
-msgstr ""
-
-#: src/window.rs:2880
-msgid "_Queue {} item"
-msgid_plural "_Queue {} items"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/window.rs:2917
-msgid "Select at least one item"
-msgstr ""
-
-#: src/preferences.rs:30 src/preferences.rs:732 src/preferences.rs:997
-msgid "Media"
-msgstr ""
-
-#: src/preferences.rs:742
-msgid "Used for new media downloads"
-msgstr ""
-
-#: src/preferences.rs:994
-msgid "yt-dlp and ffmpeg resolve media pages"
-msgstr ""
-
-#: src/preferences.rs:997
-msgid "Media support tools"
-msgstr ""
-
-#: src/download.rs:2586 src/download.rs:2656
-msgid "Waiting to resolve media…"
-msgstr ""
-
-#: src/download.rs:2584 src/download.rs:2654
-msgid "Waiting to resolve audio…"
-msgstr ""
-
-#: src/download.rs:3461 src/video.rs:2834
-msgid "Resolving media…"
-msgstr ""
-
-#: src/download.rs:3459 src/video.rs:2832
-msgid "Resolving audio…"
-msgstr ""
-
-#: src/video.rs:279
-msgid "Media downloads need the yt-dlp support tools"
-msgstr ""
-
-#: src/video.rs:288
-msgid "Couldn't install the media support tools: {detail}"
-msgstr ""
-
-#: src/video.rs:301 src/video.rs:300 src/video.rs:342
-msgid "No suitable formats found for this media"
-msgstr ""
-
-#: src/preferences.rs:700 src/preferences.rs:1148 src/preferences.rs:1153
-msgid "Check for Updates"
-msgstr ""
-
-#: src/preferences.rs:1082
-msgid "Checking for updates…"
-msgstr ""
-
-#: src/preferences.rs:1122
-msgid "Update available: {installed} → {latest}"
-msgstr ""
-
-#: src/preferences.rs:1144
-msgid "Up to date • {yt} • {ff}"
-msgstr ""
-
-#: src/preferences.rs:1152
-msgid "Couldn't check for updates"
-msgstr ""
-
-#: src/video.rs:352
-msgid "No suitable formats found for this media ({total} listed: {reasons})"
-msgstr ""
-
-#: src/video.rs:341
-msgid "manifest"
-msgstr ""
-
-#: src/video.rs:342
-msgid "DRM"
-msgstr ""
-
-#: src/video.rs:343
-msgid "no link"
-msgstr ""
-
-#: src/video.rs:344
-msgid "video-only"
-msgstr ""
-
-#: src/window.rs:121
-msgid "Stop recording"
-msgstr ""
-
-#: src/video.rs:3881 src/video.rs:3899
-msgid "Recording…"
-msgstr ""
-
-#: src/window.rs:118 src/window.rs:121
-msgid "Stop"
-msgstr ""
-
-#: src/video.rs:345
-msgid "unclassified"
-msgstr ""
-
-#: src/preferences.rs:771
-msgid "Preferred video codec"
-msgstr ""
-
-#: src/video.rs:1640
-msgid "Newest first"
-msgstr ""
-
-#: src/video.rs:1640
-msgid "Most compatible"
-msgstr ""
-
-#: src/video.rs:3978
-msgid "Finalizing…"
-msgstr ""
-
-#: src/preferences.rs:325
-msgid "Proxy"
-msgstr ""
-
-#: src/preferences.rs:326
-msgid "Torrents follow SOCKS5 proxies only"
-msgstr ""
-
-#: src/download.rs:516
-msgid "System"
-msgstr ""
-
-#: src/download.rs:516
-msgid "Manual"
-msgstr ""
-
-#: src/download.rs:516 src/video.rs:1669 src/video.rs:1734
-msgid "Off"
-msgstr ""
-
-#: src/preferences.rs:346
-msgid "Manual proxy"
-msgstr ""
-
-#: src/preferences.rs:348
-msgid "Type"
-msgstr ""
-
-#: src/preferences.rs:375
-msgid "Host"
-msgstr ""
-
-#: src/preferences.rs:381 src/preferences.rs:619
-msgid "Port"
-msgstr ""
-
-#: src/preferences.rs:1098
-msgid "Update checks are skipped while a proxy is configured"
-msgstr ""
-
-#: src/download.rs:735
-msgid "Proxy host is empty"
-msgstr ""
-
-#: src/download.rs:738
-msgid "Proxy port is out of range (1–65535)"
 msgstr ""
 
 #: data/io.github.houssemko.Grab.gschema.xml
@@ -1080,116 +1426,6 @@ msgstr ""
 msgid "Proxy port, e.g. 9050 for Tor."
 msgstr ""
 
-#: src/download.rs:774
-msgid "Unknown proxy type: {t}"
-msgstr ""
-
-#: src/window.rs:1503 src/window.rs:1870
-msgid "Automatic"
-msgstr ""
-
-#: src/download.rs:1636
-msgid "1 hour"
-msgid_plural "{n} hours"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/download.rs:1638
-msgid "1 minute"
-msgid_plural "{n} minutes"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/download.rs:1640
-msgid "1 second"
-msgid_plural "{n} seconds"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/video.rs:1670
-msgid "English"
-msgstr ""
-
-#: src/video.rs:1671
-msgid "Arabic"
-msgstr ""
-
-#: src/video.rs:1672
-msgid "German"
-msgstr ""
-
-#: src/video.rs:1673
-msgid "Spanish"
-msgstr ""
-
-#: src/video.rs:1674
-msgid "French"
-msgstr ""
-
-#: src/video.rs:1675
-msgid "Hindi"
-msgstr ""
-
-#: src/video.rs:1676
-msgid "Indonesian"
-msgstr ""
-
-#: src/video.rs:1677
-msgid "Italian"
-msgstr ""
-
-#: src/video.rs:1678
-msgid "Japanese"
-msgstr ""
-
-#: src/video.rs:1679
-msgid "Korean"
-msgstr ""
-
-#: src/video.rs:1680
-msgid "Dutch"
-msgstr ""
-
-#: src/video.rs:1681
-msgid "Polish"
-msgstr ""
-
-#: src/video.rs:1682
-msgid "Portuguese"
-msgstr ""
-
-#: src/video.rs:1683
-msgid "Russian"
-msgstr ""
-
-#: src/video.rs:1684
-msgid "Turkish"
-msgstr ""
-
-#: src/video.rs:1685
-msgid "Vietnamese"
-msgstr ""
-
-#: src/video.rs:1686
-msgid "Chinese"
-msgstr ""
-
-#: src/preferences.rs:801
-msgid "Audio quality"
-msgstr ""
-
-#: src/preferences.rs:802
-msgid "0 is best, 10 is worst"
-msgstr ""
-
-#: src/preferences.rs:812
-msgid "Subtitles"
-msgstr ""
-
-#: src/preferences.rs:813
-msgid "Download subtitles beside the video"
-msgstr ""
-
 #: data/io.github.houssemko.Grab.gschema.xml
 msgid "Subtitle language"
 msgstr ""
@@ -1218,226 +1454,3 @@ msgid ""
 "Applies when the torrent engine first starts."
 msgstr ""
 
-#: src/video.rs:309
-msgid "No suitable formats found for this media (the page listed none)"
-msgstr ""
-
-#: src/download.rs:747
-msgid "Proxy host contains invalid characters"
-msgstr ""
-
-#: src/video.rs:1111
-msgid "staging directory escaped its root"
-msgstr ""
-
-#: src/application.rs:311 src/application.rs:315 src/window.rs:809
-msgid "Clear Finished"
-msgstr ""
-
-#: src/application.rs:311
-msgid "Clear Finished Downloads?"
-msgstr ""
-
-#: src/application.rs:305
-msgid "This will remove the finished download from the list. The file stays on disk."
-msgid_plural "This will remove {n} finished downloads from the list. The files stay on disk."
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/application.rs:329
-msgid "Cleared finished download"
-msgid_plural "Cleared {n} finished downloads"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/preferences.rs:146
-msgid "Parallel connections for large files"
-msgstr ""
-
-#: src/preferences.rs:316
-msgid "Keep original file dates"
-msgstr ""
-
-#: src/preferences.rs:317
-msgid "Use the server's date instead of download time"
-msgstr ""
-
-#: src/preferences.rs:433
-msgid "Background download notifications"
-msgstr ""
-
-#: src/preferences.rs:447
-msgid "Keep the computer awake while downloads are active"
-msgstr ""
-
-#: src/preferences.rs:480
-msgid "Stop seeding at this upload ratio. 0 means unlimited."
-msgstr ""
-
-#: src/preferences.rs:497
-msgid "Seed time limit"
-msgstr ""
-
-#: src/preferences.rs:499
-msgid "Stop seeding this many minutes after finishing. 0 means unlimited."
-msgstr ""
-
-#: src/preferences.rs:512
-msgid "Connectivity"
-msgstr ""
-
-#: src/preferences.rs:517
-msgid "Find peers without trackers. Takes effect on restart."
-msgstr ""
-
-#: src/preferences.rs:772
-msgid "Newest codecs first, or widest playback"
-msgstr ""
-
-#: src/preferences.rs:876
-msgid "Post-processing"
-msgstr ""
-
-#: src/preferences.rs:877
-msgid "Applied while finishing downloads"
-msgstr ""
-
-#: src/preferences.rs:880
-msgid "Embed subtitles"
-msgstr ""
-
-#: src/preferences.rs:881
-msgid "Mux downloaded subtitles into the video file"
-msgstr ""
-
-#: src/preferences.rs:888
-msgid "Remove sponsored segments"
-msgstr ""
-
-#: src/preferences.rs:889
-msgid "Cut SponsorBlock-flagged sponsor segments"
-msgstr ""
-
-#: src/preferences.rs:900
-msgid "Mark sponsored segments"
-msgstr ""
-
-#: src/preferences.rs:902
-msgid "Tag SponsorBlock-flagged sponsor segments as chapters"
-msgstr ""
-
-#: src/preferences.rs:933
-msgid "Embed chapters"
-msgstr ""
-
-#: src/preferences.rs:934
-msgid "Write chapter markers into the finished file"
-msgstr ""
-
-#: src/preferences.rs:949
-msgid "Remux video"
-msgstr ""
-
-#: src/preferences.rs:951
-msgid "Change the finished file's container without re-encoding"
-msgstr ""
-
-#: src/preferences.rs:546
-msgid "Upload speed limit"
-msgstr ""
-
-#: src/preferences.rs:549
-msgid "Per torrent, e.g. 500K, 2M; empty means unlimited"
-msgstr ""
-
-#: src/video.rs:4132
-msgid "\"Live from start\" isn't available for this stream — recording from the live edge…"
-msgstr ""
-
-#: src/preferences.rs:75
-msgid "Avoids broken names on USB drives, network shares and older systems"
-msgstr ""
-
-#: src/preferences.rs:185
-msgid "Handy for archives; otherwise files are dated when you downloaded them"
-msgstr ""
-
-#: src/preferences.rs:342
-msgid "Keep sharing the finished file with other downloaders"
-msgstr ""
-
-#: src/preferences.rs:357
-msgid "Upload relative to download size; 2.0 means twice as much up as down"
-msgstr ""
-
-#: src/preferences.rs:378
-msgid "Counts from the moment your download finished"
-msgstr ""
-
-#: src/preferences.rs:398
-msgid "Lets magnet links and trackerless torrents find peers"
-msgstr ""
-
-#: src/preferences.rs:609
-msgid "Ranks available formats; the closest match wins when your pick isn't offered"
-msgstr ""
-
-#: src/preferences.rs:642
-msgid "Applies to audio-only downloads and extracted audio"
-msgstr ""
-
-#: src/preferences.rs:723
-msgid "Needs subtitles enabled under Media → Subtitles; does nothing without them"
-msgstr ""
-
-#: src/preferences.rs:734
-msgid "Works where SponsorBlock has data, mostly YouTube"
-msgstr ""
-
-#: src/preferences.rs:751
-msgid "Lets you skip sponsors with chapter navigation instead of cutting them"
-msgstr ""
-
-#: src/preferences.rs:773
-msgid "Players with chapter support let you jump between sections"
-msgstr ""
-
-#: src/preferences.rs:795
-msgid "Useful when a player or editor dislikes the original container"
-msgstr ""
-
-#: src/preferences.rs:827
-msgid "Needs the site to keep a replay; otherwise recording starts from the live edge"
-msgstr ""
-
-#: src/video.rs:1639
-msgid "the link opened a collection, not a single video"
-msgstr ""
-
-#: src/video.rs:1637
-msgid "the story is no longer available"
-msgstr ""
-
-#: src/window.rs:2658 src/window.rs:2853
-msgid "Select All"
-msgstr ""
-
-#: src/window.rs:2660 src/window.rs:2855
-msgid "Select None"
-msgstr ""
-
-#: src/window.rs:2681
-msgid "_Add {} file"
-msgid_plural "_Add {} files"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/download.rs
-msgid "Expanded into {added} of {total} item"
-msgid_plural "Expanded into {added} of {total} items"
-msgstr[0] ""
-msgstr[1] ""
-
-#: src/application.rs:154
-msgid "Only .torrent files can be opened directly"
-msgstr ""

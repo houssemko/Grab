@@ -2240,63 +2240,28 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 crate::install_help::show(&btn, move || kick_b(true));
                 return;
             }
-            // Flatpak: staged auto-install under a progress popover
-            // anchored at the button (HIG: feedback lives with its
+            // Flatpak: staged auto-install under the shared progress
+            // popover anchored at the button (HIG: feedback lives with its
             // control; stages stand in for percentages that don't exist).
-            btn.set_sensitive(false);
-            let pop_label = gtk4::Label::new(Some(&gettext("Downloading yt-dlp (1 of 2)…")));
-            pop_label.set_wrap(true);
-            pop_label.set_max_width_chars(30);
-            let pop_spin = gtk4::Spinner::new();
-            pop_spin.start();
-            let pop_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-            pop_box.set_margin_top(18);
-            pop_box.set_margin_bottom(18);
-            pop_box.set_margin_start(18);
-            pop_box.set_margin_end(18);
-            pop_box.append(&pop_spin);
-            pop_box.append(&pop_label);
-            let pop = gtk4::Popover::new();
-            pop.set_child(Some(&pop_box));
-            pop.set_parent(&btn);
-            pop.popup();
-            let (btn_b, pop_b, label_b, step_b, kick_b, dialog_b) = (
-                btn.clone(),
-                pop.clone(),
-                pop_label.clone(),
-                step2.clone(),
-                kick.clone(),
-                dialog_weak.clone(),
+            let (step_b, kick_b) = (step2.clone(), kick.clone());
+            let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
+            crate::install_progress::run(
+                &btn,
+                move |err| {
+                    if dialog_err.upgrade().is_none() {
+                        return;
+                    }
+                    step_b.tools.set_subtitle(&err);
+                },
+                move || {
+                    if dialog_ok.upgrade().is_none() {
+                        return;
+                    }
+                    // Re-probe, don't just refresh: an unlisted URL that led
+                    // here for missing tools has no preview yet.
+                    kick_b(true);
+                },
             );
-            glib::spawn_future_local(async move {
-                if let Err(e) = crate::video::install_ytdlp().await {
-                    pop_b.popdown();
-                    if dialog_b.upgrade().is_none() {
-                        return;
-                    }
-                    step_b.tools.set_subtitle(&e.to_string());
-                    btn_b.set_sensitive(true);
-                    return;
-                }
-                label_b.set_text(&gettext("Downloading ffmpeg (2 of 2)…"));
-                if let Err(e) = crate::video::install_ffmpeg().await {
-                    pop_b.popdown();
-                    if dialog_b.upgrade().is_none() {
-                        return;
-                    }
-                    step_b.tools.set_subtitle(&e.to_string());
-                    btn_b.set_sensitive(true);
-                    return;
-                }
-                pop_b.popdown();
-                if dialog_b.upgrade().is_none() {
-                    return;
-                }
-                btn_b.set_sensitive(true);
-                // Re-probe, don't just refresh: an unlisted URL that led
-                // here for missing tools has no preview yet.
-                kick_b(true);
-            });
         });
     }
     {

@@ -933,59 +933,24 @@ pub fn show(
                 });
                 return;
             }
-            btn.set_sensitive(false);
-            let pop_label = gtk4::Label::new(Some(&gettext("Downloading yt-dlp (1 of 2)…")));
-            pop_label.set_wrap(true);
-            pop_label.set_max_width_chars(30);
-            let pop_spin = gtk4::Spinner::new();
-            pop_spin.start();
-            let pop_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-            pop_box.set_margin_top(18);
-            pop_box.set_margin_bottom(18);
-            pop_box.set_margin_start(18);
-            pop_box.set_margin_end(18);
-            pop_box.append(&pop_spin);
-            pop_box.append(&pop_label);
-            let pop = gtk4::Popover::new();
-            pop.set_child(Some(&pop_box));
-            pop.set_parent(&btn);
-            pop.popup();
-            let (row_b, btn_b, spin_b, pop_b, label_b) = (
-                row.clone(),
-                btn.clone(),
-                spin.clone(),
-                pop.clone(),
-                pop_label.clone(),
+            let (row_err, row_ok) = (row.clone(), row.clone());
+            let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
+            let (btn_b, spin_b, action_b) = (btn.clone(), spin.clone(), action.clone());
+            crate::install_progress::run(
+                &btn,
+                move |err| {
+                    if dialog_err.upgrade().is_none() {
+                        return;
+                    }
+                    row_err.set_subtitle(&err);
+                },
+                move || {
+                    if dialog_ok.upgrade().is_none() {
+                        return;
+                    }
+                    refresh_video_tools(&row_ok, &btn_b, &spin_b, &action_b);
+                },
             );
-            let dialog_b = dialog_weak.clone();
-            let action_b = action.clone();
-            gtk4::glib::spawn_future_local(async move {
-                if let Err(e) = crate::video::install_ytdlp().await {
-                    pop_b.popdown();
-                    if dialog_b.upgrade().is_none() {
-                        return;
-                    }
-                    row_b.set_subtitle(&e.to_string());
-                    btn_b.set_sensitive(true);
-                    return;
-                }
-                label_b.set_text(&gettext("Downloading ffmpeg (2 of 2)…"));
-                if let Err(e) = crate::video::install_ffmpeg().await {
-                    pop_b.popdown();
-                    if dialog_b.upgrade().is_none() {
-                        return;
-                    }
-                    row_b.set_subtitle(&e.to_string());
-                    btn_b.set_sensitive(true);
-                    return;
-                }
-                pop_b.popdown();
-                if dialog_b.upgrade().is_none() {
-                    return;
-                }
-                refresh_video_tools(&row_b, &btn_b, &spin_b, &action_b);
-                btn_b.set_sensitive(true);
-            });
         });
     }
     video_page.add(&video_quality_group);

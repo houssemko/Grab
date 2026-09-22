@@ -1170,6 +1170,26 @@ async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<S
     .flatten()
 }
 
+/// Display-ready version line for an installed tool binary: yt-dlp's
+/// `--version` output as-is, ffmpeg's first line trimmed to its version
+/// token ("ffmpeg version n9.0.1 …" → "ffmpeg n9.0.1"). `None` when the
+/// binary can't be probed. For the install-progress popover; the
+/// Preferences tools row keeps its own synchronous probe.
+pub(crate) async fn tool_display_version(
+    binary: PathBuf,
+    version_arg: &'static str,
+) -> Option<String> {
+    let line = tool_first_line(binary.clone(), version_arg).await?;
+    if binary
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
+    {
+        let token = line.split_whitespace().nth(2)?;
+        return Some(format!("ffmpeg {token}"));
+    }
+    Some(line)
+}
+
 /// Refuse stale or unverifiable toolchains before any network happens.
 /// Returns the raw version lines for attempt logging.
 pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
