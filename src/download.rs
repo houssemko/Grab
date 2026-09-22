@@ -149,6 +149,16 @@ impl DownloadItem {
     }
 }
 
+/// Split a filename into stem and extension (extension keeps its dot).
+/// `rfind`, not `split`: only the last dot counts, and a leading dot
+/// (`".profile"`) is a stem, not an extension. Pure.
+fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
+    match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
+        _ => (name, None),
+    }
+}
+
 /// Cap a filename to filesystem limits (NAME_MAX is 255 bytes on
 /// ext4/tmpfs), keeping the extension. Truncates the stem on a char
 /// boundary; reserves room for the ` (n)` dedupe suffix.
@@ -157,10 +167,7 @@ pub(crate) fn shorten_filename(name: &str) -> String {
     if name.len() <= MAX_FILENAME_BYTES {
         return name.to_string();
     }
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
-        _ => (name, None),
-    };
+    let (stem, ext) = split_stem_ext(name);
     let ext_len = ext.map_or(0, str::len);
     let keep = stem.floor_char_boundary(MAX_FILENAME_BYTES.saturating_sub(ext_len));
     match ext {
@@ -181,10 +188,7 @@ pub(crate) fn shorten_filename(name: &str) -> String {
 /// so `Café & Croissants.mp4` becomes `Cafe_Croissants.mp4`. A stem that
 /// folds to nothing falls back to `"file"`, so the result is never empty.
 pub(crate) fn restrict_filename_ascii(name: &str) -> String {
-    let (stem, ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
-        _ => (name, None),
-    };
+    let (stem, ext) = split_stem_ext(name);
     let stem = fold_ascii_part(stem);
     let stem = if stem.is_empty() {
         "file".to_string()
@@ -508,18 +512,12 @@ pub fn proxy_mode_labels() -> Vec<String> {
 /// Combo index for a stored mode value. Unknown values fall back to
 /// system (the default).
 pub fn proxy_mode_index(value: &str) -> usize {
-    PROXY_MODE_VALUES
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(0)
+    crate::video::combo_index(PROXY_MODE_VALUES, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to system.
 pub fn proxy_mode_value(index: usize) -> &'static str {
-    PROXY_MODE_VALUES
-        .get(index)
-        .copied()
-        .unwrap_or(PROXY_MODE_SYSTEM)
+    crate::video::combo_value(PROXY_MODE_VALUES, index, PROXY_MODE_SYSTEM)
 }
 
 pub const PROXY_TYPE_VALUES: &[&str] = &["http", "https", "socks5"];
@@ -535,15 +533,12 @@ pub fn proxy_type_labels() -> Vec<String> {
 
 /// Combo index for a stored type value. Unknown values fall back to SOCKS5.
 pub fn proxy_type_index(value: &str) -> usize {
-    PROXY_TYPE_VALUES
-        .iter()
-        .position(|v| *v == value)
-        .unwrap_or(2)
+    crate::video::combo_index(PROXY_TYPE_VALUES, value, 2)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to SOCKS5.
 pub fn proxy_type_value(index: usize) -> &'static str {
-    PROXY_TYPE_VALUES.get(index).copied().unwrap_or("socks5")
+    crate::video::combo_value(PROXY_TYPE_VALUES, index, "socks5")
 }
 
 /// Proxy resolved for one attempt: reqwest interceptors for the direct
@@ -611,6 +606,21 @@ fn system_proxy_settings() -> Option<gio::Settings> {
     Some(gio::Settings::new("org.gnome.system.proxy"))
 }
 
+/// http:// + https:// reqwest proxies for one URL, with the bypass
+/// list applied. Used by both system and manual resolution; callers
+/// differ only in how they surface construction failure.
+fn http_proxies(url: &str, no_proxy_env: &str) -> Result<Vec<reqwest::Proxy>, reqwest::Error> {
+    [reqwest::Proxy::http(url), reqwest::Proxy::https(url)]
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|proxies| {
+            proxies
+                .into_iter()
+                .map(|p| p.no_proxy(reqwest::NoProxy::from_string(no_proxy_env)))
+                .collect()
+        })
+}
+
 /// Proxy from the desktop settings (`org.gnome.system.proxy`, manual
 /// mode). PAC (`auto`) is unsupported by design — executing remote
 /// proxy scripts is out of scope — as is a missing schema.
@@ -661,17 +671,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
     let https = host("https-host");
     if s.boolean("use-same-proxy") && valid(&http, port("http-port")) {
         let url = format!("http://{}:{}", http, port("http-port"));
-        let mk = |p: reqwest::Proxy| p.no_proxy(reqwest::NoProxy::from_string(&no_proxy_env));
-        let proxies = [
-            reqwest::Proxy::http(url.clone()),
-            reqwest::Proxy::https(url.clone()),
-        ]
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .ok()?
-        .into_iter()
-        .map(mk)
-        .collect();
+        let proxies = http_proxies(&url, &no_proxy_env).ok()?;
         return Some(ResolvedProxy {
             proxies,
             cache_key: format!("{url}|{no_proxy_env}"),
@@ -740,16 +740,7 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     let (proxies, cli_url) = match o.proxy_type.as_str() {
         "http" | "https" => {
             let url = format!("http://{host}:{}", o.proxy_port);
-            let proxies = [
-                reqwest::Proxy::http(url.clone()),
-                reqwest::Proxy::https(url.clone()),
-            ]
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .map(apply_bypass)
-            .collect();
+            let proxies = http_proxies(&url, &no_proxy_env).map_err(|e| e.to_string())?;
             (proxies, url)
         }
         // SOCKS5 always remote-resolving: local DNS would leak every
@@ -817,6 +808,16 @@ fn send_last_modified(
 /// instead of the panic cascading through every worker into the app.
 pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// First recorded attempt error, or a generic interruption message.
+/// Each outcome tail wraps it in its own `AttemptFail` variant (changed
+/// vs throttled vs retryable drive different recovery), so the helper
+/// returns the message and callers keep their variants.
+fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
+    lock_recover(first_err)
+        .take()
+        .unwrap_or_else(|| gettext("Download interrupted"))
 }
 
 pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
@@ -1212,14 +1213,7 @@ async fn attempt_multi(
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
             let mut downloaded = st.completed_bytes();
-            ctx.tx
-                .send(EngineMsg::Progress {
-                    downloaded,
-                    total: Some(total),
-                    uploaded: 0,
-                    upload_bps: 0,
-                })
-                .ok();
+            ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
             let pace_start = Instant::now();
             let mut paced: u64 = 0;
             let mut last_sent = Instant::now();
@@ -1237,61 +1231,32 @@ async fn attempt_multi(
                 written += bytes.len() as u64;
                 ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
                 st.mark(idx);
-                if let Some(r) = rate {
-                    paced += bytes.len() as u64;
-                    let wait = paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
-                    if wait > 0.0 {
-                        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-                    }
-                }
+                pace_chunk(&mut paced, pace_start, rate, bytes.len()).await;
                 // ~20fps row updates: smooth determinate motion per HIG;
                 // each tick is one label render on a handful of rows.
                 if last_sent.elapsed() >= Duration::from_millis(50) {
                     rate = live_rate_limit();
-                    ctx.tx
-                        .send(EngineMsg::Progress {
-                            downloaded,
-                            total: Some(total),
-                            uploaded: 0,
-                            upload_bps: 0,
-                        })
-                        .ok();
+                    ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
                     last_sent = Instant::now();
                 }
             }
             file.flush()
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
-            ctx.tx
-                .send(EngineMsg::Progress {
-                    downloaded,
-                    total: Some(total),
-                    uploaded: 0,
-                    upload_bps: 0,
-                })
-                .ok();
+            ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
             Ok::<u64, String>(written)
         }
     };
     let (wres, _) = tokio::join!(writer, futures_util::future::join_all(workers));
     let written = wres.map_err(AttemptFail::Retryable)?;
     if changed.load(Ordering::SeqCst) {
-        let msg = lock_recover(&first_err)
-            .take()
-            .unwrap_or_else(|| gettext("Download interrupted"));
-        return Err(AttemptFail::Changed(msg));
+        return Err(AttemptFail::Changed(take_first_err(&first_err)));
     }
     if throttled.load(Ordering::SeqCst) {
-        let msg = lock_recover(&first_err)
-            .take()
-            .unwrap_or_else(|| gettext("Download interrupted"));
-        return Err(AttemptFail::Throttled(msg));
+        return Err(AttemptFail::Throttled(take_first_err(&first_err)));
     }
     if failed.load(Ordering::SeqCst) {
-        let msg = lock_recover(&first_err)
-            .take()
-            .unwrap_or_else(|| gettext("Download interrupted"));
-        return Err(AttemptFail::Retryable(msg));
+        return Err(AttemptFail::Retryable(take_first_err(&first_err)));
     }
     if written != expect_bytes {
         return Err(AttemptFail::Retryable(gettext("Incomplete download")));
@@ -1342,16 +1307,7 @@ async fn attempt_once(
         if start > 0 {
             req = req.header("Range", format!("bytes={start}-"));
         }
-        let resp = match tokio::time::timeout(
-            ctx.timeout,
-            ctx.client.execute(req.build().map_err(|e| e.to_string())?),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => return Err(e.to_string()),
-            Err(_) => return Err(gettext("Connection timed out")),
-        };
+        let resp = execute_with_timeout(&ctx.client, req, ctx.timeout).await?;
         let status = resp.status();
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
             // The range is past EOF. That means "already complete" ONLY with
@@ -1382,9 +1338,7 @@ async fn attempt_once(
                     ctx.cookies.as_ref(),
                     &ctx.url,
                 );
-                if let Ok(built) = hreq.build()
-                    && let Ok(Ok(hresp)) =
-                        tokio::time::timeout(ctx.timeout, ctx.client.execute(built)).await
+                if let Ok(hresp) = execute_with_timeout(&ctx.client, hreq, ctx.timeout).await
                     && hresp.status().is_success()
                     && hresp.content_length() == Some(start)
                     && !has_holes(&ctx.dest)
@@ -1474,14 +1428,7 @@ async fn attempt_once(
             ctx.tx.send(EngineMsg::SuggestName(name)).ok();
         }
         let mut downloaded = if partial { start } else { 0 };
-        ctx.tx
-            .send(EngineMsg::Progress {
-                downloaded,
-                total,
-                uploaded: 0,
-                upload_bps: 0,
-            })
-            .ok();
+        ctx.tx.send(progress_msg(downloaded, total)).ok();
         let mut stream = resp.bytes_stream();
         let pace_start = Instant::now();
         let mut paced: u64 = 0;
@@ -1511,25 +1458,12 @@ async fn attempt_once(
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?;
             downloaded += chunk.len() as u64;
-            if let Some(r) = rate {
-                paced += chunk.len() as u64;
-                let wait = paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
-                if wait > 0.0 {
-                    tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-                }
-            }
+            pace_chunk(&mut paced, pace_start, rate, chunk.len()).await;
             // ~20fps row updates: smooth determinate motion per HIG;
             // each tick is one label render on a handful of rows.
             if last_sent.elapsed() >= Duration::from_millis(50) {
                 rate = live_rate_limit();
-                ctx.tx
-                    .send(EngineMsg::Progress {
-                        downloaded,
-                        total,
-                        uploaded: 0,
-                        upload_bps: 0,
-                    })
-                    .ok();
+                ctx.tx.send(progress_msg(downloaded, total)).ok();
                 last_sent = Instant::now();
             }
         }
@@ -1581,6 +1515,31 @@ fn live_rate_limit() -> Option<u64> {
     match LIVE_RATE_LIMIT.load(Ordering::Relaxed) {
         0 => None,
         r => Some(r),
+    }
+}
+
+/// Throttle one chunk against the shared speed limit. The limit arrives
+/// per call (never hoisted or cached) so preference edits apply
+/// mid-download; `paced`/`pace_start` carry the running account.
+/// Progress message for the direct engine: HTTP rows never carry
+/// upload counters (zeros keep the torrent-only upload suffix in the
+/// pump empty). Callers pass their own byte counts.
+fn progress_msg(downloaded: u64, total: Option<u64>) -> EngineMsg {
+    EngineMsg::Progress {
+        downloaded,
+        total,
+        uploaded: 0,
+        upload_bps: 0,
+    }
+}
+
+async fn pace_chunk(paced: &mut u64, pace_start: Instant, rate: Option<u64>, n: usize) {
+    if let Some(r) = rate {
+        *paced += n as u64;
+        let wait = *paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
+        if wait > 0.0 {
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
     }
 }
 
@@ -1972,6 +1931,23 @@ pub(crate) fn stamp_request(
     req
 }
 
+/// Execute one request under a timeout. Timeouts surface the same
+/// "Connection timed out" message at every call site so rows report one
+/// consistent stall string; build and transport errors keep their own
+/// text for the callers to wrap (`Err(String)` vs `Retryable`).
+async fn execute_with_timeout(
+    client: &reqwest::Client,
+    req: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> Result<reqwest::Response, String> {
+    let built = req.build().map_err(|e| e.to_string())?;
+    match tokio::time::timeout(timeout, client.execute(built)).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(gettext("Connection timed out")),
+    }
+}
+
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
@@ -1984,16 +1960,7 @@ async fn probe_ranges(
         cookies,
         url,
     );
-    let resp = match tokio::time::timeout(
-        timeout,
-        client.execute(req.build().map_err(|e| e.to_string())?),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => return Err(e.to_string()),
-        Err(_) => return Err(gettext("Connection timed out")),
-    };
+    let resp = execute_with_timeout(client, req, timeout).await?;
     if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         return Err(gettext("Range requests not supported"));
     }
@@ -2093,21 +2060,10 @@ async fn fetch_piece(
             ctx.cookies.as_ref(),
             &ctx.url,
         );
-        let built = match req.build() {
+        let resp = match execute_with_timeout(&ctx.client, req, timeout).await {
             Ok(r) => r,
             Err(e) => {
-                last_err = Retryable(e.to_string());
-                continue;
-            }
-        };
-        let resp = match tokio::time::timeout(timeout, ctx.client.execute(built)).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                last_err = Retryable(e.to_string());
-                continue;
-            }
-            Err(_) => {
-                last_err = Retryable(gettext("Connection timed out"));
+                last_err = Retryable(e);
                 continue;
             }
         };
@@ -2260,6 +2216,15 @@ pub(crate) struct RemovedSnapshot {
     /// Staged video source, so Undo on a video row restores the Page
     /// marker instead of demoting it to a plain download.
     pub video_source: Option<crate::video::VideoSource>,
+}
+
+/// One validated queue entry awaiting the restore apply phase.
+/// Defined at module level: `restore_queue` collects these first so a
+/// mid-loop validation failure can never leave half-spawned engines.
+struct PendingRestore {
+    item: StoredItem,
+    output_dir: Option<String>,
+    segments: Option<SegmentState>,
 }
 
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
@@ -2917,6 +2882,21 @@ impl DownloadManager {
         self.pump(item, item_id, generation, rx);
     }
 
+    /// Whether a finished-name candidate is taken: a file on disk, a
+    /// reserved part/sidecar stem, or a live row already holding it.
+    /// Shared by the Finished claim loop and the DEST_EXISTS requeue so
+    /// both agree on what "taken" means. `existing` is the intake-time
+    /// snapshot (one readdir per call, not per candidate). Video engines
+    /// never suggest today, but this is a generic finished-name claim:
+    /// the reservation stays uniform across all of them.
+    fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
+        std::path::Path::new(dir).join(n).exists()
+            || crate::video::stem_reserved_in(existing, name_stem(n))
+            || (0..self.store.n_items())
+                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                .any(|it| it.dest_dir() == dir && it.filename() == n)
+    }
+
     /// Drain one engine's message channel into its row. Shared by the HTTP
     /// and torrent engines: every arm below is engine-generic, so arms the
     /// other engine never sends simply never fire.
@@ -3030,22 +3010,7 @@ impl DownloadManager {
                                 let dir = item.dest_dir().to_string();
                                 let existing =
                                     crate::video::dir_file_names(std::path::Path::new(&dir));
-                                let taken = |n: &str| {
-                                    std::path::Path::new(&dir).join(n).exists()
-                                        // Video engines never suggest today,
-                                        // but this is a generic finished-name
-                                        // claim: keep the reservation uniform
-                                        // across all of them.
-                                        || crate::video::stem_reserved_in(
-                                            &existing,
-                                            name_stem(n),
-                                        )
-                                        || (0..this.store.n_items())
-                                            .filter_map(|i| {
-                                                this.store.item(i).and_downcast::<DownloadItem>()
-                                            })
-                                            .any(|it| it.dest_dir() == dir && it.filename() == n)
-                                };
+                                let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
                                 // Claim-then-move so a file appearing between the
                                 // dedupe check and the rename is never clobbered:
                                 // retry with a fresh deduped name instead.
@@ -3195,13 +3160,7 @@ impl DownloadManager {
                             let current = item.filename().to_string();
                             let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
                             let new_name = dedupe_filename(&current, |n| {
-                                std::path::Path::new(&dir).join(n).exists()
-                                    || crate::video::stem_reserved_in(&existing, name_stem(n))
-                                    || (0..this.store.n_items())
-                                        .filter_map(|i| {
-                                            this.store.item(i).and_downcast::<DownloadItem>()
-                                        })
-                                        .any(|it| it.dest_dir() == dir && it.filename() == n)
+                                this.is_name_taken(&dir, &existing, n)
                             });
                             item.set_filename(new_name);
                             item.set_status(DownloadStatus::Queued);
@@ -4320,6 +4279,62 @@ impl DownloadManager {
         }
     }
 
+    /// Validate one persisted queue entry for restore: trust-checked
+    /// output dir, URL, filename, absolute dest, well-shaped bitmap.
+    /// Invalid entries warn-skip (never strand engines); valid ones
+    /// collect for the apply phase. Pure part of `restore_queue` —
+    /// validation must never insert or spawn (see its two-phase note).
+    fn validate_stored_item(item: StoredItem) -> Option<PendingRestore> {
+        // The recorded engine folder is only trusted when it sits
+        // directly inside the row's own dest; otherwise it stays
+        // unknown and delete falls back to the recomputed path.
+        let output_dir = item.output_dir.clone().filter(|dir| {
+            let folder = std::path::PathBuf::from(dir);
+            folder.is_absolute()
+                && folder
+                    .parent()
+                    .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
+        });
+        // Mirror restore_existing's cheap validations now, so the
+        // apply phase below cannot fail (and strand engines) partway.
+        if normalize_url(&item.url).is_err() {
+            tracing::warn!("skipping queue entry with bad URL");
+            return None;
+        }
+        if !sane_filename(&item.filename) {
+            tracing::warn!(
+                "skipping queue entry: Invalid filename in queue: {}",
+                item.filename
+            );
+            return None;
+        }
+        if !std::path::Path::new(&item.dest_dir).is_absolute() {
+            tracing::warn!(
+                "skipping queue entry: Invalid destination in queue: {}",
+                item.dest_dir
+            );
+            return None;
+        }
+        // A stored bitmap resumes segmented; anything
+        // misshapen is dropped (single-stream fallback stays
+        // correct via the spawn-time file checks).
+        let segments = match &item.segments {
+            Some(s)
+                if s.total > 0
+                    && s.total <= MAX_SEGMENTED_TOTAL
+                    && s.done.len() == s.total.div_ceil(piece_len(s.total)) as usize =>
+            {
+                Some(s.clone())
+            }
+            _ => None,
+        };
+        Some(PendingRestore {
+            item,
+            output_dir,
+            segments,
+        })
+    }
+
     /// Load the persisted queue (cap: 1000 items / 10 MB), then resume.
     /// Unusable files are moved to `queue.json.bak` (not deleted), so a
     /// single bad write can never silently wipe the whole queue.
@@ -4371,61 +4386,11 @@ impl DownloadManager {
             // start_next, so collect all restore decisions first and only
             // then apply them — a mid-loop validation failure can no longer
             // leave half-spawned engines behind.
-            struct PendingRestore {
-                item: StoredItem,
-                output_dir: Option<String>,
-                segments: Option<SegmentState>,
-            }
             let mut pending = Vec::with_capacity(items.len());
             for item in items {
-                // The recorded engine folder is only trusted when it sits
-                // directly inside the row's own dest; otherwise it stays
-                // unknown and delete falls back to the recomputed path.
-                let output_dir = item.output_dir.clone().filter(|dir| {
-                    let folder = std::path::PathBuf::from(dir);
-                    folder.is_absolute()
-                        && folder
-                            .parent()
-                            .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
-                });
-                // Mirror restore_existing's cheap validations now, so the
-                // apply phase below cannot fail (and strand engines) partway.
-                if normalize_url(&item.url).is_err() {
-                    tracing::warn!("skipping queue entry with bad URL");
-                    continue;
+                if let Some(p) = Self::validate_stored_item(item) {
+                    pending.push(p);
                 }
-                if !sane_filename(&item.filename) {
-                    tracing::warn!(
-                        "skipping queue entry: Invalid filename in queue: {}",
-                        item.filename
-                    );
-                    continue;
-                }
-                if !std::path::Path::new(&item.dest_dir).is_absolute() {
-                    tracing::warn!(
-                        "skipping queue entry: Invalid destination in queue: {}",
-                        item.dest_dir
-                    );
-                    continue;
-                }
-                // A stored bitmap resumes segmented; anything
-                // misshapen is dropped (single-stream fallback stays
-                // correct via the spawn-time file checks).
-                let segments = match &item.segments {
-                    Some(s)
-                        if s.total > 0
-                            && s.total <= MAX_SEGMENTED_TOTAL
-                            && s.done.len() == s.total.div_ceil(piece_len(s.total)) as usize =>
-                    {
-                        Some(s.clone())
-                    }
-                    _ => None,
-                };
-                pending.push(PendingRestore {
-                    item,
-                    output_dir,
-                    segments,
-                });
             }
             for p in pending {
                 match p.item.status {

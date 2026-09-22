@@ -13,6 +13,18 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
+/// Close the dialog, then run a follow-up (Check Again closes and
+/// re-runs resolution via the caller's callback).
+fn close_then(btn: &gtk4::Button, dialog: &adw::Dialog, on_check: impl Fn() + 'static) {
+    let weak = dialog.downgrade();
+    btn.connect_clicked(move |_| {
+        if let Some(d) = weak.upgrade() {
+            d.close();
+        }
+        on_check();
+    });
+}
+
 /// Show the install-help dialog. `on_check` runs after Check Again closes
 /// the dialog (typically: re-resolve tools and refresh the calling row).
 pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() + 'static) {
@@ -42,24 +54,8 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&check_btn));
 
-    {
-        let d = dialog.downgrade();
-        close_btn.connect_clicked(move |_| {
-            if let Some(d) = d.upgrade() {
-                d.close();
-            }
-        });
-    }
-    {
-        let d = dialog.downgrade();
-        let on_check = std::rc::Rc::new(on_check);
-        check_btn.connect_clicked(move |_| {
-            if let Some(d) = d.upgrade() {
-                d.close();
-            }
-            on_check();
-        });
-    }
+    crate::window::close_on_click(&close_btn, &dialog);
+    close_then(&check_btn, &dialog, on_check);
 
     let pkgs = std::fs::read_to_string("/etc/os-release")
         .ok()

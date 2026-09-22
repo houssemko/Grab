@@ -169,6 +169,34 @@ pub fn setup(app: &adw::Application) {
     }
 }
 
+/// Destructive confirm dialog: Cancel/confirm responses, destructive
+/// confirm styling, Cancel as default and close. The confirm body runs
+/// only on explicit confirmation (dialogs sit open while the queue may
+/// change, so bodies that depend on counts re-read at confirm time).
+fn destructive_confirm(
+    parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
+    heading: &str,
+    body: &str,
+    confirm_label: &str,
+    on_confirm: impl Fn() + 'static,
+) {
+    let dialog = adw::AlertDialog::builder()
+        .heading(heading)
+        .body(body)
+        .build();
+    dialog.add_response("cancel", &gettext("Cancel"));
+    dialog.add_response("confirm", confirm_label);
+    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(None, move |_, response| {
+        if response == "confirm" {
+            on_confirm();
+        }
+    });
+    dialog.present(Some(parent));
+}
+
 fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>) {
     let entries = [
         {
@@ -209,19 +237,14 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         n as u32,
                     )
                     .replace("{n}", &n.to_string());
-                    let dialog = adw::AlertDialog::builder()
-                        .heading(gettext("Cancel All Downloads?"))
-                        .body(&body)
-                        .build();
-                    dialog.add_response("cancel", &gettext("Cancel"));
-                    dialog.add_response("confirm", &gettext("Cancel All"));
-                    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
-                    dialog.set_default_response(Some("cancel"));
-                    dialog.set_close_response("cancel");
                     let manager = s.manager.clone();
                     let toasts = s.toasts.clone();
-                    dialog.connect_response(None, move |_, response| {
-                        if response == "confirm" {
+                    destructive_confirm(
+                        &s.window,
+                        &gettext("Cancel All Downloads?"),
+                        &body,
+                        &gettext("Cancel All"),
+                        move || {
                             // Count at confirm time, not dialog-open time:
                             // the queue may have changed while it sat open.
                             let n = manager.active_count();
@@ -235,9 +258,8 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                                 .replace("{n}", &n.to_string()),
                             );
                             toasts.add_toast(toast);
-                        }
-                    });
-                    dialog.present(Some(&s.window));
+                        },
+                    );
                 })
                 .build()
         },
@@ -272,19 +294,14 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         n as u32,
                     )
                     .replace("{n}", &n.to_string());
-                    let dialog = adw::AlertDialog::builder()
-                        .heading(gettext("Clear Finished Downloads?"))
-                        .body(&body)
-                        .build();
-                    dialog.add_response("cancel", &gettext("Cancel"));
-                    dialog.add_response("confirm", &gettext("Clear Finished"));
-                    dialog.set_response_appearance("confirm", adw::ResponseAppearance::Destructive);
-                    dialog.set_default_response(Some("cancel"));
-                    dialog.set_close_response("cancel");
                     let manager = s.manager.clone();
                     let toasts = s.toasts.clone();
-                    dialog.connect_response(None, move |_, response| {
-                        if response == "confirm" {
+                    destructive_confirm(
+                        &s.window,
+                        &gettext("Clear Finished Downloads?"),
+                        &body,
+                        &gettext("Clear Finished"),
+                        move || {
                             let n = manager.clear_finished();
                             if n == 0 {
                                 return;
@@ -298,9 +315,8 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                                 .replace("{n}", &n.to_string()),
                             );
                             toasts.add_toast(toast);
-                        }
-                    });
-                    dialog.present(Some(&s.window));
+                        },
+                    );
                 })
                 .build()
         },

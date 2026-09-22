@@ -123,36 +123,19 @@ async fn export_cookies(
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&candidate)
-            {
-                Ok(_) => break candidate,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => {
-                    tracing::debug!(error = %e, "cookie export temp file failed");
-                    return None;
-                }
-            }
+            opts.mode(0o600);
         }
-        #[cfg(not(unix))]
-        {
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(_) => break candidate,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => {
-                    tracing::debug!(error = %e, "cookie export temp file failed");
-                    return None;
-                }
+        match opts.open(&candidate) {
+            Ok(_) => break candidate,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                tracing::debug!(error = %e, "cookie export temp file failed");
+                return None;
             }
         }
     };
@@ -209,9 +192,7 @@ pub(crate) async fn jar_for_browser(
     if cookies_browser.is_empty() || cookies_browser == "none" {
         return None;
     }
-    if let Some(cached) = jar_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    if let Some(cached) = crate::download::lock_recover(jar_cache())
         .get(cookies_browser)
         .filter(|c| c.at.elapsed() < JAR_TTL)
     {
@@ -224,16 +205,13 @@ pub(crate) async fn jar_for_browser(
     let text = export_cookies(youtube_bin, &spec, page_url, Duration::from_secs(120)).await?;
     let (jar, count) = jar_from_export(&text);
     tracing::debug!(cookies = count, "exported browser cookies");
-    jar_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(
-            cookies_browser.to_string(),
-            CachedJar {
-                jar: jar.clone(),
-                at: Instant::now(),
-            },
-        );
+    crate::download::lock_recover(jar_cache()).insert(
+        cookies_browser.to_string(),
+        CachedJar {
+            jar: jar.clone(),
+            at: Instant::now(),
+        },
+    );
     // An empty jar is still a valid answer (logged-out profile):
     // callers send no Cookie header and move on.
     Some(jar)

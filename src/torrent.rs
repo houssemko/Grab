@@ -44,18 +44,18 @@ static ACTIVE: std::sync::LazyLock<Mutex<HashMap<u64, Active>>> =
 /// Pre-chosen file indices for multi-file torrents, staged at intake
 /// (file-list dialog) and consumed once by the engine at spawn. Keyed by
 /// pseudo-URL: only archived files carry selections, magnets pass None.
-/// Staged file selection: chosen indices.
-type StagedSelection = Vec<usize>;
-
-static PENDING_SELECTIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, StagedSelection>>> =
+static PENDING_SELECTIONS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<usize>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Lock the staged-selection map, recovering from poisoning: a panicked
+/// test must not deadlock the suite on the next lock.
+fn lock_pending() -> std::sync::MutexGuard<'static, HashMap<String, Vec<usize>>> {
+    PENDING_SELECTIONS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Stage a file selection for the next spawn of `pseudo_url`.
 pub fn stage_selection(pseudo_url: &str, only_files: Vec<usize>) {
-    PENDING_SELECTIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(pseudo_url.to_string(), only_files);
+    lock_pending().insert(pseudo_url.to_string(), only_files);
 }
 
 /// Read the staged selection for `pseudo_url`, if any. Peek, not take:
@@ -64,30 +64,20 @@ pub fn stage_selection(pseudo_url: &str, only_files: Vec<usize>) {
 /// `prune_selections`); in-session the key outlives Undo because unremove
 /// re-inserts the same pseudo-URL.
 pub(crate) fn get_selection(pseudo_url: &str) -> Option<Vec<usize>> {
-    PENDING_SELECTIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(pseudo_url)
-        .cloned()
+    lock_pending().get(pseudo_url).cloned()
 }
 
 /// Drop staged selections no live row references (companion to
 /// `sweep_archives`, called with the same referenced set).
 pub fn prune_selections(referenced: &std::collections::HashSet<String>) {
-    PENDING_SELECTIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|k, _| referenced.contains(k));
+    lock_pending().retain(|k, _| referenced.contains(k));
 }
 
 /// Drop the staged selection for `pseudo_url` (companion to
 /// `prune_selections`): a finished row never re-spawns, so keeping its
 /// filter would pin the entry until the next sweep.
 pub(crate) fn drop_selection(pseudo_url: &str) {
-    PENDING_SELECTIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(pseudo_url);
+    lock_pending().remove(pseudo_url);
 }
 
 /// True for either torrent source: magnet links and archived .torrent
@@ -97,14 +87,20 @@ pub fn is_torrent(s: &str) -> bool {
     is_magnet(s) || is_torrent_url(s)
 }
 
+/// Case-insensitive ASCII prefix check on leading-whitespace-trimmed
+/// input. `get` (not slicing): non-ASCII input must never panic the
+/// classifier.
+fn has_prefix_ci(s: &str, prefix: &str) -> bool {
+    s.trim_start()
+        .get(..prefix.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+}
+
 pub fn is_magnet(s: &str) -> bool {
-    // `get` (not slicing): non-ASCII input must never panic the classifier.
     // Match the bare `magnet:` prefix, not `magnet:?`: parse_magnet is the
     // real validator, and anything magnet:-shaped must never fall through
     // to the http scheme branch (tracker params contain `://`).
-    s.trim_start()
-        .get(..7)
-        .is_some_and(|p| p.eq_ignore_ascii_case("magnet:"))
+    has_prefix_ci(s, "magnet:")
 }
 
 /// Parse a magnet link, rejecting anything rqbit cannot resolve to BTv1.
@@ -114,6 +110,14 @@ pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, String> {
         return Err(gettext("Only BitTorrent v1 magnets are supported"));
     }
     Ok(m)
+}
+
+/// Raw torrent display name, lossy-decoded. Callers apply their own
+/// `sane_filename` gate and fallback (info-hash hex, `"torrent"`, or
+/// stub), which deliberately differ per site — this helper only
+/// decodes.
+fn raw_torrent_name<B: AsRef<[u8]>>(name: Option<&B>) -> Option<String> {
+    name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
 }
 
 /// Display stub for a magnet row: the advertised name, else the info-hash hex.
@@ -141,9 +145,7 @@ pub enum TorrentSource {
 
 /// Pseudo-URL prefix for archived .torrent files (never leaves the app).
 pub fn is_torrent_url(s: &str) -> bool {
-    s.trim_start()
-        .get(..8)
-        .is_some_and(|p| p.eq_ignore_ascii_case("torrent:"))
+    has_prefix_ci(s, "torrent:")
 }
 
 /// Archive dir for .torrent files: alongside the session state.
@@ -166,6 +168,16 @@ pub fn archive_path_for_url(url: &str) -> Option<PathBuf> {
     .then_some(path)
 }
 
+/// Sanitized file stem of a user-supplied file name, if it passes the
+/// filename gate. Path traversal (`../`) never survives: `file_stem`
+/// strips directories, and hostile stems fail `sane_filename`.
+fn safe_stem(file_name: &str) -> Option<&str> {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| sane_filename(s))
+}
+
 /// Copy `.torrent` bytes into the archive, named after the sanitized file
 /// stem. Returns the pseudo-URL the queue row stores.
 pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, String> {
@@ -175,11 +187,7 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
     }
     // Parse first: never archive bytes rqbit itself would reject.
     librqbit::torrent_from_bytes(bytes).map_err(|e| format!("Invalid torrent file: {e}"))?;
-    let stem = Path::new(file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| sane_filename(s))
-        .unwrap_or("torrent");
+    let stem = safe_stem(file_name).unwrap_or("torrent");
     let dir = torrents_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot store torrent file: {e}"))?;
     // Dedupe against existing archives the same way downloads do.
@@ -192,10 +200,7 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
 
 /// Stub row name for an archived file: the sanitized file stem.
 pub fn stub_name_for_file(file_name: &str) -> String {
-    let stem = Path::new(file_name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| sane_filename(s));
+    let stem = safe_stem(file_name);
     match stem {
         Some(s) => crate::download::shorten_filename(s),
         None => "torrent".to_string(),
@@ -234,34 +239,33 @@ fn sanitize_display_path(path: &str) -> String {
 pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>), String> {
     let meta =
         librqbit::torrent_from_bytes(bytes).map_err(|e| format!("Invalid torrent file: {e}"))?;
-    let name = meta
-        .info
-        .data
-        .name
-        .as_ref()
-        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+    let name = raw_torrent_name(meta.info.data.name.as_ref())
         .filter(|n| sane_filename(n))
         .unwrap_or_else(|| "torrent".to_string());
-    let mut entries = Vec::new();
-    if let Some(files) = meta.info.data.files.as_ref() {
-        for (i, f) in files.iter().enumerate() {
-            let parts: Vec<String> = f
-                .path
+    let entries: Vec<TorrentFileEntry> =
+        meta.info.data.files.as_ref().map_or(Vec::new(), |files| {
+            files
                 .iter()
-                .map(|c| String::from_utf8_lossy(c.as_ref()).into_owned())
-                .collect();
-            let raw = parts.join("/");
-            let shown = sanitize_display_path(&raw);
-            entries.push(TorrentFileEntry {
-                path: if shown.is_empty() {
-                    format!("file {i}")
-                } else {
-                    shown
-                },
-                length: f.length,
-            });
-        }
-    }
+                .enumerate()
+                .map(|(i, f)| {
+                    let parts: Vec<String> = f
+                        .path
+                        .iter()
+                        .map(|c| String::from_utf8_lossy(c.as_ref()).into_owned())
+                        .collect();
+                    let raw = parts.join("/");
+                    let shown = sanitize_display_path(&raw);
+                    TorrentFileEntry {
+                        path: if shown.is_empty() {
+                            format!("file {i}")
+                        } else {
+                            shown
+                        },
+                        length: f.length,
+                    }
+                })
+                .collect()
+        });
     Ok((name, entries))
 }
 
@@ -317,19 +321,21 @@ fn output_folder_for(
     dest.join(dir)
 }
 
+/// Two or more files means the torrent downloads into its own folder;
+/// single-file torrents sit flat in `dest`. Boundary (`>= 2`) pinned by
+/// `intake_plan_mirrors_engine_layout`.
+fn is_multi_file<T>(files: Option<&[T]>) -> bool {
+    files.is_some_and(|f| f.len() >= 2)
+}
+
 /// What the engine will download into for archived `.torrent` bytes:
 /// the folder base plus whether it is multi-file. Mirrors `run_torrent`'s
 /// File branch exactly, so intake can detect on-disk collisions upfront
 /// instead of letting `overwrite: true` clobber existing files.
 pub(crate) fn intake_plan(bytes: &[u8]) -> Option<(String, bool)> {
     let meta = librqbit::torrent_from_bytes(bytes).ok()?;
-    let raw = meta
-        .info
-        .data
-        .name
-        .as_ref()
-        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
-    let multi = meta.info.data.files.as_ref().is_some_and(|f| f.len() >= 2);
+    let raw = raw_torrent_name(meta.info.data.name.as_ref());
+    let multi = is_multi_file(meta.info.data.files.as_deref());
     let base = raw
         .filter(|n| sane_filename(n))
         .map(|n| shorten_filename(&n))
@@ -349,16 +355,11 @@ pub fn torrent_output_dir(dest: &std::path::Path, url: &str) -> Option<PathBuf> 
     let path = archive_path_for_url(url)?;
     let bytes = std::fs::read(path).ok()?;
     let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
-    let multi = meta.info.data.files.as_ref().is_some_and(|f| f.len() >= 2);
+    let multi = is_multi_file(meta.info.data.files.as_deref());
     if !multi {
         return None;
     }
-    let name = meta
-        .info
-        .data
-        .name
-        .as_ref()
-        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
+    let name = raw_torrent_name(meta.info.data.name.as_ref());
     // Same fallback the engine uses (info-hash hex): deterministic match.
     let fallback = meta.info_hash.as_string();
     Some(output_folder_for(dest, name, true, &fallback))
@@ -388,33 +389,36 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     }
     let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
     for (i, entry) in entries.iter().enumerate() {
-        if keep.contains(&i) {
+        if keep.contains(&i) || is_hostile_entry(&entry.path) {
             continue;
         }
-        // Never let a hostile entry escape the folder (join would follow
-        // `..` or an absolute path); the file simply stays behind.
-        if entry
-            .path
-            .split('/')
-            .any(|c| c.is_empty() || c == "." || c == "..")
-        {
-            continue;
-        }
-        let path = folder.join(&entry.path);
-        let _ = std::fs::remove_file(&path);
-        let mut parent = path.parent();
-        while let Some(dir) = parent {
-            if dir == folder {
-                break;
-            }
-            match std::fs::remove_dir(dir) {
-                Ok(()) => parent = dir.parent(),
-                Err(_) => break,
-            }
-        }
+        remove_file_and_prune_parents(&folder.join(&entry.path), folder);
     }
 }
 
+/// Whether a torrent entry path may escape its folder (`..`, absolute
+/// paths, empty segments): hostile entries are never joined — the file
+/// simply stays behind.
+fn is_hostile_entry(path: &str) -> bool {
+    path.split('/')
+        .any(|c| c.is_empty() || c == "." || c == "..")
+}
+
+/// Remove a file, then prune parents left empty, stopping at (and never
+/// removing) `folder`.
+fn remove_file_and_prune_parents(path: &std::path::Path, folder: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let mut parent = path.parent();
+    while let Some(dir) = parent {
+        if dir == folder {
+            break;
+        }
+        match std::fs::remove_dir(dir) {
+            Ok(()) => parent = dir.parent(),
+            Err(_) => break,
+        }
+    }
+}
 /// Network plan for one torrent add, resolved from settings at spawn.
 /// A SOCKS5 proxy takes over TCP peers and HTTP trackers — but the engine
 /// cannot proxy DHT (UDP), inbound connections, or UDP trackers, so those
@@ -707,6 +711,46 @@ pub(crate) fn forget_download(id: u64) {
     });
 }
 
+/// Seed-limit check for the poll loop: ratio and/or seed-time rules.
+/// Pure (and unit-testable — the loop itself is timing-dependent).
+/// `t0` is the first finished tick; seed-time counts from there.
+fn seed_limits_hit(
+    seed_ratio: f64,
+    seed_time_min: i32,
+    t0: std::time::Instant,
+    total_bytes: u64,
+    uploaded_bytes: u64,
+) -> bool {
+    let ratio_hit = seed_ratio > 0.0
+        && total_bytes > 0
+        && uploaded_bytes as f64 >= seed_ratio * total_bytes as f64;
+    let time_hit = seed_time_min > 0
+        && t0.elapsed() >= std::time::Duration::from_secs(seed_time_min as u64 * 60);
+    ratio_hit || time_hit
+}
+
+/// Evict a finished row from the session unless still seeding: every
+/// managed torrent pins its chunk-tracker, storage and peer state, so
+/// completed rows would leak RAM one torrent at a time. Files stay on
+/// disk (`false` = keep files).
+async fn maybe_evict(session: &Session, id: TorrentIdOrHash, finished: bool, seed_finished: bool) {
+    if finished && !seed_finished {
+        let _ = session.delete(id, false).await;
+    }
+}
+
+/// Progress message for one poll tick. Torrent rows carry their live
+/// upload counters here; HTTP rows send zeros, keeping the torrent-only
+/// upload suffix in the pump empty for them.
+fn progress_msg(downloaded: u64, total: Option<u64>, uploaded: u64, upload_bps: u64) -> EngineMsg {
+    EngineMsg::Progress {
+        downloaded,
+        total,
+        uploaded,
+        upload_bps,
+    }
+}
+
 /// Poll one managed torrent into the pump. Returns true when the download
 /// finished (caller deletes the .torrent archive then; Failed/Cancelled
 /// keep theirs for retry).
@@ -744,16 +788,16 @@ async fn poll_loop(
         }
         let total = (stats.total_bytes > 0).then_some(stats.total_bytes);
         if tx
-            .send(EngineMsg::Progress {
-                downloaded: stats.progress_bytes,
+            .send(progress_msg(
+                stats.progress_bytes,
                 total,
-                uploaded: stats.uploaded_bytes,
-                upload_bps: stats
+                stats.uploaded_bytes,
+                stats
                     .live
                     .as_ref()
                     .map(|l| l.upload_speed.as_bytes())
                     .unwrap_or(0),
-            })
+            ))
             .is_err()
         {
             break;
@@ -788,12 +832,13 @@ async fn poll_loop(
             // action instead of flipping to Done while the engine keeps
             // seeding in the background.
             let t0 = *finished_at.get_or_insert_with(std::time::Instant::now);
-            let ratio_hit = seed_ratio > 0.0
-                && stats.total_bytes > 0
-                && stats.uploaded_bytes as f64 >= seed_ratio * stats.total_bytes as f64;
-            let time_hit = seed_time_min > 0
-                && t0.elapsed() >= std::time::Duration::from_secs(seed_time_min as u64 * 60);
-            if ratio_hit || time_hit {
+            if seed_limits_hit(
+                seed_ratio,
+                seed_time_min,
+                t0,
+                stats.total_bytes,
+                stats.uploaded_bytes,
+            ) {
                 let _ = session.pause(&handle).await;
                 let _ = session
                     .delete(TorrentIdOrHash::Hash(handle.info_hash()), false)
@@ -845,6 +890,36 @@ pub(crate) struct TorrentJob {
     /// directly instead of recomputing from metadata.
     pub dest_is_final: bool,
     pub tx: UnboundedSender<EngineMsg>,
+}
+
+/// Claim the registry slot for a spawn. Resume when this row already
+/// owns it (retry after pause); reject when a *different* row holds the
+/// same torrent. Mutation stays under one lock hold; on `Err` the guard
+/// drops with the return and the caller fails the row.
+fn claim_slot(active: &mut HashMap<u64, Active>, id: u64, hash_hex: &str) -> Result<bool, ()> {
+    if let Some(a) = active.get_mut(&id) {
+        if a.hash_hex != hash_hex {
+            a.hash_hex = hash_hex.to_string();
+            a.handle = None;
+            a.paused = false;
+            Ok(false)
+        } else {
+            a.paused = false;
+            Ok(a.handle.is_some())
+        }
+    } else if active.values().any(|a| a.hash_hex == hash_hex) {
+        Err(())
+    } else {
+        active.insert(
+            id,
+            Active {
+                hash_hex: hash_hex.to_string(),
+                handle: None,
+                paused: false,
+            },
+        );
+        Ok(false)
+    }
 }
 
 pub(crate) async fn run_torrent(job: TorrentJob) {
@@ -914,13 +989,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                 Ok(meta) => {
                     let hash_id = meta.info_hash;
                     let hash_hex = hash_id.as_string();
-                    let raw_name = meta
-                        .info
-                        .data
-                        .name
-                        .as_ref()
-                        .map(|n| String::from_utf8_lossy(n.as_ref()).into_owned());
-                    let multi = meta.info.data.files.as_ref().is_some_and(|f| f.len() >= 2);
+                    let raw_name = raw_torrent_name(meta.info.data.name.as_ref());
+                    let multi = is_multi_file(meta.info.data.files.as_deref());
                     let stub = raw_name
                         .clone()
                         .filter(|n| sane_filename(n))
@@ -945,31 +1015,13 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
     // fail fast when a *different* row holds the same magnet.
     let resumed = {
         let mut active = ACTIVE.lock().await;
-        if let Some(a) = active.get_mut(&id) {
-            if a.hash_hex != hash_hex {
-                a.hash_hex = hash_hex.clone();
-                a.handle = None;
-                a.paused = false;
-                false
-            } else {
-                a.paused = false;
-                a.handle.is_some()
-            }
-        } else {
-            if active.values().any(|a| a.hash_hex == hash_hex) {
+        match claim_slot(&mut active, id, &hash_hex) {
+            Ok(resumed) => resumed,
+            Err(()) => {
                 drop(active);
                 fail(gettext("Torrent is already in the queue"));
                 return;
             }
-            active.insert(
-                id,
-                Active {
-                    hash_hex: hash_hex.clone(),
-                    handle: None,
-                    paused: false,
-                },
-            );
-            false
         }
     };
     let session = match ensure_session(SessionConfig {
@@ -1005,12 +1057,15 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                 &tx,
             )
             .await;
-            // Finished rows leave the session unless still seeding: every
-            // managed torrent pins its chunk-tracker, storage and peer
-            // state, so completed rows would leak RAM one torrent at a time.
-            if finished && !seed_finished {
-                let _ = session.delete(TorrentIdOrHash::Hash(hash_id), false).await;
-            }
+            // Finished rows leave the session unless still seeding (see
+            // `maybe_evict`).
+            maybe_evict(
+                &session,
+                TorrentIdOrHash::Hash(hash_id),
+                finished,
+                seed_finished,
+            )
+            .await;
         } else {
             fail(gettext("Torrent is no longer managed"));
         }
@@ -1048,16 +1103,14 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         Adder::File(bytes) => AddTorrent::from_bytes(bytes),
     };
     let handle = match session.add_torrent(add, Some(opts)).await {
-        Ok(resp) => match resp {
-            // The session outlives our registry: only adopt a stale handle
-            // on a file-filter match, else fail fast (delete the owner first).
-            AddTorrentResponse::AlreadyManaged(_, handle) if handle.only_files() != want_files => {
-                ACTIVE.lock().await.remove(&id);
-                fail(gettext("Torrent is already in the queue"));
-                return;
-            }
-            _ => resp.into_handle(),
-        },
+        // The session outlives our registry: only adopt a stale handle
+        // on a file-filter match, else fail fast (delete the owner first).
+        Ok(AddTorrentResponse::AlreadyManaged(_, handle)) if handle.only_files() != want_files => {
+            ACTIVE.lock().await.remove(&id);
+            fail(gettext("Torrent is already in the queue"));
+            return;
+        }
+        Ok(resp) => resp.into_handle(),
         Err(e) => {
             ACTIVE.lock().await.remove(&id);
             fail(format!("Cannot add torrent: {e}"));
@@ -1107,12 +1160,15 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
         &tx,
     )
     .await;
-    // Finished rows leave the session unless still seeding: every managed
-    // torrent pins its chunk-tracker, storage and peer state, so completed
-    // rows would leak RAM one torrent at a time. Files stay on disk.
-    if finished && !seed_finished {
-        let _ = session.delete(TorrentIdOrHash::Hash(hash_id), false).await;
-    }
+    // Finished rows leave the session unless still seeding (see
+    // `maybe_evict`). Files stay on disk.
+    maybe_evict(
+        &session,
+        TorrentIdOrHash::Hash(hash_id),
+        finished,
+        seed_finished,
+    )
+    .await;
     ACTIVE.lock().await.remove(&id);
     // Archives live as long as their rows: delete_download() drops them,
     // remove() keeps them for Undo, sweep_archives() cleans orphans.
