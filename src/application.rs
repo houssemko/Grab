@@ -397,3 +397,19 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
     ];
     app.add_action_entries(entries);
 }
+
+#[cfg(test)]
+mod tests {
+    /// The About dialog (`from_appdata`) displays the newest metainfo
+    /// release as the app version — a Cargo bump without a matching
+    /// metainfo entry ships a stale version string (4.0.5 showed 4.0.3).
+    #[test]
+    fn metainfo_newest_release_matches_package_version() {
+        let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");
+        let marker = "<release version=\"";
+        let start = xml.find(marker).expect("metainfo has releases") + marker.len();
+        let rest = &xml[start..];
+        let end = rest.find('"').expect("release version closes");
+        assert_eq!(&rest[..end], env!("CARGO_PKG_VERSION"));
+    }
+}

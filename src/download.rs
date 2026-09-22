@@ -3548,7 +3548,6 @@ impl DownloadManager {
             quality,
             audio_only,
             dest: item.file_path(),
-            connections: opts.connections.max(1) as u32,
             // Shared throttle: parsed once here; empty/0/invalid means
             // unlimited (the preferences row flags junk live).
             speed_limit: parse_rate(opts.limit_rate.as_str()),

@@ -46,6 +46,16 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.0.5" date="2026-09-21">
+      <description>
+        <p>Browser cookies now read the freshest Chromium channel profile, so daily-driven beta/nightly builds stop losing to a stale stable install.</p>
+      </description>
+    </release>
+    <release version="4.0.4" date="2026-09-21">
+      <description>
+        <p>Flatpak now ships the yt-dlp_linux build for keyring and impersonation support.</p>
+      </description>
+    </release>
     <release version="4.0.3" date="2026-09-21">
       <description>
         <p>Fixes video extraction failures by excluding YouTube's web player client from every yt-dlp spawn, and bumps the gtk4 stack to the latest stable 0.11.5.</p>
