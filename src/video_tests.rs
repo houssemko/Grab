@@ -902,7 +902,6 @@ fn pipeline_reports_missing_tools() {
         audio_only: false,
         audio_quality: 5,
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,
@@ -2806,7 +2805,6 @@ fn direct_test_job() -> VideoJob {
         audio_only: false,
         audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,
@@ -3055,7 +3053,6 @@ fn live_test_job() -> VideoJob {
         audio_only: false,
         audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,
@@ -3452,7 +3449,6 @@ fn vod_hls_pins_planner_variant_id() {
         audio_only: false,
         audio_quality: 5,
         dest: dir.join("v.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,
@@ -3518,7 +3514,6 @@ fn vod_hls_refuses_existing_dest() {
         audio_only: false,
         audio_quality: 5,
         dest: dir.join("v.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,
@@ -4394,11 +4389,11 @@ fn live_capture_argv_never_takes_embed_subs() {
 }
 
 #[test]
-fn unified_argv_passes_concurrent_fragments() {
-    // VOD DASH legs fragment, so they inherit the user's parallel
-    // connections setting instead of yt-dlp's serial default.
-    let mut job = direct_test_job();
-    job.connections = 7;
+fn unified_argv_leaves_fragments_serial() {
+    // yt-dlp legs stay at the serial fragment default even when the
+    // app's own segmented engine runs hot: fragment floods trip 429s
+    // on strict hosts.
+    let job = direct_test_job();
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let argv = unified_download_argv(
         &job,
@@ -4408,26 +4403,7 @@ fn unified_argv_passes_concurrent_fragments() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
     );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--concurrent-fragments")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "7");
-    // A zeroed setting degrades to serial, never to "0".
-    job.connections = 0;
-    let argv = unified_download_argv(
-        &job,
-        "bv+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--concurrent-fragments")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "1");
+    assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
 
 #[test]
@@ -4505,17 +4481,13 @@ fn unified_argv_marks_sponsors_when_enabled() {
 }
 
 #[test]
-fn hls_argv_passes_concurrent_fragments() {
-    // Fragmented HLS like the DASH legs: same parallelism setting.
-    let mut job = direct_test_job();
-    job.connections = 6;
+fn hls_argv_leaves_fragments_serial() {
+    // Same serial default as every other yt-dlp leg: the connections
+    // setting is the app engine's own.
+    let job = direct_test_job();
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
     let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--concurrent-fragments")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "6");
+    assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
 }
 
 #[test]
@@ -4588,8 +4560,8 @@ fn live_capture_argv_never_remuxes_video() {
 
 #[test]
 fn live_capture_argv_has_no_concurrent_fragments() {
-    // Live edge recording keeps its conservative serial timing: the
-    // fragment-tuning change is VOD-only by design.
+    // Every yt-dlp leg runs fragments at the serial default; live
+    // edge recording never tuned it in the first place.
     let job = live_test_job();
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
     assert!(!argv.iter().any(|a| a == "--concurrent-fragments"));
@@ -5182,7 +5154,6 @@ fn hls_collects_sidecar_beside_finished_file() {
         audio_only: false,
         audio_quality: 5,
         dest: dir.join("v.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,

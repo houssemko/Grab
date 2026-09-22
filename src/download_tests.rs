@@ -3585,7 +3585,6 @@ fn proxy_argv_precedes_end_of_options() {
         audio_only: false,
         audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
-        connections: 4,
         speed_limit: None,
         keep_server_date: false,
         video_format_id: None,

@@ -3354,10 +3354,6 @@ pub struct VideoJob {
     pub playlist_item_id: Option<String>,
     pub quality: String,
     pub dest: PathBuf,
-    /// Parallel fragment downloads for yt-dlp legs (`--concurrent-fragments`),
-    /// from the same "connections" setting as the app's own segmented HTTP
-    /// downloads. Schema range is 1..=16; clamped at spawn.
-    pub connections: u32,
     /// Per-download speed cap in bytes/sec (`--ratelimit`), parsed once from
     /// the shared "speed limit" preference. `None` means unlimited (empty,
     /// `0`, or invalid input — the preferences row flags junk live). Live
@@ -3969,10 +3965,9 @@ pub(crate) fn unified_download_argv(
         out.to_string_lossy().into_owned(),
         "--ffmpeg-location".to_string(),
         ffmpeg_location_dir(ffmpeg_bin),
-        // Same parallelism as the app's own segmented downloads: DASH/HLS
-        // legs fetch fragments, not one byte stream (yt-dlp default is 1).
-        "--concurrent-fragments".to_string(),
-        job.connections.max(1).to_string(),
+        // Fragment downloads stay at yt-dlp's serial default: the app's
+        // parallel-connections setting drives only its own segmented
+        // HTTP engine, never fragment floods on strict hosts.
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];
@@ -4951,9 +4946,8 @@ pub(crate) fn hls_download_argv(
         ytdlp_output_template(&out_template),
         "--ffmpeg-location".to_string(),
         ffmpeg_location_dir(ffmpeg_bin),
-        // Fragmented HLS like the DASH legs: same parallelism setting.
-        "--concurrent-fragments".to_string(),
-        job.connections.max(1).to_string(),
+        // Serial fragments like every other yt-dlp leg (see the unified
+        // builder): the connections setting is the app engine's own.
         "--print".to_string(),
         "after_move:filepath".to_string(),
     ];

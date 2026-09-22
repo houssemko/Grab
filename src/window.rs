@@ -1331,6 +1331,82 @@ struct VideoStep {
     error: adw::ActionRow,
 }
 
+/// Queue one probed video from the Add dialog and close it: exact
+/// format picks pin the variant (its height as the fallback),
+/// Automatic falls back to the global preference, audio-only drops
+/// the pin. Shared by the listed video-page branch and the
+/// unlisted-link branch (short links like dai.ly probe video-shaped
+/// too): both queue the canonical page, never the typed link — the
+/// typed link may redirect to an HTML page the plain engine would
+/// save as a file. Intake errors surface on the details page with
+/// the Add button re-enabled.
+#[allow(clippy::too_many_arguments)]
+fn submit_probed_single(
+    manager: &Rc<DownloadManager>,
+    dest: &Rc<RefCell<String>>,
+    dialog: &glib::WeakRef<adw::Dialog>,
+    step: &Rc<VideoStep>,
+    formats: &Rc<RefCell<Vec<Option<String>>>>,
+    lookup_add: &Rc<RefCell<Option<gtk4::Button>>>,
+    v: &crate::video::VideoInfo,
+) {
+    let typed = step.name.text().trim().to_string();
+    let audio_only = step.audio.is_active();
+    // Default name from the video title and id; the intake
+    // sanitizes it and falls back to the URL stem.
+    let remux = crate::video::remux_video_active(&manager.settings().remux_video());
+    let auto = typed.is_empty().then(|| {
+        crate::video::default_video_filename(&v.title, &v.id, audio_only, remux.as_deref())
+    });
+    let name = if typed.is_empty() {
+        auto.as_deref()
+    } else {
+        Some(typed.as_str())
+    };
+    // Exact picks pin the format and carry its height
+    // as the fallback, so a dropped pin still
+    // degrades to the chosen height. Audio-only rows
+    // drop the pin (nothing to pin a track to).
+    // The Automatic row (no pin: pre-resolve, or pages
+    // listing nothing pinnable) falls back to the
+    // global preference. The combo rows and the info
+    // formats share one order.
+    let selected = step.quality.selected() as usize;
+    let format_id = formats.borrow().get(selected).cloned().flatten();
+    let format_id = if audio_only { None } else { format_id };
+    let quality = match format_id.clone() {
+        Some(id) => v
+            .formats
+            .iter()
+            .find(|opt| opt.id == id)
+            .map(|opt| crate::video::quality_for_height(opt.height).to_string())
+            .unwrap_or_else(|| manager.settings().video_quality()),
+        None => manager.settings().video_quality(),
+    };
+    match manager.enqueue_video(
+        &v.page_url,
+        Some(&dest.borrow()),
+        name,
+        crate::video::VideoChoices {
+            quality,
+            audio_only,
+            video_format_id: format_id,
+            is_live: v.is_live,
+            playlist_item_id: None,
+        },
+    ) {
+        Ok(_) => {
+            if let Some(d) = dialog.upgrade() {
+                d.close();
+            }
+        }
+        Err(e) => {
+            show_video_error(step, &e);
+            set_lookup_add(lookup_add, true);
+        }
+    }
+}
+
 /// Queue a probed link as a plain file and close the dialog: the
 /// fallback when extraction finds no playable media (or fails) on an
 /// unlisted page. Returns false when even the plain intake rejects the
@@ -2322,65 +2398,15 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 match ready {
                     Some(probe) => match probe {
                         crate::video::ProbeResult::Single(v) => {
-                            let typed = step2.name.text().trim().to_string();
-                            let audio_only = step2.audio.is_active();
-                            // Default name from the video title and id; the intake
-                            // sanitizes it and falls back to the URL stem.
-                            let remux =
-                                crate::video::remux_video_active(&m.settings().remux_video());
-                            let auto = typed.is_empty().then(|| {
-                                crate::video::default_video_filename(
-                                    &v.title,
-                                    &v.id,
-                                    audio_only,
-                                    remux.as_deref(),
-                                )
-                            });
-                            let name = if typed.is_empty() {
-                                auto.as_deref()
-                            } else {
-                                Some(typed.as_str())
-                            };
-                            // Exact picks pin the format and carry its height
-                            // as the fallback, so a dropped pin still
-                            // degrades to the chosen height. Audio-only rows
-                            // drop the pin (nothing to pin a track to).
-                            // The Automatic row (no pin: pre-resolve, or pages
-                            // listing nothing pinnable) falls back to the
-                            // global preference. The combo rows and the info
-                            // formats share one order.
-                            let selected = step2.quality.selected() as usize;
-                            let format_id = formats.borrow().get(selected).cloned().flatten();
-                            let format_id = if audio_only { None } else { format_id };
-                            let quality = match format_id.clone() {
-                                Some(id) => v
-                                    .formats
-                                    .iter()
-                                    .find(|opt| opt.id == id)
-                                    .map(|opt| {
-                                        crate::video::quality_for_height(opt.height).to_string()
-                                    })
-                                    .unwrap_or_else(|| m.settings().video_quality()),
-                                None => m.settings().video_quality(),
-                            };
-                            match m.enqueue_video(
-                                &v.page_url,
-                                Some(&dd.borrow()),
-                                name,
-                                crate::video::VideoChoices {
-                                    quality,
-                                    audio_only,
-                                    video_format_id: format_id,
-                                    is_live: v.is_live,
-                                    playlist_item_id: None,
-                                },
-                            ) {
-                                Ok(_) => close(),
-                                Err(e) => {
-                                    show_video_error(&step2, &e);
-                                    set_lookup_add(&lookup_add_submit, true);
-                                }
-                            }
+                            submit_probed_single(
+                                &m,
+                                &dd,
+                                &dialog_weak,
+                                &step2,
+                                &formats,
+                                &lookup_add_submit,
+                                &v,
+                            );
                         }
                         // Collections queue through the item picker: one
                         // row per chosen entry, each re-resolving its own
@@ -2411,9 +2437,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             // Unlisted http(s) links get one probe for a video path, unless
             // they are obviously direct files (extension sniff — the
             // plain engine downloads those better anyway, with no probe
-            // delay): the details page resolves, and either shows the
-            // video step or falls back to a plain queue. Anything else
-            // skips straight to the plain intake below.
+            // delay): the details page resolves, and a fresh preview
+            // queues like a listed video page (canonical page, never the
+            // typed link). Anything else skips straight to the plain
+            // intake below.
             if crate::video::is_http_url(&url) && !crate::video::is_direct_file_url(&url) {
                 if nav2.visible_page_tag().as_deref() != Some("video") {
                     nav2.push(&video_nav_page2);
@@ -2431,6 +2458,37 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         &step2,
                         &gettext("Still looking up the media — wait for the preview, then add."),
                     );
+                } else {
+                    // Fresh preview on a link that probed video-shaped
+                    // (e.g. a dai.ly short link): queue it like a listed
+                    // video page. Without this the press fell through to
+                    // a bare return and the dialog just sat there.
+                    // preview_fresh implies info is Single or Playlist
+                    // (the enum's only variants), so this is exhaustive.
+                    match info.borrow().clone() {
+                        Some(crate::video::ProbeResult::Single(v)) => {
+                            submit_probed_single(
+                                &m,
+                                &dd,
+                                &dialog_weak,
+                                &step2,
+                                &formats,
+                                &lookup_add_submit,
+                                &v,
+                            );
+                        }
+                        Some(crate::video::ProbeResult::Playlist(pl)) => {
+                            push_playlist_items_page(
+                                &nav2,
+                                m.clone(),
+                                dd.clone(),
+                                dialog_weak.clone(),
+                                pl,
+                                step2.audio.is_active(),
+                            );
+                        }
+                        None => {}
+                    }
                 }
                 return;
             }
