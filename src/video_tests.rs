@@ -2367,6 +2367,33 @@ fn firefox_profile_prefers_default_section() {
 }
 
 #[test]
+fn zen_profile_resolves_under_dot_zen_and_uses_firefox_spec() {
+    let dir = std::env::temp_dir().join(format!("grab-zen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let base = dir.join(".zen");
+    let profile = base.join("abc123.default");
+    std::fs::create_dir_all(&profile).unwrap();
+    std::fs::write(profile.join("cookies.sqlite"), b"sqlite").unwrap();
+    std::fs::write(
+        base.join("profiles.ini"),
+        "[Profile0]\nName=default\nIsRelative=1\nPath=abc123.default\nDefault=1\n",
+    )
+    .unwrap();
+    let found = browser_profile_dir_in(&dir.join(".config"), &dir, "zen").expect("zen resolves");
+    assert_eq!(found, profile);
+    let spec = {
+        let _env = ScopedHostConfig::apply(&dir.join(".config"));
+        std::fs::create_dir_all(dir.join(".config")).unwrap();
+        cookies_browser_spec("zen")
+    };
+    // yt-dlp has no "zen" browser: the Firefox extractor reads the profile.
+    assert_eq!(spec, Some(format!("firefox:{}", found.display())));
+    assert_eq!(cookies_browser_index("zen"), 9);
+    assert_eq!(cookies_browser_value(9), "zen");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cookies_browser_spec_pins_chromium_profile_path() {
     let dir = std::env::temp_dir().join(format!("grab-pin-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

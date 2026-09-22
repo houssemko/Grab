@@ -1218,7 +1218,7 @@ pub(crate) fn page_host(url: &str) -> String {
 /// Browsers offered for `--cookies-from-browser`, in combo order. Values
 /// are the yt-dlp browser names; labels come from [`cookies_browser_labels`].
 pub const COOKIES_BROWSERS: &[&str] = &[
-    "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale",
+    "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale", "zen",
 ];
 
 /// Translated combo labels, index-aligned with [`COOKIES_BROWSERS`].
@@ -1233,6 +1233,7 @@ pub fn cookies_browser_labels() -> Vec<String> {
         "Opera".to_string(),
         "Vivaldi".to_string(),
         "Whale".to_string(),
+        "Zen".to_string(),
     ];
     labels.insert(0, gettext("None"));
     labels
@@ -1462,6 +1463,13 @@ pub(crate) fn browser_profile_dir_in(
         .into_iter()
         .find_map(|base| firefox_profile_dirs(&base).into_iter().next());
     }
+    // Zen is Firefox-based (same profiles.ini + cookies.sqlite layout),
+    // but keeps its profiles under ~/.zen instead of ~/.mozilla/firefox.
+    if browser == "zen" {
+        return [home.join(".zen"), config_home.join("zen")]
+            .into_iter()
+            .find_map(|base| firefox_profile_dirs(&base).into_iter().next());
+    }
     freshest_chromium_profile(config_home, browser)
 }
 
@@ -1491,10 +1499,14 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     if value.is_empty() || value == "none" || !COOKIES_BROWSERS.contains(&value) {
         return None;
     }
+    // yt-dlp has no "zen" browser; Zen is Firefox-based (same
+    // cookies.sqlite layout), so its resolved profile is handed to the
+    // Firefox extractor.
+    let ytdlp_browser = if value == "zen" { "firefox" } else { value };
     if let Some(dir) = browser_profile_dir(value) {
-        return Some(format!("{value}:{}", dir.display()));
+        return Some(format!("{ytdlp_browser}:{}", dir.display()));
     }
-    Some(value.to_string())
+    Some(ytdlp_browser.to_string())
 }
 
 /// Shared trailing argv for every yt-dlp spawn: YouTube player-client
