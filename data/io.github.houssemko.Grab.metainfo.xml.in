@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.0.6-beta.1" date="2026-09-22">
+      <description>
+        <p>Beta: non-video Drive links fall back to direct download, Add works on short and unlisted video links that probe video-shaped, and yt-dlp fragment downloads return to the serial default.</p>
+      </description>
+    </release>
     <release version="4.0.5" date="2026-09-21">
       <description>
         <p>Browser cookies now read the freshest Chromium channel profile, so daily-driven beta/nightly builds stop losing to a stale stable install.</p>
