@@ -171,15 +171,19 @@ msgstr ""
 msgid "Show terminal install instructions"
 msgstr ""
 
-#: src/window.rs:76
+#: src/window.rs:91
+msgid "Could not open {what} with its default application: {e}"
+msgstr ""
+
+#: src/window.rs:116
 msgid "show"
 msgstr ""
 
-#: src/window.rs:78
+#: src/window.rs:118
 msgid "open"
 msgstr ""
 
-#: src/window.rs:81
+#: src/window.rs:121
 msgid "Could not {verb} {what} in the file manager: {e}"
 msgstr ""
 
