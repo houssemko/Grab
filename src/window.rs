@@ -78,8 +78,27 @@ pub(crate) fn close_on_click(btn: &gtk4::Button, dialog: &adw::Dialog) {
     });
 }
 
-/// Open `path` in the file manager (`reveal` shows the containing folder
-/// with the file selected instead of opening the folder itself).
+/// Open `path` with the system's default application for its file type —
+/// the same as double-clicking the file in the file manager. Used for
+/// double-click/Enter on a finished download row.
+pub fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
+    let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
+    let t = toasts.clone();
+    let what = path.to_string_lossy().into_owned();
+    glib::spawn_future_local(async move {
+        if let Err(e) = launcher.launch_future(None::<&gtk4::Window>).await {
+            t.add_toast(adw::Toast::new(
+                &gettext("Could not open {what} with its default application: {e}")
+                    .replace("{what}", &what)
+                    .replace("{e}", &e.to_string()),
+            ));
+        }
+    });
+}
+
+/// Launch `path` with its default handler (`reveal` shows the containing
+/// folder with the file selected instead). For a directory the default
+/// handler is the file manager.
 pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: bool) {
     let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
     let t = toasts.clone();
@@ -542,7 +561,7 @@ fn build_row(
             // downloaded file. Only the second press opens: triple-clicks
             // and beyond do nothing.
             if n_press == 2 && it.status() == DownloadStatus::Done {
-                launch_path(&it.display_path(), &t, false);
+                open_with_default_app(&it.display_path(), &t);
                 return;
             }
             let live = matches!(
@@ -591,7 +610,7 @@ fn build_row(
             } else if let Some(it) = m.find(id)
                 && it.status() == DownloadStatus::Done
             {
-                launch_path(&it.display_path(), &t, false);
+                open_with_default_app(&it.display_path(), &t);
             }
             glib::Propagation::Stop
         });
