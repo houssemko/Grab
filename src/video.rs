@@ -4002,6 +4002,24 @@ fn discover_unified_output(staging: &Path, after_move: Option<&str>) -> Option<P
         .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
 }
 
+/// Shared argv tail for the VOD download builders ([`unified_download_argv`]
+/// and [`hls_download_argv`]): opt-in subtitle sidecars (never on
+/// audio-only rows), proxy flags, and browser identity/cookie args.
+fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
+    // No subtitles on audio-only rows (nothing to caption).
+    if !job.audio_only
+        && let Some(lang) = job.subtitles.as_deref()
+    {
+        args.extend(subtitle_cli_args(lang));
+    }
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
+    args.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        None,
+        &job.page_url,
+    ));
+}
+
 /// yt-dlp argv for one unified direct download: the single `-f` merge
 /// spec into a staging temp, merged and converted by yt-dlp itself.
 /// Pure for tests like the HLS/live builders (same `--`-before-URL
@@ -4097,18 +4115,7 @@ pub(crate) fn unified_download_argv(
         args.push("--remux-video".to_string());
         args.push(fmt.to_string());
     }
-    // No subtitles on audio-only rows (nothing to caption).
-    if !job.audio_only
-        && let Some(lang) = job.subtitles.as_deref()
-    {
-        args.extend(subtitle_cli_args(lang));
-    }
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
-    args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
-        None,
-        &job.page_url,
-    ));
+    push_vod_tail_args(&mut args, job);
     args
 }
 
@@ -5057,17 +5064,7 @@ pub(crate) fn hls_download_argv(
     // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
     // never reach this builder — they run through `live_capture_argv`,
     // which deliberately omits subtitles).
-    if !job.audio_only
-        && let Some(lang) = job.subtitles.as_deref()
-    {
-        args.extend(subtitle_cli_args(lang));
-    }
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
-    args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
-        None,
-        &job.page_url,
-    ));
+    push_vod_tail_args(&mut args, job);
     args
 }
 
