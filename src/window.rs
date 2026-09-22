@@ -560,10 +560,10 @@ fn build_row(
             if !row_focused {
                 return glib::Propagation::Proceed;
             }
-            if let Some(it) = m.find(id) {
-                if it.status() == DownloadStatus::Done {
-                    launch_path(&it.display_path(), &t, false);
-                }
+            if let Some(it) = m.find(id)
+                && it.status() == DownloadStatus::Done
+            {
+                launch_path(&it.display_path(), &t, false);
             }
             glib::Propagation::Stop
         });
