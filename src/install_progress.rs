@@ -15,12 +15,12 @@ use gettextrs::gettext;
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 
-/// The one install currently in flight (if any) and its progress popover.
-///
-/// All GTK work happens on the main thread, so a `thread_local` is enough —
-/// no locking. `SESSION` holds the popover so a later click on the Install
-/// button re-opens it instead of starting a second install; it also holds a
-/// failed run's popover until the next click retires it with a retry.
+// The one install currently in flight (if any) and its progress popover.
+//
+// All GTK work happens on the main thread, so a `thread_local` is enough —
+// no locking. `SESSION` holds the popover so a later click on the Install
+// button re-opens it instead of starting a second install; it also holds a
+// failed run's popover until the next click retires it with a retry.
 thread_local! {
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SESSION: RefCell<Option<gtk4::Popover>> = const { RefCell::new(None) };
