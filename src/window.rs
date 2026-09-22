@@ -47,6 +47,27 @@ fn error_label(group: &adw::PreferencesGroup) -> gtk4::Label {
     label
 }
 
+/// HIG selection-mode action bar shared by the pickers: Select All /
+/// Select None start-packed, the confirm action end-packed as
+/// suggested. Returns the bar and its three buttons for the caller to
+/// wire and attach to its toolbar. One builder so both dialogs stay
+/// identical.
+fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Button, gtk4::Button) {
+    let action_bar = gtk4::ActionBar::new();
+    let select_all_btn = gtk4::Button::builder().label(gettext("Select All")).build();
+    let select_none_btn = gtk4::Button::builder()
+        .label(gettext("Select None"))
+        .build();
+    let add_btn = gtk4::Button::builder()
+        .use_underline(true)
+        .css_classes(["suggested-action"])
+        .build();
+    action_bar.pack_start(&select_all_btn);
+    action_bar.pack_start(&select_none_btn);
+    action_bar.pack_end(&add_btn);
+    (action_bar, select_all_btn, select_none_btn, add_btn)
+}
+
 /// Close the dialog when the button is clicked (Cancel/close actions).
 pub(crate) fn close_on_click(btn: &gtk4::Button, dialog: &adw::Dialog) {
     let weak = dialog.downgrade();
@@ -2763,18 +2784,7 @@ pub(crate) fn show_torrent_files_dialog(
     toolbar.set_content(Some(&page));
     // HIG selection mode: the selection's actions live in a bottom
     // action bar, not the header.
-    let action_bar = gtk4::ActionBar::new();
-    let select_all_btn = gtk4::Button::builder().label(gettext("Select All")).build();
-    let select_none_btn = gtk4::Button::builder()
-        .label(gettext("Select None"))
-        .build();
-    let add_btn = gtk4::Button::builder()
-        .use_underline(true)
-        .css_classes(["suggested-action"])
-        .build();
-    action_bar.pack_start(&select_all_btn);
-    action_bar.pack_start(&select_none_btn);
-    action_bar.pack_end(&add_btn);
+    let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&add_btn));
@@ -2958,18 +2968,7 @@ fn push_playlist_items_page(
     hb.set_show_end_title_buttons(false);
     toolbar.add_top_bar(&hb);
     toolbar.set_content(Some(&scrolled));
-    let action_bar = gtk4::ActionBar::new();
-    let select_all_btn = gtk4::Button::builder().label(gettext("Select All")).build();
-    let select_none_btn = gtk4::Button::builder()
-        .label(gettext("Select None"))
-        .build();
-    let add_btn = gtk4::Button::builder()
-        .use_underline(true)
-        .css_classes(["suggested-action"])
-        .build();
-    action_bar.pack_start(&select_all_btn);
-    action_bar.pack_start(&select_none_btn);
-    action_bar.pack_end(&add_btn);
+    let (action_bar, select_all_btn, select_none_btn, add_btn) = selection_action_bar();
     toolbar.add_bottom_bar(&action_bar);
     let picker_page = adw::NavigationPage::builder()
         .tag("playlist")

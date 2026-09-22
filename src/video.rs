@@ -2055,13 +2055,7 @@ async fn fetch_raw_dump_json(
     let stdout = out_task.await.unwrap_or_default();
     let stderr = err_task.await.unwrap_or_default();
     if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr)
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("yt-dlp reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
         return Err(VideoError::fetch(detail));
     }
     let value: serde_json::Value =
@@ -2727,6 +2721,30 @@ fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
         cmd.process_group(0);
     }
     cmd
+}
+
+/// Spawn a [`ytdlp_command`]-configured child and take its stdout/stderr
+/// pipes. Fails with a runtime error naming the missing pipe.
+fn spawn_piped_ytdlp(
+    mut cmd: tokio::process::Command,
+) -> Result<
+    (
+        tokio::process::Child,
+        tokio::process::ChildStdout,
+        tokio::process::ChildStderr,
+    ),
+    VideoError,
+> {
+    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    Ok((child, stdout, stderr))
 }
 
 /// Canonical quality ladder: stored value to height cap (`None` = Best,
@@ -4008,6 +4026,24 @@ fn discover_unified_output(staging: &Path, after_move: Option<&str>) -> Option<P
         .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
 }
 
+/// Shared argv tail for the VOD download builders ([`unified_download_argv`]
+/// and [`hls_download_argv`]): opt-in subtitle sidecars (never on
+/// audio-only rows), proxy flags, and browser identity/cookie args.
+fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
+    // No subtitles on audio-only rows (nothing to caption).
+    if !job.audio_only
+        && let Some(lang) = job.subtitles.as_deref()
+    {
+        args.extend(subtitle_cli_args(lang));
+    }
+    args.extend(proxy_cli_args(job.proxy.as_ref()));
+    args.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        None,
+        &job.page_url,
+    ));
+}
+
 /// yt-dlp argv for one unified direct download: the single `-f` merge
 /// spec into a staging temp, merged and converted by yt-dlp itself.
 /// Pure for tests like the HLS/live builders (same `--`-before-URL
@@ -4103,18 +4139,7 @@ pub(crate) fn unified_download_argv(
         args.push("--remux-video".to_string());
         args.push(fmt.to_string());
     }
-    // No subtitles on audio-only rows (nothing to caption).
-    if !job.audio_only
-        && let Some(lang) = job.subtitles.as_deref()
-    {
-        args.extend(subtitle_cli_args(lang));
-    }
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
-    args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
-        None,
-        &job.page_url,
-    ));
+    push_vod_tail_args(&mut args, job);
     args
 }
 
@@ -4261,15 +4286,7 @@ async fn run_ytdlp_attempt(
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(argv);
     apply_proxy_env(&mut cmd, proxy);
-    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         // `downloaded_bytes` resets per format leg, so plain max would
@@ -4359,13 +4376,7 @@ async fn run_ytdlp_attempt(
     let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("yt-dlp reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&log_tail, "yt-dlp reported failure");
         return Err(VideoError::part_failed(detail));
     }
     Ok((Some(()), after_move))
@@ -4489,26 +4500,7 @@ async fn remux_live_capture(
             .stderr
             .take()
             .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
-        let logs = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut reader = tokio::io::BufReader::new(stderr);
-            let mut tail = Vec::new();
-            let mut pending = String::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        trace_format_lines(&mut pending, &buf[..n]);
-                        tail.extend_from_slice(&buf[..n]);
-                        if tail.len() > 8192 {
-                            tail.drain(..tail.len() - 8192);
-                        }
-                    }
-                }
-            }
-            String::from_utf8_lossy(&tail).into_owned()
-        });
+        let logs = drain_stderr_to_tail(stderr);
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
@@ -4527,13 +4519,7 @@ async fn remux_live_capture(
         if status.success() {
             return Ok(());
         }
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("ffmpeg reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         if with_bsf {
             tracing::info!(error = %detail, "live remux without bsf, retrying bare");
             continue;
@@ -4614,15 +4600,7 @@ async fn run_live_ytdlp(
         let mut cmd = ytdlp_command(youtube_bin);
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
-        let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+        let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         let tx_p = tx.clone();
         // Recording indicator: live captures often emit no yt-dlp progress
         // lines for long stretches, leaving the row stuck on "Resolving
@@ -4678,26 +4656,7 @@ async fn run_live_ytdlp(
             }
             have
         });
-        let logs = tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut reader = tokio::io::BufReader::new(stderr);
-            let mut tail = Vec::new();
-            let mut pending = String::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        trace_format_lines(&mut pending, &buf[..n]);
-                        tail.extend_from_slice(&buf[..n]);
-                        if tail.len() > 8192 {
-                            tail.drain(..tail.len() - 8192);
-                        }
-                    }
-                }
-            }
-            String::from_utf8_lossy(&tail).into_owned()
-        });
+        let logs = drain_stderr_to_tail(stderr);
         // `aborted` gates the live-edge retry below: a stopped attempt must
         // never come back as a fresh capture. `&mut abort` keeps the receiver
         // usable for the second attempt when it didn't fire.
@@ -4914,6 +4873,45 @@ fn is_format_selection_line(line: &str) -> bool {
     line.contains("Downloading ") && line.contains("format(s)")
 }
 
+/// Last non-blank line of captured child output, for error detail.
+/// `fallback` names the tool when the output carries nothing usable.
+fn last_log_line(output: &str, fallback: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(fallback)
+        .trim()
+        .to_string()
+}
+
+/// Spawn a task draining a child process's stderr pipe: complete lines
+/// are traced as they arrive (see [`trace_format_lines`]) and the last
+/// 8 KiB are kept. Awaiting the returned handle yields the
+/// lossy-decoded tail for error detail.
+fn drain_stderr_to_tail(stderr: tokio::process::ChildStderr) -> tokio::task::JoinHandle<String> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let mut tail = Vec::new();
+        let mut pending = String::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    trace_format_lines(&mut pending, &buf[..n]);
+                    tail.extend_from_slice(&buf[..n]);
+                    if tail.len() > 8192 {
+                        tail.drain(..tail.len() - 8192);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    })
+}
+
 /// SIGKILL a spawned downloader and the ffmpeg it may have started:
 /// both run in a dedicated process group (`process_group(0)` at
 /// spawn), so one killpg reaps the tree instead of orphaning ffmpeg
@@ -5074,17 +5072,7 @@ pub(crate) fn hls_download_argv(
     // Sidecar subtitles for HLS VOD rows (never audio-only; live rows
     // never reach this builder — they run through `live_capture_argv`,
     // which deliberately omits subtitles).
-    if !job.audio_only
-        && let Some(lang) = job.subtitles.as_deref()
-    {
-        args.extend(subtitle_cli_args(lang));
-    }
-    args.extend(proxy_cli_args(job.proxy.as_ref()));
-    args.extend(ytdlp_identity_args(
-        &job.cookies_browser,
-        None,
-        &job.page_url,
-    ));
+    push_vod_tail_args(&mut args, job);
     args
 }
 
@@ -5100,7 +5088,7 @@ async fn run_hls_ytdlp(
     tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::download::EngineMsg;
-    use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _};
+    use tokio::io::AsyncBufReadExt as _;
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
@@ -5113,15 +5101,7 @@ async fn run_hls_ytdlp(
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
-    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
@@ -5197,25 +5177,7 @@ async fn run_hls_ytdlp(
         }
         (max_dl, max_total, after_move)
     });
-    let logs = tokio::spawn(async move {
-        let mut reader = tokio::io::BufReader::new(stderr);
-        let mut tail = Vec::new();
-        let mut pending = String::new();
-        let mut buf = [0u8; 4096];
-        loop {
-            match reader.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    trace_format_lines(&mut pending, &buf[..n]);
-                    tail.extend_from_slice(&buf[..n]);
-                    if tail.len() > 8192 {
-                        tail.drain(..tail.len() - 8192);
-                    }
-                }
-            }
-        }
-        String::from_utf8_lossy(&tail).into_owned()
-    });
+    let logs = drain_stderr_to_tail(stderr);
     let status = tokio::select! {
         biased;
         _ = abort => {
@@ -5245,13 +5207,7 @@ async fn run_hls_ytdlp(
     let (mut _downloaded, _total, after_move) = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("yt-dlp reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&log_tail, "yt-dlp reported failure");
         return Err(VideoError::part_failed(detail));
     }
     let final_tmp = discover_ytdlp_output(&job.dest, after_move.as_deref());
