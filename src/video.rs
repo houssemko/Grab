@@ -1153,21 +1153,24 @@ pub async fn latest_ytdlp_tag() -> Option<String> {
 
 /// Run `binary --version` off the caller's thread and return its first
 /// output line. `None` covers missing binaries, spawn failures and empty
-/// output alike — all mean "unusable".
+/// output alike — all mean "unusable". Uses the shared runtime's handle
+/// directly (not `tokio::task::spawn_blocking`) so this stays callable
+/// from the GTK thread, which has no tokio context entered.
 async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
-    tokio::task::spawn_blocking(move || {
-        std::process::Command::new(&binary)
-            .arg(version_arg)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-            .filter(|s| !s.is_empty())
-    })
-    .await
-    .ok()
-    .flatten()
+    crate::download::tokio_rt()
+        .spawn_blocking(move || {
+            std::process::Command::new(&binary)
+                .arg(version_arg)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Display-ready version line for an installed tool binary: yt-dlp's
