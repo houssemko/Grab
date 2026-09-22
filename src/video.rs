@@ -2723,6 +2723,30 @@ fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     cmd
 }
 
+/// Spawn a [`ytdlp_command`]-configured child and take its stdout/stderr
+/// pipes. Fails with a runtime error naming the missing pipe.
+fn spawn_piped_ytdlp(
+    mut cmd: tokio::process::Command,
+) -> Result<
+    (
+        tokio::process::Child,
+        tokio::process::ChildStdout,
+        tokio::process::ChildStderr,
+    ),
+    VideoError,
+> {
+    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    Ok((child, stdout, stderr))
+}
+
 /// Canonical quality ladder: stored value to height cap (`None` = Best,
 /// tallest available). Single source for the height cap and the
 /// extractor selector — unknown values fall back to 1080p in both by
@@ -4262,15 +4286,7 @@ async fn run_ytdlp_attempt(
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(argv);
     apply_proxy_env(&mut cmd, proxy);
-    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         // `downloaded_bytes` resets per format leg, so plain max would
@@ -4584,15 +4600,7 @@ async fn run_live_ytdlp(
         let mut cmd = ytdlp_command(youtube_bin);
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
-        let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+        let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
         let tx_p = tx.clone();
         // Recording indicator: live captures often emit no yt-dlp progress
         // lines for long stretches, leaving the row stuck on "Resolving
@@ -5093,15 +5101,7 @@ async fn run_hls_ytdlp(
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
-    let mut child = cmd.spawn().map_err(VideoError::runtime)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no output pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| VideoError::runtime("yt-dlp gave no log pipe"))?;
+    let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
