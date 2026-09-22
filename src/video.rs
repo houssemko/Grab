@@ -2055,13 +2055,7 @@ async fn fetch_raw_dump_json(
     let stdout = out_task.await.unwrap_or_default();
     let stderr = err_task.await.unwrap_or_default();
     if !status.success() {
-        let detail = String::from_utf8_lossy(&stderr)
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("yt-dlp reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
         return Err(VideoError::fetch(detail));
     }
     let value: serde_json::Value =
@@ -4359,13 +4353,7 @@ async fn run_ytdlp_attempt(
     let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("yt-dlp reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&log_tail, "yt-dlp reported failure");
         return Err(VideoError::part_failed(detail));
     }
     Ok((Some(()), after_move))
@@ -4508,13 +4496,7 @@ async fn remux_live_capture(
         if status.success() {
             return Ok(());
         }
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("ffmpeg reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         if with_bsf {
             tracing::info!(error = %detail, "live remux without bsf, retrying bare");
             continue;
@@ -4876,6 +4858,18 @@ fn is_format_selection_line(line: &str) -> bool {
     line.contains("Downloading ") && line.contains("format(s)")
 }
 
+/// Last non-blank line of captured child output, for error detail.
+/// `fallback` names the tool when the output carries nothing usable.
+fn last_log_line(output: &str, fallback: &str) -> String {
+    output
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(fallback)
+        .trim()
+        .to_string()
+}
+
 /// Spawn a task draining a child process's stderr pipe: complete lines
 /// are traced as they arrive (see [`trace_format_lines`]) and the last
 /// 8 KiB are kept. Awaiting the returned handle yields the
@@ -5216,13 +5210,7 @@ async fn run_hls_ytdlp(
     let (mut _downloaded, _total, after_move) = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
     if !status.success() {
-        let detail = log_tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("yt-dlp reported failure")
-            .trim()
-            .to_string();
+        let detail = last_log_line(&log_tail, "yt-dlp reported failure");
         return Err(VideoError::part_failed(detail));
     }
     let final_tmp = discover_ytdlp_output(&job.dest, after_move.as_deref());
