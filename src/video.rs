@@ -1171,7 +1171,8 @@ async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<S
 }
 
 /// Display-ready version line for an installed tool binary: yt-dlp's
-/// `--version` output as-is, ffmpeg's first line trimmed to its version
+/// `--version` output labeled ("2026.08.19" → "yt-dlp 2026.08.19"),
+/// ffmpeg's first line trimmed to its version
 /// token ("ffmpeg version n9.0.1 …" → "ffmpeg n9.0.1"). `None` when the
 /// binary can't be probed. For the install-progress popover; the
 /// Preferences tools row keeps its own synchronous probe.
@@ -1186,6 +1187,12 @@ pub(crate) async fn tool_display_version(
     {
         let token = line.split_whitespace().nth(2)?;
         return Some(format!("ffmpeg {token}"));
+    }
+    if binary
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("yt-dlp"))
+    {
+        return Some(format!("yt-dlp {line}"));
     }
     Some(line)
 }
