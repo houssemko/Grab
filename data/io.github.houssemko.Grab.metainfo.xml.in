@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.1.1" date="2026-09-22">
+      <description>
+        <p>Hotfix: the HLS block map rescales when totals refine upward instead of staying flood-lit on its first tiny estimate, and second legs start empty.</p>
+      </description>
+    </release>
     <release version="4.1.0" date="2026-09-22">
       <description>
         <p>Non-video Drive links fall back to direct download, Add works on short and unlisted video links, yt-dlp fragments run serially, and the HLS block map no longer flashes on estimate wobble.</p>
