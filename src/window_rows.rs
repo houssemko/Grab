@@ -76,7 +76,7 @@ pub(crate) fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Bu
 /// Open `path` with the system's default application for its file type —
 /// the same as double-clicking the file in the file manager. Used for
 /// double-click/Enter on a finished download row.
-pub fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
+fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
     let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
     let t = toasts.clone();
     let what = path.to_string_lossy().into_owned();

@@ -8,12 +8,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-/// Facade: the add dialog flow lives in [`window_dialogs`](crate::window_dialogs)
-/// now (no re-exports: the window builder consumes it here).
-pub use crate::window_dialogs::show_add_dialog;
-/// Facade: row widgets live in [`window_rows`](crate::window_rows) now
-/// (no re-exports: the window builder consumes them here, tests import
-/// directly).
+/// Facade: the dialog flow lives in [`window_dialogs`](crate::window_dialogs)
+/// now; these re-exports keep the in-tree `crate::window::X` paths working.
+pub use crate::window_dialogs::{show_add_dialog, show_torrent_files_dialog};
+/// Facade: row widgets live in [`window_rows`](crate::window_rows) now;
+/// the re-export keeps the in-tree `crate::window::X` path working.
 use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
 

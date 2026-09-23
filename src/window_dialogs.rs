@@ -1502,7 +1502,7 @@ fn push_playlist_items_page(
 /// Multi-file .torrent intake: one switch per file, all on by default.
 /// The selection feeds rqbit's `only_files` at add time (no live setter),
 /// so it must be chosen here, before the row exists.
-pub(crate) fn show_torrent_files_dialog(
+pub fn show_torrent_files_dialog(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     parent: Option<glib::WeakRef<adw::Dialog>>,

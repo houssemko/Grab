@@ -129,7 +129,7 @@ pub fn setup(app: &adw::Application) {
                                 Ok((_, entries)) if entries.len() > 1 => {
                                     let dest =
                                         Rc::new(RefCell::new(manager.effective_download_dir()));
-                                    crate::window_dialogs::show_torrent_files_dialog(
+                                    window::show_torrent_files_dialog(
                                         manager, dest, None, file_name, bytes, entries,
                                     );
                                 }
