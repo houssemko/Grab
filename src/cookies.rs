@@ -165,7 +165,7 @@ async fn export_cookies(
             // download spawns — so a hung yt-dlp can't linger holding the
             // browser's cookie DB lock. Reap it, drop the temp file, and
             // fall back to plain requests.
-            crate::video::kill_tree(&mut child);
+            crate::video_spawn::kill_tree(&mut child);
             let _ = child.wait().await;
             let _ = std::fs::remove_file(&path);
             return None;

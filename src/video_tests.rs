@@ -6,7 +6,7 @@ use crate::media_types::{
 use crate::video_argv::{
     YTDLP_PROGRESS_TEMPLATE, container_truth_name, fallback_to_live_edge, hls_download_argv,
     hls_format_spec, live_capture_argv, live_remux_argv, merge_output_ext, part_fallback_spec,
-    unified_download_argv, unified_format_spec,
+    proxy_cli_args, unified_download_argv, unified_format_spec,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -30,6 +30,7 @@ use crate::video_progress::{
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
+use crate::video_spawn::fetch_raw_dump_json;
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
@@ -39,7 +40,8 @@ use crate::video_staging::{
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs,
     cookies_browser_spec, distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain,
-    find_in_dirs, parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
+    find_in_dirs, parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
+    ytdlp_update_available,
 };
 use crate::video_types::codec_preference;
 use crate::video_types::video_domain;
