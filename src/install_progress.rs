@@ -229,7 +229,7 @@ pub fn run(
                 return;
             }
         };
-        let version = crate::video::tool_display_version(yt_path, "--version").await;
+        let version = crate::video_tools::tool_display_version(yt_path, "--version").await;
         yt.set_installed(version);
 
         // Stage 2: the ffmpeg toolchain (ffmpeg and ffprobe).
@@ -246,7 +246,7 @@ pub fn run(
                 return;
             }
         };
-        let version = crate::video::tool_display_version(ff_path, "-version").await;
+        let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
         ff.set_installed(version);
 
         // Linger on the two checkmarks so the completed state registers,

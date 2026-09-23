@@ -5,8 +5,9 @@ use crate::media_types::{
 };
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_tools::{
-    browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
-    extract_ffmpeg_toolchain, find_in_dirs, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
+    MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs, cookies_browser_spec,
+    distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs,
+    parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
 };
 use crate::video_types::video_domain;
 use crate::video_types::{

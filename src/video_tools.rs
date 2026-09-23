@@ -707,3 +707,85 @@ pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
         .to_string_lossy()
         .into_owned()
 }
+
+/// Latest released yt-dlp tag without downloading anything: one
+/// user-initiated GitHub API call for the update check. `None` on any
+/// network/API failure — the row then reports the check failed instead
+/// of prompting.
+pub async fn latest_ytdlp_tag() -> Option<String> {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp");
+        fetcher
+            .fetch_latest_release(None)
+            .await
+            .ok()
+            .map(|release| release.tag_name)
+    });
+    handle.await.ok().flatten()
+}
+
+/// Run `binary --version` off the caller's thread and return its first
+/// output line. `None` covers missing binaries, spawn failures and empty
+/// output alike — all mean "unusable". Uses the shared runtime's handle
+/// directly (not `tokio::task::spawn_blocking`) so this stays callable
+/// from the GTK thread, which has no tokio context entered.
+async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
+    crate::runtime::tokio_rt()
+        .spawn_blocking(move || {
+            std::process::Command::new(&binary)
+                .arg(version_arg)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Display-ready version line for an installed tool binary: yt-dlp's
+/// `--version` output labeled ("2026.08.19" → "yt-dlp 2026.08.19"),
+/// ffmpeg's first line trimmed to its version
+/// token ("ffmpeg version n9.0.1 …" → "ffmpeg n9.0.1"). `None` when the
+/// binary can't be probed. For the install-progress popover; the
+/// Preferences tools row keeps its own synchronous probe.
+pub(crate) async fn tool_display_version(
+    binary: PathBuf,
+    version_arg: &'static str,
+) -> Option<String> {
+    let line = tool_first_line(binary.clone(), version_arg).await?;
+    if binary
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy() == "ffmpeg")
+    {
+        let token = line.split_whitespace().nth(2)?;
+        return Some(format!("ffmpeg {token}"));
+    }
+    if binary
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with("yt-dlp"))
+    {
+        return Some(format!("yt-dlp {line}"));
+    }
+    Some(line)
+}
+
+/// Refuse stale or unverifiable toolchains before any network happens.
+/// Returns the raw version lines for attempt logging.
+pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
+    // ffmpeg takes a single-dash -version; --version is an error there.
+    let (yt, ff) = tokio::join!(
+        tool_first_line(libs.youtube.clone(), "--version"),
+        tool_first_line(libs.ffmpeg.clone(), "-version")
+    );
+    let yt = yt.ok_or_else(VideoError::missing_tools)?;
+    let fresh = parse_yt_dlp_version(&yt).is_some_and(|v| v >= MIN_YTDLP_VERSION);
+    if !fresh {
+        return Err(VideoError::outdated());
+    }
+    let ff = ff.ok_or_else(VideoError::missing_tools)?;
+    Ok((yt, ff))
+}
