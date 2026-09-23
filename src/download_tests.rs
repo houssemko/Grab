@@ -12,6 +12,7 @@ use crate::download_net::{
 };
 use crate::download_pieces::{BLOCK_CELLS, aggregate, plan_pieces, split_count};
 use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate};
+use crate::download_row::DownloadItem;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::file_names::{
     PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, piece_len, rename_noreplace,
