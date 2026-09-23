@@ -27,6 +27,14 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name || inputs.tag }}
 
+      # A release tag must carry metadata matching its version, and HEAD
+      # must be that tag: otherwise the artifacts below are built from a
+      # commit that disagrees with the published version/notes.
+      - name: Check release metadata consistency
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: ./build-aux/check-release-consistency.py --tag "$TAG"
+
       - name: Install Flatpak tooling
         run: |
           sudo apt-get update -qq

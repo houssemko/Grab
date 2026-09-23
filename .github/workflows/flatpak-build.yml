@@ -29,6 +29,14 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
 
+      # Release mode: the tag's metadata (version, metainfo release,
+      # HEAD) must agree before anything is built and published.
+      - name: Check release metadata consistency
+        if: inputs.release-tag != ''
+        env:
+          TAG: ${{ inputs.release-tag }}
+        run: ./build-aux/check-release-consistency.py --tag "$TAG"
+
       # The GNOME SDK/Platform are immutable per runtime version and
       # would otherwise re-download (~1 min + GBs) on every pristine
       # build. Only this layer is cached; the build itself stays
@@ -68,6 +76,21 @@ jobs:
 
       - name: Bundle
         run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.houssemko.Grab
+
+      # Read back what the bundle actually embeds: the app version, the
+      # metainfo release notes, and the vendored crate list. A tag
+      # published before a lock/metainfo change would otherwise ship the
+      # previous dependency set and notes with no visible sign. Test-mode
+      # bundles have no tag, so the version is read from the tree.
+      - name: Check bundle contents
+        env:
+          TAG: ${{ inputs.release-tag }}
+        run: |
+          if [ -n "$TAG" ]; then
+            ./build-aux/check-bundle-contents.py Grab.flatpak --tag "$TAG"
+          else
+            ./build-aux/check-bundle-contents.py Grab.flatpak --tag "v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          fi
 
       - name: Attach to the release
         if: inputs.release-tag != ''
