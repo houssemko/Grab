@@ -33,74 +33,11 @@ use crate::download_pieces::{BLOCK_CELLS, MAX_SEGMENTED_TOTAL};
 /// [`download_rate`](crate::download_rate) now (no re-exports: the
 /// engine consumes it here, tests import it directly).
 use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
-
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum, serde::Serialize, serde::Deserialize,
-)]
-#[enum_type(name = "GrabDownloadStatus")]
-#[serde(rename_all = "lowercase")]
-pub enum DownloadStatus {
-    #[default]
-    Queued,
-    Downloading,
-    Paused,
-    Done,
-    Failed,
-    Cancelled,
-}
-
-impl DownloadStatus {
-    /// Short human-readable label for the status, for list rows and toasts.
-    pub fn label(self) -> String {
-        // gettext() wraps each literal here (not at the call sites) so
-        // xgettext can statically extract every status msgid.
-        match self {
-            DownloadStatus::Queued => gettext("Queued"),
-            DownloadStatus::Downloading => gettext("Downloading"),
-            DownloadStatus::Paused => gettext("Paused"),
-            DownloadStatus::Done => gettext("Done"),
-            DownloadStatus::Failed => gettext("Failed"),
-            DownloadStatus::Cancelled => gettext("Cancelled"),
-        }
-    }
-}
-
-const QUEUE_VERSION: u32 = 2;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredItem {
-    url: String,
-    dest_dir: String,
-    filename: String,
-    status: DownloadStatus,
-    #[serde(default)]
-    progress: f64,
-    /// Completed 1 MB pieces for segmented resume across restarts (v2+).
-    /// Absent on v1 files and for items that need no resume.
-    #[serde(default)]
-    segments: Option<SegmentState>,
-    /// Intake file selection for multi-file torrents (v2+). The live map
-    /// is in-memory only, so the selection is persisted here and
-    /// re-staged on restore — otherwise a restart drops the filter and
-    /// the resume downloads every file.
-    #[serde(default)]
-    selected_files: Option<Vec<usize>>,
-    /// Recorded engine output folder for torrents (v2+). Absent on old
-    /// files and for items that need no folder tracking.
-    #[serde(default)]
-    output_dir: Option<String>,
-    /// Video-page source for yt-dlp items: only `Some(Page)` is ever
-    /// written (plain downloads omit it, so old files stay clean and old
-    /// app versions keep reading new ones).
-    #[serde(default)]
-    video_source: Option<crate::media_types::VideoSource>,
-}
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct StoredQueue {
-    version: u32,
-    items: Vec<StoredItem>,
-}
+pub use crate::download_store::DownloadStatus;
+/// Facade: queue persistence model lives in [`download_store`](crate::download_store)
+/// now; the status re-export keeps every `crate::download::X` path working.
+/// (The stored structs stay imported below without re-export.)
+use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 
 mod imp {
     use super::*;

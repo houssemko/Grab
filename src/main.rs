@@ -5,6 +5,7 @@ mod download_fetch;
 mod download_net;
 mod download_pieces;
 mod download_rate;
+mod download_store;
 mod engine_msg;
 mod file_names;
 mod install_help;
