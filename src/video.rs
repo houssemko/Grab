@@ -4266,8 +4266,11 @@ async fn run_unified_ytdlp(
         Err(e) => return Err(VideoError::combine(&e)),
     }
     // Best-effort subtitle sidecar beside the discovered output
-    // (video rows only; audio-only rows never request them).
+    // (video rows only; audio-only rows never request them). Skipped
+    // when embedding: the tracks are muxed into the file itself, so no
+    // .srt is left alongside (uncollected sidecars die with staging).
     if !job.audio_only
+        && !job.embed_subs
         && let Some(lang) = job.subtitles.as_deref()
     {
         collect_sidecar(&sidecar_path_for(&final_tmp, lang), &job.dest, lang);
@@ -5254,13 +5257,21 @@ async fn run_hls_ytdlp(
     }
     // Best-effort subtitle sidecar: `-o` is the `hls` part template, so
     // collect `<stem>.hls.<lang>.srt` beside the finished file (outside
-    // the part namespace, so retries and row removal keep it).
-    if let Some(lang) = job.subtitles.as_deref() {
+    // the part namespace, so retries and row removal keep it). Skipped
+    // when embedding: the tracks are muxed into the file itself — and
+    // the part sidecar is deleted outright, since unlike the unified
+    // path it lives in the dest dir (no staging wipe reaches it).
+    if !job.embed_subs
+        && let Some(lang) = job.subtitles.as_deref()
+    {
         collect_sidecar(
             &dest_part_path(&job.dest, "hls", &format!("{lang}.srt")),
             &job.dest,
             lang,
         );
+    } else if let Some(lang) = job.subtitles.as_deref() {
+        let _ =
+            tokio::fs::remove_file(dest_part_path(&job.dest, "hls", &format!("{lang}.srt"))).await;
     }
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(file_len(&job.dest))
