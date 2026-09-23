@@ -59,3 +59,77 @@ pub(crate) fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
     }
     pieces
 }
+/// Resume bitmap for one segmented download, persisted in the queue file
+/// (same JSON shape) so restarts resume segmented instead of starting over.
+/// Piece bitmap: `done[i]` covers
+/// `[i * piece_len(total), min((i+1) * piece_len(total), total))`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SegmentState {
+    pub(crate) total: u64,
+    pub(crate) done: Vec<bool>,
+}
+
+impl SegmentState {
+    pub(crate) fn new(total: u64) -> Self {
+        Self {
+            total,
+            done: vec![false; total.div_ceil(piece_len(total)) as usize],
+        }
+    }
+
+    pub(crate) fn mark(&mut self, idx: u64) {
+        if let Some(slot) = self.done.get_mut(idx as usize) {
+            *slot = true;
+        }
+    }
+
+    /// Missing `(piece index, start, end)` ranges, in order.
+    pub(crate) fn missing(&self) -> Vec<(u64, u64, u64)> {
+        let piece = piece_len(self.total);
+        let mut out = Vec::new();
+        for (i, done) in self.done.iter().enumerate() {
+            if !done {
+                let start = i as u64 * piece;
+                out.push((i as u64, start, (start + piece).min(self.total) - 1));
+            }
+        }
+        out
+    }
+
+    /// Contiguous completed prefix, in bytes (never past `total`: the tail
+    /// piece is usually short, so an uncapped count would overshoot).
+    pub(crate) fn prefix_len(&self) -> u64 {
+        (self.done.iter().take_while(|b| **b).count() as u64 * piece_len(self.total))
+            .min(self.total)
+    }
+
+    /// Forget every piece from the first gap on, keeping the bitmap
+    /// consistent with a file truncated to the completed prefix. Used
+    /// wherever the file is shrunk while the bitmap is kept.
+    pub(crate) fn forget_beyond_prefix(&mut self) {
+        let mut gap = false;
+        for slot in self.done.iter_mut() {
+            if !*slot {
+                gap = true;
+            } else if gap {
+                *slot = false;
+            }
+        }
+    }
+
+    /// Bytes already on disk according to the bitmap.
+    pub(crate) fn completed_bytes(&self) -> u64 {
+        let piece = piece_len(self.total);
+        self.done
+            .iter()
+            .enumerate()
+            .map(|(i, d)| {
+                if *d {
+                    piece.min(self.total.saturating_sub(i as u64 * piece))
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+}

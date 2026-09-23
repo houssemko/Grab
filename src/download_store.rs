@@ -3,7 +3,7 @@
 //! module (gettext + download_fetch bitmap + media types): the
 //! manager persists/restores through the `download` facade.
 
-use crate::download_fetch::SegmentState;
+use crate::download_pieces::SegmentState;
 use gettextrs::gettext;
 use gtk4::glib;
 

@@ -15,20 +15,21 @@ use std::time::{Duration, Instant, SystemTime};
 /// Facade: HTTP fetch engine lives in [`download_fetch`](crate::download_fetch)
 /// now (no re-exports: the manager consumes it here, tests import it directly).
 use crate::download_fetch::{
-    FetchCtx, SegmentState, StartMode, apply_torrent_limits, run_download, truncate_to_prefix,
+    FetchCtx, StartMode, apply_torrent_limits, run_download, truncate_to_prefix,
 };
 /// Facade: intake normalization lives in [`download_intake`](crate::download_intake)
-/// now; these re-exports keep every `crate::download::X` path working.
+/// now; the re-exports keep the in-tree `crate::download::X` paths working.
 pub use crate::download_intake::normalize_url;
 /// Facade: network options + proxy/client plumbing lives in
-/// [`download_net`](crate::download_net) now; these re-exports keep every
-/// `crate::download::X` path working. (Names used only inside this
-/// module or its tests stay imported below without re-export.)
+/// [`download_net`](crate::download_net) now; the re-exports keep the
+/// in-tree `crate::download::X` paths working. (Names used only inside
+/// this module or its tests stay imported below without re-export.)
 use crate::download_net::http_client_for;
 pub use crate::download_net::{
     DownloadOptions, PROXY_MODE_MANUAL, proxy_mode_index, proxy_mode_labels, proxy_mode_value,
     proxy_type_index, proxy_type_labels, proxy_type_value,
 };
+use crate::download_pieces::SegmentState;
 /// Facade: segmented-piece math lives in [`download_pieces`](crate::download_pieces)
 /// now (no re-exports: the engine consumes it here, tests import it directly).
 use crate::download_pieces::{BLOCK_CELLS, MAX_SEGMENTED_TOTAL};
