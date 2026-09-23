@@ -2,6 +2,7 @@ mod application;
 mod cookies;
 mod download;
 mod download_fetch;
+mod download_intake;
 mod download_net;
 mod download_pieces;
 mod download_rate;

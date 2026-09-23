@@ -4,6 +4,7 @@ use crate::download_fetch::{
     has_holes, parse_content_range, rejects_unexpected_restart, response_total, run_download,
     stamp_request, truncate_to_prefix,
 };
+use crate::download_intake::{MAX_URL_LEN, normalize_url};
 use crate::download_net::{
     DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, normalize_no_proxy,
     proxied_pool_len, proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index,
