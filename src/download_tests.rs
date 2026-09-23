@@ -3453,7 +3453,7 @@ exit 0
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let jar = crate::download::tokio_rt()
+    let jar = crate::runtime::tokio_rt()
         .block_on(crate::cookies::jar_for_browser(
             "firefox",
             &bin,
@@ -3464,7 +3464,7 @@ exit 0
         .expect("subdomain in scope");
     assert_eq!(header, "sid=abc123");
     // The off switch never spawns.
-    let none = crate::download::tokio_rt().block_on(crate::cookies::jar_for_browser(
+    let none = crate::runtime::tokio_rt().block_on(crate::cookies::jar_for_browser(
         "none",
         &bin,
         "https://example.com/v",
@@ -3508,7 +3508,7 @@ exit 0
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let jar = crate::download::tokio_rt()
+    let jar = crate::runtime::tokio_rt()
         .block_on(crate::cookies::jar_for_browser(
             "firefox",
             &bin,
@@ -3700,7 +3700,7 @@ fn cookies_export_failure_means_plain_requests() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let jar = crate::download::tokio_rt().block_on(crate::cookies::jar_for_browser(
+    let jar = crate::runtime::tokio_rt().block_on(crate::cookies::jar_for_browser(
         "chrome",
         &bin,
         "https://example.com/v",
@@ -3736,7 +3736,7 @@ exit 0
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let jar = crate::download::tokio_rt()
+    let jar = crate::runtime::tokio_rt()
         .block_on(crate::cookies::jar_for_browser(
             "opera",
             &bin,

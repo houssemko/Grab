@@ -16,7 +16,7 @@
 //!   and offer an install action.
 //!
 //! All yt-dlp work runs on Grab's shared Tokio runtime
-//! ([`crate::download::tokio_rt`]) so no GTK thread is ever blocked.
+//! ([`crate::runtime::tokio_rt`]) so no GTK thread is ever blocked.
 
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
@@ -856,7 +856,7 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
 /// thread on it.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
-    let handle = crate::download::tokio_rt()
+    let handle = crate::runtime::tokio_rt()
         .spawn(async move { LibraryInstaller::new(dir).install_youtube(None).await });
     match handle.await {
         Ok(Ok(path)) => Ok(path),
@@ -873,7 +873,7 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
 pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
     let handle =
-        crate::download::tokio_rt().spawn(async move { install_ffmpeg_toolchain(dir).await });
+        crate::runtime::tokio_rt().spawn(async move { install_ffmpeg_toolchain(dir).await });
     match handle.await {
         Ok(res) => res,
         Err(e) => Err(VideoError::runtime(&e)),
@@ -988,7 +988,7 @@ pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
 /// network/API failure — the row then reports the check failed instead
 /// of prompting.
 pub async fn latest_ytdlp_tag() -> Option<String> {
-    let handle = crate::download::tokio_rt().spawn(async move {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp");
         fetcher
             .fetch_latest_release(None)
@@ -1005,7 +1005,7 @@ pub async fn latest_ytdlp_tag() -> Option<String> {
 /// directly (not `tokio::task::spawn_blocking`) so this stays callable
 /// from the GTK thread, which has no tokio context entered.
 async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
-    crate::download::tokio_rt()
+    crate::runtime::tokio_rt()
         .spawn_blocking(move || {
             std::process::Command::new(&binary)
                 .arg(version_arg)
@@ -1875,7 +1875,7 @@ async fn fetch_raw_dump_json(
     url: &str,
     cookies_browser: &str,
     timeout: Duration,
-    fetch_proxy: Option<&crate::download::ResolvedProxy>,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
     flat_playlist: bool,
 ) -> Result<serde_json::Value, VideoError> {
     let mut args = vec!["--ignore-config".to_string(), "--no-progress".to_string()];
@@ -1952,7 +1952,7 @@ async fn fetch_video_page(
     url: &str,
     cookies_browser: &str,
     timeout: Duration,
-    fetch_proxy: Option<&crate::download::ResolvedProxy>,
+    fetch_proxy: Option<&crate::net_types::ResolvedProxy>,
     playlist_item_id: Option<&str>,
 ) -> Result<FetchedVideo, VideoError> {
     let value = fetch_raw_dump_json(
@@ -2049,9 +2049,9 @@ pub async fn fetch_video_infos(
     url: String,
     cookies_browser: String,
     newest_first: bool,
-    fetch_proxy: Option<crate::download::ResolvedProxy>,
+    fetch_proxy: Option<crate::net_types::ResolvedProxy>,
 ) -> Result<ProbeResult, VideoError> {
-    let handle = crate::download::tokio_rt().spawn(async move {
+    let handle = crate::runtime::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
         let out = staging_root();
@@ -2563,7 +2563,7 @@ pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> us
 
 /// `--proxy` argv for one yt-dlp spawn. Empty when direct. Proxies are
 /// unauthenticated (see `manual_proxy`): the URL never carries userinfo.
-pub(crate) fn proxy_cli_args(proxy: Option<&crate::download::ResolvedProxy>) -> Vec<String> {
+pub(crate) fn proxy_cli_args(proxy: Option<&crate::net_types::ResolvedProxy>) -> Vec<String> {
     match proxy.map(|p| p.cli_url.clone()) {
         Some(url) => vec!["--proxy".to_string(), url],
         None => Vec::new(),
@@ -2574,7 +2574,7 @@ pub(crate) fn proxy_cli_args(proxy: Option<&crate::download::ResolvedProxy>) -> 
 /// honors it on a best-effort basis for the bypass list.
 pub(crate) fn apply_proxy_env(
     cmd: &mut tokio::process::Command,
-    proxy: Option<&crate::download::ResolvedProxy>,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
 ) {
     if let Some(p) = proxy
         && !p.no_proxy_env.is_empty()
@@ -3384,7 +3384,7 @@ pub struct VideoJob {
     pub embed_chapters: bool,
     /// Proxy resolved at spawn time (`None` = direct). yt-dlp spawns
     /// take `--proxy` plus NO_PROXY from it.
-    pub proxy: Option<crate::download::ResolvedProxy>,
+    pub proxy: Option<crate::net_types::ResolvedProxy>,
 }
 
 /// Progress reports are throttled to this many bytes between row updates:
@@ -4157,7 +4157,7 @@ async fn run_ytdlp_attempt(
     argv: &[String],
     report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
     on_merge: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
-    proxy: Option<&crate::download::ResolvedProxy>,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
     abort: &mut oneshot::Receiver<()>,
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>), VideoError> {

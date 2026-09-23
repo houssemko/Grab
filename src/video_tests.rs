@@ -923,7 +923,7 @@ fn pipeline_reports_missing_tools() {
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
+    let res = crate::runtime::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
     // Nothing else was sent: resolving never started without the tools.
     // The abandoned (empty) staging dir is the caller's to drop.
@@ -1423,7 +1423,7 @@ fn ensure_tool_versions_accepts_fresh_pair() {
     let yt = fake_tool(&dir, "yt-dlp", "2026.08.19");
     let ff = fake_ffmpeg_strict(&dir);
     let libs = yt_dlp::client::deps::Libraries::new(yt, ff);
-    let (yt_v, ff_v) = crate::download::tokio_rt()
+    let (yt_v, ff_v) = crate::runtime::tokio_rt()
         .block_on(ensure_tool_versions(&libs))
         .expect("fresh pair passes");
     assert_eq!(yt_v, "2026.08.19");
@@ -1439,7 +1439,7 @@ fn ensure_tool_versions_refuses_stale_yt_dlp() {
     let yt = fake_tool(&dir, "yt-dlp", "2024.10.07");
     let ff = fake_ffmpeg_strict(&dir);
     let libs = yt_dlp::client::deps::Libraries::new(yt, ff);
-    let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
+    let res = crate::runtime::tokio_rt().block_on(ensure_tool_versions(&libs));
     assert!(
         matches!(res, Err(VideoError::Message(_))),
         "stale binary must fail with the actionable message, got {res:?}"
@@ -1453,7 +1453,7 @@ fn ensure_tool_versions_refuses_missing_binary() {
         "/nonexistent-grab-test/yt-dlp".into(),
         "/nonexistent-grab-test/ffmpeg".into(),
     );
-    let res = crate::download::tokio_rt().block_on(ensure_tool_versions(&libs));
+    let res = crate::runtime::tokio_rt().block_on(ensure_tool_versions(&libs));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
 }
 
@@ -2963,7 +2963,7 @@ fn fetch_video_page_parses_dump_json() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let FetchedVideo::Single(video) = crate::download::tokio_rt()
+    let FetchedVideo::Single(video) = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -3309,7 +3309,7 @@ fn live_capture_adopts_part_and_remuxes() {
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
     // Natural end (fake exits 0) with a `.part` shell: adopted,
     // remuxed, delivered.
-    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
@@ -3352,7 +3352,7 @@ fn live_capture_empty_fails_with_detail() {
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
@@ -3412,7 +3412,7 @@ fn live_capture_stale_staging_never_adopts() {
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
@@ -3444,7 +3444,7 @@ fn live_capture_refuses_existing_dest() {
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
@@ -3479,7 +3479,7 @@ fn live_capture_abort_adopts_partial() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let res = crate::download::tokio_rt().block_on(async {
+    let res = crate::runtime::tokio_rt().block_on(async {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -3557,7 +3557,7 @@ fn hls_map_survives_estimate_wobble() {
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -3658,7 +3658,7 @@ fn vod_hls_pins_planner_variant_id() {
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -3724,7 +3724,7 @@ fn vod_hls_refuses_existing_dest() {
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -3909,7 +3909,7 @@ fn fetch_video_page_surfaces_stderr_tail() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let res = crate::download::tokio_rt().block_on(fetch_video_page(
+    let res = crate::runtime::tokio_rt().block_on(fetch_video_page(
         &bin,
         "https://example.com/v",
         "none",
@@ -3937,7 +3937,7 @@ fn fetch_video_page_rejects_garbage_stdout() {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let res = crate::download::tokio_rt().block_on(fetch_video_page(
+    let res = crate::runtime::tokio_rt().block_on(fetch_video_page(
         &bin,
         "https://example.com/v",
         "none",
@@ -3998,7 +3998,7 @@ fn fetch_video_page_resolves_without_flat_playlist() {
         })
         .to_string(),
     );
-    let FetchedVideo::Single(video) = crate::download::tokio_rt()
+    let FetchedVideo::Single(video) = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -4094,7 +4094,7 @@ fn dump_json_flat_playlist_flag_per_caller() {
         ("grab-flatprobe-off", false, false),
     ] {
         let bin = fake_argv_dump_bin(name, r#"{"id":"x","title":"T"}"#);
-        crate::download::tokio_rt()
+        crate::runtime::tokio_rt()
             .block_on(fetch_raw_dump_json(
                 &bin,
                 "https://example.com/v",
@@ -4134,7 +4134,7 @@ fn fetch_video_page_returns_playlist_for_expansion() {
         })
         .to_string(),
     );
-    let res = crate::download::tokio_rt().block_on(fetch_video_page(
+    let res = crate::runtime::tokio_rt().block_on(fetch_video_page(
         &bin,
         "https://example.com/stories",
         "none",
@@ -4196,7 +4196,7 @@ fn apply_proxy_env_sets_nothing_when_direct() {
     // Deterministic regardless of the ambient environment: a direct
     // spawn must neither set nor inherit proxy routing. The spawn runs
     // inside the runtime (tokio process needs a reactor context).
-    let out = crate::download::tokio_rt().block_on(async {
+    let out = crate::runtime::tokio_rt().block_on(async {
         let mut cmd = tokio::process::Command::new("env");
         cmd.env_remove("NO_PROXY").env_remove("no_proxy");
         cmd.env_remove("HTTP_PROXY").env_remove("http_proxy");
@@ -4228,7 +4228,7 @@ fn apply_proxy_env_stamps_no_proxy_when_proxied() {
     .proxy_config()
     .expect("well-formed")
     .expect("proxied");
-    let out = crate::download::tokio_rt().block_on(async {
+    let out = crate::runtime::tokio_rt().block_on(async {
         let mut cmd = tokio::process::Command::new("env");
         cmd.env_remove("NO_PROXY").env_remove("no_proxy");
         apply_proxy_env(&mut cmd, Some(&proxy));
@@ -5363,7 +5363,7 @@ fn hls_collects_sidecar_beside_finished_file() {
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -5399,7 +5399,7 @@ fn hls_embed_skips_sidecar_collection() {
     job.embed_subs = true;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -5516,7 +5516,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_live_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
@@ -5649,7 +5649,7 @@ fn unified_runner_downloads_claims_and_collects() {
     job.subtitles = Some("en".into());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -5696,7 +5696,7 @@ fn unified_runner_surfaces_failure_tail() {
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -5737,7 +5737,7 @@ fn unified_runner_abort_stays_quiet() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
     let handle = std::thread::spawn(move || {
-        crate::download::tokio_rt().block_on(run_unified_ytdlp(
+        crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
             &bin,
             std::path::Path::new("/usr/bin/ffmpeg"),
             &staging,
@@ -5773,7 +5773,7 @@ fn unified_runner_refuses_existing_dest() {
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -5827,7 +5827,7 @@ exit 0
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &bin,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
@@ -6073,7 +6073,7 @@ fn unified_runner_sums_two_leg_progress() {
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::download::tokio_rt().block_on(run_unified_ytdlp(
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,

@@ -6,9 +6,12 @@ mod file_names;
 mod install_help;
 mod install_progress;
 mod media_types;
+mod net_types;
 mod preferences;
+mod runtime;
 mod settings;
 mod torrent;
+mod ui_util;
 // Video-page extraction + resolver worker (src/video.rs): consumed by the
 // dialog, preferences, queue persistence and the engine. A few helpers
 // stay ahead of use (expiry checks for a future no-re-resolve fast path);

@@ -3,6 +3,8 @@ use crate::file_names::{
     PIECE_MIN, dedupe_filename, filename_from_url, fmt_bytes, name_stem, percent_decode, piece_len,
     rename_noreplace, restrict_filename_ascii, sane_filename, shorten_filename,
 };
+use crate::net_types::ResolvedProxy;
+use crate::runtime::{lock_recover, tokio_rt};
 use futures_util::StreamExt as _;
 use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
@@ -322,35 +324,6 @@ pub fn proxy_type_value(index: usize) -> &'static str {
     crate::media_types::combo_value(PROXY_TYPE_VALUES, index, "socks5")
 }
 
-/// Proxy resolved for one attempt: reqwest interceptors for the direct
-/// engine, plus the CLI form for yt-dlp spawns.
-#[derive(Clone, Debug)]
-pub(crate) struct ResolvedProxy {
-    proxies: Vec<reqwest::Proxy>,
-    /// Single URL for `--proxy` (SOCKS always remote-resolving).
-    pub cli_url: String,
-    /// Comma list for NO_PROXY env on yt-dlp spawns.
-    pub no_proxy_env: String,
-    cache_key: String,
-}
-
-impl ResolvedProxy {
-    /// SOCKS5 URL for the torrent engine: librqbit's `proxy_url` demands
-    /// exactly the `socks5://` scheme, so the remote-resolving `socks5h://`
-    /// form normalizes down. Peer addresses arrive as IPs (trackers, PEX —
-    /// DHT is off under proxy), so no hostname resolution happens on the
-    /// peer path at all. HTTP(S) proxies yield `None`: the engine has no
-    /// HTTP-CONNECT peer path, so those torrents stay direct instead of
-    /// failing.
-    pub fn torrent_socks_url(&self) -> Option<String> {
-        let rest = self
-            .cli_url
-            .strip_prefix("socks5h://")
-            .or_else(|| self.cli_url.strip_prefix("socks5://"))?;
-        Some(format!("socks5://{rest}"))
-    }
-}
-
 /// Loopback bypass applied when no ignore list is configured: exits
 /// cannot reach the user's own machine, so proxying localhost only
 /// breaks local services.
@@ -587,10 +560,6 @@ fn send_last_modified(
 /// Lock a worker-shared mutex, recovering the guarded value when a
 /// previous worker panic poisoned it. The item then fails with an error
 /// instead of the panic cascading through every worker into the app.
-pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// First recorded attempt error, or a generic interruption message.
 /// Each outcome tail wraps it in its own `AttemptFail` variant (changed
 /// vs throttled vs retryable drive different recovery), so the helper
@@ -599,18 +568,6 @@ fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
     lock_recover(first_err)
         .take()
         .unwrap_or_else(|| gettext("Download interrupted"))
-}
-
-pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("grab-download")
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-    })
 }
 
 fn http_client() -> &'static reqwest::Client {

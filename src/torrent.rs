@@ -24,9 +24,9 @@ use librqbit::{
 };
 use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
-use crate::download::tokio_rt;
 use crate::engine_msg::EngineMsg;
 use crate::file_names::{dedupe_filename, sane_filename, shorten_filename};
+use crate::runtime::tokio_rt;
 
 // rqbit keeps the handle alias private (`torrent_state` is not public API),
 // so name it locally: it is just a refcounted managed torrent.
@@ -444,7 +444,7 @@ pub(crate) fn plan_torrent_net(
     listen_port: i32,
     upnp: bool,
     trackers: Option<Vec<String>>,
-    proxy: Option<&crate::download::ResolvedProxy>,
+    proxy: Option<&crate::net_types::ResolvedProxy>,
 ) -> TorrentNetPlan {
     let Some(url) = proxy.and_then(|p| p.torrent_socks_url()) else {
         return TorrentNetPlan {

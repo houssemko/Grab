@@ -68,16 +68,6 @@ fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Button, gtk4:
     (action_bar, select_all_btn, select_none_btn, add_btn)
 }
 
-/// Close the dialog when the button is clicked (Cancel/close actions).
-pub(crate) fn close_on_click(btn: &gtk4::Button, dialog: &adw::Dialog) {
-    let weak = dialog.downgrade();
-    btn.connect_clicked(move |_| {
-        if let Some(d) = weak.upgrade() {
-            d.close();
-        }
-    });
-}
-
 /// Open `path` with the system's default application for its file type —
 /// the same as double-clicking the file in the file manager. Used for
 /// double-click/Enter on a finished download row.
@@ -1464,7 +1454,7 @@ fn show_rename_dialog(
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&rename_btn));
 
-    close_on_click(&cancel_btn, &dialog);
+    crate::ui_util::close_on_click(&cancel_btn, &dialog);
     {
         let m = manager.clone();
         let dialog = dialog.downgrade();
@@ -2505,7 +2495,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     dialog.set_child(Some(&nav));
     dialog.set_default_widget(Some(&add_btn));
 
-    close_on_click(&cancel_btn, &dialog);
+    crate::ui_util::close_on_click(&cancel_btn, &dialog);
     // One submit path for the Add button and URL apply: video pages go
     // through the Page intake (a matching preview is required so the row
     // stores the resolved page, not a stale URL), everything else keeps
