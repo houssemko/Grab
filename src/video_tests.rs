@@ -3,6 +3,8 @@ use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
     quality_value,
 };
+use crate::video_types::video_domain;
+use crate::video_types::{classify, codec_rank, has_fetchable_media, video_format_options};
 use pretty_assertions::assert_eq;
 
 // ── classify ───────────────────────────────────────────────────────────
