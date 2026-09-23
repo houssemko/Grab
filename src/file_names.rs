@@ -367,3 +367,41 @@ fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io
         Err(std::io::Error::last_os_error())
     }
 }
+
+/// Whether a row name is just the page URL derived at intake:
+/// dialog-less rows skip the picker, so their names are URL stems
+/// ("watch"). Matches the derived stem modulo intake-dedupe ` (N)`
+/// suffixes. Dialog-seeded and typed names never match (unless
+/// perversely identical to the URL stem). Pure for tests.
+pub(crate) fn is_url_derived_name(current: &str, page_url: &str) -> bool {
+    let derived = filename_from_url(page_url);
+    current == derived || strip_dedupe_suffix(current) == derived
+}
+
+/// Intake-dedupe suffix stripped: `watch (12)` → `watch`,
+/// `Clip (3).mp4` → `Clip.mp4`. ASCII-boundary operations only, so
+/// non-ASCII titles are never split mid-codepoint. Pure for tests.
+pub(crate) fn strip_dedupe_suffix(name: &str) -> String {
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
+        _ => (name, None),
+    };
+    if let Some(open) = stem.rfind(" (") {
+        let inner = &stem[open + 2..];
+        if !inner.is_empty()
+            && inner
+                .strip_suffix(')')
+                .is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        {
+            let base = &stem[..open];
+            if base.is_empty() {
+                return name.to_string();
+            }
+            return match ext {
+                Some(e) => format!("{base}{e}"),
+                None => base.to_string(),
+            };
+        }
+    }
+    name.to_string()
+}

@@ -1,12 +1,13 @@
 use super::*;
+use crate::file_names::{is_url_derived_name, strip_dedupe_suffix};
 use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
     quality_value,
 };
 use crate::video_argv::{
-    YTDLP_PROGRESS_TEMPLATE, container_truth_name, fallback_to_live_edge, hls_download_argv,
-    hls_format_spec, live_capture_argv, live_remux_argv, merge_output_ext, part_fallback_spec,
-    proxy_cli_args, unified_download_argv, unified_format_spec,
+    YTDLP_PROGRESS_TEMPLATE, apply_proxy_env, container_truth_name, fallback_to_live_edge,
+    hls_download_argv, hls_format_spec, live_capture_argv, live_remux_argv, merge_output_ext,
+    part_fallback_spec, proxy_cli_args, unified_download_argv, unified_format_spec,
 };
 use crate::video_plan::{
     StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
@@ -30,25 +31,29 @@ use crate::video_progress::{
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
-use crate::video_spawn::fetch_raw_dump_json;
+use crate::video_runner::{run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
+use crate::video_spawn::{fetch_raw_dump_json, fetch_video_page};
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, read_manifest, resume_plan, sidecar_path_for, staging_dir,
     staging_root, stem_reserved_in, unified_candidate, unified_temp_limit, ytdlp_output_template,
 };
+use crate::video_tools::VideoError;
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs,
     cookies_browser_spec, distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain,
     find_in_dirs, parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
     ytdlp_update_available,
 };
+use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
 use crate::video_types::video_domain;
 use crate::video_types::{
     VideoFormatOption, classify, codec_rank, has_fetchable_media, video_format_options,
 };
 use pretty_assertions::assert_eq;
+use yt_dlp::model::Video;
 
 // ── classify ───────────────────────────────────────────────────────────
 
