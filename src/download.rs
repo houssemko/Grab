@@ -2118,7 +2118,8 @@ impl DownloadManager {
         self.begin_batch();
         let mut added = 0;
         for entry in &pl.items {
-            let Some(url) = crate::video::expand_child_target(&item.url(), &pl.page_url, entry)
+            let Some(url) =
+                crate::video_probe::expand_child_target(&item.url(), &pl.page_url, entry)
             else {
                 continue;
             };
@@ -2647,7 +2648,7 @@ impl DownloadManager {
                         // to today's collection error instead.
                         let (added, total) = this.expand_playlist_rows(id, &item, &pl);
                         if added == 0 {
-                            let e = crate::video::playlist_resolve_error(None);
+                            let e = crate::video_probe::playlist_resolve_error(None);
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused
                             {

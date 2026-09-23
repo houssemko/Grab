@@ -1624,7 +1624,7 @@ fn fallback_plain_failed(
 ) {
     info.borrow_mut().take();
     tracing::warn!(
-        host = %crate::video::page_host(url),
+        host = %crate::video_probe::page_host(url),
         error = %error,
         "plain fallback failed"
     );
@@ -1724,7 +1724,7 @@ fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
         playlist_count_label(pl.kind, pl.items.len()),
         glib::markup_escape_text(&pl.page_url)
     );
-    if crate::video::playlist_truncated(pl) {
+    if crate::video_probe::playlist_truncated(pl) {
         desc.push_str(" • ");
         desc.push_str(
             &gettext("Showing the first {n} of {total}")
@@ -2100,7 +2100,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 Err(pe) => {
                                     info_b.borrow_mut().take();
                                     tracing::warn!(
-                                        host = %crate::video::page_host(&url),
+                                        host = %crate::video_probe::page_host(&url),
                                         error = %pe.to_string(),
                                         "drive direct fallback failed"
                                     );
@@ -2112,7 +2112,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         }
                         info_b.borrow_mut().take();
                         tracing::warn!(
-                            host = %crate::video::page_host(&url),
+                            host = %crate::video_probe::page_host(&url),
                             error = %e.to_string(),
                             "video preview failed"
                         );
@@ -2932,7 +2932,7 @@ fn push_playlist_items_page(
     let group = adw::PreferencesGroup::builder()
         .title(playlist_count_label(playlist.kind, count))
         .build();
-    if crate::video::playlist_truncated(&playlist) {
+    if crate::video_probe::playlist_truncated(&playlist) {
         group.set_description(Some(
             &gettext("Showing the first {n} of {total}")
                 .replace("{n}", &count.to_string())
@@ -3053,7 +3053,7 @@ fn push_playlist_items_page(
             // persisted entry id as fallback.
             let mut failed: Option<String> = None;
             for (i, item) in &chosen {
-                let page_url = crate::video::story_segment_url(&playlist.page_url, &item.id)
+                let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
                 let name = default_name_for(settings, &item.title, &item.id, audio_only);

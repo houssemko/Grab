@@ -19,6 +19,7 @@ mod ui_util;
 // goes unfulfilled.
 #[expect(dead_code)]
 mod video;
+mod video_probe;
 mod video_quality;
 mod video_tools;
 mod video_types;
