@@ -1,4 +1,5 @@
-use crate::download::{BLOCK_CELLS, DownloadManager, DownloadStatus, RemovedSnapshot, aggregate};
+use crate::download::{DownloadManager, DownloadStatus, RemovedSnapshot};
+use crate::download_pieces::{BLOCK_CELLS, aggregate};
 use adw::prelude::*;
 use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;

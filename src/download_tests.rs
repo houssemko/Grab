@@ -1,4 +1,5 @@
 use super::*;
+use crate::download_pieces::{BLOCK_CELLS, aggregate, plan_pieces, split_count};
 use crate::file_names::{
     PIECE_MAX, dedupe_filename, filename_from_url, piece_len, rename_noreplace, shorten_filename,
 };

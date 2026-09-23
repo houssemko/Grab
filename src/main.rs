@@ -1,6 +1,7 @@
 mod application;
 mod cookies;
 mod download;
+mod download_pieces;
 mod engine_msg;
 mod file_names;
 mod install_help;
