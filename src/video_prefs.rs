@@ -1,0 +1,187 @@
+//! Preference combos + active-value resolution: codec priority,
+//! subtitle language and remux target labels/indices plus the
+//! allowlisted actives jobs consume. Leaf module (media types +
+//! gettext): preferences, settings and the engines consume these
+//! through the `video` facade.
+
+use crate::video_tools::COOKIES_BROWSERS;
+use gettextrs::gettext;
+
+/// Translated combo labels, index-aligned with [`COOKIES_BROWSERS`].
+/// Browser names are proper nouns and stay untranslated; only None is prose.
+pub fn cookies_browser_labels() -> Vec<String> {
+    let mut labels = vec![
+        "Brave".to_string(),
+        "Chrome".to_string(),
+        "Chromium".to_string(),
+        "Edge".to_string(),
+        "Firefox".to_string(),
+        "Opera".to_string(),
+        "Vivaldi".to_string(),
+        "Whale".to_string(),
+        "Zen".to_string(),
+    ];
+    labels.insert(0, gettext("None"));
+    labels
+}
+
+/// Combo index for a stored browser value. Unknown values fall back to
+/// None rather than selecting a browser the user didn't pick.
+pub fn cookies_browser_index(value: &str) -> usize {
+    crate::media_types::combo_index(COOKIES_BROWSERS, value, 0)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to off.
+pub fn cookies_browser_value(index: usize) -> &'static str {
+    crate::media_types::combo_value(COOKIES_BROWSERS, index, "none")
+}
+
+/// Codec priority modes for the `video-codec-priority` setting.
+pub const CODEC_PRIORITY_NEWEST: &str = "newest";
+
+pub const CODEC_PRIORITY_COMPATIBLE: &str = "compatible";
+
+pub const CODEC_PRIORITY_VALUES: &[&str] = &[CODEC_PRIORITY_NEWEST, CODEC_PRIORITY_COMPATIBLE];
+
+/// Translated combo labels, index-aligned with [`CODEC_PRIORITY_VALUES`].
+pub fn codec_priority_labels() -> Vec<String> {
+    vec![gettext("Newest first"), gettext("Most compatible")]
+}
+
+/// Combo index for a stored priority value. Unknown values fall back
+/// to newest (the historical behavior).
+pub fn codec_priority_index(value: &str) -> usize {
+    crate::media_types::combo_index(CODEC_PRIORITY_VALUES, value, 0)
+}
+
+/// Stored value for a combo index. Out-of-range indexes fall back to newest.
+pub fn codec_priority_value(index: usize) -> &'static str {
+    crate::media_types::combo_value(CODEC_PRIORITY_VALUES, index, CODEC_PRIORITY_NEWEST)
+}
+
+/// yt-dlp subtitle language codes offered in preferences, index-aligned
+/// with [`subtitle_language_labels`]. `off` disables subtitle downloads.
+pub(crate) const SUBTITLE_LANGUAGE_VALUES: &[&str] = &[
+    "off", "en", "ar", "de", "es", "fr", "hi", "id", "it", "ja", "ko", "nl", "pl", "pt", "ru",
+    "tr", "vi", "zh",
+];
+
+pub fn subtitle_language_labels() -> Vec<String> {
+    vec![
+        gettext("Off"),
+        gettext("English"),
+        gettext("Arabic"),
+        gettext("German"),
+        gettext("Spanish"),
+        gettext("French"),
+        gettext("Hindi"),
+        gettext("Indonesian"),
+        gettext("Italian"),
+        gettext("Japanese"),
+        gettext("Korean"),
+        gettext("Dutch"),
+        gettext("Polish"),
+        gettext("Portuguese"),
+        gettext("Russian"),
+        gettext("Turkish"),
+        gettext("Vietnamese"),
+        gettext("Chinese"),
+    ]
+}
+
+/// Combo index for a stored subtitle language code. Unknown or empty
+/// values fall back to English (the default).
+pub fn subtitle_language_index(value: &str) -> usize {
+    crate::media_types::combo_index(SUBTITLE_LANGUAGE_VALUES, value, 1)
+}
+
+/// Stored code for a combo index. Out-of-range indexes fall back to English.
+pub fn subtitle_language_value(index: usize) -> &'static str {
+    crate::media_types::combo_value(SUBTITLE_LANGUAGE_VALUES, index, "en")
+}
+
+/// Active raw setting for one job: trimmed and lowercased, then
+/// allowlisted against `values` minus `"off"`. `off`, empty and unknown
+/// codes (hand-edited dconf) all resolve to `None`: a code yt-dlp would
+/// only warn about is never requested, and the value reaching the CLI —
+/// and any sidecar filename — always comes from the fixed list. Pure.
+fn allowlisted_active(raw: &str, values: &[&str]) -> Option<String> {
+    let norm = raw.trim().to_ascii_lowercase();
+    values
+        .iter()
+        .find(|v| **v == norm && **v != "off")
+        .map(|v| v.to_string())
+}
+
+/// Active subtitle language for one job: the raw setting trimmed and
+/// lowercased, then allowlisted against [`SUBTITLE_LANGUAGE_VALUES`].
+/// `off`, empty and unknown codes (hand-edited dconf) all resolve to
+/// `None`: a code yt-dlp would only warn about is never requested, and
+/// the value reaching `--sub-langs` — and the sidecar filename — always
+/// comes from the fixed list.
+pub(crate) fn subtitle_lang_active(raw: &str) -> Option<String> {
+    allowlisted_active(raw, SUBTITLE_LANGUAGE_VALUES)
+}
+
+/// Offered subtitle languages that produce sidecars: the full list
+/// minus the `off` marker (the prefs UI uses the full list). Single
+/// source so writers and deleters cannot drift when codes change.
+pub(crate) fn subtitle_content_languages() -> impl Iterator<Item = &'static str> {
+    SUBTITLE_LANGUAGE_VALUES
+        .iter()
+        .copied()
+        .filter(|l| *l != "off")
+}
+
+/// yt-dlp remux target containers offered in preferences, index-aligned
+/// with [`remux_video_labels`]. `off` disables remuxing.
+pub(crate) const REMUX_VIDEO_VALUES: &[&str] = &["off", "mp4", "mkv", "webm"];
+
+pub fn remux_video_labels() -> Vec<String> {
+    vec![
+        gettext("Off"),
+        // Container names are proper nouns: never translated.
+        "MP4".to_string(),
+        "MKV".to_string(),
+        "WebM".to_string(),
+    ]
+}
+
+/// Combo index for a stored remux target. Unknown or empty values fall
+/// back to Off (the default).
+pub fn remux_video_index(value: &str) -> usize {
+    crate::media_types::combo_index(REMUX_VIDEO_VALUES, value, 0)
+}
+
+/// Stored code for a combo index. Out-of-range indexes fall back to Off.
+pub fn remux_video_value(index: usize) -> &'static str {
+    crate::media_types::combo_value(REMUX_VIDEO_VALUES, index, "off")
+}
+
+/// Active remux target for one job: the raw setting trimmed and
+/// lowercased, then allowlisted against [`REMUX_VIDEO_VALUES`].
+/// `off`, empty and unknown codes (hand-edited dconf) all resolve to
+/// `None`: a code yt-dlp would only warn about is never requested, and
+/// the value reaching `--remux-video` always comes from the fixed list.
+pub(crate) fn remux_video_active(raw: &str) -> Option<String> {
+    allowlisted_active(raw, REMUX_VIDEO_VALUES)
+}
+
+/// Best-effort subtitle sidecars — yt-dlp/Parabolic parity: exact
+/// language with automatic-caption fallback, converted to SRT beside
+/// the output. A missing language is only a warning upstream (verified
+/// against yt-dlp 2026.08.19: `There are no subtitles for the
+/// requested languages`, exit 0), and conversion points at Grab's
+/// resolved ffmpeg (guaranteed present by `resolve_libraries`, which
+/// refuses video attempts without it) — so subtitles can never sink a
+/// download.
+pub(crate) fn subtitle_cli_args(lang: &str) -> Vec<String> {
+    vec![
+        "--write-subs".to_string(),
+        "--sub-langs".to_string(),
+        lang.to_string(),
+        "--write-auto-subs".to_string(),
+        "--convert-subs".to_string(),
+        "srt".to_string(),
+    ]
+}

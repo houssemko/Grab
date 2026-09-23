@@ -3062,7 +3062,7 @@ impl DownloadManager {
             subtitles: if audio_only {
                 None
             } else {
-                crate::video::subtitle_lang_active(&self.settings.subtitle_language())
+                crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
             },
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),
@@ -3075,7 +3075,7 @@ impl DownloadManager {
             remux_video: if audio_only {
                 None
             } else {
-                crate::video::remux_video_active(&self.settings.remux_video())
+                crate::video_prefs::remux_video_active(&self.settings.remux_video())
             },
             embed_chapters: self.settings.embed_chapters(),
             proxy,
@@ -3530,7 +3530,7 @@ impl DownloadManager {
         // over a sidecar). Plain rows never wrote sidecars — gate on the
         // staged video source like remove()'s part cleanup does.
         if self.video_sources.borrow().contains_key(&id) {
-            for lang in crate::video::subtitle_content_languages() {
+            for lang in crate::video_prefs::subtitle_content_languages() {
                 let sidecar = crate::video::sidecar_path_for(&item.file_path(), lang);
                 match gio::File::for_path(&sidecar).trash(gio::Cancellable::NONE) {
                     Ok(()) => {}

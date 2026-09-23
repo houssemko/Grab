@@ -128,7 +128,7 @@ impl AppSettings {
         self.video_codec_priority() == crate::video::CODEC_PRIORITY_NEWEST
     }
     /// Stored subtitle language code; `"off"` when disabled. Resolved
-    /// to `Option` at spawn time via [`crate::video::subtitle_lang_active`].
+    /// to `Option` at spawn time via [`crate::video_prefs::subtitle_lang_active`].
     pub fn subtitle_language(&self) -> String {
         self.0.string(key::SUBTITLE_LANGUAGE).to_string()
     }

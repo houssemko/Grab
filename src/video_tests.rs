@@ -3,6 +3,12 @@ use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
     quality_value,
 };
+use crate::video_prefs::{
+    CODEC_PRIORITY_NEWEST, SUBTITLE_LANGUAGE_VALUES, codec_priority_index, codec_priority_value,
+    cookies_browser_index, cookies_browser_labels, cookies_browser_value, remux_video_active,
+    remux_video_labels, subtitle_lang_active, subtitle_language_index, subtitle_language_labels,
+    subtitle_language_value,
+};
 use crate::video_probe::{
     DIRECT_FILE_EXTS, MAX_PLAYLIST_ITEMS, drive_direct_url, drive_file_id, expand_child_target,
     insta_shortcode_to_pk, is_direct_file_url, is_expired, is_http_url, now_unix,
@@ -11,9 +17,9 @@ use crate::video_probe::{
 };
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_tools::{
-    MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs, cookies_browser_spec,
-    distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs,
-    parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
+    COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs,
+    cookies_browser_spec, distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain,
+    find_in_dirs, parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
 };
 use crate::video_types::video_domain;
 use crate::video_types::{

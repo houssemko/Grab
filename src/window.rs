@@ -30,7 +30,7 @@ fn default_name_for(
     id: &str,
     audio_only: bool,
 ) -> String {
-    let remux = crate::video::remux_video_active(&settings.remux_video());
+    let remux = crate::video_prefs::remux_video_active(&settings.remux_video());
     crate::video::default_video_filename(title, id, audio_only, remux.as_deref())
 }
 
