@@ -1,6 +1,6 @@
 //! Queue persistence model: row status, the serde queue file
 //! (versioned, backward compatible) and its stored items. Leaf
-//! module (gettext + download_fetch bitmap + media types): the
+//! module (gettext + download_pieces bitmap + media types): the
 //! manager persists/restores through the `download` facade.
 
 use crate::download_pieces::SegmentState;

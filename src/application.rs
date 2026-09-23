@@ -439,16 +439,56 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
 
 #[cfg(test)]
 mod tests {
+    /// Every metainfo `<release version="...">` entry, in file order.
+    fn metainfo_release_versions(xml: &str) -> Vec<String> {
+        let marker = "<release version=\"";
+        let mut out = Vec::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find(marker) {
+            rest = &rest[start + marker.len()..];
+            let end = rest.find('"').expect("release version closes");
+            out.push(rest[..end].to_string());
+            rest = &rest[end..];
+        }
+        assert!(!out.is_empty(), "metainfo has releases");
+        out
+    }
+
+    /// Version tuple for comparison (numeric parts, patch-suffix last).
+    fn version_key(v: &str) -> (u32, u32, u32) {
+        let core = v.split(['-', '+']).next().unwrap_or(v);
+        let mut parts = core.split('.').map(|p| p.parse().unwrap_or(0));
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    }
+
     /// The About dialog (`from_appdata`) displays the newest metainfo
     /// release as the app version — a Cargo bump without a matching
     /// metainfo entry ships a stale version string (4.0.5 showed 4.0.3).
     #[test]
     fn metainfo_newest_release_matches_package_version() {
         let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");
-        let marker = "<release version=\"";
-        let start = xml.find(marker).expect("metainfo has releases") + marker.len();
-        let rest = &xml[start..];
-        let end = rest.find('"').expect("release version closes");
-        assert_eq!(&rest[..end], env!("CARGO_PKG_VERSION"));
+        let newest = metainfo_release_versions(xml)
+            .iter()
+            .max_by_key(|v| version_key(v))
+            .expect("at least one release")
+            .clone();
+        assert_eq!(newest, env!("CARGO_PKG_VERSION"));
+    }
+
+    /// The newest entry must also be first: `from_appdata` reads the
+    /// leading `<release>`, so an out-of-order file shows the wrong
+    /// version even when a matching entry exists further down.
+    #[test]
+    fn metainfo_lists_newest_release_first() {
+        let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");
+        let versions = metainfo_release_versions(xml);
+        assert_eq!(
+            versions.first().map(String::as_str),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
     }
 }

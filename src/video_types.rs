@@ -460,7 +460,7 @@ impl HlsSel {
     /// Build from an extractor format: manifest protocol, DRM-free,
     /// with a playlist URL. The URL itself is validated but not
     /// stored — runners re-resolve by id. `pub(crate)` for the planner
-    /// in `video.rs`.
+    /// in `video_plan.rs`.
     pub(crate) fn from_format(f: &Format) -> Option<Self> {
         if f.protocol != Protocol::M3U8Native {
             return None;
