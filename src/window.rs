@@ -30,7 +30,7 @@ fn default_name_for(
     id: &str,
     audio_only: bool,
 ) -> String {
-    let remux = crate::video::remux_video_active(&settings.remux_video());
+    let remux = crate::video_prefs::remux_video_active(&settings.remux_video());
     crate::video::default_video_filename(title, id, audio_only, remux.as_deref())
 }
 
@@ -66,16 +66,6 @@ fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Button, gtk4:
     action_bar.pack_start(&select_none_btn);
     action_bar.pack_end(&add_btn);
     (action_bar, select_all_btn, select_none_btn, add_btn)
-}
-
-/// Close the dialog when the button is clicked (Cancel/close actions).
-pub(crate) fn close_on_click(btn: &gtk4::Button, dialog: &adw::Dialog) {
-    let weak = dialog.downgrade();
-    btn.connect_clicked(move |_| {
-        if let Some(d) = weak.upgrade() {
-            d.close();
-        }
-    });
 }
 
 /// Open `path` with the system's default application for its file type —
@@ -1464,7 +1454,7 @@ fn show_rename_dialog(
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&rename_btn));
 
-    close_on_click(&cancel_btn, &dialog);
+    crate::ui_util::close_on_click(&cancel_btn, &dialog);
     {
         let m = manager.clone();
         let dialog = dialog.downgrade();
@@ -1569,7 +1559,7 @@ fn submit_probed_single(
         &v.page_url,
         Some(&dest.borrow()),
         name,
-        crate::video::VideoChoices {
+        crate::media_types::VideoChoices {
             quality,
             audio_only,
             video_format_id: format_id,
@@ -1634,7 +1624,7 @@ fn fallback_plain_failed(
 ) {
     info.borrow_mut().take();
     tracing::warn!(
-        host = %crate::video::page_host(url),
+        host = %crate::video_probe::page_host(url),
         error = %error,
         "plain fallback failed"
     );
@@ -1707,13 +1697,15 @@ fn show_video_error(v: &VideoStep, message: &str) {
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories").
-fn playlist_count_label(kind: crate::video::PlaylistKind, count: usize) -> String {
+fn playlist_count_label(kind: crate::media_types::PlaylistKind, count: usize) -> String {
     let template = match kind {
-        crate::video::PlaylistKind::Stories => ngettext("{} story", "{} stories", count as u32),
-        crate::video::PlaylistKind::Highlights => {
+        crate::media_types::PlaylistKind::Stories => {
+            ngettext("{} story", "{} stories", count as u32)
+        }
+        crate::media_types::PlaylistKind::Highlights => {
             ngettext("{} highlight", "{} highlights", count as u32)
         }
-        crate::video::PlaylistKind::Playlist => ngettext("{} item", "{} items", count as u32),
+        crate::media_types::PlaylistKind::Playlist => ngettext("{} item", "{} items", count as u32),
     };
     template.replace("{}", &count.to_string())
 }
@@ -1723,7 +1715,7 @@ fn playlist_count_label(kind: crate::video::PlaylistKind, count: usize) -> Strin
 /// hidden — renames and format pins don't apply across items — while
 /// the audio switch stays visible and seeds the picker for every
 /// queued item.
-fn show_video_playlist(v: &VideoStep, pl: &crate::video::PlaylistInfo) {
+fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group
         .set_title(glib::markup_escape_text(&pl.title).as_str());
@@ -1732,7 +1724,7 @@ fn show_video_playlist(v: &VideoStep, pl: &crate::video::PlaylistInfo) {
         playlist_count_label(pl.kind, pl.items.len()),
         glib::markup_escape_text(&pl.page_url)
     );
-    if crate::video::playlist_truncated(pl) {
+    if crate::video_probe::playlist_truncated(pl) {
         desc.push_str(" • ");
         desc.push_str(
             &gettext("Showing the first {n} of {total}")
@@ -2108,7 +2100,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 Err(pe) => {
                                     info_b.borrow_mut().take();
                                     tracing::warn!(
-                                        host = %crate::video::page_host(&url),
+                                        host = %crate::video_probe::page_host(&url),
                                         error = %pe.to_string(),
                                         "drive direct fallback failed"
                                     );
@@ -2120,7 +2112,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         }
                         info_b.borrow_mut().take();
                         tracing::warn!(
-                            host = %crate::video::page_host(&url),
+                            host = %crate::video_probe::page_host(&url),
                             error = %e.to_string(),
                             "video preview failed"
                         );
@@ -2296,12 +2288,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         // Outside Flatpak there is no bundled binary and host packages
         // can't be installed from here: guide through self-install
         // instead of the automatic download.
-        if !crate::video::in_flatpak() {
+        if !crate::video_tools::in_flatpak() {
             btn.set_label(&gettext("How to Install"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
         }
         video_install_btn.connect_clicked(move |_| {
-            if !crate::video::in_flatpak() {
+            if !crate::video_tools::in_flatpak() {
                 let kick_b = kick.clone();
                 crate::install_help::show(&btn, move || kick_b(true));
                 return;
@@ -2503,7 +2495,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     dialog.set_child(Some(&nav));
     dialog.set_default_widget(Some(&add_btn));
 
-    close_on_click(&cancel_btn, &dialog);
+    crate::ui_util::close_on_click(&cancel_btn, &dialog);
     // One submit path for the Add button and URL apply: video pages go
     // through the Page intake (a matching preview is required so the row
     // stores the resolved page, not a stale URL), everything else keeps
@@ -2781,7 +2773,7 @@ pub(crate) fn show_torrent_files_dialog(
         check.update_property(&[gtk4::accessible::Property::Label(&e.path)]);
         let row = adw::ActionRow::builder()
             .title(&e.path)
-            .subtitle(crate::download::fmt_bytes(e.length))
+            .subtitle(crate::file_names::fmt_bytes(e.length))
             .activatable(true)
             .build();
         row.add_prefix(&check);
@@ -2926,7 +2918,7 @@ fn push_playlist_items_page(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     parent: glib::WeakRef<adw::Dialog>,
-    playlist: crate::video::PlaylistInfo,
+    playlist: crate::media_types::PlaylistInfo,
     audio_only: bool,
 ) {
     // Same guard as the video page: don't stack a second picker while
@@ -2940,7 +2932,7 @@ fn push_playlist_items_page(
     let group = adw::PreferencesGroup::builder()
         .title(playlist_count_label(playlist.kind, count))
         .build();
-    if crate::video::playlist_truncated(&playlist) {
+    if crate::video_probe::playlist_truncated(&playlist) {
         group.set_description(Some(
             &gettext("Showing the first {n} of {total}")
                 .replace("{n}", &count.to_string())
@@ -3040,7 +3032,7 @@ fn push_playlist_items_page(
     {
         let parent_weak = parent.clone();
         add_btn.connect_clicked(move |_| {
-            let chosen: Vec<(usize, &crate::video::PlaylistItem)> = playlist
+            let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
@@ -3061,7 +3053,7 @@ fn push_playlist_items_page(
             // persisted entry id as fallback.
             let mut failed: Option<String> = None;
             for (i, item) in &chosen {
-                let page_url = crate::video::story_segment_url(&playlist.page_url, &item.id)
+                let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
                 let name = default_name_for(settings, &item.title, &item.id, audio_only);
@@ -3069,7 +3061,7 @@ fn push_playlist_items_page(
                     &page_url,
                     Some(&dest_dir.borrow()),
                     Some(&name),
-                    crate::video::VideoChoices {
+                    crate::media_types::VideoChoices {
                         quality: manager.settings().video_quality(),
                         audio_only,
                         video_format_id: None,

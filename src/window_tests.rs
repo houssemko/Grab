@@ -1,6 +1,6 @@
 use super::*;
 use crate::download::DownloadStatus;
-use crate::video::PlaylistKind;
+use crate::media_types::PlaylistKind;
 
 #[test]
 fn should_pulse_covers_row_states() {

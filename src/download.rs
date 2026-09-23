@@ -1,3 +1,10 @@
+use crate::engine_msg::{DEST_EXISTS, EngineMsg};
+use crate::file_names::{
+    PIECE_MIN, dedupe_filename, filename_from_url, fmt_bytes, name_stem, percent_decode, piece_len,
+    rename_noreplace, restrict_filename_ascii, sane_filename, shorten_filename,
+};
+use crate::net_types::ResolvedProxy;
+use crate::runtime::{lock_recover, tokio_rt};
 use futures_util::StreamExt as _;
 use gettextrs::{gettext, ngettext};
 use gtk4::gio::prelude::*;
@@ -70,7 +77,7 @@ struct StoredItem {
     /// written (plain downloads omit it, so old files stay clean and old
     /// app versions keep reading new ones).
     #[serde(default)]
-    video_source: Option<crate::video::VideoSource>,
+    video_source: Option<crate::media_types::VideoSource>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -149,217 +156,6 @@ impl DownloadItem {
     }
 }
 
-/// Split a filename into stem and extension (extension keeps its dot).
-/// `rfind`, not `split`: only the last dot counts, and a leading dot
-/// (`".profile"`) is a stem, not an extension. Pure.
-fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
-    match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
-        _ => (name, None),
-    }
-}
-
-/// Cap a filename to filesystem limits (NAME_MAX is 255 bytes on
-/// ext4/tmpfs), keeping the extension. Truncates the stem on a char
-/// boundary; reserves room for the ` (n)` dedupe suffix.
-pub(crate) fn shorten_filename(name: &str) -> String {
-    const MAX_FILENAME_BYTES: usize = 240;
-    if name.len() <= MAX_FILENAME_BYTES {
-        return name.to_string();
-    }
-    let (stem, ext) = split_stem_ext(name);
-    let ext_len = ext.map_or(0, str::len);
-    let keep = stem.floor_char_boundary(MAX_FILENAME_BYTES.saturating_sub(ext_len));
-    match ext {
-        Some(e) => format!("{}{e}", &stem[..keep]),
-        None => stem[..keep].to_string(),
-    }
-}
-
-/// Fold a filename to plain ASCII, mirroring yt-dlp's `--restrict-filenames`
-/// (`sanitize_filename(restricted=True)`) with a simpler documented fold:
-///
-/// - accented Latin letters map to their base letter (`é` → `e`, `ß` → `ss`,
-///   `æ` → `ae`); every other non-ASCII character becomes `_`
-/// - `"` and control characters are dropped outright (as in yt-dlp)
-/// - runs of `_` collapse to one; leading/trailing `_` are stripped
-///
-/// The split keeps the extension: stem and extension are folded separately,
-/// so `Café & Croissants.mp4` becomes `Cafe_Croissants.mp4`. A stem that
-/// folds to nothing falls back to `"file"`, so the result is never empty.
-pub(crate) fn restrict_filename_ascii(name: &str) -> String {
-    let (stem, ext) = split_stem_ext(name);
-    let stem = fold_ascii_part(stem);
-    let stem = if stem.is_empty() {
-        "file".to_string()
-    } else {
-        stem
-    };
-    match ext {
-        Some(e) => format!("{stem}{}", fold_ascii_part(e)),
-        None => stem,
-    }
-}
-
-/// Fold one filename part (stem or extension) to ASCII.
-fn fold_ascii_part(part: &str) -> String {
-    /// Base-letter fold for the accented Latin ranges yt-dlp maps through
-    /// its own accent table; anything unlisted here is not representable
-    /// in ASCII and becomes `_` in the caller.
-    fn fold_accent(c: char) -> Option<&'static str> {
-        match c {
-            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ǎ' => Some("a"),
-            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => Some("e"),
-            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'ĭ' | 'į' => Some("i"),
-            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' | 'ǒ' => Some("o"),
-            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' | 'ǔ' => Some("u"),
-            'ý' | 'ÿ' => Some("y"),
-            'ñ' | 'ń' | 'ň' => Some("n"),
-            'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => Some("c"),
-            'ß' => Some("ss"),
-            'æ' => Some("ae"),
-            'œ' => Some("oe"),
-            'ð' | 'ď' | 'đ' => Some("d"),
-            'þ' => Some("th"),
-            'ł' => Some("l"),
-            'š' | 'ś' | 'ŝ' | 'ş' => Some("s"),
-            'ž' | 'ź' | 'ż' => Some("z"),
-            'ğ' => Some("g"),
-            'ř' => Some("r"),
-            'ť' | 'ţ' => Some("t"),
-            'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' | 'Ǎ' => Some("A"),
-            'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => Some("E"),
-            'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'Ĭ' | 'Į' => Some("I"),
-            'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' | 'Ǒ' => Some("O"),
-            'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' | 'Ǔ' => Some("U"),
-            'Ý' | 'Ÿ' => Some("Y"),
-            'Ñ' | 'Ń' | 'Ň' => Some("N"),
-            'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => Some("C"),
-            'Æ' => Some("AE"),
-            'Œ' => Some("OE"),
-            'Ð' | 'Ď' | 'Đ' => Some("D"),
-            'Þ' => Some("TH"),
-            'Ł' => Some("L"),
-            'Š' | 'Ś' | 'Ŝ' | 'Ş' => Some("S"),
-            'Ž' | 'Ź' | 'Ż' => Some("Z"),
-            'Ğ' => Some("G"),
-            'Ř' => Some("R"),
-            'Ť' | 'Ţ' => Some("T"),
-            _ => None,
-        }
-    }
-
-    let mut out = String::with_capacity(part.len());
-    for c in part.chars() {
-        if let Some(base) = fold_accent(c) {
-            out.push_str(base);
-        } else if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-            out.push(c);
-        } else if c == '"' || c.is_control() {
-            // Dropped outright, as in yt-dlp's restricted mode.
-        } else {
-            out.push('_');
-        }
-    }
-    let mut collapsed = String::with_capacity(out.len());
-    let mut prev_underscore = false;
-    for c in out.chars() {
-        if c == '_' {
-            if prev_underscore {
-                continue;
-            }
-            prev_underscore = true;
-        } else {
-            prev_underscore = false;
-        }
-        collapsed.push(c);
-    }
-    collapsed.trim_matches('_').to_string()
-}
-
-/// Append ` (n)` before the extension until `taken` returns false.
-///
-/// Example: `dedupe_filename("f.iso", |n| n == "f.iso")` returns `"f (1).iso"`.
-pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
-    if !taken(filename) {
-        return filename.to_string();
-    }
-    let (stem, ext) = match filename.rfind('.') {
-        Some(i) if i > 0 => (&filename[..i], Some(&filename[i + 1..])),
-        _ => (filename, None),
-    };
-    let mut n = 1;
-    for _ in 1..=9999 {
-        let cand = match ext {
-            Some(e) => format!("{stem} ({n}).{e}"),
-            None => format!("{filename} ({n})"),
-        };
-        if !taken(&cand) {
-            return cand;
-        }
-        n += 1;
-    }
-    // Absurd collision count: return the next candidate anyway (a later
-    // write visibly fails) rather than stat-ing the disk forever.
-    match ext {
-        Some(e) => format!("{stem} ({n}).{e}"),
-        None => format!("{filename} ({n})"),
-    }
-}
-
-/// File stem of a finished-name candidate (`Clip.mp4` → `Clip`,
-/// extensionless `README` → `README`); `""` when there is none, which
-/// never reserves (see `stem_reserved_in`).
-fn name_stem(name: &str) -> &str {
-    std::path::Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-}
-
-pub(crate) fn sane_filename(s: &str) -> bool {
-    /// Explicit bidi controls (marks, embeddings/overrides, isolates).
-    /// No std helper exists, so match the assigned ranges with escapes
-    /// (never literal glyphs: they are invisible in source).
-    fn is_bidi_control(c: char) -> bool {
-        matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-    }
-    !s.is_empty()
-        && !s.contains('/')
-        && !s.contains('\0')
-        && s != "."
-        && s != ".."
-        // Control/bidi-override characters deceive in listings and
-        // notification text (FIND-03/04); servers love to send them.
-        && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
-}
-
-/// Best-effort filename from a URL path, falling back to `index.html`.
-/// Decode `%XX` escapes (RFC 5987 `filename*=`); leaves everything else
-/// (including `+`) untouched. No new dependency for ten lines.
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let mut decoded = None;
-        if bytes[i] == b'%'
-            && let (Some(&h), Some(&l)) = (bytes.get(i + 1), bytes.get(i + 2))
-            && let (Some(h), Some(l)) = ((h as char).to_digit(16), (l as char).to_digit(16))
-        {
-            decoded = Some((h << 4 | l) as u8);
-        }
-        if let Some(b) = decoded {
-            out.push(b);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 /// Filename from a `Content-Disposition` header (RFC 6266): prefers
 /// `filename*=UTF-8''...`, falls back to quoted `filename="..."`, strips
 /// any directory components servers sometimes include. `None` when absent
@@ -395,19 +191,6 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
         }
     }
     fallback
-}
-
-pub fn filename_from_url(url_str: &str) -> String {
-    url::Url::parse(url_str)
-        .ok()
-        .and_then(|u| {
-            u.path_segments()
-                .and_then(|mut segs| segs.rfind(|s| !s.is_empty()).map(|s| s.to_string()))
-        })
-        // Browsers decode %XX escapes: %20 is a space, not six chars.
-        .map(|s| percent_decode(&s))
-        .filter(|s| sane_filename(s))
-        .unwrap_or_else(|| "index.html".to_string())
 }
 
 /// Normalize user input into a URL string, adding `https://` to bare hosts.
@@ -512,12 +295,12 @@ pub fn proxy_mode_labels() -> Vec<String> {
 /// Combo index for a stored mode value. Unknown values fall back to
 /// system (the default).
 pub fn proxy_mode_index(value: &str) -> usize {
-    crate::video::combo_index(PROXY_MODE_VALUES, value, 0)
+    crate::media_types::combo_index(PROXY_MODE_VALUES, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to system.
 pub fn proxy_mode_value(index: usize) -> &'static str {
-    crate::video::combo_value(PROXY_MODE_VALUES, index, PROXY_MODE_SYSTEM)
+    crate::media_types::combo_value(PROXY_MODE_VALUES, index, PROXY_MODE_SYSTEM)
 }
 
 pub const PROXY_TYPE_VALUES: &[&str] = &["http", "https", "socks5"];
@@ -533,41 +316,12 @@ pub fn proxy_type_labels() -> Vec<String> {
 
 /// Combo index for a stored type value. Unknown values fall back to SOCKS5.
 pub fn proxy_type_index(value: &str) -> usize {
-    crate::video::combo_index(PROXY_TYPE_VALUES, value, 2)
+    crate::media_types::combo_index(PROXY_TYPE_VALUES, value, 2)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to SOCKS5.
 pub fn proxy_type_value(index: usize) -> &'static str {
-    crate::video::combo_value(PROXY_TYPE_VALUES, index, "socks5")
-}
-
-/// Proxy resolved for one attempt: reqwest interceptors for the direct
-/// engine, plus the CLI form for yt-dlp spawns.
-#[derive(Clone, Debug)]
-pub(crate) struct ResolvedProxy {
-    proxies: Vec<reqwest::Proxy>,
-    /// Single URL for `--proxy` (SOCKS always remote-resolving).
-    pub cli_url: String,
-    /// Comma list for NO_PROXY env on yt-dlp spawns.
-    pub no_proxy_env: String,
-    cache_key: String,
-}
-
-impl ResolvedProxy {
-    /// SOCKS5 URL for the torrent engine: librqbit's `proxy_url` demands
-    /// exactly the `socks5://` scheme, so the remote-resolving `socks5h://`
-    /// form normalizes down. Peer addresses arrive as IPs (trackers, PEX —
-    /// DHT is off under proxy), so no hostname resolution happens on the
-    /// peer path at all. HTTP(S) proxies yield `None`: the engine has no
-    /// HTTP-CONNECT peer path, so those torrents stay direct instead of
-    /// failing.
-    pub fn torrent_socks_url(&self) -> Option<String> {
-        let rest = self
-            .cli_url
-            .strip_prefix("socks5h://")
-            .or_else(|| self.cli_url.strip_prefix("socks5://"))?;
-        Some(format!("socks5://{rest}"))
-    }
+    crate::media_types::combo_value(PROXY_TYPE_VALUES, index, "socks5")
 }
 
 /// Loopback bypass applied when no ignore list is configured: exits
@@ -806,10 +560,6 @@ fn send_last_modified(
 /// Lock a worker-shared mutex, recovering the guarded value when a
 /// previous worker panic poisoned it. The item then fails with an error
 /// instead of the panic cascading through every worker into the app.
-pub(crate) fn lock_recover<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// First recorded attempt error, or a generic interruption message.
 /// Each outcome tail wraps it in its own `AttemptFail` variant (changed
 /// vs throttled vs retryable drive different recovery), so the helper
@@ -818,18 +568,6 @@ fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
     lock_recover(first_err)
         .take()
         .unwrap_or_else(|| gettext("Download interrupted"))
-}
-
-pub(crate) fn tokio_rt() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("grab-download")
-            .enable_all()
-            .build()
-            .expect("tokio runtime")
-    })
 }
 
 fn http_client() -> &'static reqwest::Client {
@@ -894,64 +632,6 @@ fn client_builder() -> reqwest::ClientBuilder {
                 attempt.follow()
             }
         }))
-}
-
-pub(crate) enum EngineMsg {
-    Progress {
-        downloaded: u64,
-        total: Option<u64>,
-        /// Torrent upload counters (HTTP sends zeros): shown on the row
-        /// while downloading and while seeding toward a seed limit.
-        uploaded: u64,
-        upload_bps: u64,
-    },
-    Finished {
-        size: u64,
-    },
-    /// A video row resolved playlist-shaped with no picked entry: the
-    /// pump queues one row per item (worker tasks never touch the
-    /// main-thread manager) and retires the carrier.
-    ExpandPlaylist(crate::video::PlaylistInfo),
-    Failed(String),
-    /// A multi worker finished one piece; the UI thread records it for resume.
-    PieceDone(u64),
-    /// Multi attempt failed terminally: shrink the file to the completed
-    /// prefix (kept bitmap stays valid for a later segmented retry).
-    TruncatePrefix,
-    /// Fresh multi probe succeeded; the UI thread creates the resume bitmap.
-    SegmentsInit {
-        total: u64,
-    },
-    /// The server is throttling parallel connections: the UI thread shrinks
-    /// the file to the completed prefix and drops the bitmap, then acks so
-    /// the engine may continue single-stream. Handshake (not fire-and-forget)
-    /// so a concurrent pause/resume can never observe bitmap without file.
-    FallbackSingle {
-        ack: tokio::sync::mpsc::Sender<()>,
-    },
-    /// Server-advertised filename (Content-Disposition). Stored for
-    /// adoption at Finished, when the current name qualifies.
-    SuggestName(String),
-    /// Server-advertised Last-Modified (HTTP date). Stored for application
-    /// at Finished when the keep-server-date setting is on. Best-effort:
-    /// a missing or unparsable header simply sends nothing.
-    LastModified(SystemTime),
-    /// A dialog-less row resolved live (its source never marked
-    /// it): track it so Stop finalizes the capture instead of killing
-    /// it like a stalled VOD attempt.
-    LiveDetected,
-    /// The server object changed mid-download (version check failed). The
-    /// UI thread drops the resume bitmap so a later retry starts fresh
-    /// instead of failing on the dead file version forever.
-    FailedVersion(String),
-    /// Torrent per-piece haves polled from the session (500ms tick).
-    /// Replaces the stored bitfield; the block map redraws off progress
-    /// ticks arriving on the same tick, so this needs no extra signal.
-    TorrentPieces(Vec<bool>),
-    /// Free-form phase label from engines whose progress has stages the
-    /// byte counters don't capture (video resolve/merge). Applied as the
-    /// row detail; the next Progress tick renders over it as usual.
-    Phase(String),
 }
 
 /// Shared inputs for one download's engine task. Groups the params every
@@ -1278,10 +958,6 @@ fn has_holes(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A fresh run found someone else's file at our path (it appeared after
-/// dedupe): the pump requeues under a fresh name instead of failing.
-pub(crate) const DEST_EXISTS: &str = "Destination already exists";
-
 async fn attempt_once(
     ctx: &FetchCtx,
     expected_total: Option<u64>,
@@ -1553,21 +1229,6 @@ fn apply_torrent_limits(s: &crate::settings::AppSettings) {
     );
 }
 
-pub(crate) fn fmt_bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < 4 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
 /// "900 MB of 2.0 GB" for progress rows (Files copy-dialog convention).
 fn format_amounts(downloaded: u64, total: u64) -> String {
     format!("{} of {}", fmt_bytes(downloaded), fmt_bytes(total))
@@ -1586,24 +1247,6 @@ fn fmt_eta(secs: u64) -> String {
     }
 }
 
-/// Smallest piece size: everything at or under ~4 GB splits into 1 MB
-/// pieces, so one slow connection only ever delays the tail by ~1 MB.
-const PIECE_MIN: u64 = 1024 * 1024;
-/// Largest piece size: bounds per-request overhead on huge files without
-/// starving the work-stealing queue (still thousands of pieces).
-const PIECE_MAX: u64 = 16 * 1024 * 1024;
-/// Pieces per download to aim for; beyond this the piece size grows.
-const PIECE_TARGET_COUNT: u64 = 4096;
-
-/// Byte range each segmented piece covers. Pure function of the total, so
-/// persisted bitmaps stay valid across restarts: DO NOT change the formula
-/// without a queue migration (restore drops mismatched bitmaps to a safe
-/// single-stream resume instead of corrupting).
-pub(crate) fn piece_len(total: u64) -> u64 {
-    total
-        .div_ceil(PIECE_TARGET_COUNT)
-        .clamp(PIECE_MIN, PIECE_MAX)
-}
 /// A file is split only when it holds at least this much per connection
 /// (aria2-style: connections x MIN_SEGMENT), keeping small downloads on the
 /// cheaper single-stream path.
@@ -1777,112 +1420,6 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
     Ok(())
 }
 
-/// Rename without clobbering: `std::fs::rename` silently replaces the
-/// destination. Prefers `renameat2(RENAME_NOREPLACE)` (atomic on any
-/// filesystem, FAT included); falls back to claiming `new` with a hard
-/// link, to a plain rename only where hard links are unsupported, and to
-/// a copy where source and destination live on different filesystems
-/// (staging is on tmpfs, downloads usually are not).
-pub(crate) fn rename_noreplace(
-    old: &std::path::Path,
-    new: &std::path::Path,
-) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    match rename_noreplace_sys(old, new) {
-        // Ancient kernels (< 3.15) lack renameat2: use the portable path.
-        // ENOSYS is 38 in the Linux UAPI (asm-generic and x86 alike).
-        Err(e) if e.raw_os_error() == Some(38) => {}
-        // Cross-device: no rename variant can span filesystems (EXDEV
-        // 18); copy through a `create_new` claim instead.
-        Err(e) if e.raw_os_error() == Some(18) => return copy_noreplace(old, new),
-        r => return r,
-    }
-    // Claim `new` atomically via the link: an `exists()` pre-check followed
-    // by a plain rename is a TOCTOU — a rival rename can slip in between
-    // and get clobbered. Retry the link on transient errors; fall back to
-    // plain rename only where hard links cannot work at all (Linux UAPI
-    // numbers: EPERM 1, EOPNOTSUPP 95, ENOSYS 38), and to a copy across
-    // filesystems (EXDEV 18).
-    loop {
-        match std::fs::hard_link(old, new) {
-            Ok(()) => return std::fs::remove_file(old),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(e),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(e) if e.raw_os_error() == Some(18) => {
-                return copy_noreplace(old, new);
-            }
-            Err(e) if matches!(e.raw_os_error(), Some(1 | 95 | 38)) => {
-                return std::fs::rename(old, new);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-}
-
-/// Copy `old` to `new` without replacing an existing `new`, then remove
-/// `old`. Cross-device fallback for [`rename_noreplace`]: neither rename
-/// nor link can span filesystems, so bytes are copied through a
-/// `create_new` handle — the atomic claim, no TOCTOU — and the source is
-/// unlinked only after the copy lands. A failed copy removes the partial
-/// destination, which only this call could have created.
-fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
-    let mut src = std::fs::File::open(old)?;
-    let permissions = src.metadata().map(|m| m.permissions()).ok();
-    let mut dst = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(new)?;
-    let copy = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
-    if copy.is_err() {
-        let _ = std::fs::remove_file(new);
-        return copy.map(|_| ());
-    }
-    drop(dst);
-    if let Some(permissions) = permissions {
-        let _ = std::fs::set_permissions(new, permissions);
-    }
-    std::fs::remove_file(old)
-}
-
-/// `renameat2(olddirfd, old, newdirfd, new, RENAME_NOREPLACE)` without a
-/// libc dependency: one syscall, three stable constants.
-#[cfg(target_os = "linux")]
-fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt as _;
-    unsafe extern "C" {
-        fn renameat2(
-            olddirfd: std::os::raw::c_int,
-            oldpath: *const std::os::raw::c_char,
-            newdirfd: std::os::raw::c_int,
-            newpath: *const std::os::raw::c_char,
-            flags: std::os::raw::c_uint,
-        ) -> std::os::raw::c_int;
-    }
-    const AT_FDCWD: std::os::raw::c_int = -100;
-    const RENAME_NOREPLACE: std::os::raw::c_uint = 1; // renameat2(2)
-    // Queue/dedupe names never contain NUL (sane_filename), but fail
-    // visibly instead of truncating if one ever slips through.
-    let cvt = |p: &std::path::Path| {
-        std::ffi::CString::new(p.as_os_str().as_bytes())
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
-    };
-    let (old, new) = (cvt(old)?, cvt(new)?);
-    // SAFETY: NUL-terminated buffers outlive the call; the rest are integers.
-    let r = unsafe {
-        renameat2(
-            AT_FDCWD,
-            old.as_ptr(),
-            AT_FDCWD,
-            new.as_ptr(),
-            RENAME_NOREPLACE,
-        )
-    };
-    if r == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
-}
 /// How the engine task should start this download.
 #[derive(Debug)]
 enum StartMode {
@@ -2188,7 +1725,7 @@ pub struct DownloadManager {
     server_mtime: RefCell<HashMap<u64, SystemTime>>,
     /// Video-page source by row (in-memory only, like the maps above):
     /// persisted on [`StoredItem`] and re-staged on restore.
-    video_sources: RefCell<HashMap<u64, crate::video::VideoSource>>,
+    video_sources: RefCell<HashMap<u64, crate::media_types::VideoSource>>,
     /// Abort senders for running resolver workers, by row. Signalled (then
     /// dropped) from pause/park/cancel paths so the worker stops its
     /// extractor streams promptly; the pump tail also drops them.
@@ -2215,7 +1752,7 @@ pub(crate) struct RemovedSnapshot {
     pub segments: Option<SegmentState>,
     /// Staged video source, so Undo on a video row restores the Page
     /// marker instead of demoting it to a plain download.
-    pub video_source: Option<crate::video::VideoSource>,
+    pub video_source: Option<crate::media_types::VideoSource>,
 }
 
 /// One validated queue entry awaiting the restore apply phase.
@@ -2355,7 +1892,7 @@ impl DownloadManager {
     }
 
     /// Video-page source staged for a row, if any.
-    pub fn video_source(&self, id: u64) -> Option<crate::video::VideoSource> {
+    pub fn video_source(&self, id: u64) -> Option<crate::media_types::VideoSource> {
         self.video_sources.borrow().get(&id).cloned()
     }
 
@@ -2486,7 +2023,7 @@ impl DownloadManager {
     /// here — the dialog owns routing, and misuse fails loudly at
     /// resolve instead of silently saving HTML.
     ///
-    /// [`crate::video::VideoSource::Page`] staged before insert, so the
+    /// [`crate::media_types::VideoSource::Page`] staged before insert, so the
     /// persist inside [`DownloadManager::insert`] already carries it and
     /// [`DownloadManager::start_next`] parks the row for the resolver
     /// worker instead of feeding the page to the HTTP engine.
@@ -2498,7 +2035,7 @@ impl DownloadManager {
         page_url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
-        choices: crate::video::VideoChoices,
+        choices: crate::media_types::VideoChoices,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         let dir = self.resolve_dir(dest_dir);
@@ -2518,11 +2055,11 @@ impl DownloadManager {
         };
         // One readdir per intake: the reservation probe below must not
         // stat the download dir once per dedupe candidate.
-        let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
-                || crate::video::stem_reserved_in(&existing, name_stem(n))
+                || crate::video_staging::stem_reserved_in(&existing, name_stem(n))
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| {
@@ -2538,7 +2075,7 @@ impl DownloadManager {
         });
         self.video_sources.borrow_mut().insert(
             item.id(),
-            crate::video::VideoSource::Page {
+            crate::media_types::VideoSource::Page {
                 page_url: url,
                 media_url: None,
                 expires_at: None,
@@ -2567,10 +2104,10 @@ impl DownloadManager {
         self: &Rc<Self>,
         id: u64,
         item: &DownloadItem,
-        pl: &crate::video::PlaylistInfo,
+        pl: &crate::media_types::PlaylistInfo,
     ) -> (usize, usize) {
         let (quality, audio_only) = match self.video_source(id) {
-            Some(crate::video::VideoSource::Page {
+            Some(crate::media_types::VideoSource::Page {
                 quality,
                 audio_only,
                 ..
@@ -2581,7 +2118,8 @@ impl DownloadManager {
         self.begin_batch();
         let mut added = 0;
         for entry in &pl.items {
-            let Some(url) = crate::video::expand_child_target(&item.url(), &pl.page_url, entry)
+            let Some(url) =
+                crate::video_probe::expand_child_target(&item.url(), &pl.page_url, entry)
             else {
                 continue;
             };
@@ -2594,7 +2132,7 @@ impl DownloadManager {
                     &url,
                     Some(&dest_dir),
                     None,
-                    crate::video::VideoChoices {
+                    crate::media_types::VideoChoices {
                         quality: quality.clone(),
                         audio_only,
                         video_format_id: None,
@@ -2634,7 +2172,7 @@ impl DownloadManager {
         filename: &str,
         status: DownloadStatus,
         segments: Option<SegmentState>,
-        video_source: Option<crate::video::VideoSource>,
+        video_source: Option<crate::media_types::VideoSource>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         if !sane_filename(filename) {
@@ -2654,11 +2192,11 @@ impl DownloadManager {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
         if let Some(src) = video_source {
-            let matches = matches!(&src, crate::video::VideoSource::Page { page_url, .. } if *page_url == url);
+            let matches = matches!(&src, crate::media_types::VideoSource::Page { page_url, .. } if *page_url == url);
             if matches {
                 let audio_only = matches!(
                     &src,
-                    crate::video::VideoSource::Page {
+                    crate::media_types::VideoSource::Page {
                         audio_only: true,
                         ..
                     }
@@ -2787,7 +2325,7 @@ impl DownloadManager {
         if crate::torrent::is_torrent(&url) {
             return self.spawn_torrent(item, url);
         }
-        if let Some(crate::video::VideoSource::Page {
+        if let Some(crate::media_types::VideoSource::Page {
             page_url,
             quality,
             audio_only,
@@ -2891,7 +2429,7 @@ impl DownloadManager {
     /// the reservation stays uniform across all of them.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         std::path::Path::new(dir).join(n).exists()
-            || crate::video::stem_reserved_in(existing, name_stem(n))
+            || crate::video_staging::stem_reserved_in(existing, name_stem(n))
             || (0..self.store.n_items())
                 .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                 .any(|it| it.dest_dir() == dir && it.filename() == n)
@@ -3008,8 +2546,9 @@ impl DownloadManager {
                             if let Some(name) = pending {
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
-                                let existing =
-                                    crate::video::dir_file_names(std::path::Path::new(&dir));
+                                let existing = crate::video_staging::dir_file_names(
+                                    std::path::Path::new(&dir),
+                                );
                                 let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
                                 // Claim-then-move so a file appearing between the
                                 // dedupe check and the rename is never clobbered:
@@ -3110,7 +2649,7 @@ impl DownloadManager {
                         // to today's collection error instead.
                         let (added, total) = this.expand_playlist_rows(id, &item, &pl);
                         if added == 0 {
-                            let e = crate::video::playlist_resolve_error(None);
+                            let e = crate::video_probe::playlist_resolve_error(None);
                             if item.status() != DownloadStatus::Cancelled
                                 && item.status() != DownloadStatus::Paused
                             {
@@ -3158,7 +2697,8 @@ impl DownloadManager {
                             // this terminates.
                             let dir = item.dest_dir().to_string();
                             let current = item.filename().to_string();
-                            let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
+                            let existing =
+                                crate::video_staging::dir_file_names(std::path::Path::new(&dir));
                             let new_name = dedupe_filename(&current, |n| {
                                 this.is_name_taken(&dir, &existing, n)
                             });
@@ -3260,7 +2800,7 @@ impl DownloadManager {
                         // this path.
                         let is_video_row = matches!(
                             this.video_source(id),
-                            Some(crate::video::VideoSource::Page { .. })
+                            Some(crate::media_types::VideoSource::Page { .. })
                         );
                         if is_video_row
                             && name.contains('.')
@@ -3443,7 +2983,7 @@ impl DownloadManager {
 }
 
 /// Video-page spawn inputs: everything `spawn_video` needs from the
-/// row's [`VideoSource::Page`]. Bundled into one struct so the growing
+/// row's [`crate::media_types::VideoSource::Page`]. Bundled into one struct so the growing
 /// field list doesn't trip clippy's too-many-arguments lint at the
 /// call boundary.
 struct SpawnVideoParams {
@@ -3524,7 +3064,7 @@ impl DownloadManager {
             subtitles: if audio_only {
                 None
             } else {
-                crate::video::subtitle_lang_active(&self.settings.subtitle_language())
+                crate::video_prefs::subtitle_lang_active(&self.settings.subtitle_language())
             },
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),
@@ -3537,7 +3077,7 @@ impl DownloadManager {
             remux_video: if audio_only {
                 None
             } else {
-                crate::video::remux_video_active(&self.settings.remux_video())
+                crate::video_prefs::remux_video_active(&self.settings.remux_video())
             },
             embed_chapters: self.settings.embed_chapters(),
             proxy,
@@ -3992,8 +3532,8 @@ impl DownloadManager {
         // over a sidecar). Plain rows never wrote sidecars — gate on the
         // staged video source like remove()'s part cleanup does.
         if self.video_sources.borrow().contains_key(&id) {
-            for lang in crate::video::subtitle_content_languages() {
-                let sidecar = crate::video::sidecar_path_for(&item.file_path(), lang);
+            for lang in crate::video_prefs::subtitle_content_languages() {
+                let sidecar = crate::video_staging::sidecar_path_for(&item.file_path(), lang);
                 match gio::File::for_path(&sidecar).trash(gio::Cancellable::NONE) {
                     Ok(()) => {}
                     Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
@@ -4257,7 +3797,7 @@ impl DownloadManager {
                     let output_dir = (!output_dir.is_empty()).then_some(output_dir);
                     let video_source = self
                         .video_source(it.id())
-                        .filter(|s| matches!(s, crate::video::VideoSource::Page { .. }));
+                        .filter(|s| matches!(s, crate::media_types::VideoSource::Page { .. }));
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),

@@ -54,12 +54,12 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&check_btn));
 
-    crate::window::close_on_click(&close_btn, &dialog);
+    crate::ui_util::close_on_click(&close_btn, &dialog);
     close_then(&check_btn, &dialog, on_check);
 
     let pkgs = std::fs::read_to_string("/etc/os-release")
         .ok()
-        .and_then(|text| crate::video::distro_packages(&text));
+        .and_then(|text| crate::video_tools::distro_packages(&text));
     match pkgs {
         Some(pkgs) => {
             let group = adw::PreferencesGroup::builder()

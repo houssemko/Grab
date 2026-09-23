@@ -1,10 +1,13 @@
-# Grab architectural guardrails — Task 1, foundation.
+# Grab architectural guardrails — Task 1, foundation; cycles broken to 0
+# by the engine-cycle refactor (slices A-D: media_types, engine_msg,
+# file_names, runtime/net_types/ui_util leaves).
 # Baseline 2026-09-23: quality 4773 after rescan (was 4708), bottleneck modularity.
-# check_rules with max_cycles=0 FAILS: 2 circular deps among
-# cookies/download/torrent/video/install_help/window (runtime: download<->video via
-# VideoSource/EngineMsg, download<->torrent via magnet/archive + EngineMsg).
-# Lock at current count to prevent new cycles; Task 4 RFC targets reduction to 0.
-# God files present (video.rs 5.3k, download.rs 4.5k, window.rs 3.1k) so no_god_files stays off.
+# Former cycles (now broken): download<->video via VideoSource/EngineMsg,
+# download<->torrent via magnet/archive + EngineMsg, window<->install_help
+# via close_on_click. Edges that remain are one-way by design (UI drives
+# engine; resolve/probe helpers flow download->video; cookies flow outward).
+# God files: video.rs split to a ~120-line facade (S1-S11); download.rs
+# (~4.5k) and window.rs (~3.1k) still pending, so no_god_files stays off.
 
 [constraints]
-max_cycles = 2
+max_cycles = 0

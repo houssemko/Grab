@@ -1,18 +1,31 @@
 mod application;
 mod cookies;
 mod download;
+mod engine_msg;
+mod file_names;
 mod install_help;
 mod install_progress;
+mod media_types;
+mod net_types;
 mod preferences;
+mod runtime;
 mod settings;
 mod torrent;
+mod ui_util;
 // Video-page extraction + resolver worker (src/video.rs): consumed by the
-// dialog, preferences, queue persistence and the engine. A few helpers
-// stay ahead of use (expiry checks for a future no-re-resolve fast path);
-// expect dead_code until they wire up. Remove this attribute if it ever
-// goes unfulfilled.
-#[expect(dead_code)]
+// dialog, preferences, queue persistence and the engine.
 mod video;
+mod video_argv;
+mod video_plan;
+mod video_prefs;
+mod video_probe;
+mod video_progress;
+mod video_quality;
+mod video_runner;
+mod video_spawn;
+mod video_staging;
+mod video_tools;
+mod video_types;
 mod window;
 
 use gtk4::gio::prelude::*;

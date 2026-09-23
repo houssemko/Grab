@@ -126,7 +126,7 @@ fn blocklist_url_rejects_non_http() {
     assert!(blocklist_url_of("not a url").is_err());
 }
 
-fn manual_proxy(ptype: &str) -> Option<crate::download::ResolvedProxy> {
+fn manual_proxy(ptype: &str) -> Option<crate::net_types::ResolvedProxy> {
     crate::download::DownloadOptions {
         limit_rate: String::new(),
         connections: 4,
@@ -321,7 +321,7 @@ fn sweep_session_orphans_without_session_is_noop() {
     // No engine started in tests: the sweep must return without touching
     // anything (in particular, without creating a session as a side effect).
     let keep = std::collections::HashSet::new();
-    crate::download::tokio_rt().block_on(sweep_session_orphans(&keep));
+    crate::runtime::tokio_rt().block_on(sweep_session_orphans(&keep));
     assert!(session_handle().is_none());
 }
 
