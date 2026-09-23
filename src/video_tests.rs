@@ -3421,7 +3421,9 @@ fn live_capture_empty_fails_with_detail() {
 }
 
 /// Fake yt-dlp for an abortable capture: records a partial immediately,
-/// then sleeps (simulating an ongoing live edge) until killed.
+/// then sleeps (simulating an ongoing live edge) until killed. Also
+/// writes the `.ytdl` downloader-state file that real yt-dlp keeps
+/// beside its `-o` target for fragment (live) downloads.
 fn fake_ytdlp_slow(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-slow");
     std::fs::write(
@@ -3435,6 +3437,7 @@ for a in "$@"; do
 done
 echo "[Grab];downloading;1;100;100;1000;5"
 printf 'partial' > "$out.part"
+printf '{"downloader": {"current_fragment": {"index": 0}}}' > "$out.ytdl"
 sleep 60
 "#,
     )
@@ -3532,8 +3535,17 @@ fn live_capture_abort_adopts_partial() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let res = crate::runtime::tokio_rt().block_on(async {
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let state = dir.join("v.live.mp4.ytdl");
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Wait for the fake to actually write its state file before
+            // stopping the capture: a fixed sleep would race the write on
+            // a loaded machine and pass vacuously.
+            for _ in 0..200 {
+                if state.exists() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             let _ = abort_tx.send(());
         });
         run_live_ytdlp(
@@ -3553,6 +3565,17 @@ fn live_capture_abort_adopts_partial() {
         "abort must complete Done, got {res:?}"
     );
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"partial");
+    // A killed yt-dlp never removes its own `.ytdl` downloader-state
+    // file, so the post-capture sweep owns it: a killed capture must
+    // leave nothing beside the finished file.
+    assert!(
+        !dir.join("v.live.mp4.ytdl").exists(),
+        "killed capture left its .ytdl state file behind"
+    );
+    assert!(
+        !dir.join("v.live.mp4.part").exists(),
+        "killed capture left its .part shell behind"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

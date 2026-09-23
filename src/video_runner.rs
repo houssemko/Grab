@@ -845,7 +845,13 @@ pub(crate) async fn run_live_ytdlp(
     // The killed recorder never renames its shell: sweep it now that the
     // remux is claimed, so stopped captures leave no litter beside the
     // finished file. A clean yt-dlp exit renamed it already (no-op).
+    // Its `.ytdl` downloader-state file needs the same sweep for a
+    // different reason: yt-dlp deletes that itself only on a clean exit,
+    // so any killed capture that recorded bytes (Stop, stall timeout)
+    // would otherwise strand a JSON sidecar beside the recording. Both
+    // are best-effort; barren attempts never wrote either file.
     let _ = tokio::fs::remove_file(&part).await;
+    let _ = tokio::fs::remove_file(out.with_extension(format!("{ext}.ytdl"))).await;
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(file_len(&job.dest))
 }
