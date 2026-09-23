@@ -4846,19 +4846,22 @@ fn parse_ytdlp_after_move(line: &str) -> Option<&str> {
 /// Whether a fresh total starts a new format leg (video→audio)
 /// rather than HLS/DASH estimate wobble. Totals are re-estimated per
 /// fragment while bytes climb monotonically, so wobble moves the total
-/// alone; a new leg restarts BOTH — a much smaller total AND downloaded
-/// back near zero (legs download sequentially, so bytes are high when
-/// the second leg starts). The first known total always (re)inits.
-/// Growth alone never restarts: a bigger second leg keeps the old grid
-/// (cosmetic mis-scale, bar stays right) instead of flashing the map.
-/// Pure for tests.
+/// alone; a new leg moves the total substantially (either direction —
+/// the audio leg is usually much smaller, but need not be) AND resets
+/// downloaded back near zero (legs download sequentially, so bytes are
+/// high when the second leg starts). Unknown bytes count as reset: a
+/// leg's first lines may carry no count yet. The first known total
+/// always (re)inits. Pure for tests.
 fn leg_changed(max_total: Option<u64>, max_dl: u64, total: u64, downloaded: Option<u64>) -> bool {
     if total == 0 {
         return false;
     }
     match max_total {
         None | Some(0) => true,
-        Some(m) => total < m / 2 && downloaded.is_some_and(|d| d <= max_dl / 2),
+        Some(m) => {
+            let total_moved = total < m / 2 || total > m.saturating_mul(2);
+            total_moved && downloaded.is_none_or(|d| d <= max_dl / 2)
+        }
     }
 }
 
