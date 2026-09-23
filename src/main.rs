@@ -1,6 +1,13 @@
 mod application;
 mod cookies;
 mod download;
+mod download_fetch;
+mod download_intake;
+mod download_net;
+mod download_pieces;
+mod download_rate;
+mod download_row;
+mod download_store;
 mod engine_msg;
 mod file_names;
 mod install_help;
@@ -27,6 +34,8 @@ mod video_staging;
 mod video_tools;
 mod video_types;
 mod window;
+mod window_dialogs;
+mod window_rows;
 
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
