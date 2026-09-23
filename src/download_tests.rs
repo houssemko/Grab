@@ -1,4 +1,9 @@
 use super::*;
+use crate::download_fetch::{
+    AttemptFail, FetchCtx, SegmentState, StartMode, fetch_piece, filename_from_content_disposition,
+    has_holes, parse_content_range, rejects_unexpected_restart, response_total, run_download,
+    stamp_request, truncate_to_prefix,
+};
 use crate::download_net::{
     DownloadOptions, PROXY_MODE_DIRECT, PROXY_MODE_SYSTEM, http_client, normalize_no_proxy,
     proxied_pool_len, proxy_mode_index, proxy_mode_labels, proxy_mode_value, proxy_type_index,
@@ -7,11 +12,15 @@ use crate::download_net::{
 use crate::download_pieces::{BLOCK_CELLS, aggregate, plan_pieces, split_count};
 use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate};
 use crate::file_names::{
-    PIECE_MAX, dedupe_filename, filename_from_url, piece_len, rename_noreplace, shorten_filename,
+    PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, piece_len, rename_noreplace,
+    shorten_filename,
 };
+
 use crate::video::test_support::NoVideoTools;
 use pretty_assertions::assert_eq;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Serializes every test that iterates the shared glib default
