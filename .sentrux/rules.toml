@@ -1,0 +1,10 @@
+# Grab architectural guardrails — Task 1, foundation.
+# Baseline 2026-09-23: quality 4773 after rescan (was 4708), bottleneck modularity.
+# check_rules with max_cycles=0 FAILS: 2 circular deps among
+# cookies/download/torrent/video/install_help/window (runtime: download<->video via
+# VideoSource/EngineMsg, download<->torrent via magnet/archive + EngineMsg).
+# Lock at current count to prevent new cycles; Task 4 RFC targets reduction to 0.
+# God files present (video.rs 5.3k, download.rs 4.5k, window.rs 3.1k) so no_god_files stays off.
+
+[constraints]
+max_cycles = 2
