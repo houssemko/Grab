@@ -24,8 +24,9 @@ use librqbit::{
 };
 use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
-use crate::download::{dedupe_filename, sane_filename, shorten_filename, tokio_rt};
+use crate::download::tokio_rt;
 use crate::engine_msg::EngineMsg;
+use crate::file_names::{dedupe_filename, sane_filename, shorten_filename};
 
 // rqbit keeps the handle alias private (`torrent_state` is not public API),
 // so name it locally: it is just a refcounted managed torrent.
@@ -128,7 +129,7 @@ pub fn stub_name(magnet: &str) -> Option<String> {
     // the info-hash hex when dn is missing or fails the filename gate.
     m.name
         .clone()
-        .filter(|n| crate::download::sane_filename(n))
+        .filter(|n| crate::file_names::sane_filename(n))
         .or_else(|| m.as_id20().map(|id| id.as_string()))
 }
 
@@ -203,7 +204,7 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
 pub fn stub_name_for_file(file_name: &str) -> String {
     let stem = safe_stem(file_name);
     match stem {
-        Some(s) => crate::download::shorten_filename(s),
+        Some(s) => crate::file_names::shorten_filename(s),
         None => "torrent".to_string(),
     }
 }

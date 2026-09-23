@@ -2783,7 +2783,7 @@ pub(crate) fn show_torrent_files_dialog(
         check.update_property(&[gtk4::accessible::Property::Label(&e.path)]);
         let row = adw::ActionRow::builder()
             .title(&e.path)
-            .subtitle(crate::download::fmt_bytes(e.length))
+            .subtitle(crate::file_names::fmt_bytes(e.length))
             .activatable(true)
             .build();
         row.add_prefix(&check);

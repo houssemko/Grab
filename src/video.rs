@@ -71,7 +71,7 @@ pub fn default_video_filename(
 /// suffixes. Dialog-seeded and typed names never match (unless
 /// perversely identical to the URL stem). Pure for tests.
 pub(crate) fn is_url_derived_name(current: &str, page_url: &str) -> bool {
-    let derived = crate::download::filename_from_url(page_url);
+    let derived = crate::file_names::filename_from_url(page_url);
     current == derived || strip_dedupe_suffix(current) == derived
 }
 
@@ -3157,7 +3157,7 @@ fn collect_sidecar(src: &Path, dest: &Path, lang: &str) {
     // intake snapshot) must survive. Ours stays beside the part file,
     // where row removal sweeps it. Collection runs at most once per row
     // (post-claim), so an existing dst is always foreign.
-    if let Err(e) = crate::download::rename_noreplace(src, &dst) {
+    if let Err(e) = crate::file_names::rename_noreplace(src, &dst) {
         tracing::warn!(
             src = %src.display(),
             dst = %dst.display(),
@@ -4112,7 +4112,7 @@ async fn run_unified_ytdlp(
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
-    match crate::download::rename_noreplace(&final_tmp, &job.dest) {
+    match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
@@ -4615,7 +4615,7 @@ async fn run_live_ytdlp(
         let _ = tokio::fs::remove_dir_all(staging).await;
         return Err(e);
     }
-    match crate::download::rename_noreplace(&final_tmp, &job.dest) {
+    match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
@@ -5022,7 +5022,7 @@ async fn run_hls_ytdlp(
                         // handful per download.
                         tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
                         grid_total = Some(t);
-                        let len = crate::download::piece_len(t);
+                        let len = crate::file_names::piece_len(t);
                         marked = 0;
                         if let Some(count) = leg_have.checked_div(len) {
                             for idx in 0..count {
@@ -5043,7 +5043,8 @@ async fn run_hls_ytdlp(
                     leg_have = leg_have.max(d.min(grid));
                     let have = max_dl.max(d.min(max_total.unwrap_or(grid)));
                     max_dl = have;
-                    for idx in piece_marks(crate::download::piece_len(grid), &mut marked, leg_have)
+                    for idx in
+                        piece_marks(crate::file_names::piece_len(grid), &mut marked, leg_have)
                     {
                         tx_p.send(EngineMsg::PieceDone(idx)).ok();
                     }
@@ -5105,7 +5106,7 @@ async fn run_hls_ytdlp(
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
-    match crate::download::rename_noreplace(&final_tmp, &job.dest) {
+    match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());

@@ -2,6 +2,7 @@ mod application;
 mod cookies;
 mod download;
 mod engine_msg;
+mod file_names;
 mod install_help;
 mod install_progress;
 mod media_types;

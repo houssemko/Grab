@@ -3586,7 +3586,7 @@ fn hls_map_survives_estimate_wobble() {
     // wobble must not rebuild the grid.
     assert_eq!(inits, vec![2_000_000u64, 100_000_000u64], "{inits:?}");
     // 46 MB of 100 MB: marked cells over the live grid size, never ~full.
-    let cells = 100_000_000u64.div_ceil(crate::download::piece_len(100_000_000)) as f64;
+    let cells = 100_000_000u64.div_ceil(crate::file_names::piece_len(100_000_000)) as f64;
     let frac = marked.len() as f64 / cells;
     assert!(
         (0.35..0.6).contains(&frac),

@@ -1,4 +1,7 @@
 use super::*;
+use crate::file_names::{
+    PIECE_MAX, dedupe_filename, filename_from_url, piece_len, rename_noreplace, shorten_filename,
+};
 use crate::video::test_support::NoVideoTools;
 use pretty_assertions::assert_eq;
 
