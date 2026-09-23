@@ -24,6 +24,10 @@ use crate::video_probe::{
     parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
+use crate::video_progress::{
+    is_format_selection_line, is_ytdlp_merge_line, leg_changed, parse_ytdlp_after_move,
+    parse_ytdlp_template, piece_marks, trace_format_lines,
+};
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_staging::{
@@ -2961,6 +2965,7 @@ fn direct_test_job() -> VideoJob {
         proxy: None,
     }
 }
+#[test]
 fn part_fallback_specs() {
     assert_eq!(part_fallback_spec("720p", true, false), "bv*[height<=720]");
     assert_eq!(part_fallback_spec("best", true, false), "bv*");
