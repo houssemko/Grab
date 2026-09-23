@@ -1908,14 +1908,25 @@ fn leg_changed_ignores_wobble_restarts_legs() {
         2_000_000,
         Some(18_900_000)
     ));
-    // Bigger second leg keeps the old grid (documented residual:
-    // cosmetic mis-scale instead of a flashing map).
+    // Bigger second leg with reset bytes restarts on a fresh grid
+    // instead of flood-filling the old one.
+    assert!(leg_changed(
+        Some(19_000_000),
+        19_000_000,
+        40_000_000,
+        Some(0)
+    ));
+    // Same growth with continuous bytes is estimate refinement.
     assert!(!leg_changed(
         Some(19_000_000),
         19_000_000,
-        30_000_000,
-        Some(0)
+        40_000_000,
+        Some(19_000_000)
     ));
+    // Unknown bytes count as reset: a leg's first lines may carry no
+    // count yet, while a stable total never restarts regardless.
+    assert!(leg_changed(Some(19_000_000), 19_000_000, 2_000_000, None));
+    assert!(!leg_changed(Some(19_000_000), 8_000_000, 19_000_000, None));
 }
 
 #[test]
@@ -3570,8 +3581,9 @@ fn hls_map_survives_estimate_wobble() {
     // One init for the first total, one rescale past it — the downward
     // wobble must not rebuild the grid.
     assert_eq!(inits, vec![2_000_000u64, 100_000_000u64], "{inits:?}");
-    // 46 MB of 100 MB on 1 MiB pieces: ~43 of 96 cells, never ~full.
-    let frac = marked.len() as f64 / 96.0;
+    // 46 MB of 100 MB: marked cells over the live grid size, never ~full.
+    let cells = 100_000_000u64.div_ceil(crate::download::piece_len(100_000_000)) as f64;
+    let frac = marked.len() as f64 / cells;
     assert!(
         (0.35..0.6).contains(&frac),
         "map fraction {frac} ({} marks), expected ~0.46",
