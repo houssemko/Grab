@@ -640,7 +640,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("My Video.mp4"),
-            crate::video::VideoChoices {
+            crate::media_types::VideoChoices {
                 quality: "1080p".to_string(),
                 audio_only: false,
                 video_format_id: None,
@@ -660,7 +660,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
     // The Page marker survives the failure, so Retry replays the pipeline.
     assert!(matches!(
         manager.video_source(id),
-        Some(crate::video::VideoSource::Page { .. })
+        Some(crate::media_types::VideoSource::Page { .. })
     ));
     // Engine slot and abort sender are both released.
     assert!(!manager.running.borrow().contains_key(&id));
@@ -687,7 +687,7 @@ fn enqueue_video_restrict_filenames_folds_name() {
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest),
             Some("Café & Croissants.mp4"),
-            crate::video::VideoChoices {
+            crate::media_types::VideoChoices {
                 quality: "1080p".to_string(),
                 audio_only: false,
                 video_format_id: None,
@@ -718,7 +718,7 @@ fn video_source_survives_restore_and_retry() {
                 "https://vimeo.com/123456",
                 Some(&dest),
                 Some("Clip.mp4"),
-                crate::video::VideoChoices {
+                crate::media_types::VideoChoices {
                     quality: "720p".to_string(),
                     audio_only: false,
                     video_format_id: None,
@@ -745,7 +745,7 @@ fn video_source_survives_restore_and_retry() {
     assert_eq!(restored.status(), DownloadStatus::Failed);
     let stored = manager2.video_source(id).expect("re-staged source");
     assert!(
-        matches!(stored, crate::video::VideoSource::Page { ref quality, .. } if quality == "720p")
+        matches!(stored, crate::media_types::VideoSource::Page { ref quality, .. } if quality == "720p")
     );
     crate::video::clean_staging(&crate::video::staging_dir(id));
     let _ = std::fs::remove_file(&qf);
@@ -767,7 +767,7 @@ fn mismatched_video_source_dropped_on_restore() {
             segments: None,
             selected_files: None,
             output_dir: None,
-            video_source: Some(crate::video::VideoSource::Page {
+            video_source: Some(crate::media_types::VideoSource::Page {
                 page_url: "https://vimeo.com/OTHER".into(),
                 media_url: None,
                 expires_at: None,
@@ -810,7 +810,7 @@ fn unremove_restores_video_source() {
             "https://vimeo.com/123456",
             Some(&dest),
             Some("Clip.mp4"),
-            crate::video::VideoChoices {
+            crate::media_types::VideoChoices {
                 quality: "720p".to_string(),
                 audio_only: false,
                 video_format_id: None,
@@ -842,7 +842,7 @@ fn unremove_restores_video_source() {
     assert_eq!(revived.status(), DownloadStatus::Failed);
     assert!(matches!(
         manager.video_source(new_id),
-        Some(crate::video::VideoSource::Page { .. })
+        Some(crate::media_types::VideoSource::Page { .. })
     ));
     crate::video::clean_staging(&crate::video::staging_dir(id));
     crate::video::clean_staging(&crate::video::staging_dir(new_id));
@@ -862,7 +862,7 @@ fn queue_file_never_carries_cookies() {
             "https://vimeo.com/123456",
             Some("/tmp/dl"),
             Some("Clip.mp4"),
-            crate::video::VideoChoices {
+            crate::media_types::VideoChoices {
                 quality: "1080p".to_string(),
                 audio_only: false,
                 video_format_id: None,
@@ -3139,7 +3139,7 @@ fn remove_cleans_video_staging() {
     manager.store().append(&item);
     manager.video_sources.borrow_mut().insert(
         id,
-        crate::video::VideoSource::Page {
+        crate::media_types::VideoSource::Page {
             page_url: "https://x.com/u/status/1".to_string(),
             media_url: None,
             expires_at: None,
@@ -3177,7 +3177,7 @@ fn remove_keeps_live_staging_for_finalize() {
     manager.store().append(&item);
     manager.video_sources.borrow_mut().insert(
         id,
-        crate::video::VideoSource::Page {
+        crate::media_types::VideoSource::Page {
             page_url: "https://x.com/u/status/1".to_string(),
             media_url: None,
             expires_at: None,
@@ -3900,7 +3900,7 @@ fn enqueue_video_reserves_part_namespaced_stems() {
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
-            crate::video::VideoChoices {
+            crate::media_types::VideoChoices {
                 quality: "1080p".to_string(),
                 audio_only: false,
                 video_format_id: None,
@@ -3947,7 +3947,7 @@ fn delete_download_trashes_video_sidecars() {
     store.append(&video);
     manager.video_sources.borrow_mut().insert(
         11,
-        crate::video::VideoSource::Page {
+        crate::media_types::VideoSource::Page {
             page_url: "https://x.com/u/status/1".to_string(),
             media_url: None,
             expires_at: None,
@@ -4013,7 +4013,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
             "https://www.youtube.com/watch?v=gXtp6C-3JKo",
             Some(&dest_s),
             Some("Clip.mp4"),
-            crate::video::VideoChoices {
+            crate::media_types::VideoChoices {
                 quality: "1080p".to_string(),
                 audio_only: false,
                 video_format_id: None,
@@ -4039,7 +4039,7 @@ fn enqueue_video_accepts_unlisted_url() {
     let _notools = NoVideoTools::apply();
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let choices = crate::video::VideoChoices {
+    let choices = crate::media_types::VideoChoices {
         quality: "1080p".to_string(),
         audio_only: false,
         video_format_id: None,

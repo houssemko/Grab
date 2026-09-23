@@ -610,8 +610,8 @@ pub fn show(
         settings,
         crate::settings::key::VIDEO_QUALITY,
         crate::settings::AppSettings::video_quality,
-        crate::video::quality_index,
-        crate::video::quality_value,
+        crate::media_types::quality_index,
+        crate::media_types::quality_value,
     );
     video_quality_group.add(&video_quality);
     let codec_labels = crate::video::codec_priority_labels();

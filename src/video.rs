@@ -32,44 +32,6 @@ use yt_dlp::model::format::{Extension, Format, FormatType, Protocol};
 use yt_dlp::model::selector::{VideoCodecPreference, VideoQuality};
 use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
 
-/// Values for the `video-quality` GSettings key and the per-item quality
-/// stored on [`VideoSource::Page`]. Index-aligned with the ComboRow models
-/// in Preferences and the New Download dialog — see [`quality_index`] and
-/// [`quality_value`]. Labels are translated at the call sites.
-pub const VIDEO_QUALITY_VALUES: &[&str] = &["best", "2160p", "1440p", "1080p", "720p", "480p"];
-
-/// Default quality when nothing is stored (or the stored value is unknown).
-pub fn default_video_quality() -> String {
-    "1080p".to_string()
-}
-
-/// Combo-box index for a stored value against an ordered value table.
-/// Unknown values fall back to `fallback`, so a hand-edited dconf key
-/// can never desync the combo. Fallbacks differ per combo by design —
-/// pass them through, don't unify them. Pure.
-pub(crate) fn combo_index(values: &[&str], value: &str, fallback: usize) -> usize {
-    values.iter().position(|v| *v == value).unwrap_or(fallback)
-}
-
-/// Stored value for a combo-box index against an ordered value table.
-/// Out-of-range indexes (the model is rebuilt from translations) fall
-/// back instead of panicking. Pure.
-pub(crate) fn combo_value<'a>(values: &[&'a str], index: usize, fallback: &'a str) -> &'a str {
-    values.get(index).copied().unwrap_or(fallback)
-}
-
-/// Model index for a stored quality value. Unknown values fall back to the
-/// 1080p row so a hand-edited dconf key can't desync the combo.
-pub fn quality_index(value: &str) -> usize {
-    combo_index(VIDEO_QUALITY_VALUES, value, 3)
-}
-
-/// Stored value for a combo index. Out-of-range indexes (shouldn't happen,
-/// but the model is rebuilt from translations) fall back to 1080p.
-pub fn quality_value(index: usize) -> &'static str {
-    combo_value(VIDEO_QUALITY_VALUES, index, "1080p")
-}
-
 /// Default file name for a resolved video when the user left the name
 /// blank: yt-dlp's default output template (`%(title)s [%(id)s].%(ext)s`)
 /// with the container the worker will produce. Grab keeps passing yt-dlp
@@ -141,7 +103,7 @@ fn strip_dedupe_suffix(name: &str) -> String {
     name.to_string()
 }
 
-/// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`].
+/// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`](crate::media_types::VIDEO_QUALITY_VALUES).
 /// Shared by Preferences and the New Download dialog so both combos stay
 /// in the same order.
 pub fn quality_labels() -> Vec<String> {
@@ -201,93 +163,37 @@ const VIDEO_DOMAINS: &[&str] = &[
     "bandcamp.com",
 ];
 
-/// Per-row video choices from the New Download dialog: quality
-/// preset, audio-only switch, format pin and liveness. Bundled so
-/// intake entry points stay under the argument-count lint.
-#[derive(Debug, Clone)]
-pub struct VideoChoices {
-    pub quality: String,
-    /// Per-download audio-only switch from the New Download dialog.
-    /// Deliberately not a preference: no global default exists.
-    pub audio_only: bool,
-    pub video_format_id: Option<String>,
-    pub is_live: bool,
-    /// yt-dlp id of the playlist entry this row was picked from, if any.
-    /// Instagram stamps every story/highlight entry with the collection
-    /// URL, so the row's page URL re-resolves the whole tray: the worker
-    /// selects the picked entry by this id instead.
-    pub playlist_item_id: Option<String>,
-}
-
-/// Where a to-be-downloaded resource comes from. Serialized into the queue
-/// file, so it stays stable across releases.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum VideoSource {
-    /// Ordinary file for the plain HTTP engine (or magnet/torrents handled
-    /// elsewhere). The default for anything that is not a known video page.
-    Direct,
-    /// Media behind a page that needs yt-dlp. The persisted identity is the
-    /// *page* URL; `media_url`/`expires_at` are transient — when missing or
-    /// expired the page is extracted again. `quality`/`audio_only` are the
-    /// per-item choices from the New Download dialog (audio has no
-    /// global default by design).
-    Page {
-        page_url: String,
-        media_url: Option<String>,
-        expires_at: Option<i64>,
-        #[serde(default = "default_video_quality")]
-        quality: String,
-        #[serde(default)]
-        audio_only: bool,
-        /// Whether the page is a live stream. Persisted so rows restored
-        /// across launches keep their live behavior (stop-and-keep
-        /// instead of pause/cancel); refreshed on every resolve.
-        #[serde(default)]
-        is_live: bool,
-        /// Pinned video format id chosen in the dialog (`None` = the
-        /// quality preset decides at attempt time). Falls back to the
-        /// preset when the id vanishes from fresh metadata.
-        #[serde(default)]
-        video_format_id: Option<String>,
-        /// yt-dlp id of the playlist entry this row was picked from, if
-        /// any (see [`VideoChoices::playlist_item_id`]). Persisted so
-        /// rows restored across launches still resolve the picked story.
-        #[serde(default)]
-        playlist_item_id: Option<String>,
-    },
-}
-
 /// Decide whether `url` goes through the video extractor.
 ///
 /// [`crate::download::normalize_url`] runs first, so callers pass a fully
 /// qualified `http(s)` URL; anything else (magnets, bare hosts, unknown
-/// schemes) is [`VideoSource::Direct`].
-pub fn classify(url: &str) -> VideoSource {
+/// schemes) is [`VideoSource::Direct`](crate::media_types::VideoSource::Direct).
+pub fn classify(url: &str) -> crate::media_types::VideoSource {
     match url::Url::parse(url) {
         Ok(u) if matches!(u.scheme(), "http" | "https") => {
             let is_video = u.host_str().is_some_and(video_domain);
             if is_video {
-                VideoSource::Page {
+                crate::media_types::VideoSource::Page {
                     page_url: u.to_string(),
                     media_url: None,
                     expires_at: None,
-                    quality: default_video_quality(),
+                    quality: crate::media_types::default_video_quality(),
                     audio_only: false,
                     is_live: false,
                     video_format_id: None,
                     playlist_item_id: None,
                 }
             } else {
-                VideoSource::Direct
+                crate::media_types::VideoSource::Direct
             }
         }
-        _ => VideoSource::Direct,
+        _ => crate::media_types::VideoSource::Direct,
     }
 }
 
 /// Convenience predicate for the enqueue/restore paths.
 pub fn is_video_page(url: &str) -> bool {
-    matches!(classify(url), VideoSource::Page { .. })
+    matches!(classify(url), crate::media_types::VideoSource::Page { .. })
 }
 
 /// Whether a resolved preview still matches the dialog's current text.
@@ -575,7 +481,7 @@ impl VideoInfo {
 #[derive(Clone, Debug)]
 pub enum ProbeResult {
     Single(VideoInfo),
-    Playlist(PlaylistInfo),
+    Playlist(crate::media_types::PlaylistInfo),
 }
 
 impl ProbeResult {
@@ -613,64 +519,6 @@ impl ProbeResult {
             ProbeResult::Playlist(p) => !p.items.is_empty(),
         }
     }
-}
-
-/// Which flavor of multi-item collection a probe found. Affects the
-/// picker labels ("3 stories" vs "3 items") and whether single-story
-/// pastes are retargeted to the owner's tray; the download pipeline
-/// otherwise treats them alike.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlaylistKind {
-    Playlist,
-    Stories,
-    Highlights,
-}
-
-impl PlaylistKind {
-    /// Classify from the probed URL (what the user typed) with the
-    /// extractor key as backup. Heuristic by design: a wrong guess only
-    /// mislabels the item count.
-    fn classify(page_url: &str, extractor_key: &str) -> Self {
-        let url = page_url.to_lowercase();
-        let key = extractor_key.to_lowercase();
-        if url.contains("highlight") || key.contains("highlight") {
-            Self::Highlights
-        } else if url.contains("/stories/") || key.contains("stories") {
-            Self::Stories
-        } else {
-            Self::Playlist
-        }
-    }
-}
-
-/// One entry of a probed collection. Deliberately small like
-/// [`VideoInfo`]: each queued row re-resolves its own item page at
-/// download time, so the picker only needs identity + label.
-#[derive(Clone, Debug)]
-pub struct PlaylistItem {
-    /// 1-based position (`playlist_index` when the extractor reports it).
-    pub index: usize,
-    pub id: String,
-    pub title: String,
-    /// Canonical per-item page URL — the identity queued and persisted.
-    pub page_url: String,
-    /// Duration in seconds, when the listing reports one (flat listings
-    /// usually don't).
-    pub duration: Option<i64>,
-}
-
-/// A probed multi-item collection: the picker lists [`PlaylistInfo::items`],
-/// the queue gets one row per chosen item.
-#[derive(Clone, Debug)]
-pub struct PlaylistInfo {
-    pub id: String,
-    pub title: String,
-    /// The collection URL that was probed.
-    pub page_url: String,
-    pub kind: PlaylistKind,
-    /// Entries reported by the extractor, before the picker cap.
-    pub total: usize,
-    pub items: Vec<PlaylistItem>,
 }
 
 /// Whether a resolved page carries anything fetchable: at least one
@@ -1252,12 +1100,12 @@ pub fn cookies_browser_labels() -> Vec<String> {
 /// Combo index for a stored browser value. Unknown values fall back to
 /// None rather than selecting a browser the user didn't pick.
 pub fn cookies_browser_index(value: &str) -> usize {
-    combo_index(COOKIES_BROWSERS, value, 0)
+    crate::media_types::combo_index(COOKIES_BROWSERS, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to off.
 pub fn cookies_browser_value(index: usize) -> &'static str {
-    combo_value(COOKIES_BROWSERS, index, "none")
+    crate::media_types::combo_value(COOKIES_BROWSERS, index, "none")
 }
 
 /// Real home directory from the passwd database, bypassing any sandbox
@@ -1745,7 +1593,7 @@ pub(crate) const MAX_PLAYLIST_ITEMS: usize = 500;
 /// True only when the collection held more items than the fetch cap:
 /// lenient parsing can drop unusable entries too, so `total >
 /// items.len()` alone is not evidence of truncation.
-pub(crate) fn playlist_truncated(pl: &PlaylistInfo) -> bool {
+pub(crate) fn playlist_truncated(pl: &crate::media_types::PlaylistInfo) -> bool {
     pl.total > pl.items.len() && pl.items.len() == MAX_PLAYLIST_ITEMS
 }
 
@@ -1770,7 +1618,10 @@ fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
 /// usually stubs (`_type: "url"`), but fully-extracted video objects
 /// pass through the same field reads. Nulls, non-objects and entries
 /// without a usable page URL are dropped.
-fn parse_playlist_item(entry: &serde_json::Value, position: usize) -> Option<PlaylistItem> {
+fn parse_playlist_item(
+    entry: &serde_json::Value,
+    position: usize,
+) -> Option<crate::media_types::PlaylistItem> {
     entry.as_object()?;
     let is_http = |u: &str| u.starts_with("http://") || u.starts_with("https://");
     // `webpage_url` is the canonical item page; bare `url` doubles as
@@ -1791,7 +1642,7 @@ fn parse_playlist_item(entry: &serde_json::Value, position: usize) -> Option<Pla
         .and_then(|i| usize::try_from(i).ok())
         .filter(|&i| i > 0) // `playlist_index` is documented 1-based; 0 is bogus.
         .unwrap_or(position + 1);
-    Some(PlaylistItem {
+    Some(crate::media_types::PlaylistItem {
         index,
         id,
         title,
@@ -1804,7 +1655,10 @@ fn parse_playlist_item(entry: &serde_json::Value, position: usize) -> Option<Pla
 /// `entries` array, as `--flat-playlist --dump-single-json` emits).
 /// Returns `None` for single-video JSON so the caller falls through to
 /// the video path.
-fn parse_playlist_json(value: &serde_json::Value, url: &str) -> Option<PlaylistInfo> {
+fn parse_playlist_json(
+    value: &serde_json::Value,
+    url: &str,
+) -> Option<crate::media_types::PlaylistInfo> {
     let obj = value.as_object()?;
     let entries = obj.get("entries").and_then(|e| e.as_array())?;
     // A single video never carries `entries`; belt-and-braces in case an
@@ -1817,17 +1671,17 @@ fn parse_playlist_json(value: &serde_json::Value, url: &str) -> Option<PlaylistI
         .and_then(|k| k.as_str())
         .unwrap_or("");
     let total = entries.len();
-    let items: Vec<PlaylistItem> = entries
+    let items: Vec<crate::media_types::PlaylistItem> = entries
         .iter()
         .enumerate()
         .filter_map(|(i, e)| parse_playlist_item(e, i))
         .take(MAX_PLAYLIST_ITEMS)
         .collect();
-    Some(PlaylistInfo {
+    Some(crate::media_types::PlaylistInfo {
         id: json_str(value, "id").unwrap_or("").to_string(),
         title: json_str(value, "title").unwrap_or(url).to_string(),
         page_url: json_str(value, "webpage_url").unwrap_or(url).to_string(),
-        kind: PlaylistKind::classify(url, extractor_key),
+        kind: crate::media_types::PlaylistKind::classify(url, extractor_key),
         total,
         items,
     })
@@ -1841,8 +1695,8 @@ fn parse_playlist_json(value: &serde_json::Value, url: &str) -> Option<PlaylistI
 /// the worker re-resolves the tray and selects the picked entry by id.
 /// Highlights keep their URL: a highlight *is* the collection, and its
 /// items are not addressable as live stories.
-fn retarget_story_items(url: &str, playlist: &mut PlaylistInfo) {
-    if playlist.kind != PlaylistKind::Stories {
+fn retarget_story_items(url: &str, playlist: &mut crate::media_types::PlaylistInfo) {
+    if playlist.kind != crate::media_types::PlaylistKind::Stories {
         return;
     }
     let Some(tray) = story_tray_url(url) else {
@@ -1913,7 +1767,7 @@ fn story_tray_url(url: &str) -> Option<String> {
 pub(crate) fn expand_child_target(
     parent_url: &str,
     playlist_url: &str,
-    item: &PlaylistItem,
+    item: &crate::media_types::PlaylistItem,
 ) -> Option<String> {
     if let Some(segment) = story_segment_url(parent_url, &item.id) {
         return Some(segment);
@@ -2142,7 +1996,7 @@ pub enum VideoOutcome {
     Finished(u64),
     /// The page resolved playlist-shaped with no picked entry: queue
     /// one row per item (see `expand_child_target`) instead of failing.
-    Expand(PlaylistInfo),
+    Expand(crate::media_types::PlaylistInfo),
     /// Stopped before finishing; the canceller owns the row state.
     Aborted,
 }
@@ -2154,7 +2008,7 @@ pub enum VideoOutcome {
 #[derive(Debug)]
 pub(crate) enum FetchedVideo {
     Single(Box<Video>),
-    Playlist(PlaylistInfo),
+    Playlist(crate::media_types::PlaylistInfo),
 }
 
 /// The picked playlist entry, for rows queued from a picker whose page
@@ -2385,12 +2239,12 @@ pub fn codec_priority_labels() -> Vec<String> {
 /// Combo index for a stored priority value. Unknown values fall back
 /// to newest (the historical behavior).
 pub fn codec_priority_index(value: &str) -> usize {
-    combo_index(CODEC_PRIORITY_VALUES, value, 0)
+    crate::media_types::combo_index(CODEC_PRIORITY_VALUES, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to newest.
 pub fn codec_priority_value(index: usize) -> &'static str {
-    combo_value(CODEC_PRIORITY_VALUES, index, CODEC_PRIORITY_NEWEST)
+    crate::media_types::combo_value(CODEC_PRIORITY_VALUES, index, CODEC_PRIORITY_NEWEST)
 }
 
 /// yt-dlp subtitle language codes offered in preferences, index-aligned
@@ -2426,12 +2280,12 @@ pub fn subtitle_language_labels() -> Vec<String> {
 /// Combo index for a stored subtitle language code. Unknown or empty
 /// values fall back to English (the default).
 pub fn subtitle_language_index(value: &str) -> usize {
-    combo_index(SUBTITLE_LANGUAGE_VALUES, value, 1)
+    crate::media_types::combo_index(SUBTITLE_LANGUAGE_VALUES, value, 1)
 }
 
 /// Stored code for a combo index. Out-of-range indexes fall back to English.
 pub fn subtitle_language_value(index: usize) -> &'static str {
-    combo_value(SUBTITLE_LANGUAGE_VALUES, index, "en")
+    crate::media_types::combo_value(SUBTITLE_LANGUAGE_VALUES, index, "en")
 }
 
 /// Active raw setting for one job: trimmed and lowercased, then
@@ -2484,12 +2338,12 @@ pub fn remux_video_labels() -> Vec<String> {
 /// Combo index for a stored remux target. Unknown or empty values fall
 /// back to Off (the default).
 pub fn remux_video_index(value: &str) -> usize {
-    combo_index(REMUX_VIDEO_VALUES, value, 0)
+    crate::media_types::combo_index(REMUX_VIDEO_VALUES, value, 0)
 }
 
 /// Stored code for a combo index. Out-of-range indexes fall back to Off.
 pub fn remux_video_value(index: usize) -> &'static str {
-    combo_value(REMUX_VIDEO_VALUES, index, "off")
+    crate::media_types::combo_value(REMUX_VIDEO_VALUES, index, "off")
 }
 
 /// Active remux target for one job: the raw setting trimmed and
@@ -2637,7 +2491,7 @@ impl HlsSel {
 /// global preference. Exact hits return themselves; anything between
 /// buckets rounds to the closest, ties up; heights outside every
 /// bucket clamp to the tallest/shortest. Every result is a recognized
-/// [`VIDEO_QUALITY_VALUES`] entry (never "best").
+/// [`VIDEO_QUALITY_VALUES`](crate::media_types::VIDEO_QUALITY_VALUES) entry (never "best").
 pub fn quality_for_height(height: u32) -> &'static str {
     QUALITY_HEIGHTS
         .iter()
@@ -3457,7 +3311,7 @@ pub struct VideoJob {
     pub item_id: u64,
     pub page_url: String,
     /// yt-dlp id of the playlist entry this row was picked from, if any
-    /// (see [`VideoChoices::playlist_item_id`]). The worker selects the
+    /// (see [`VideoChoices::playlist_item_id`](crate::media_types::VideoChoices::playlist_item_id)). The worker selects the
     /// entry when the page re-resolves playlist-shaped.
     pub playlist_item_id: Option<String>,
     pub quality: String,

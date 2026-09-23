@@ -3,6 +3,7 @@ mod cookies;
 mod download;
 mod install_help;
 mod install_progress;
+mod media_types;
 mod preferences;
 mod settings;
 mod torrent;

@@ -1569,7 +1569,7 @@ fn submit_probed_single(
         &v.page_url,
         Some(&dest.borrow()),
         name,
-        crate::video::VideoChoices {
+        crate::media_types::VideoChoices {
             quality,
             audio_only,
             video_format_id: format_id,
@@ -1707,13 +1707,15 @@ fn show_video_error(v: &VideoStep, message: &str) {
 }
 
 /// Item-count label for a probed collection, kind-aware ("3 stories").
-fn playlist_count_label(kind: crate::video::PlaylistKind, count: usize) -> String {
+fn playlist_count_label(kind: crate::media_types::PlaylistKind, count: usize) -> String {
     let template = match kind {
-        crate::video::PlaylistKind::Stories => ngettext("{} story", "{} stories", count as u32),
-        crate::video::PlaylistKind::Highlights => {
+        crate::media_types::PlaylistKind::Stories => {
+            ngettext("{} story", "{} stories", count as u32)
+        }
+        crate::media_types::PlaylistKind::Highlights => {
             ngettext("{} highlight", "{} highlights", count as u32)
         }
-        crate::video::PlaylistKind::Playlist => ngettext("{} item", "{} items", count as u32),
+        crate::media_types::PlaylistKind::Playlist => ngettext("{} item", "{} items", count as u32),
     };
     template.replace("{}", &count.to_string())
 }
@@ -1723,7 +1725,7 @@ fn playlist_count_label(kind: crate::video::PlaylistKind, count: usize) -> Strin
 /// hidden — renames and format pins don't apply across items — while
 /// the audio switch stays visible and seeds the picker for every
 /// queued item.
-fn show_video_playlist(v: &VideoStep, pl: &crate::video::PlaylistInfo) {
+fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group
         .set_title(glib::markup_escape_text(&pl.title).as_str());
@@ -2926,7 +2928,7 @@ fn push_playlist_items_page(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
     parent: glib::WeakRef<adw::Dialog>,
-    playlist: crate::video::PlaylistInfo,
+    playlist: crate::media_types::PlaylistInfo,
     audio_only: bool,
 ) {
     // Same guard as the video page: don't stack a second picker while
@@ -3040,7 +3042,7 @@ fn push_playlist_items_page(
     {
         let parent_weak = parent.clone();
         add_btn.connect_clicked(move |_| {
-            let chosen: Vec<(usize, &crate::video::PlaylistItem)> = playlist
+            let chosen: Vec<(usize, &crate::media_types::PlaylistItem)> = playlist
                 .items
                 .iter()
                 .enumerate()
@@ -3069,7 +3071,7 @@ fn push_playlist_items_page(
                     &page_url,
                     Some(&dest_dir.borrow()),
                     Some(&name),
-                    crate::video::VideoChoices {
+                    crate::media_types::VideoChoices {
                         quality: manager.settings().video_quality(),
                         audio_only,
                         video_format_id: None,

@@ -1,4 +1,8 @@
 use super::*;
+use crate::media_types::{
+    PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
+    quality_value,
+};
 use pretty_assertions::assert_eq;
 
 // ── classify ───────────────────────────────────────────────────────────

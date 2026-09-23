@@ -70,7 +70,7 @@ struct StoredItem {
     /// written (plain downloads omit it, so old files stay clean and old
     /// app versions keep reading new ones).
     #[serde(default)]
-    video_source: Option<crate::video::VideoSource>,
+    video_source: Option<crate::media_types::VideoSource>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -512,12 +512,12 @@ pub fn proxy_mode_labels() -> Vec<String> {
 /// Combo index for a stored mode value. Unknown values fall back to
 /// system (the default).
 pub fn proxy_mode_index(value: &str) -> usize {
-    crate::video::combo_index(PROXY_MODE_VALUES, value, 0)
+    crate::media_types::combo_index(PROXY_MODE_VALUES, value, 0)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to system.
 pub fn proxy_mode_value(index: usize) -> &'static str {
-    crate::video::combo_value(PROXY_MODE_VALUES, index, PROXY_MODE_SYSTEM)
+    crate::media_types::combo_value(PROXY_MODE_VALUES, index, PROXY_MODE_SYSTEM)
 }
 
 pub const PROXY_TYPE_VALUES: &[&str] = &["http", "https", "socks5"];
@@ -533,12 +533,12 @@ pub fn proxy_type_labels() -> Vec<String> {
 
 /// Combo index for a stored type value. Unknown values fall back to SOCKS5.
 pub fn proxy_type_index(value: &str) -> usize {
-    crate::video::combo_index(PROXY_TYPE_VALUES, value, 2)
+    crate::media_types::combo_index(PROXY_TYPE_VALUES, value, 2)
 }
 
 /// Stored value for a combo index. Out-of-range indexes fall back to SOCKS5.
 pub fn proxy_type_value(index: usize) -> &'static str {
-    crate::video::combo_value(PROXY_TYPE_VALUES, index, "socks5")
+    crate::media_types::combo_value(PROXY_TYPE_VALUES, index, "socks5")
 }
 
 /// Proxy resolved for one attempt: reqwest interceptors for the direct
@@ -911,7 +911,7 @@ pub(crate) enum EngineMsg {
     /// A video row resolved playlist-shaped with no picked entry: the
     /// pump queues one row per item (worker tasks never touch the
     /// main-thread manager) and retires the carrier.
-    ExpandPlaylist(crate::video::PlaylistInfo),
+    ExpandPlaylist(crate::media_types::PlaylistInfo),
     Failed(String),
     /// A multi worker finished one piece; the UI thread records it for resume.
     PieceDone(u64),
@@ -2188,7 +2188,7 @@ pub struct DownloadManager {
     server_mtime: RefCell<HashMap<u64, SystemTime>>,
     /// Video-page source by row (in-memory only, like the maps above):
     /// persisted on [`StoredItem`] and re-staged on restore.
-    video_sources: RefCell<HashMap<u64, crate::video::VideoSource>>,
+    video_sources: RefCell<HashMap<u64, crate::media_types::VideoSource>>,
     /// Abort senders for running resolver workers, by row. Signalled (then
     /// dropped) from pause/park/cancel paths so the worker stops its
     /// extractor streams promptly; the pump tail also drops them.
@@ -2215,7 +2215,7 @@ pub(crate) struct RemovedSnapshot {
     pub segments: Option<SegmentState>,
     /// Staged video source, so Undo on a video row restores the Page
     /// marker instead of demoting it to a plain download.
-    pub video_source: Option<crate::video::VideoSource>,
+    pub video_source: Option<crate::media_types::VideoSource>,
 }
 
 /// One validated queue entry awaiting the restore apply phase.
@@ -2355,7 +2355,7 @@ impl DownloadManager {
     }
 
     /// Video-page source staged for a row, if any.
-    pub fn video_source(&self, id: u64) -> Option<crate::video::VideoSource> {
+    pub fn video_source(&self, id: u64) -> Option<crate::media_types::VideoSource> {
         self.video_sources.borrow().get(&id).cloned()
     }
 
@@ -2486,7 +2486,7 @@ impl DownloadManager {
     /// here — the dialog owns routing, and misuse fails loudly at
     /// resolve instead of silently saving HTML.
     ///
-    /// [`crate::video::VideoSource::Page`] staged before insert, so the
+    /// [`crate::media_types::VideoSource::Page`] staged before insert, so the
     /// persist inside [`DownloadManager::insert`] already carries it and
     /// [`DownloadManager::start_next`] parks the row for the resolver
     /// worker instead of feeding the page to the HTTP engine.
@@ -2498,7 +2498,7 @@ impl DownloadManager {
         page_url: &str,
         dest_dir: Option<&str>,
         filename: Option<&str>,
-        choices: crate::video::VideoChoices,
+        choices: crate::media_types::VideoChoices,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         let dir = self.resolve_dir(dest_dir);
@@ -2538,7 +2538,7 @@ impl DownloadManager {
         });
         self.video_sources.borrow_mut().insert(
             item.id(),
-            crate::video::VideoSource::Page {
+            crate::media_types::VideoSource::Page {
                 page_url: url,
                 media_url: None,
                 expires_at: None,
@@ -2567,10 +2567,10 @@ impl DownloadManager {
         self: &Rc<Self>,
         id: u64,
         item: &DownloadItem,
-        pl: &crate::video::PlaylistInfo,
+        pl: &crate::media_types::PlaylistInfo,
     ) -> (usize, usize) {
         let (quality, audio_only) = match self.video_source(id) {
-            Some(crate::video::VideoSource::Page {
+            Some(crate::media_types::VideoSource::Page {
                 quality,
                 audio_only,
                 ..
@@ -2594,7 +2594,7 @@ impl DownloadManager {
                     &url,
                     Some(&dest_dir),
                     None,
-                    crate::video::VideoChoices {
+                    crate::media_types::VideoChoices {
                         quality: quality.clone(),
                         audio_only,
                         video_format_id: None,
@@ -2634,7 +2634,7 @@ impl DownloadManager {
         filename: &str,
         status: DownloadStatus,
         segments: Option<SegmentState>,
-        video_source: Option<crate::video::VideoSource>,
+        video_source: Option<crate::media_types::VideoSource>,
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(url)?;
         if !sane_filename(filename) {
@@ -2654,11 +2654,11 @@ impl DownloadManager {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
         if let Some(src) = video_source {
-            let matches = matches!(&src, crate::video::VideoSource::Page { page_url, .. } if *page_url == url);
+            let matches = matches!(&src, crate::media_types::VideoSource::Page { page_url, .. } if *page_url == url);
             if matches {
                 let audio_only = matches!(
                     &src,
-                    crate::video::VideoSource::Page {
+                    crate::media_types::VideoSource::Page {
                         audio_only: true,
                         ..
                     }
@@ -2787,7 +2787,7 @@ impl DownloadManager {
         if crate::torrent::is_torrent(&url) {
             return self.spawn_torrent(item, url);
         }
-        if let Some(crate::video::VideoSource::Page {
+        if let Some(crate::media_types::VideoSource::Page {
             page_url,
             quality,
             audio_only,
@@ -3260,7 +3260,7 @@ impl DownloadManager {
                         // this path.
                         let is_video_row = matches!(
                             this.video_source(id),
-                            Some(crate::video::VideoSource::Page { .. })
+                            Some(crate::media_types::VideoSource::Page { .. })
                         );
                         if is_video_row
                             && name.contains('.')
@@ -3443,7 +3443,7 @@ impl DownloadManager {
 }
 
 /// Video-page spawn inputs: everything `spawn_video` needs from the
-/// row's [`VideoSource::Page`]. Bundled into one struct so the growing
+/// row's [`crate::media_types::VideoSource::Page`]. Bundled into one struct so the growing
 /// field list doesn't trip clippy's too-many-arguments lint at the
 /// call boundary.
 struct SpawnVideoParams {
@@ -4257,7 +4257,7 @@ impl DownloadManager {
                     let output_dir = (!output_dir.is_empty()).then_some(output_dir);
                     let video_source = self
                         .video_source(it.id())
-                        .filter(|s| matches!(s, crate::video::VideoSource::Page { .. }));
+                        .filter(|s| matches!(s, crate::media_types::VideoSource::Page { .. }));
                     items.push(StoredItem {
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
