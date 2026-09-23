@@ -3,6 +3,10 @@ use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
     quality_value,
 };
+use crate::video_plan::{
+    StreamSel, find_hls_format, find_usable_format, plan_streams, select_audio_original_first,
+    select_hls_format,
+};
 use crate::video_prefs::{
     CODEC_PRIORITY_NEWEST, SUBTITLE_LANGUAGE_VALUES, codec_priority_index, codec_priority_value,
     cookies_browser_index, cookies_browser_labels, cookies_browser_value, remux_video_active,
@@ -15,12 +19,14 @@ use crate::video_probe::{
     parse_playlist_json, parse_single_video, pick_playlist_entry, playlist_resolve_error,
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
+use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs,
     cookies_browser_spec, distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain,
     find_in_dirs, parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
 };
+use crate::video_types::codec_preference;
 use crate::video_types::video_domain;
 use crate::video_types::{
     VideoFormatOption, classify, codec_rank, has_fetchable_media, video_format_options,
