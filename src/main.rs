@@ -23,6 +23,7 @@ mod video_plan;
 mod video_prefs;
 mod video_probe;
 mod video_quality;
+mod video_staging;
 mod video_tools;
 mod video_types;
 mod window;

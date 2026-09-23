@@ -21,6 +21,12 @@ use crate::video_probe::{
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
+use crate::video_staging::{
+    ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
+    dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
+    is_sparse_shell, is_ytdlp_fragment, read_manifest, resume_plan, sidecar_path_for, staging_dir,
+    staging_root, stem_reserved_in, unified_candidate, unified_temp_limit, ytdlp_output_template,
+};
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs,
     cookies_browser_spec, distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain,

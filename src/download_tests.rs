@@ -3918,8 +3918,8 @@ fn enqueue_video_reserves_part_namespaced_stems() {
         std::fs::read(dest.join("Clip.video.mp4")).unwrap(),
         b"foreign"
     );
-    assert!(!crate::video::stem_reserved_in(
-        &crate::video::dir_file_names(&dest),
+    assert!(!crate::video_staging::stem_reserved_in(
+        &crate::video_staging::dir_file_names(&dest),
         "Clip (1)"
     ));
     drain_engine(&manager, item.id());

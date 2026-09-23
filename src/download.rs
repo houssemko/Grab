@@ -2055,11 +2055,11 @@ impl DownloadManager {
         };
         // One readdir per intake: the reservation probe below must not
         // stat the download dir once per dedupe candidate.
-        let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
-                || crate::video::stem_reserved_in(&existing, name_stem(n))
+                || crate::video_staging::stem_reserved_in(&existing, name_stem(n))
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| {
@@ -2429,7 +2429,7 @@ impl DownloadManager {
     /// the reservation stays uniform across all of them.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         std::path::Path::new(dir).join(n).exists()
-            || crate::video::stem_reserved_in(existing, name_stem(n))
+            || crate::video_staging::stem_reserved_in(existing, name_stem(n))
             || (0..self.store.n_items())
                 .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                 .any(|it| it.dest_dir() == dir && it.filename() == n)
@@ -2546,8 +2546,9 @@ impl DownloadManager {
                             if let Some(name) = pending {
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
-                                let existing =
-                                    crate::video::dir_file_names(std::path::Path::new(&dir));
+                                let existing = crate::video_staging::dir_file_names(
+                                    std::path::Path::new(&dir),
+                                );
                                 let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
                                 // Claim-then-move so a file appearing between the
                                 // dedupe check and the rename is never clobbered:
@@ -2696,7 +2697,8 @@ impl DownloadManager {
                             // this terminates.
                             let dir = item.dest_dir().to_string();
                             let current = item.filename().to_string();
-                            let existing = crate::video::dir_file_names(std::path::Path::new(&dir));
+                            let existing =
+                                crate::video_staging::dir_file_names(std::path::Path::new(&dir));
                             let new_name = dedupe_filename(&current, |n| {
                                 this.is_name_taken(&dir, &existing, n)
                             });
@@ -3531,7 +3533,7 @@ impl DownloadManager {
         // staged video source like remove()'s part cleanup does.
         if self.video_sources.borrow().contains_key(&id) {
             for lang in crate::video_prefs::subtitle_content_languages() {
-                let sidecar = crate::video::sidecar_path_for(&item.file_path(), lang);
+                let sidecar = crate::video_staging::sidecar_path_for(&item.file_path(), lang);
                 match gio::File::for_path(&sidecar).trash(gio::Cancellable::NONE) {
                     Ok(()) => {}
                     Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
