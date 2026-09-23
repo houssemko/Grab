@@ -34,6 +34,7 @@ mod video_staging;
 mod video_tools;
 mod video_types;
 mod window;
+mod window_rows;
 
 use gtk4::gio::prelude::*;
 use gtk4::{gio, glib};
