@@ -1388,6 +1388,12 @@ pub fn build_window(
                 {
                     a.set_enabled(m.has_failed());
                 }
+                if let Some(a) = app
+                    .lookup_action("clear-finished")
+                    .and_downcast::<gio::SimpleAction>()
+                {
+                    a.set_enabled(m.finished_count() > 0);
+                }
             }
             banner.set_revealed(m.has_errored());
             // Same predicate as close-request: only quit/withdraw when

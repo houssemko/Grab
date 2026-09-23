@@ -5367,6 +5367,45 @@ fn hls_collects_sidecar_beside_finished_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn hls_embed_skips_sidecar_collection() {
+    // Embed mode muxes the tracks into the file itself: no .srt may be
+    // left alongside it (the uncollected staging sidecar dies with the
+    // staging wipe). Same fake as above, embed flag on.
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-embed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_subs(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    job.subtitles = Some("en".into());
+    job.embed_subs = true;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::download::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
+    assert!(
+        !dir.join("v.en.srt").exists(),
+        "embedded subtitles must not leave a sidecar"
+    );
+    assert!(
+        !dir.join("v.hls.en.srt").exists(),
+        "part-namespaced sidecar must not be orphaned"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fake yt-dlp for the unified path: expands the `%(ext)s` template,
 /// prints template progress + a merge line + the after_move path, and
 /// writes output bytes plus an `en` sidecar beside the template.
