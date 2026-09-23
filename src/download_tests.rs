@@ -1,5 +1,6 @@
 use super::*;
 use crate::download_pieces::{BLOCK_CELLS, aggregate, plan_pieces, split_count};
+use crate::download_rate::{fmt_eta, format_amounts, live_rate_limit, parse_rate};
 use crate::file_names::{
     PIECE_MAX, dedupe_filename, filename_from_url, piece_len, rename_noreplace, shorten_filename,
 };

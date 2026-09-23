@@ -14,13 +14,20 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{
     Arc, Mutex, OnceLock,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime};
 
 /// Facade: segmented-piece math lives in [`download_pieces`](crate::download_pieces)
 /// now (no re-exports: the engine consumes it here, tests import it directly).
 use crate::download_pieces::{BLOCK_CELLS, MAX_SEGMENTED_TOTAL, plan_pieces};
+/// Facade: rate parsing/pacing + progress text lives in
+/// [`download_rate`](crate::download_rate) now (no re-exports: the
+/// engine consumes it here, tests import it directly).
+use crate::download_rate::{
+    fmt_eta, format_amounts, live_rate_limit, pace_chunk, parse_rate, progress_msg,
+    publish_rate_limit,
+};
 
 #[derive(
     Debug, Default, Clone, Copy, PartialEq, Eq, glib::Enum, serde::Serialize, serde::Deserialize,
@@ -1157,72 +1164,6 @@ async fn attempt_once(
     }
 }
 
-/// Parse a speed limit like `500K`, `2M`, `1.5G` (or plain bytes) into
-/// bytes/sec. `None` means unlimited (empty, `0`) or invalid.
-pub(crate) fn parse_rate(s: &str) -> Option<u64> {
-    let s = s.trim();
-    if s.is_empty() || s == "0" {
-        return None;
-    }
-    let (num, mult) = match s.as_bytes().last()? {
-        b'K' | b'k' => (&s[..s.len() - 1], 1024u64),
-        b'M' | b'm' => (&s[..s.len() - 1], 1024 * 1024),
-        b'G' | b'g' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
-        b'0'..=b'9' => (s, 1),
-        _ => return None,
-    };
-    num.trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|v| *v > 0.0)
-        .map(|v| (v * mult as f64) as u64)
-}
-
-/// Live speed cap in bytes/sec (0 = unlimited), applied per download: every
-/// engine paces to the full value. One atomic serves all engines because the
-/// preference is single: the settings watch publishes, pacing loops read
-/// each tick. `gio::Settings` is main-thread-only (`!Send`), hence the hop.
-static LIVE_RATE_LIMIT: AtomicU64 = AtomicU64::new(0);
-
-fn publish_rate_limit(settings: &crate::settings::AppSettings) {
-    LIVE_RATE_LIMIT.store(
-        parse_rate(settings.speed_limit().as_str()).unwrap_or(0),
-        Ordering::Relaxed,
-    );
-}
-
-fn live_rate_limit() -> Option<u64> {
-    match LIVE_RATE_LIMIT.load(Ordering::Relaxed) {
-        0 => None,
-        r => Some(r),
-    }
-}
-
-/// Throttle one chunk against the shared speed limit. The limit arrives
-/// per call (never hoisted or cached) so preference edits apply
-/// mid-download; `paced`/`pace_start` carry the running account.
-/// Progress message for the direct engine: HTTP rows never carry
-/// upload counters (zeros keep the torrent-only upload suffix in the
-/// pump empty). Callers pass their own byte counts.
-fn progress_msg(downloaded: u64, total: Option<u64>) -> EngineMsg {
-    EngineMsg::Progress {
-        downloaded,
-        total,
-        uploaded: 0,
-        upload_bps: 0,
-    }
-}
-
-async fn pace_chunk(paced: &mut u64, pace_start: Instant, rate: Option<u64>, n: usize) {
-    if let Some(r) = rate {
-        *paced += n as u64;
-        let wait = *paced as f64 / r as f64 - pace_start.elapsed().as_secs_f64();
-        if wait > 0.0 {
-            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-        }
-    }
-}
-
 /// Re-apply both torrent speed caps from settings. Both the download and
 /// upload watchers call this so editing one key can never silently clear
 /// the other.
@@ -1231,24 +1172,6 @@ fn apply_torrent_limits(s: &crate::settings::AppSettings) {
         parse_rate(s.speed_limit().trim()),
         parse_rate(s.torrent_upload_limit().trim()),
     );
-}
-
-/// "900 MB of 2.0 GB" for progress rows (Files copy-dialog convention).
-fn format_amounts(downloaded: u64, total: u64) -> String {
-    format!("{} of {}", fmt_bytes(downloaded), fmt_bytes(total))
-}
-
-/// Human ETA ("14 minutes"): longest whole unit, for the HIG's
-/// "About {eta} left" estimate phrasing. Pure for tests.
-fn fmt_eta(secs: u64) -> String {
-    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
-    if h > 0 {
-        ngettext("1 hour", "{n} hours", h as u32).replace("{n}", &h.to_string())
-    } else if m > 0 {
-        ngettext("1 minute", "{n} minutes", m as u32).replace("{n}", &m.to_string())
-    } else {
-        ngettext("1 second", "{n} seconds", s as u32).replace("{n}", &s.to_string())
-    }
 }
 
 /// Per-piece fetch attempts before a worker gives up on it.
