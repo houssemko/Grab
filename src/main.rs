@@ -1,6 +1,7 @@
 mod application;
 mod cookies;
 mod download;
+mod download_net;
 mod download_pieces;
 mod download_rate;
 mod engine_msg;
