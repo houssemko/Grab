@@ -411,10 +411,10 @@ impl VideoError {
     fn outdated() -> Self {
         Self::Message(gettext("Video tools are too old — update them to continue"))
     }
-    /// The exact [`crate::download::DEST_EXISTS`] sentence, so the pump's
+    /// The exact [`crate::engine_msg::DEST_EXISTS`] sentence, so the pump's
     /// foreign-file requeue path picks a fresh name and retries the merge.
     fn exists() -> Self {
-        Self::Message(crate::download::DEST_EXISTS.to_string())
+        Self::Message(crate::engine_msg::DEST_EXISTS.to_string())
     }
 }
 
@@ -3402,9 +3402,9 @@ const PROGRESS_GRANULARITY: u64 = 16384;
 pub async fn run_video_download(
     mut job: VideoJob,
     mut abort: oneshot::Receiver<()>,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
-    use crate::download::EngineMsg;
+    use crate::engine_msg::EngineMsg;
 
     let staging = staging_dir(job.item_id);
     // Keep the canonical path: `discover_unified_output` compares a
@@ -4037,9 +4037,9 @@ async fn run_unified_ytdlp(
     total: Option<u64>,
     abort: &mut oneshot::Receiver<()>,
     timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
-    use crate::download::EngineMsg;
+    use crate::engine_msg::EngineMsg;
     // Split rows merge (video ext mapped onto yt-dlp's supported set);
     // adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
@@ -4440,9 +4440,9 @@ async fn run_live_ytdlp(
     hls_format_id: &str,
     mut abort: oneshot::Receiver<()>,
     timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
-    use crate::download::EngineMsg;
+    use crate::engine_msg::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
     // Fresh capture: a crashed run's dest-dir live file must never be
     // resumed into (append-only stream — resume corrupts) nor adopted
@@ -4967,9 +4967,9 @@ async fn run_hls_ytdlp(
     hls_format_id: &str,
     abort: oneshot::Receiver<()>,
     timeout: Duration,
-    tx: tokio::sync::mpsc::UnboundedSender<crate::download::EngineMsg>,
+    tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
-    use crate::download::EngineMsg;
+    use crate::engine_msg::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
     tokio::fs::create_dir_all(staging)
         .await

@@ -3327,7 +3327,7 @@ fn live_capture_adopts_part_and_remuxes() {
     let phases: Vec<String> = {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let crate::download::EngineMsg::Phase(p) = msg {
+            if let crate::engine_msg::EngineMsg::Phase(p) = msg {
                 out.push(p);
             }
         }
@@ -3455,7 +3455,7 @@ fn live_capture_refuses_existing_dest() {
         tx,
     ));
     match res {
-        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS, "{e}"),
+        Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
         ok => panic!("expected pre-flight refusal, got {ok:?}"),
     }
     assert!(
@@ -3547,7 +3547,7 @@ fn hls_map_survives_estimate_wobble() {
     // bytes must leave the map at the true fraction (~46%), not flood
     // it to full. Replays the EngineMsg stream onto a bitmap with the
     // row's own replace-on-init semantics.
-    use crate::download::EngineMsg;
+    use crate::engine_msg::EngineMsg;
     let dir = std::env::temp_dir().join(format!("grab-fakehls-wobble-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3735,7 +3735,7 @@ fn vod_hls_refuses_existing_dest() {
         tx,
     ));
     match res {
-        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS, "{e}"),
+        Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
         ok => panic!("expected pre-flight refusal, got {ok:?}"),
     }
     assert!(
@@ -5531,7 +5531,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
     let phases: Vec<String> = {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
-            if let crate::download::EngineMsg::Phase(p) = msg {
+            if let crate::engine_msg::EngineMsg::Phase(p) = msg {
                 out.push(p);
             }
         }
@@ -5669,8 +5669,8 @@ fn unified_runner_downloads_claims_and_collects() {
     let mut merging = false;
     while let Ok(msg) = rx.try_recv() {
         match msg {
-            crate::download::EngineMsg::Progress { downloaded: 7, .. } => progress = true,
-            crate::download::EngineMsg::Phase(p) if p.contains("Merging") => merging = true,
+            crate::engine_msg::EngineMsg::Progress { downloaded: 7, .. } => progress = true,
+            crate::engine_msg::EngineMsg::Phase(p) if p.contains("Merging") => merging = true,
             _ => {}
         }
     }
@@ -5786,7 +5786,7 @@ fn unified_runner_refuses_existing_dest() {
         tx,
     ));
     match res {
-        Err(e) => assert_eq!(e.to_string(), crate::download::DEST_EXISTS, "{e}"),
+        Err(e) => assert_eq!(e.to_string(), crate::engine_msg::DEST_EXISTS, "{e}"),
         ok => panic!("expected pre-flight refusal, got {ok:?}"),
     }
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"already");
@@ -6088,7 +6088,7 @@ fn unified_runner_sums_two_leg_progress() {
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     let mut max_seen = 0u64;
     while let Ok(msg) = rx.try_recv() {
-        if let crate::download::EngineMsg::Progress { downloaded, .. } = msg {
+        if let crate::engine_msg::EngineMsg::Progress { downloaded, .. } = msg {
             max_seen = max_seen.max(downloaded);
         }
     }

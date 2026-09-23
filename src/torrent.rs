@@ -24,7 +24,8 @@ use librqbit::{
 };
 use tokio::sync::{Mutex, OnceCell, mpsc::UnboundedSender};
 
-use crate::download::{EngineMsg, dedupe_filename, sane_filename, shorten_filename, tokio_rt};
+use crate::download::{dedupe_filename, sane_filename, shorten_filename, tokio_rt};
+use crate::engine_msg::EngineMsg;
 
 // rqbit keeps the handle alias private (`torrent_state` is not public API),
 // so name it locally: it is just a refcounted managed torrent.
