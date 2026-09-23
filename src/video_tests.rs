@@ -3,6 +3,10 @@ use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
     quality_value,
 };
+use crate::video_tools::{
+    browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
+    extract_ffmpeg_toolchain, find_in_dirs, toolchain_dir_in, user_lib_dir, ytdlp_update_available,
+};
 use crate::video_types::video_domain;
 use crate::video_types::{classify, codec_rank, has_fetchable_media, video_format_options};
 use pretty_assertions::assert_eq;

@@ -59,7 +59,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
 
     let pkgs = std::fs::read_to_string("/etc/os-release")
         .ok()
-        .and_then(|text| crate::video::distro_packages(&text));
+        .and_then(|text| crate::video_tools::distro_packages(&text));
     match pkgs {
         Some(pkgs) => {
             let group = adw::PreferencesGroup::builder()

@@ -201,7 +201,7 @@ pub(crate) async fn jar_for_browser(
     // Same resolved spec the download spawns use (`browser:/profile`
     // dir): exporting by bare name could authenticate as a different
     // profile than the downloads.
-    let spec = crate::video::cookies_browser_spec(cookies_browser)?;
+    let spec = crate::video_tools::cookies_browser_spec(cookies_browser)?;
     let text = export_cookies(youtube_bin, &spec, page_url, Duration::from_secs(120)).await?;
     let (jar, count) = jar_from_export(&text);
     tracing::debug!(cookies = count, "exported browser cookies");

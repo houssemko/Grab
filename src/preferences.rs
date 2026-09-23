@@ -845,13 +845,13 @@ pub fn show(
         let action = tool_action.clone();
         // Outside Flatpak the button guides through self-install; the
         // automatic download stays Flatpak-only.
-        if !crate::video::in_flatpak() {
+        if !crate::video_tools::in_flatpak() {
             btn.set_label(&gettext("How to Install"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
         }
         let settings_b = settings.clone();
         video_tools_btn.connect_clicked(move |_| {
-            if !crate::video::in_flatpak() {
+            if !crate::video_tools::in_flatpak() {
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
                 let dialog_b = dialog_weak.clone();
                 let action_b = action.clone();
@@ -911,7 +911,7 @@ pub fn show(
                     spin_b.set_visible(false);
                     match (current, tag) {
                         (Some(installed), Some(tag))
-                            if crate::video::ytdlp_update_available(&installed, &tag) =>
+                            if crate::video_tools::ytdlp_update_available(&installed, &tag) =>
                         {
                             row_b.set_subtitle(
                                 &gettext("Update available: yt-dlp {installed} → {latest}")

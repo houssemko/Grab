@@ -2288,12 +2288,12 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         // Outside Flatpak there is no bundled binary and host packages
         // can't be installed from here: guide through self-install
         // instead of the automatic download.
-        if !crate::video::in_flatpak() {
+        if !crate::video_tools::in_flatpak() {
             btn.set_label(&gettext("How to Install"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
         }
         video_install_btn.connect_clicked(move |_| {
-            if !crate::video::in_flatpak() {
+            if !crate::video_tools::in_flatpak() {
                 let kick_b = kick.clone();
                 crate::install_help::show(&btn, move || kick_b(true));
                 return;
