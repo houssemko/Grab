@@ -126,7 +126,7 @@ impl PlaylistKind {
 }
 
 /// One entry of a probed collection. Deliberately small like
-/// [`VideoInfo`](crate::video::VideoInfo): each queued row re-resolves its own item page at
+/// [`VideoInfo`](crate::video_types::VideoInfo): each queued row re-resolves its own item page at
 /// download time, so the picker only needs identity + label.
 #[derive(Clone, Debug)]
 pub struct PlaylistItem {

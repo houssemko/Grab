@@ -56,9 +56,9 @@ const VIDEO_DOMAINS: &[&str] = &[
 
 /// Decide whether `url` goes through the video extractor.
 ///
-/// [`crate::download::normalize_url`] runs first, so callers pass a fully
-/// qualified `http(s)` URL; anything else (magnets, bare hosts, unknown
-/// schemes) is [`VideoSource::Direct`](crate::media_types::VideoSource::Direct).
+/// Callers pass a fully qualified `http(s)` URL (normalization runs
+/// first); anything else (magnets, bare hosts, unknown schemes) is
+/// [`VideoSource::Direct`](crate::media_types::VideoSource::Direct).
 pub fn classify(url: &str) -> crate::media_types::VideoSource {
     match url::Url::parse(url) {
         Ok(u) if matches!(u.scheme(), "http" | "https") => {

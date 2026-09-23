@@ -15,18 +15,11 @@
 //! Grab only *extracts* with yt-dlp: format URLs are resolved here and the
 //! bytes are pulled by the existing engine as ordinary queue items.
 
-pub use crate::video_argv::VideoJob;
 /// Facade: attempt inputs + argv builders live in
-/// [`video_argv`](crate::video_argv) now; these re-exports keep every
-/// `crate::video::X` path working. (Names used only inside this module
-/// or its tests stay imported below without re-export.)
-/// Facade: stream planning lives in [`video_plan`](crate::video_plan)
-/// now (no re-exports: the runner consumes it here, tests import it
-/// directly).
+/// [`video_argv`](crate::video_argv) now.
+pub use crate::video_argv::VideoJob;
 /// Facade: preference combos + active-value resolution live in
-/// [`video_prefs`](crate::video_prefs) now; these re-exports keep every
-/// `crate::video::X` path working. (Names used only inside this module
-/// or its tests stay imported below without re-export.)
+/// [`video_prefs`](crate::video_prefs) now.
 pub use crate::video_prefs::{
     CODEC_PRIORITY_NEWEST, codec_priority_index, codec_priority_labels, codec_priority_value,
     cookies_browser_index, cookies_browser_labels, cookies_browser_value, remux_video_index,
@@ -34,39 +27,26 @@ pub use crate::video_prefs::{
     subtitle_language_value,
 };
 /// Facade: page probing + playlist parsing lives in
-/// [`video_probe`](crate::video_probe) now; these re-exports keep every
-/// `crate::video::X` path working. (Names used only inside this module
-/// or its tests stay imported below without re-export.)
+/// [`video_probe`](crate::video_probe) now.
 pub use crate::video_probe::{drive_direct_url, is_direct_file_url, is_http_url};
 /// Facade: progress-line parsing lives in
 /// [`video_progress`](crate::video_progress) now (no re-exports: the
-/// runner consumes it here, tests import it directly).
+/// runner consumes it, tests import it directly).
+/// Facade: quality ladder lives in [`video_quality`](crate::video_quality) now.
 pub use crate::video_quality::{
     default_quality_index, default_video_filename, quality_for_height, quality_labels,
 };
-/// Facade: spawn plumbing + fetch resolve live in
-/// [`video_spawn`](crate::video_spawn) now; these re-exports keep every
-/// `crate::video::X` path working. (Names used only inside this module
-/// stay imported below without re-export.)
-/// Facade: attempt orchestration lives in [`video_runner`](crate::video_runner)
-/// now; this re-export keeps every `crate::video::X` path working.
+/// Facade: attempt orchestration lives in [`video_runner`](crate::video_runner) now.
 pub use crate::video_runner::run_video_download;
+/// Facade: spawn plumbing + fetch resolve live in
+/// [`video_spawn`](crate::video_spawn) now.
 pub use crate::video_spawn::fetch_video_infos;
 /// Facade: staging/parts/manifest/resume lives in
-/// [`video_staging`](crate::video_staging) now; these re-exports keep
-/// every `crate::video::X` path working. (Names used only inside this
-/// module or its tests stay imported below without re-export.)
+/// [`video_staging`](crate::video_staging) now.
 pub use crate::video_staging::{clean_dest_parts, clean_staging, staging_dir, staging_root};
-/// Facade: tool provisioning lives in [`video_tools`](crate::video_tools)
-/// now; these re-exports keep every `crate::video::X` path working.
-/// (Names used only inside this module or its tests stay imported
-/// below without re-export.)
+/// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{install_ffmpeg, install_ytdlp, latest_ytdlp_tag, resolve_libraries};
-
-/// Facade: probe identity lives in [`video_types`](crate::video_types)
-/// now; these re-exports keep every `crate::video::X` path working.
-/// (Names used only inside this module or its tests stay imported
-/// below without re-export.)
+/// Facade: probe identity lives in [`video_types`](crate::video_types) now.
 pub use crate::video_types::{ProbeResult, VideoInfo, VideoOutcome, is_video_page, preview_fresh};
 
 #[cfg(test)]

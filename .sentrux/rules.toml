@@ -6,7 +6,8 @@
 # download<->torrent via magnet/archive + EngineMsg, window<->install_help
 # via close_on_click. Edges that remain are one-way by design (UI drives
 # engine; resolve/probe helpers flow download->video; cookies flow outward).
-# God files present (video.rs 5.3k, download.rs 4.5k, window.rs 3.1k) so no_god_files stays off.
+# God files: video.rs split to a ~120-line facade (S1-S11); download.rs
+# (~4.5k) and window.rs (~3.1k) still pending, so no_god_files stays off.
 
 [constraints]
 max_cycles = 0
