@@ -2160,14 +2160,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/id3/id3-1.17.1.crate",
-        "sha256": "24993fcabcbc07c8ac076a8e62db8593d1a5c4dbe81d57e531d2b7cb7f737380",
-        "dest": "cargo/id3-1.17.1"
+        "url": "https://static.crates.io/crates/id3/id3-1.17.2.crate",
+        "sha256": "ef8be496a46468ba3d43690775aa3a79102ce4daf7d99e8072589aae1a3cd955",
+        "dest": "cargo/id3-1.17.2"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"24993fcabcbc07c8ac076a8e62db8593d1a5c4dbe81d57e531d2b7cb7f737380\", \"files\": {}}",
-        "dest": "cargo/id3-1.17.1",
+        "contents": "{\"package\": \"ef8be496a46468ba3d43690775aa3a79102ce4daf7d99e8072589aae1a3cd955\", \"files\": {}}",
+        "dest": "cargo/id3-1.17.2",
         "dest-filename": ".cargo-checksum.json"
     },
     {
