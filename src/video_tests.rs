@@ -5150,12 +5150,13 @@ fn vod_hls_pins_planner_variant_id() {
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
-        &AttemptGate::new(),
+        &gate,
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -5163,6 +5164,11 @@ fn vod_hls_pins_planner_variant_id() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
+    assert!(
+        gate.was_delivered(),
+        "the HLS leg delivered a file without recording it: the orphan \
+         finalizer would never know to reclaim it"
+    );
     // argv log lands next to the dest-dir template (`v.hls.%(ext)s`):
     // parts download beside the finished file, never into staging.
     // (The fake logs to dirname(-o) + ".argv.log", i.e. beside `dir`.)
@@ -7146,12 +7152,13 @@ fn unified_runner_downloads_claims_and_collects() {
     job.subtitles = Some("en".into());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
-        &AttemptGate::new(),
+        &gate,
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
@@ -7161,6 +7168,11 @@ fn unified_runner_downloads_claims_and_collects() {
     ));
     assert!(matches!(res, Ok(Some(7))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
+    assert!(
+        gate.was_delivered(),
+        "the unified leg delivered a file without recording it: the orphan \
+         finalizer would never know to reclaim it"
+    );
     assert_eq!(std::fs::read(dir.join("v.en.srt")).unwrap(), b"subtitles");
     assert!(!staging.exists(), "staging cleaned");
     let mut progress = false;

@@ -4331,6 +4331,11 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
          reached its rename could still deliver"
     );
     assert!(!gate.was_delivered());
+    assert!(
+        !part.exists(),
+        "remove claimed the gate but left the row's part shell behind: the \
+         inline reclaim must sweep it"
+    );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
@@ -4379,7 +4384,7 @@ fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
     let worker_dest = dest.clone();
     let handle = crate::runtime::tokio_rt().spawn(async move {
         // Stand in for a worker that was already inside its rename.
-        std::fs::write(&worker_dest, b"orphan").ok();
+        std::fs::write(&worker_dest, b"orphan").expect("stand-in worker must place the orphan");
         gate.mark_delivered();
     });
     manager.running.borrow_mut().insert(id, handle);
@@ -4394,6 +4399,75 @@ fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
         !dest.exists(),
         "the commit won, so the attempt placed a file, and the row is gone: \
          the orphan outlived it"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn removing_a_settled_video_row_keeps_the_users_finished_file() {
+    // A delivered attempt leaves its gate COMMITTING + delivered in the
+    // map (the pump tail clears the worker handle but never the gate),
+    // with no worker in flight. Removing that settled row must keep the
+    // file the user owns: only a worker the finalizer actually awaited
+    // can have left an orphan behind.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-settled-keeps");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 926_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-settled-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("v.mp4");
+    std::fs::write(&dest, b"owned").unwrap();
+    let staging = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    assert!(gate.try_commit());
+    gate.mark_delivered();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    // No running handle: the attempt settled long ago.
+
+    manager.remove(id);
+
+    assert!(
+        dest.exists(),
+        "no worker was in flight, so nothing could have orphaned this file: \
+         the finished file belongs to the user"
+    );
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        b"owned",
+        "the settled row's file must survive removal byte-for-byte"
+    );
+    assert!(
+        !staging.exists(),
+        "the settled row's scratch must still go with the row"
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }

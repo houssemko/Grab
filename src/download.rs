@@ -1743,50 +1743,47 @@ impl DownloadManager {
     /// the way out, and a finalize path can still be mid-rename -- so
     /// unlinking first just loses the race. Awaiting the task is sound
     /// because the worker drops its process-group guards before it
-    /// returns, and a killed process cannot write again.
+    /// returns, and a killed process cannot write again. Sweeping both
+    /// destinations once the task has returned closes that window without
+    /// needing a tombstone.
     ///
-    /// Both destinations, not just staging. The worker can still be inside
-    /// its final rename when the row is removed, so the file can land
-    /// *after* an inline sweep; sweeping once the task has returned closes
-    /// that window without needing a tombstone.
-    /// Reclaim a removed video row's scratch, but only once its worker has
-    /// actually stopped.
-    ///
-    /// Claiming the gate first is what makes this safe to defer: a worker
+    /// Claiming the gate first is what makes deferring safe: a worker
     /// that has not reached its rename yet finds the row gone and delivers
-    /// nothing, and one that had already committed has placed a file that
-    /// the reclaim below removes.
-    fn finish_discard(
-        &self,
-        id: u64,
-        dest: std::path::PathBuf,
-        gate: std::sync::Arc<crate::attempt_gate::AttemptGate>,
-    ) {
+    /// nothing. Only a worker this finalizer actually awaited may have
+    /// committed and placed a file the row no longer owns, so only that
+    /// path removes `dest` -- the one sanctioned exception to never
+    /// deleting a finished file. With no worker in flight no orphan is
+    /// possible, so that path sweeps scratch only and never touches `dest`.
+    fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
         let _ = gate.discard();
         let staging = crate::video::staging_dir(id);
-        let reclaim = move || {
-            crate::video::clean_staging(&staging);
-            crate::video::clean_dest_parts(&dest);
-            if gate.was_delivered() {
-                // The commit won the race, so this file is the attempt's own
-                // orphan and the row is gone. The one sanctioned exception
-                // to never deleting a finished file.
-                let _ = std::fs::remove_file(&dest);
-            }
-        };
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let tracked = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
-                    reclaim();
+                    crate::video::clean_staging(&staging);
+                    crate::video::clean_dest_parts(&dest);
+                    if gate.was_delivered() {
+                        // The commit won the race, so this file is the
+                        // attempt's own orphan and the row is gone. The one
+                        // sanctioned exception to never deleting a finished
+                        // file.
+                        let _ = std::fs::remove_file(&dest);
+                    }
                 });
                 // Shutdown must be able to reap this too: it owns the
                 // worker, and dropping a task that merely holds a
                 // JoinHandle detaches the worker rather than stopping it.
                 self.discards.borrow_mut().insert(id, tracked);
             }
-            // No task to wait for, so nothing can be writing.
-            None => reclaim(),
+            // No task to wait for, so nothing can be writing -- and no
+            // orphan is possible either. Sweep the scratch, never the
+            // finished file: with no worker in flight it belongs to the
+            // user (a settled row) or was never delivered at all.
+            None => {
+                crate::video::clean_staging(&staging);
+                crate::video::clean_dest_parts(&dest);
+            }
         }
     }
 
