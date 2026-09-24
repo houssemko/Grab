@@ -45,6 +45,7 @@ pub use crate::download_store::DownloadStatus;
 /// now; the status re-export keeps every `crate::download::X` path working.
 /// (The stored structs stay imported below without re-export.)
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
+use crate::video::AttemptGate;
 
 pub struct DownloadManager {
     // Borrow discipline: RefCells are never held across `set_*` property
@@ -87,6 +88,10 @@ pub struct DownloadManager {
     /// dropped) from pause/park/cancel paths so the worker stops its
     /// extractor streams promptly; the pump tail also drops them.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
+    /// Delivery decision per video attempt, by row. Created when the
+    /// attempt is spawned so the manager and the worker arbitrate on one
+    /// object; see `attempt_gate`.
+    gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Tracked
     /// because a finalizer *owns* the worker handle: shutdown must be able
     /// to stop those workers too, and merely aborting a task that holds a
@@ -161,6 +166,7 @@ impl DownloadManager {
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
+            gates: RefCell::new(HashMap::new()),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
@@ -273,6 +279,11 @@ impl DownloadManager {
     /// Video-page source staged for a row, if any.
     pub fn video_source(&self, id: u64) -> Option<crate::media_types::VideoSource> {
         self.video_sources.borrow().get(&id).cloned()
+    }
+
+    /// The delivery gate for `id`, if this row has a video attempt.
+    pub(crate) fn gate_for(&self, id: u64) -> Option<std::sync::Arc<AttemptGate>> {
+        self.gates.borrow().get(&id).cloned()
     }
 
     /// Whether the row is currently capturing a live stream (stop-and-keep
@@ -1397,6 +1408,10 @@ impl DownloadManager {
         self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+        self.gates.borrow_mut().insert(id, AttemptGate::new());
+        let gate = self
+            .gate_for(id)
+            .expect("spawn just created the attempt gate");
         // Overwrite any stale sender: its task is dead or guarded stale.
         self.video_abort.borrow_mut().insert(id, abort_tx);
         // Live rows finalize in the worker on stop: track them so
@@ -1463,7 +1478,7 @@ impl DownloadManager {
         };
         let handle = tokio_rt().spawn(async move {
             let worker_tx = tx.clone();
-            match crate::video::run_video_download(job, abort_rx, worker_tx).await {
+            match crate::video::run_video_download(job, &gate, abort_rx, worker_tx).await {
                 Ok(crate::video::VideoOutcome::Finished(size)) => {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
@@ -1734,14 +1749,36 @@ impl DownloadManager {
     /// its final rename when the row is removed, so the file can land
     /// *after* an inline sweep; sweeping once the task has returned closes
     /// that window without needing a tombstone.
-    fn finish_discard(&self, id: u64, dest: std::path::PathBuf) {
+    /// Reclaim a removed video row's scratch, but only once its worker has
+    /// actually stopped.
+    ///
+    /// Claiming the gate first is what makes this safe to defer: a worker
+    /// that has not reached its rename yet finds the row gone and delivers
+    /// nothing, and one that had already committed has placed a file that
+    /// the reclaim below removes.
+    fn finish_discard(
+        &self,
+        id: u64,
+        dest: std::path::PathBuf,
+        gate: std::sync::Arc<crate::attempt_gate::AttemptGate>,
+    ) {
+        let _ = gate.discard();
         let staging = crate::video::staging_dir(id);
+        let reclaim = move || {
+            crate::video::clean_staging(&staging);
+            crate::video::clean_dest_parts(&dest);
+            if gate.was_delivered() {
+                // The commit won the race, so this file is the attempt's own
+                // orphan and the row is gone. The one sanctioned exception
+                // to never deleting a finished file.
+                let _ = std::fs::remove_file(&dest);
+            }
+        };
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let tracked = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
-                    crate::video::clean_staging(&staging);
-                    crate::video::clean_dest_parts(&dest);
+                    reclaim();
                 });
                 // Shutdown must be able to reap this too: it owns the
                 // worker, and dropping a task that merely holds a
@@ -1749,10 +1786,7 @@ impl DownloadManager {
                 self.discards.borrow_mut().insert(id, tracked);
             }
             // No task to wait for, so nothing can be writing.
-            None => {
-                crate::video::clean_staging(&staging);
-                crate::video::clean_dest_parts(&dest);
-            }
+            None => reclaim(),
         }
     }
 
@@ -1859,7 +1893,16 @@ impl DownloadManager {
         // deliver a file for a row that no longer exists.
         if self.video_sources.borrow().contains_key(&id) {
             let dest = self.find(id).map(|i| i.file_path()).unwrap_or_default();
-            self.finish_discard(id, dest);
+            // Spawned attempts always have a gate (Task 2 inserts it
+            // before spawning); a row that never spawned has none, and no
+            // worker can be inside a rename for it, so a fresh gate —
+            // claimed by `finish_discard` like any other — keeps the
+            // reclaim path uniform without arbitrating against anyone.
+            let gate = self
+                .gate_for(id)
+                .unwrap_or_else(crate::video::AttemptGate::new);
+            self.gates.borrow_mut().remove(&id);
+            self.finish_discard(id, dest, gate);
         }
         // The snapshot carries the source for Undo; the live map drops it
         // with the row (cancel keeps it, remove doesn't).

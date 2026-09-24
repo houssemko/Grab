@@ -3,6 +3,7 @@
 //! leaf and mid-level module: the engine drives `run_video_download`
 //! through the `video` facade.
 
+use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
@@ -64,6 +65,7 @@ pub enum StopIntent {
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
 pub async fn run_video_download(
     mut job: VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     mut abort: oneshot::Receiver<StopIntent>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
@@ -212,6 +214,7 @@ pub async fn run_video_download(
                 &ffmpeg_bin,
                 &staging,
                 &job,
+                gate,
                 &hls.format_id,
                 abort,
                 timeout,
@@ -225,6 +228,7 @@ pub async fn run_video_download(
             &ffmpeg_bin,
             &staging,
             &job,
+            gate,
             &hls.format_id,
             abort,
             timeout,
@@ -359,6 +363,7 @@ pub async fn run_video_download(
         &ffmpeg_bin,
         &staging,
         &job,
+        gate,
         &spec,
         video_sel.as_ref().map(|s| s.ext.as_str()),
         combined_total,
@@ -383,6 +388,7 @@ pub(crate) async fn run_unified_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     spec: &str,
     video_ext: Option<&str>,
     total: Option<u64>,
@@ -463,8 +469,17 @@ pub(crate) async fn run_unified_ytdlp(
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
+    // The linearization point, as on the live leg: either this wins and
+    // the row is still here, or the removal already won and there is
+    // nothing to deliver.
+    if !gate.try_commit() {
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Ok(None);
+    }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {}
+        Ok(()) => {
+            gate.mark_delivered();
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
         }
@@ -817,6 +832,7 @@ pub(crate) async fn run_live_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     hls_format_id: &str,
     mut abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
@@ -943,7 +959,18 @@ pub(crate) async fn run_live_ytdlp(
             biased;
             intent = &mut abort => {
                 reap_child(&mut child, &mut group).await;
-                (true, matches!(intent, Ok(StopIntent::Discard)))
+                match intent {
+                    Ok(StopIntent::Preserve) => (true, false),
+                    Ok(StopIntent::Discard) => (true, true),
+                    Err(_) => {
+                        // No sender remains to authorise anything: fail
+                        // closed. Claim the gate so the pre-rename commit
+                        // below cannot deliver either, and take the
+                        // discarded path.
+                        let _ = gate.discard();
+                        (true, true)
+                    }
+                }
             }
             waited = tokio::time::timeout(timeout, child.wait()) => {
                 match waited {
@@ -1083,13 +1110,11 @@ pub(crate) async fn run_live_ytdlp(
         .await;
         return Err(e);
     }
-    // The second discard observation point, and the linearization one. A
-    // removal can land while the remux is in flight -- long after the
-    // recorder-wait select -- and a oneshot nobody reads is a signal that
-    // never happens, so the worker would carry on and deliver. Here the
-    // row is either still here and this delivers, or it is gone and the
-    // manager's finalizer reclaims the result.
-    if matches!(abort.try_recv(), Ok(StopIntent::Discard)) {
+    // The linearization point. `try_commit` is a CAS, so there is no window
+    // between deciding and acting for a concurrent removal to slip into:
+    // either this wins and the row is still here, or the removal already
+    // won and there is nothing to deliver.
+    if !gate.try_commit() {
         sweep_live_capture(
             &out,
             &part,
@@ -1103,7 +1128,9 @@ pub(crate) async fn run_live_ytdlp(
         return Ok(None);
     }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {}
+        Ok(()) => {
+            gate.mark_delivered();
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // The name was claimed mid-capture; the row requeues under a
             // fresh name and records again, so the shell is redundant.
@@ -1159,6 +1186,7 @@ pub(crate) async fn run_hls_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     hls_format_id: &str,
     abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
@@ -1307,8 +1335,19 @@ pub(crate) async fn run_hls_ytdlp(
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
+    // The linearization point, as on the live leg: either this wins and
+    // the row is still here, or the removal already won and there is
+    // nothing to deliver. The part shells beside the finished file are
+    // ours to sweep: no rename means no delivery happened.
+    if !gate.try_commit() {
+        clean_dest_parts(&job.dest);
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Ok(None);
+    }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {}
+        Ok(()) => {
+            gate.mark_delivered();
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
         }

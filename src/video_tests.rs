@@ -1,4 +1,5 @@
 use super::*;
+use crate::attempt_gate::AttemptGate;
 use crate::file_names::{is_url_derived_name, strip_dedupe_suffix};
 use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
@@ -976,7 +977,12 @@ fn pipeline_reports_missing_tools() {
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res = crate::runtime::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
+    let res = crate::runtime::tokio_rt().block_on(run_video_download(
+        job,
+        &AttemptGate::new(),
+        abort_rx,
+        tx,
+    ));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
     // Nothing else was sent: resolving never started without the tools.
     // The abandoned (empty) staging dir is the caller's to drop.
@@ -3368,6 +3374,7 @@ fn live_capture_adopts_part_and_remuxes() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3411,6 +3418,7 @@ fn live_capture_empty_fails_with_detail() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3474,6 +3482,7 @@ fn live_capture_stale_staging_never_adopts() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3506,6 +3515,7 @@ fn live_capture_refuses_existing_dest() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3548,6 +3558,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3613,6 +3624,7 @@ fn live_capture_abort_adopts_partial() {
             &fake_ff,
             &staging,
             &job,
+            &AttemptGate::new(),
             "h1080",
             abort_rx,
             std::time::Duration::from_secs(30),
@@ -3724,6 +3736,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3798,6 +3811,7 @@ fn live_capture_barren_start_sweeps_state_file() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3875,6 +3889,7 @@ fn live_capture_lost_rename_race_sweeps_state() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3998,6 +4013,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
                 &fake_ff,
                 &staging,
                 &job,
+                &AttemptGate::new(),
                 "h1080",
                 stop_rx,
                 std::time::Duration::from_secs(600),
@@ -4110,10 +4126,9 @@ exit 0
 fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
     // The window the recorder-wait select cannot cover. A capture that
     // ends on its own has already passed that select, so a removal arriving
-    // during the remux would otherwise sit unread in the oneshot and the
-    // worker would carry straight on to the rename -- delivering a file for
-    // a row that no longer exists. The pre-rename check is the
-    // linearization point that closes it.
+    // during the remux must claim the gate: the stop prompt alone sits
+    // unread in the oneshot, and only the pre-rename commit arbitrates
+    // delivery now. The gate CAS is the linearization point that closes it.
     let dir = std::env::temp_dir().join(format!("grab-discardremux-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4126,27 +4141,36 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
     let marker = dir.join("ffmpeg-started");
+    let gate = AttemptGate::new();
 
     let task = crate::runtime::tokio_rt().spawn({
         let staging = staging.clone();
         let marker = marker.clone();
+        let gate = std::sync::Arc::clone(&gate);
         async move {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                for _ in 0..500 {
-                    if marker.exists() {
-                        break;
+            tokio::spawn({
+                let gate = std::sync::Arc::clone(&gate);
+                async move {
+                    for _ in 0..500 {
+                        if marker.exists() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    let _ = stop_tx.send(StopIntent::Discard);
+                    // The removal itself: the prompt above is unread this
+                    // late, so only the gate claim stops the delivery.
+                    let _ = gate.discard();
                 }
-                let _ = stop_tx.send(StopIntent::Discard);
             });
             run_live_ytdlp(
                 &fake_yt,
                 &fake_ff,
                 &staging,
                 &job,
+                &gate,
                 "h1080",
                 stop_rx,
                 std::time::Duration::from_secs(60),
@@ -4166,8 +4190,8 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
     );
     assert!(
         !dest.exists(),
-        "a removal that landed mid-remux still delivered: the oneshot was \
-         never read again after the recorder wait, so the rename went ahead"
+        "a removal that landed mid-remux still delivered: the gate was \
+         never claimed, so the commit went ahead"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -4291,6 +4315,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         &break_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort1,
         std::time::Duration::from_secs(30),
@@ -4323,6 +4348,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         &copy_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort2,
         std::time::Duration::from_secs(30),
@@ -4410,6 +4436,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4453,6 +4480,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4546,6 +4574,7 @@ fn live_capture_retry_never_inherits_stale_state() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4776,6 +4805,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
                 &fake_ff,
                 &staging_for_task,
                 &job,
+                &AttemptGate::new(),
                 "h1080",
                 abort_rx,
                 std::time::Duration::from_secs(600),
@@ -5023,6 +5053,7 @@ fn hls_map_survives_estimate_wobble() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -5124,6 +5155,7 @@ fn vod_hls_pins_planner_variant_id() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -5190,6 +5222,7 @@ fn vod_hls_refuses_existing_dest() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -6829,6 +6862,7 @@ fn hls_collects_sidecar_beside_finished_file() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -6865,6 +6899,7 @@ fn hls_embed_skips_sidecar_collection() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -6982,6 +7017,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -7115,6 +7151,7 @@ fn unified_runner_downloads_claims_and_collects() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
@@ -7162,6 +7199,7 @@ fn unified_runner_surfaces_failure_tail() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
@@ -7203,6 +7241,7 @@ fn unified_runner_abort_stays_quiet() {
             std::path::Path::new("/usr/bin/ffmpeg"),
             &staging,
             &job,
+            &AttemptGate::new(),
             "v123+a456/bv*+ba/b",
             Some("mp4"),
             None,
@@ -7239,6 +7278,7 @@ fn unified_runner_refuses_existing_dest() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
@@ -7293,6 +7333,7 @@ exit 0
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
@@ -7539,6 +7580,7 @@ fn unified_runner_sums_two_leg_progress() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v1+a2/bv*+a2/bv*+ba/b",
         Some("mp4"),
         Some(150),
@@ -7699,4 +7741,201 @@ fn direct_file_exts_stay_sorted() {
             .position(|(a, b)| a != b);
         panic!("DIRECT_FILE_EXTS out of order at {at:?}");
     }
+}
+
+#[test]
+fn a_discard_before_the_commit_delivers_nothing() {
+    // The live leg must consult the gate, not just the stop signal: the
+    // signal is only a prompt, and a prompt can arrive after the one
+    // place the worker stops looking.
+    let dir = std::env::temp_dir().join(format!("grab-gate-discard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    assert!(
+        gate.discard(),
+        "the removal claims the row before the worker starts"
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &gate,
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a discarded attempt must not deliver: {res:?}"
+    );
+    assert!(!dest.exists(), "a discarded capture was delivered");
+    assert!(
+        !gate.was_delivered(),
+        "the gate must not record a delivery that never happened"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_commit_before_the_discard_delivers_and_is_recorded() {
+    // The mirror: when the commit wins, the file *is* placed, and the gate
+    // says so — which is what tells the finalizer there is an orphan.
+    let dir = std::env::temp_dir().join(format!("grab-gate-commit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &gate,
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(Some(_))),
+        "an un-discarded attempt must deliver: {res:?}"
+    );
+    assert!(dest.exists(), "nothing was placed");
+    assert!(gate.was_delivered(), "the gate must record the delivery");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_unified_leg_honours_a_discard_before_its_commit() {
+    let dir = std::env::temp_dir().join(format!("grab-gate-unified-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    assert!(gate.discard());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &gate,
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        Some(7),
+        &mut stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a discarded VOD attempt must not deliver: {res:?}"
+    );
+    assert!(!dest.exists(), "a discarded VOD attempt was delivered");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_hls_leg_honours_a_discard_before_its_commit() {
+    let dir = std::env::temp_dir().join(format!("grab-gate-hls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mkv");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    assert!(gate.discard());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &gate,
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a discarded HLS attempt must not deliver: {res:?}"
+    );
+    assert!(!dest.exists(), "a discarded HLS attempt was delivered");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
+    // `Empty` means "no stop yet" and carrying on is right. `Closed` means
+    // no sender remains to authorise anything, so it must fail closed.
+    let dir = std::env::temp_dir().join(format!("grab-gate-closed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // Sender dropped immediately: the receiver observes Closed.
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<StopIntent>();
+    drop(stop_tx);
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &gate,
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a closed receiver must stop quietly, not deliver and not fail: {res:?}"
+    );
+    assert!(
+        !gate.was_delivered(),
+        "a closed receiver authorised a delivery: nothing was left to permit it"
+    );
+    assert!(!dest.exists(), "a closed receiver delivered a file");
+    let _ = std::fs::remove_dir_all(&dir);
 }

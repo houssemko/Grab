@@ -54,8 +54,7 @@ impl AttemptGate {
     ///
     /// Returns `true` only when this caller wins the `ACTIVE` to
     /// `DISCARDED` transition. If it returns `false`, this call did not
-    /// claim discard; another commit or discard already won. Use
-    /// `is_discarded()` when that distinction matters.
+    /// claim discard; another commit or discard already won.
     #[must_use]
     pub fn discard(&self) -> bool {
         self.state
@@ -75,11 +74,6 @@ impl AttemptGate {
     /// it only after the worker has completed.
     pub fn was_delivered(&self) -> bool {
         self.delivered.load(Ordering::Acquire)
-    }
-
-    /// Whether the current decision state is `DISCARDED`.
-    pub fn is_discarded(&self) -> bool {
-        self.state.load(Ordering::Acquire) == DISCARDED
     }
 }
 

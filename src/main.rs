@@ -1,6 +1,4 @@
 mod application;
-// The attempt manager consumes this leaf in Task 2; Task 1 tests it directly.
-#[allow(dead_code)]
 mod attempt_gate;
 mod cookies;
 mod download;

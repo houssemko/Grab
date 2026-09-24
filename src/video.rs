@@ -17,7 +17,6 @@
 
 /// Facade: the per-attempt delivery decision lives in
 /// [`attempt_gate`](crate::attempt_gate) now.
-#[allow(unused_imports)]
 pub use crate::attempt_gate::AttemptGate;
 /// Facade: attempt inputs + argv builders live in
 /// [`video_argv`](crate::video_argv) now.

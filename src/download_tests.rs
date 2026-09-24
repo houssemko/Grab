@@ -4219,3 +4219,181 @@ fn enqueue_video_accepts_unlisted_url() {
     manager.cancel_all();
     crate::video::clean_staging(&crate::video::staging_dir(item.id()));
 }
+
+#[test]
+fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
+    // The gate is the only thing that can arbitrate delivery, so a video
+    // attempt must have one and a plain row must not: a plain row is
+    // aborted outright and never arbitrates anything.
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("gate-spawn");
+    let settings = test_settings();
+    // Fail validation after gate creation but before the worker/pump starts,
+    // keeping this ownership test synchronous and free of thread-affine
+    // futures.
+    settings
+        .set_string(
+            crate::settings::key::PROXY_MODE,
+            crate::download_net::PROXY_MODE_MANUAL,
+        )
+        .unwrap();
+    settings
+        .set_string(crate::settings::key::PROXY_HOST, "")
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+
+    let plain = DownloadItem::new(700_001, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+    manager.store().append(&plain);
+    manager.epoch.borrow_mut().insert(plain.id(), 1);
+    assert!(
+        manager.gate_for(plain.id()).is_none(),
+        "a plain row must not be given a gate to arbitrate"
+    );
+
+    let item = manager
+        .restore_existing(
+            "https://example.com/v.mp4",
+            "/tmp/dl",
+            "v.mp4",
+            DownloadStatus::Queued,
+            None,
+            Some(crate::media_types::VideoSource::Page {
+                page_url: "https://example.com/v.mp4".to_string(),
+                media_url: None,
+                expires_at: None,
+                quality: "1080p".to_string(),
+                audio_only: false,
+                is_live: false,
+                video_format_id: None,
+                playlist_item_id: None,
+            }),
+        )
+        .expect("video row");
+    assert!(
+        manager.gate_for(item.id()).is_some(),
+        "a video row with no gate cannot arbitrate delivery, so a removal \
+         could not stop it placing a file"
+    );
+
+    manager
+        .settings()
+        .set_string(crate::settings::key::PROXY_MODE, PROXY_MODE_DIRECT)
+        .unwrap();
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
+fn a_removal_claims_the_gate_before_the_worker_can_commit() {
+    // The decision must be claimed at `remove` time, not discovered later:
+    // a worker that has not reached its rename yet must find the row gone.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-claims-gate");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 924_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-gateclaim-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    let part = dest_dir.join("v.live.mp4.part");
+    std::fs::write(&part, b"recorded").unwrap();
+
+    manager.remove(id);
+
+    assert!(
+        !gate.try_commit(),
+        "remove returned without claiming the gate, so a worker that had not \
+         reached its rename could still deliver"
+    );
+    assert!(!gate.was_delivered());
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
+    // When the commit wins, the file *is* placed, and the row is gone, so
+    // the finalizer has to remove it. This is the only sanctioned exception
+    // to `clean_dest_parts` never touching a finished file.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-orphan");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 925_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-orphan-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("v.mp4");
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    // The commit already won, so the attempt will place the file.
+    assert!(gate.try_commit());
+    let worker_dest = dest.clone();
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        // Stand in for a worker that was already inside its rename.
+        std::fs::write(&worker_dest, b"orphan").ok();
+        gate.mark_delivered();
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
+    manager.remove(id);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while dest.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !dest.exists(),
+        "the commit won, so the attempt placed a file, and the row is gone: \
+         the orphan outlived it"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
