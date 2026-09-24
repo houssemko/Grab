@@ -139,7 +139,7 @@ pub async fn run_video_download(
         } else {
             job.remux_video.as_deref()
         };
-        let better = default_video_filename(&video.title, &video.id, job.audio_only, remux);
+        let better = default_video_filename(&video.title, job.audio_only, remux);
         if better != current {
             tx.send(EngineMsg::SuggestName(better)).ok();
         }
@@ -186,11 +186,21 @@ pub async fn run_video_download(
         // kill + adopt + remux, no grace-period finalizing); VOD
         // captures go through yt-dlp's standard HLS path.
         if job.is_live {
+            // The extractor's canonical URL, which is what the other legs
+            // get in `comment` from --embed-metadata. Falls back to the
+            // row's URL exactly as `VideoInfo::from` does, so all three
+            // legs stamp the same provenance for the same video.
+            let canonical = video
+                .webpage_url
+                .as_deref()
+                .filter(|u| !u.is_empty())
+                .unwrap_or(&job.page_url);
             return run_live_ytdlp(
                 &youtube_bin,
                 &ffmpeg_bin,
                 &staging,
                 &job,
+                canonical,
                 &hls.format_id,
                 abort,
                 timeout,
@@ -605,10 +615,13 @@ pub(crate) async fn remux_live_capture(
     dest: &Path,
     audio_only: bool,
     timeout: Duration,
+    page_url: &str,
 ) -> Result<(), VideoError> {
     for with_bsf in [true, false] {
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
-        cmd.args(live_remux_argv(ts_path, dest, audio_only, with_bsf));
+        cmd.args(live_remux_argv(
+            ts_path, dest, audio_only, with_bsf, page_url,
+        ));
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped());
@@ -792,6 +805,7 @@ pub(crate) async fn run_live_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    page_url: &str,
     hls_format_id: &str,
     mut abort: oneshot::Receiver<()>,
     timeout: Duration,
@@ -1028,7 +1042,15 @@ pub(crate) async fn run_live_ytdlp(
             return Err(e);
         }
     };
-    if let Err(e) = remux_live_capture(ffmpeg_bin, &src, &final_tmp, job.audio_only, timeout).await
+    if let Err(e) = remux_live_capture(
+        ffmpeg_bin,
+        &src,
+        &final_tmp,
+        job.audio_only,
+        timeout,
+        page_url,
+    )
+    .await
     {
         // The remuxed file never materialized, so the recorded shell is
         // the user's only copy of the capture: keep it for salvage and
