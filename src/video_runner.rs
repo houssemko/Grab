@@ -1188,3 +1188,7 @@ pub(crate) async fn run_hls_ytdlp(
     let _ = tokio::fs::remove_dir_all(staging).await;
     Ok(file_len(&job.dest))
 }
+
+#[cfg(test)]
+#[path = "video_runner_tests.rs"]
+mod tests;

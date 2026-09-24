@@ -3885,12 +3885,20 @@ fn live_capture_lost_rename_race_sweeps_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake ffmpeg that remuxes normally, then makes the destination
-/// directory read-only so the final rename fails with a permissions
-/// error — the unexpected-failure branch, as opposed to the
-/// already-exists race.
-fn fake_ffmpeg_locking_dest(dir: &std::path::Path) -> std::path::PathBuf {
-    let bin = dir.join("fake-ffmpeg-lockdest");
+/// Fake ffmpeg that remuxes normally, then replaces the destination
+/// *directory* with a regular file so the final rename fails with
+/// ENOTDIR.
+///
+/// The trigger is structural, never a permission bit: CI runs this suite
+/// as root inside `container: fedora:44`, where `CAP_DAC_OVERRIDE` makes
+/// a read-only mode a no-op. A chmod-based fixture passes unprivileged
+/// and silently delivers the file on CI. A type mismatch fails the
+/// rename for every caller, privileged or not.
+fn fake_ffmpeg_breaking_dest_dir(dest_dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dest_dir
+        .parent()
+        .expect("dest dir has a parent")
+        .join("fake-ffmpeg-breakdestdir");
     std::fs::write(
         &bin,
         format!(
@@ -3904,10 +3912,14 @@ for a in "$@"; do
     last="$a"
 done
 cat "$input" > "$last"
-chmod 500 '{}'
+# The remux is safely in staging by now; break only the destination side.
+# Fakes live outside this directory so nothing unlinks the running script.
+rm -rf '{}'
+: > '{}'
 exit 0
 "#,
-            dir.display()
+            dest_dir.display(),
+            dest_dir.display()
         ),
     )
     .unwrap();
@@ -3921,11 +3933,15 @@ exit 0
 
 #[test]
 fn live_capture_rename_failure_keeps_completed_remux() {
-    // A permissions failure on the final rename is not a requeue: the
-    // row keeps failing and nothing re-records, so both the raw shell
-    // and the *completed* remux in staging are the user's only copies
-    // of the capture. Sweeping staging here would silently destroy the
-    // finished file, so the whole capture must survive for salvage.
+    // A final rename that fails is not a requeue: the row keeps failing
+    // and nothing re-records, so the *completed* remux in staging is the
+    // user's only copy of a finished file. Sweeping staging here would
+    // silently destroy it, which is the regression this pins.
+    //
+    // The raw shell is not asserted here: the fixture destroys the dest
+    // directory to trigger the failure, taking the shell with it. The
+    // "failure keeps recorded media" policy is covered where the media
+    // survives the trigger, in the remux-failure test.
     let base =
         std::env::temp_dir().join(format!("grab-fakelive-renamefail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -3936,7 +3952,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let fake_yt = fake_ytdlp_live_with_state(&dir);
-    let fake_ff = fake_ffmpeg_locking_dest(&dir);
+    let fake_ff = fake_ffmpeg_breaking_dest_dir(&dir);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
@@ -3949,33 +3965,24 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         std::time::Duration::from_secs(30),
         tx,
     ));
-    assert!(
-        res.is_err(),
-        "a failed rename must fail the row, got {res:?}"
-    );
-    // No state-file assertion here: the fixture's read-only dest dir
-    // makes unlinking impossible, so the always-swept-state guarantee
-    // is proven by the writable-dir tests (remux failure, barren start,
-    // lost rename race) instead.
+    // Must be the rename-failure branch specifically. A requeue would
+    // pass the error check above while sweeping the very file this
+    // guards, so distinguish them.
+    match res {
+        Err(e) => assert_ne!(
+            e.to_string(),
+            crate::engine_msg::DEST_EXISTS,
+            "the fixture must fail the rename itself, not the pre-flight or the \
+             lost-name race, or this test covers the wrong branch: {e}"
+        ),
+        ok => panic!("a broken destination must fail the row, got {ok:?}"),
+    }
     assert_eq!(
-        std::fs::read(dir.join("v.live.mp4.part")).unwrap(),
+        std::fs::read(staging.join("final.mp4")).unwrap(),
         b"recorded",
-        "the raw capture is the user's only copy and must survive"
-    );
-    assert!(
-        staging.join("final.mp4").exists(),
         "the completed remux must survive a failed rename, not be swept"
     );
-    assert!(
-        !job.dest.exists(),
-        "nothing is delivered on a failed rename"
-    );
-    // Unlock before teardown: the fake left dest read-only.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    assert!(staging.exists(), "staging must be left intact for salvage");
     let _ = std::fs::remove_dir_all(&base);
 }
 
