@@ -4509,5 +4509,311 @@ fn an_undo_does_not_reclaim_a_destination_with_a_pending_discard() {
         manager.dest_reserved(&dest),
         "Undo was allowed to reclaim a destination with a pending discard"
     );
-    let _ = std::fs::remove_dir_all("/tmp/dl");
+}
+
+#[test]
+fn a_reserved_destination_forces_video_intake_to_dedupe() {
+    // Between remove and its finalizer the destination must count as taken
+    // at intake, or the finalizer's stem-wide sweep deletes the new row's
+    // part files.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-video-intake");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-intake-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    manager.reserve_dest(&dest.join("Clip.mp4"));
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest_s),
+            Some("Clip.mp4"),
+            crate::media_types::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+                playlist_item_id: None,
+            },
+        )
+        .expect("video enqueue");
+    assert_eq!(
+        item.filename(),
+        "Clip (1).mp4",
+        "intake claimed a destination whose row is still tearing down"
+    );
+    drain_engine(&manager, item.id());
+    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    manager.release_dest(&dest.join("Clip.mp4"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_reserved_destination_forces_plain_intake_to_dedupe() {
+    // The exact-path reservation applies to plain intake too: a plain row
+    // claiming a tearing-down destination meets the finalizer's sweep.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-plain-intake");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-plain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    manager.reserve_dest(&dest.join("a.bin"));
+    let item = manager
+        .enqueue("https://example.com/a.bin", Some(&dest_s), Some("a.bin"))
+        .expect("plain enqueue");
+    assert_eq!(
+        item.filename(),
+        "a (1).bin",
+        "plain intake claimed a destination whose row is still tearing down"
+    );
+    manager.cancel(item.id());
+    // Let the aborted engine's pump tail settle here, so no woken future
+    // outlives this test's queue file.
+    quiesce(&glib::MainContext::default());
+    manager.release_dest(&dest.join("a.bin"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_finished_name_claim_honours_a_pending_discard() {
+    // The Finished claim loop and the DEST_EXISTS requeue share
+    // `is_name_taken`: a reserved destination must read as taken there too.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-claim");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-claim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let existing = crate::video_staging::dir_file_names(&dest);
+    assert!(!manager.is_name_taken(&dest_s, &existing, "Clip.mp4"));
+    manager.reserve_dest(&dest.join("Clip.mp4"));
+    assert!(
+        manager.is_name_taken(&dest_s, &existing, "Clip.mp4"),
+        "a finished-name claim could take a destination still tearing down"
+    );
+    manager.release_dest(&dest.join("Clip.mp4"));
+    assert!(!manager.is_name_taken(&dest_s, &existing, "Clip.mp4"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_reserved_destination_parks_an_unremoved_row_until_start_next() {
+    // Undo bypasses intake dedupe: a reserved destination must requeue the
+    // row without starting it, later triggers must not start it while
+    // reserved, and releasing alone must not wake it (no wakeup exists yet:
+    // the next `start_next` trigger starts it).
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-unremove-park");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-park-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let reserved = dest.join("Clip.mp4");
+    manager.reserve_dest(&reserved);
+    let snap = RemovedSnapshot {
+        url: "https://vimeo.com/123456".to_string(),
+        dest_dir: dest_s,
+        filename: "Clip.mp4".to_string(),
+        status: DownloadStatus::Downloading,
+        progress: 0.3,
+        detail: String::new(),
+        output_dir: String::new(),
+        segments: None,
+        video_source: Some(crate::media_types::VideoSource::Page {
+            page_url: "https://vimeo.com/123456".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "720p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        }),
+    };
+    let revived = manager.unremove(snap);
+    let id = revived.id();
+    assert_eq!(revived.status(), DownloadStatus::Queued);
+    assert!(
+        !manager.running.borrow().contains_key(&id),
+        "unremove started a row whose destination is still tearing down"
+    );
+    manager.start_next();
+    assert_eq!(
+        revived.status(),
+        DownloadStatus::Queued,
+        "a later trigger started a row whose destination is still reserved"
+    );
+    assert!(!manager.running.borrow().contains_key(&id));
+    manager.release_dest(&reserved);
+    assert_eq!(
+        revived.status(),
+        DownloadStatus::Queued,
+        "releasing the reservation must not start the row on its own"
+    );
+    assert!(!manager.running.borrow().contains_key(&id));
+    manager.start_next();
+    assert_eq!(revived.status(), DownloadStatus::Downloading);
+    assert!(manager.running.borrow().contains_key(&id));
+    drain_engine(&manager, id);
+    crate::video::clean_staging(&crate::video::staging_dir(id));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
+    // Only rows that would actually start divert to the requeue path: a
+    // Done snapshot (e.g. clear-finished Undo) over a reserved destination
+    // restores as Done and never starts on its own.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-unremove-done");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-done-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let reserved = dest.join("Clip.mp4");
+    manager.reserve_dest(&reserved);
+    let snap = RemovedSnapshot {
+        url: "https://vimeo.com/123456".to_string(),
+        dest_dir: dest_s,
+        filename: "Clip.mp4".to_string(),
+        status: DownloadStatus::Done,
+        progress: 1.0,
+        detail: String::new(),
+        output_dir: String::new(),
+        segments: None,
+        video_source: Some(crate::media_types::VideoSource::Page {
+            page_url: "https://vimeo.com/123456".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "720p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        }),
+    };
+    let revived = manager.unremove(snap);
+    assert_eq!(
+        revived.status(),
+        DownloadStatus::Done,
+        "a settled restore must not be diverted into a re-download"
+    );
+    assert!(!manager.running.borrow().contains_key(&revived.id()));
+    manager.release_dest(&reserved);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_finalizer_releases_the_reservation_after_the_worker() {
+    // The awaited-worker arm holds the destination until the sweep is done,
+    // then releases it.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-release-async");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 927_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-reserve-async-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("v.mp4");
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
+    manager.remove(id);
+
+    assert!(
+        manager.dest_reserved(&dest),
+        "remove must hold the destination until the finalizer finishes"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while manager.dest_reserved(&dest) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the finalizer never released the destination"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn removing_a_never_spawned_video_row_releases_synchronously() {
+    // With no worker in flight the reclaim runs inline, so the reservation
+    // is already gone when remove returns.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-release-sync");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 928_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-reserve-sync-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("w.mp4");
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/2",
+        "w.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/2".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.remove(id);
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the inline reclaim must release the destination before remove returns"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
 }

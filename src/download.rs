@@ -365,7 +365,10 @@ impl DownloadManager {
             p.exists()
                 // No part-namespace gate here: plain rows never reach
                 // `clean_dest_parts` (remove() only sweeps video rows),
-                // so their stems need no reservation.
+                // so their stems need no reservation. The exact destination
+                // still does: a discard tearing down that path owns it
+                // until its finalizer releases it.
+                || self.dest_reserved(&p)
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| {
@@ -717,7 +720,13 @@ impl DownloadManager {
         while self.running.borrow().len() < self.max_concurrent() {
             let next = (0..self.store.n_items())
                 .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-                .find(|it| it.status() == DownloadStatus::Queued);
+                // A discard still tearing down owns its destination: starting
+                // a row (restored or fresh) into the finalizer's stem-wide
+                // sweep would collide with it. The row stays Queued until
+                // the reservation clears (see `unremove`).
+                .find(|it| {
+                    it.status() == DownloadStatus::Queued && !self.dest_reserved(&it.file_path())
+                });
             match next {
                 Some(item) => self.spawn(item),
                 None => break,
@@ -853,6 +862,10 @@ impl DownloadManager {
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         std::path::Path::new(dir).join(n).exists()
             || crate::video_staging::stem_reserved_in(existing, name_stem(n))
+            // A discard still tearing down owns this exact destination: the
+            // finalizer's sweep (and the orphan removal when the commit won)
+            // must not meet a row that claimed the name meanwhile.
+            || self.dest_reserved(&std::path::Path::new(dir).join(n))
             || (0..self.store.n_items())
                 .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                 .any(|it| it.dest_dir() == dir && it.filename() == n)
@@ -1992,10 +2005,18 @@ impl DownloadManager {
         }
         // Undo bypasses intake dedupe, so it must consult the reservation
         // itself: a discard still tearing down owns this destination, and
-        // starting now would collide with its stem-wide sweep. Requeue
-        // without starting; a later `start_next` picks the row up once the
-        // finalizer releases the destination.
-        if self.dest_reserved(&item.file_path()) {
+        // starting now would collide with its stem-wide sweep. Only rows
+        // that would actually start divert here (`Downloading` already
+        // mapped to `Queued` above): `Done`/`Failed`/other snapshots never
+        // start on their own, so narrowing keeps them byte-identical to the
+        // unreserved path.
+        //
+        // Known limitation: the row requeues without starting, and nothing
+        // wakes it when the finalizer releases the destination — it waits
+        // for the next `start_next` trigger. TODO(Tasks 7–9): deliver a
+        // main-thread wakeup with the quiescence work instead of relying on
+        // a later queue event.
+        if item.status() == DownloadStatus::Queued && self.dest_reserved(&item.file_path()) {
             item.set_status(DownloadStatus::Queued);
             self.store.append(&item);
             self.persist_queue();
