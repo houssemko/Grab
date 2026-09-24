@@ -23,12 +23,13 @@ use crate::video_spawn::{
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
     discover_unified_output, ensure_staging_dir, file_len, read_manifest, release_remux_lease,
-    reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir,
+    reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir, sweep_partial_remuxes,
+    sweep_staging_preserving_recordings,
 };
 use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
 use crate::video_types::{FetchedVideo, VideoOutcome};
 use gettextrs::gettext;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -481,7 +482,7 @@ pub(crate) async fn run_unified_ytdlp(
         m.final_bytes = final_bytes;
         let _ = write_manifest(staging, &m).await;
     }
-    let _ = tokio::fs::remove_dir_all(staging).await;
+    sweep_staging_preserving_recordings(staging);
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
@@ -609,6 +610,14 @@ async fn run_ytdlp_attempt(
 
 /// Remux a stopped live capture into place. Failures surface ffmpeg's
 /// own last line.
+///
+/// ffmpeg writes `<dest>.part` and the result is renamed to `dest` only
+/// once ffmpeg has actually succeeded. That is what separates a completed
+/// recording from the debris of a crashed one: a bare `final.<n>.<ext>`
+/// is always worth keeping, while a `final.<n>.<ext>.part` is worthless
+/// and any sweep may reclaim it. Without the distinction, an attempt that
+/// died mid-remux left a file indistinguishable from a finished capture,
+/// and retention could only be bounded by deleting recordings too.
 pub(crate) async fn remux_live_capture(
     ffmpeg_bin: &Path,
     ts_path: &Path,
@@ -617,10 +626,16 @@ pub(crate) async fn remux_live_capture(
     timeout: Duration,
     page_url: &str,
 ) -> Result<(), VideoError> {
+    let mut partial = dest.as_os_str().to_os_string();
+    partial.push(".part");
+    let partial = PathBuf::from(partial);
     for with_bsf in [true, false] {
+        // ffmpeg runs without `-y` and refuses an existing output, so the
+        // bare retry must not inherit the first attempt's partial.
+        let _ = tokio::fs::remove_file(&partial).await;
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
         cmd.args(live_remux_argv(
-            ts_path, dest, audio_only, with_bsf, page_url,
+            ts_path, &partial, audio_only, with_bsf, page_url,
         ));
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -647,23 +662,34 @@ pub(crate) async fn remux_live_capture(
             Ok(Err(e)) => {
                 reap_child(&mut child, &mut group).await;
                 join_drain(logs).await;
+                let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
                 reap_child(&mut child, &mut group).await;
                 join_drain(logs).await;
+                let _ = tokio::fs::remove_file(&partial).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
             }
         };
         let log_tail = join_drain(logs).await.unwrap_or_default();
         if status.success() {
-            return Ok(());
+            // Only now is this a recording. A crash before this point
+            // leaves a `.part`, which no sweep has to protect.
+            return match tokio::fs::rename(&partial, dest).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    let _ = tokio::fs::remove_file(&partial).await;
+                    Err(VideoError::runtime(&e))
+                }
+            };
         }
         let detail = last_log_line(&log_tail, "ffmpeg reported failure");
         if with_bsf {
             tracing::info!(error = %detail, "live remux without bsf, retrying bare");
             continue;
         }
+        let _ = tokio::fs::remove_file(&partial).await;
         return Err(VideoError::combine(detail));
     }
     unreachable!("bsf retry always returns");
@@ -837,6 +863,11 @@ pub(crate) async fn run_live_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
+    // Reclaim partial remuxes from attempts that died mid-ffmpeg. They are
+    // worthless by construction -- a completed one is renamed to
+    // `final.<n>.<ext>` -- so this bounds what a crash leaves behind without
+    // ever putting a real recording at risk.
+    sweep_partial_remuxes(staging);
     // At most two attempts: the from-start capture the user asked for,
     // then -- only if it recorded nothing and wasn't stopped -- one retry
     // from the live edge. The downgrade flips solely `live_from_start`
@@ -1228,7 +1259,7 @@ pub(crate) async fn run_hls_ytdlp(
             reap_child(&mut child, &mut group).await;
             progress.abort();
             logs.abort();
-            let _ = tokio::fs::remove_dir_all(staging).await;
+            sweep_staging_preserving_recordings(staging);
             return Ok(None);
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
@@ -1297,7 +1328,7 @@ pub(crate) async fn run_hls_ytdlp(
         let _ =
             tokio::fs::remove_file(dest_part_path(&job.dest, "hls", &format!("{lang}.srt"))).await;
     }
-    let _ = tokio::fs::remove_dir_all(staging).await;
+    sweep_staging_preserving_recordings(staging);
     Ok(file_len(&job.dest))
 }
 

@@ -231,6 +231,29 @@ impl DownloadManager {
         id
     }
 
+    /// Reuse a restored row's persisted id where possible, else allocate.
+    ///
+    /// The id is the staging key, so handing a restored row a fresh number
+    /// would point it at a different `<temp>/grab-video/<id>/` than the one
+    /// its last attempt wrote to -- and would let a later row be allocated
+    /// that same number and delete the retained recording.
+    fn claim_id(&self, stored: Option<u64>) -> u64 {
+        let Some(id) = stored else {
+            return self.alloc_id();
+        };
+        // Already owned in this session: a hand-edited or duplicated queue
+        // must never make two rows share one staging directory.
+        if self.find(id).is_some() || self.epoch.borrow().contains_key(&id) {
+            return self.alloc_id();
+        }
+        // Keep the allocator ahead of every id adopted, so a new row can
+        // never be handed a number a restored row still owns.
+        if id >= self.next_id.get() {
+            self.next_id.set(id + 1);
+        }
+        id
+    }
+
     /// The underlying download list.
     pub fn store(&self) -> &gio::ListStore {
         &self.store
@@ -522,37 +545,41 @@ impl DownloadManager {
     ///
     /// # Errors
     /// Returns a display-ready message when the stored entry is invalid.
-    pub fn restore_existing(
-        self: &Rc<Self>,
-        url: &str,
-        dest_dir: &str,
-        filename: &str,
-        status: DownloadStatus,
-        segments: Option<SegmentState>,
-        video_source: Option<crate::media_types::VideoSource>,
-    ) -> Result<DownloadItem, String> {
-        let url = normalize_url(url)?;
-        if !sane_filename(filename) {
-            return Err(format!("Invalid filename in queue: {filename}"));
+    pub fn restore_existing(self: &Rc<Self>, stored: &StoredItem) -> Result<DownloadItem, String> {
+        let StoredItem {
+            id: stored_id,
+            url: raw_url,
+            dest_dir,
+            filename: raw_filename,
+            status,
+            segments,
+            video_source,
+            ..
+        } = stored;
+        let url = normalize_url(raw_url)?;
+        if !sane_filename(raw_filename) {
+            return Err(format!("Invalid filename in queue: {raw_filename}"));
         }
         if !std::path::Path::new(dest_dir).is_absolute() {
             return Err(format!("Invalid destination in queue: {dest_dir}"));
         }
-        let filename = shorten_filename(filename);
-        let item = DownloadItem::new(self.alloc_id(), &url, &filename, dest_dir);
+        let filename = shorten_filename(raw_filename);
+        let item = DownloadItem::new(self.claim_id(*stored_id), &url, &filename, dest_dir);
         // Resumed rows requeue; only settled rows keep their status.
         item.set_status(match status {
-            DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => status,
+            DownloadStatus::Paused | DownloadStatus::Failed | DownloadStatus::Done => *status,
             _ => DownloadStatus::Queued,
         });
         if let Some(st) = segments {
-            self.segment_state.borrow_mut().insert(item.id(), st);
+            self.segment_state
+                .borrow_mut()
+                .insert(item.id(), st.clone());
         }
         if let Some(src) = video_source {
-            let matches = matches!(&src, crate::media_types::VideoSource::Page { page_url, .. } if *page_url == url);
+            let matches = matches!(src, crate::media_types::VideoSource::Page { page_url, .. } if *page_url == url);
             if matches {
                 let audio_only = matches!(
-                    &src,
+                    src,
                     crate::media_types::VideoSource::Page {
                         audio_only: true,
                         ..
@@ -563,7 +590,9 @@ impl DownloadManager {
                 } else {
                     gettext("Waiting to resolve media…")
                 });
-                self.video_sources.borrow_mut().insert(item.id(), src);
+                self.video_sources
+                    .borrow_mut()
+                    .insert(item.id(), src.clone());
             } else {
                 tracing::warn!("dropping video source with mismatched page URL");
             }
@@ -2156,6 +2185,7 @@ impl DownloadManager {
                         .video_source(it.id())
                         .filter(|s| matches!(s, crate::media_types::VideoSource::Page { .. }));
                     items.push(StoredItem {
+                        id: Some(it.id()),
                         url: it.url().to_string(),
                         dest_dir: it.dest_dir().to_string(),
                         filename: it.filename().to_string(),
@@ -2264,6 +2294,14 @@ impl DownloadManager {
     /// Unusable files are moved to `queue.json.bak` (not deleted), so a
     /// single bad write can never silently wipe the whole queue.
     pub fn restore_queue(self: &Rc<Self>) {
+        // Before allocating anything: a queue written before ids were
+        // persisted restores its rows with fresh ids, and those must not
+        // collide with a staging directory some other row still occupies.
+        if let Some(highest) = crate::video::highest_staging_index()
+            && highest >= self.next_id.get()
+        {
+            self.next_id.set(highest + 1);
+        }
         if Self::queue_file().exists() {
             const MAX_QUEUE_BYTES: u64 = 10_000_000;
             const MAX_QUEUE_ITEMS: usize = 1000;
@@ -2341,14 +2379,10 @@ impl DownloadManager {
                         {
                             crate::torrent::stage_selection(&url, sel);
                         }
-                        match self.restore_existing(
-                            &p.item.url,
-                            &p.item.dest_dir,
-                            &p.item.filename,
-                            status,
-                            p.segments,
-                            p.item.video_source.clone(),
-                        ) {
+                        let mut restored_item = p.item.clone();
+                        restored_item.status = status;
+                        restored_item.segments = p.segments;
+                        match self.restore_existing(&restored_item) {
                             Ok(restored) => {
                                 // Re-attach the recorded engine folder.
                                 if let Some(dir) = p.output_dir.clone() {
