@@ -4471,3 +4471,43 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
+
+#[test]
+fn a_pending_discard_reserves_the_destination_against_intake() {
+    // Between remove and its finalizer, the stem must not be claimable:
+    // otherwise the finalizer's stem-wide sweep deletes the *new* row's
+    // part files.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-intake");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::path::PathBuf::from("/tmp/dl/v.mp4");
+    assert!(!manager.dest_reserved(&dest));
+    manager.reserve_dest(&dest);
+    assert!(
+        manager.dest_reserved(&dest),
+        "intake could claim a destination whose row is still tearing down"
+    );
+    manager.release_dest(&dest);
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the reservation outlived the cleanup"
+    );
+}
+
+#[test]
+fn an_undo_does_not_reclaim_a_destination_with_a_pending_discard() {
+    // Undo bypasses intake dedupe and starts a row with the same filename
+    // immediately, so it has to consult the reservation too.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-undo");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::path::PathBuf::from("/tmp/dl/v.mp4");
+    manager.reserve_dest(&dest);
+    assert!(
+        manager.dest_reserved(&dest),
+        "Undo was allowed to reclaim a destination with a pending discard"
+    );
+    let _ = std::fs::remove_dir_all("/tmp/dl");
+}

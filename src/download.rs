@@ -92,6 +92,11 @@ pub struct DownloadManager {
     /// attempt is spawned so the manager and the worker arbitrate on one
     /// object; see `attempt_gate`.
     gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
+    /// Destinations with a discard in flight, by canonical path. Consulted
+    /// by intake *and* `unremove`: the filesystem-derived `stem_reserved_in`
+    /// check cannot see the window between a worker deleting its shell and
+    /// recreating it, and `unremove` bypasses intake entirely.
+    reservations: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Tracked
     /// because a finalizer *owns* the worker handle: shutdown must be able
     /// to stop those workers too, and merely aborting a task that holds a
@@ -167,6 +172,9 @@ impl DownloadManager {
             video_sources: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
+            reservations: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
@@ -284,6 +292,26 @@ impl DownloadManager {
     /// The delivery gate for `id`, if this row has a video attempt.
     pub(crate) fn gate_for(&self, id: u64) -> Option<std::sync::Arc<AttemptGate>> {
         self.gates.borrow().get(&id).cloned()
+    }
+
+    /// Whether `dest` has a row removal still tearing down.
+    pub(crate) fn dest_reserved(&self, dest: &std::path::Path) -> bool {
+        self.reservations
+            .lock()
+            .map(|set| set.contains(dest))
+            .unwrap_or(false)
+    }
+
+    fn reserve_dest(&self, dest: &std::path::Path) {
+        if let Ok(mut set) = self.reservations.lock() {
+            set.insert(dest.to_path_buf());
+        }
+    }
+
+    fn release_dest(&self, dest: &std::path::Path) {
+        if let Ok(mut set) = self.reservations.lock() {
+            set.remove(dest);
+        }
     }
 
     /// Whether the row is currently capturing a live stream (stop-and-keep
@@ -450,6 +478,11 @@ impl DownloadManager {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
                 || crate::video_staging::stem_reserved_in(&existing, name_stem(n))
+                // A discard still tearing down owns this destination: the
+                // finalizer's stem-wide sweep would delete a new row's
+                // parts, and part files on disk cannot show the
+                // pre-recreation window.
+                || self.dest_reserved(&p)
                 || (0..self.store.n_items())
                     .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
                     .any(|it| {
@@ -1757,6 +1790,10 @@ impl DownloadManager {
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
         let _ = gate.discard();
         let staging = crate::video::staging_dir(id);
+        // The tracked task runs on the tokio runtime, where `self` (Rc,
+        // !Send) cannot go: carry the reservation set as an `Arc` clone and
+        // release through it directly once the sweep is done.
+        let reservations = std::sync::Arc::clone(&self.reservations);
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let tracked = crate::runtime::tokio_rt().spawn(async move {
@@ -1769,6 +1806,9 @@ impl DownloadManager {
                         // sanctioned exception to never deleting a finished
                         // file.
                         let _ = std::fs::remove_file(&dest);
+                    }
+                    if let Ok(mut set) = reservations.lock() {
+                        set.remove(&dest);
                     }
                 });
                 // Shutdown must be able to reap this too: it owns the
@@ -1783,6 +1823,7 @@ impl DownloadManager {
             None => {
                 crate::video::clean_staging(&staging);
                 crate::video::clean_dest_parts(&dest);
+                self.release_dest(&dest);
             }
         }
     }
@@ -1890,6 +1931,10 @@ impl DownloadManager {
         // deliver a file for a row that no longer exists.
         if self.video_sources.borrow().contains_key(&id) {
             let dest = self.find(id).map(|i| i.file_path()).unwrap_or_default();
+            // Reserve first: between here and the finalizer's sweep a new
+            // row (or Undo) must not claim this destination, or the
+            // stem-wide sweep would delete the new row's files.
+            self.reserve_dest(&dest);
             // Spawned attempts always have a gate (Task 2 inserts it
             // before spawning); a row that never spawned has none, and no
             // worker can be inside a rename for it, so a fresh gate —
@@ -1944,6 +1989,18 @@ impl DownloadManager {
         // carries it and `start_next` dispatches on it.
         if let Some(src) = snap.video_source {
             self.video_sources.borrow_mut().insert(item.id(), src);
+        }
+        // Undo bypasses intake dedupe, so it must consult the reservation
+        // itself: a discard still tearing down owns this destination, and
+        // starting now would collide with its stem-wide sweep. Requeue
+        // without starting; a later `start_next` picks the row up once the
+        // finalizer releases the destination.
+        if self.dest_reserved(&item.file_path()) {
+            item.set_status(DownloadStatus::Queued);
+            self.store.append(&item);
+            self.persist_queue();
+            self.changed();
+            return item;
         }
         self.insert(item.clone());
         item
