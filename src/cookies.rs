@@ -162,11 +162,12 @@ async fn export_cookies(
         _ => {
             // Timed out (or the wait itself failed): SIGKILL the process
             // group — the child runs under `process_group(0)` like the
-            // download spawns — so a hung yt-dlp can't linger holding the
-            // browser's cookie DB lock. Reap it, drop the temp file, and
-            // fall back to plain requests.
-            crate::video_spawn::kill_tree(&mut child);
-            let _ = child.wait().await;
+            // download spawns — so a hung yt-dlp is signalled off the
+            // browser's cookie DB lock. The reap waits for the child to
+            // actually exit before the temp file is removed; see
+            // `reap_child` for why that wait is unbounded. Then fall back
+            // to plain requests.
+            crate::video_spawn::reap_child(&mut child).await;
             let _ = std::fs::remove_file(&path);
             return None;
         }

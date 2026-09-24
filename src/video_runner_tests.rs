@@ -64,3 +64,54 @@ fn rename_failed_exit_keeps_media_and_staging_but_sweeps_state() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The scratch sweep must not begin until the recorder has been reaped.
+/// Sweeping first could delete a file the recorder is still writing.
+///
+/// A real `Child` cannot demonstrate this: both orders leave the same end
+/// state whenever the reap is quick, and there is no hook in between. So
+/// the sequence is driven here by controlled futures instead.
+#[test]
+fn the_sweep_follows_the_reap() {
+    let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (reap_log, sweep_log) = (log.clone(), log.clone());
+    crate::runtime::tokio_rt().block_on(reap_then_sweep(
+        async move {
+            reap_log.borrow_mut().push("reap");
+        },
+        move || async move {
+            sweep_log.borrow_mut().push("sweep");
+        },
+    ));
+    assert_eq!(
+        *log.borrow(),
+        ["reap", "sweep"],
+        "the recorder must be reaped before its scratch is reclaimed"
+    );
+}
+
+/// The non-vacuity guard for the ordering: a reap that never completes
+/// must stall the sweep indefinitely. Any implementation that ran the two
+/// concurrently, or swept first, would reclaim scratch out from under a
+/// recorder that is demonstrably still running.
+#[test]
+fn a_stalled_reap_blocks_the_sweep() {
+    let swept = std::rc::Rc::new(std::cell::Cell::new(false));
+    let sweep_flag = swept.clone();
+    crate::runtime::tokio_rt().block_on(async {
+        tokio::select! {
+            _ = reap_then_sweep(
+                std::future::pending::<()>(),
+                move || async move { sweep_flag.set(true); },
+            ) => {}
+            // Nothing can satisfy the reap arm, so this is the only way
+            // out: give the sequence a real window to misbehave.
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+    });
+    assert!(
+        !swept.get(),
+        "the sweep ran while the recorder had not been reaped: scratch would be \
+         deleted under a live writer"
+    );
+}

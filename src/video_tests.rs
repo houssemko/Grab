@@ -32,7 +32,7 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
-use crate::video_spawn::{fetch_raw_dump_json, fetch_video_page};
+use crate::video_spawn::{fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command};
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
@@ -4075,6 +4075,74 @@ fn live_capture_retry_never_inherits_stale_state() {
     assert!(
         !dir.join("v.live.mp4.ytdl").exists(),
         "state must not survive"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake recorder that stays blocked for the whole test, so the only
+/// thing that can end it is the group kill under test. The sleep is far
+/// longer than any plausible test: a recorder that outlived its own
+/// assertion would let a broken kill pass.
+fn fake_sleeper(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-sleeper");
+    std::fs::write(&bin, "#!/bin/sh\nsleep 600\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[cfg(unix)]
+#[test]
+fn reap_child_reaps_the_signalled_child() {
+    // `kill_tree` only *signals* the process group. Nothing reaps the
+    // child until something waits on it, and a signalled-but-unreaped
+    // child lingers as a zombie: gone from the scheduler, but still
+    // occupying a pid, so `kill(pid, 0)` still reports success. Only a
+    // completed wait drains it and frees the pid (ESRCH).
+    //
+    // The primary oracle is `child.id()`, checked before anything else
+    // touches the child: tokio clears the cached pid only once a wait has
+    // fused the exit status, and `try_wait` reaps an exited child itself
+    // — so asking it first would make this assertion self-fulfilling.
+    let dir = std::env::temp_dir().join(format!("grab-fakesleeper-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let sleeper = fake_sleeper(&dir);
+
+    // Spawn inside the runtime: tokio's process API needs a reactor for
+    // both `spawn` and `wait`.
+    let pid = crate::runtime::tokio_rt().block_on(async {
+        let mut child = ytdlp_command(&sleeper).spawn().unwrap();
+        let pid = child.id().expect("freshly spawned child has a pid") as libc::pid_t;
+        reap_child(&mut child).await;
+        assert!(
+            child.id().is_none(),
+            "the child was signalled but never waited on: its pid is still cached. \
+             A SIGKILLed `sleep` exits at once, so the reap must have returned"
+        );
+        pid
+    });
+
+    // Supplementary, from outside tokio: the pid is genuinely released,
+    // not just forgotten. Unlike `child.id()`, this one is not race-free —
+    // a pid recycled to an unrelated process in the gap would read as
+    // "still present". That window is a few instructions wide, so this is
+    // corroboration for the primary oracle, never a replacement.
+    // SAFETY: signal 0 is the documented existence probe — it performs
+    // error checking and delivers nothing.
+    let probe = unsafe { libc::kill(pid, 0) };
+    assert_eq!(
+        probe, -1,
+        "the recorder is still in the process table: it was signalled but never reaped \
+         (pid {pid} survived the kill)"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ESRCH),
+        "the recorder's pid must be released, not left held by a zombie"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

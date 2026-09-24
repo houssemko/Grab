@@ -84,12 +84,11 @@ pub(crate) async fn fetch_raw_dump_json(
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => {
-            kill_tree(&mut child);
+            reap_child(&mut child).await;
             return Err(VideoError::fetch(&e));
         }
         Err(_) => {
-            kill_tree(&mut child);
-            let _ = child.wait().await;
+            reap_child(&mut child).await;
             return Err(VideoError::fetch(gettext("the lookup timed out")));
         }
     };
@@ -266,8 +265,9 @@ pub(crate) fn drain_stderr_to_tail(
 
 /// SIGKILL a spawned downloader and the ffmpeg it may have started:
 /// both run in a dedicated process group (`process_group(0)` at
-/// spawn), so one killpg reaps the tree instead of orphaning ffmpeg
-/// mid-merge.
+/// spawn), so one killpg signals the whole group instead of orphaning
+/// ffmpeg mid-merge. Only the direct child is waitable — see
+/// [`reap_child`], which pairs this with the wait.
 pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         // Deliberately unconditional: the group outlives its leader by
@@ -280,6 +280,42 @@ pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
             libc::killpg(pid as libc::pid_t, libc::SIGKILL);
         }
     }
+}
+
+/// [`kill_tree`], then wait for the child to be reaped.
+///
+/// `kill_tree` only *signals* the group, and says nothing about the
+/// ffmpeg grandchildren in it — only the direct yt-dlp child is reaped
+/// here. A signalled child also stays in the process table as a zombie
+/// until something waits on it, so "the signal was sent" is not the same
+/// as "the recorder is gone". Tokio's orphan queue would reap it
+/// eventually; waiting here settles it while the caller is still in a
+/// position to act on the answer.
+///
+/// The wait is deliberately **unbounded**, and that is a real property to
+/// be aware of: SIGKILL is pending, not a termination deadline, so a
+/// child wedged in uninterruptible I/O (a stuck network write, an fsync
+/// against a dead mount) never exits and this blocks. It is kept that way
+/// because every caller here either adopts, remuxes, or deletes the
+/// scratch this process was writing, and proceeding on a merely
+/// signalled child risks a remux reading a file that is still changing.
+/// Bounding the wait was tried and reverted: it converted these paths
+/// from "wait for the exit" into "proceed after a grace period", which is
+/// a data-integrity regression. Fixing the hang properly means deciding
+/// what an unconfirmed exit should do — quarantining the attempt so a
+/// Retry cannot race the writer — which is a separate design question,
+/// and not something to smuggle in as a timeout.
+///
+/// The wait result is discarded, so a `wait()` that errors leaves the
+/// caller with no verdict: the reap is best-effort, and the guarantee
+/// callers actually get is "the exit has been waited on", not "the exit
+/// was observed to happen". Every caller is on an error or cancel path
+/// either way, and propagating the error without a policy for what to do
+/// next would be a half-applied contract — the same reasoning that
+/// removed an earlier `bool` verdict from this helper.
+pub(crate) async fn reap_child(child: &mut tokio::process::Child) {
+    kill_tree(child);
+    let _ = child.wait().await;
 }
 
 /// Join a pipe-drain task with a grace period: a dead child can leave

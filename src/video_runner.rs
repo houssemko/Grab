@@ -17,7 +17,7 @@ use crate::video_progress::{
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
-    discover_ytdlp_output, drain_stderr_to_tail, fetch_video_page, join_drain, kill_tree,
+    discover_ytdlp_output, drain_stderr_to_tail, fetch_video_page, join_drain, reap_child,
     spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
@@ -560,8 +560,7 @@ async fn run_ytdlp_attempt(
     let status = tokio::select! {
         biased;
         _ = &mut *abort => {
-            kill_tree(&mut child);
-            let _ = child.wait().await;
+            reap_child(&mut child).await;
             progress.abort();
             logs.abort();
             return Ok((None, None));
@@ -569,13 +568,13 @@ async fn run_ytdlp_attempt(
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
-                kill_tree(&mut child);
+                reap_child(&mut child).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
-                kill_tree(&mut child);
+                reap_child(&mut child).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::part_failed("timed out"));
@@ -619,13 +618,12 @@ pub(crate) async fn remux_live_capture(
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
-                kill_tree(&mut child);
+                reap_child(&mut child).await;
                 join_drain(logs).await;
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
-                kill_tree(&mut child);
-                let _ = child.wait().await;
+                reap_child(&mut child).await;
                 join_drain(logs).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
             }
@@ -732,6 +730,29 @@ async fn sweep_live_capture(
         // only copy: leave the directory alone.
         Staging::Keep => {}
     }
+}
+
+/// Reap the recorder, and *only then* reclaim its scratch.
+///
+/// The order is the contract, not a stylistic choice: sweeping first
+/// could delete a file the recorder is still writing. It is also nearly
+/// invisible from the outside — a real `Child` offers no hook between the
+/// two steps, and both orders leave the same end state whenever the reap
+/// is quick. So the sequence is factored out to be driven by controlled
+/// futures in `video_runner_tests.rs`, which is what pins it; production
+/// calls it with the real ones.
+///
+/// The sweep is a closure rather than a future, so it cannot even be
+/// constructed before the reap has completed, and swapping the two
+/// arguments is a compile error instead of a silent inversion.
+async fn reap_then_sweep<F, S, G>(reap: F, sweep: S)
+where
+    F: std::future::Future<Output = ()>,
+    S: FnOnce() -> G,
+    G: std::future::Future<Output = ()>,
+{
+    reap.await;
+    sweep().await;
 }
 
 /// One live capture through the yt-dlp binary: variant choice, audio
@@ -863,38 +884,37 @@ pub(crate) async fn run_live_ytdlp(
         let aborted = tokio::select! {
             biased;
             _ = &mut abort => {
-                kill_tree(&mut child);
-                let _ = child.wait().await;
+                reap_child(&mut child).await;
                 true
             }
             waited = tokio::time::timeout(timeout, child.wait()) => {
                 match waited {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
-                        // Reap before sweeping: a still-terminating
-                        // recorder could otherwise write media or state
-                        // after the sweep passes. The recording may
-                        // already exist, so keep it and reclaim only the
-                        // scratch around it.
-                        kill_tree(&mut child);
-                        let _ = child.wait().await;
+                        // Reap, then reclaim — never the other way round.
+                        // The recording may already exist, so the sweep
+                        // keeps it and takes only the scratch around it.
                         progress.abort();
                         logs.abort();
-                        sweep_live_capture(
-                            &out,
-                            &part,
-                            &state,
-                            staging,
-                            Staging::Sweep,
-                            Exit::CaptureWaitFailed,
+                        reap_then_sweep(
+                            reap_child(&mut child),
+                            || {
+                                sweep_live_capture(
+                                    &out,
+                                    &part,
+                                    &state,
+                                    staging,
+                                    Staging::Sweep,
+                                    Exit::CaptureWaitFailed,
+                                )
+                            },
                         )
                         .await;
                         return Err(VideoError::runtime(&e));
                     }
                     Err(_) => {
                         // A stalled live capture still yields what it got.
-                        kill_tree(&mut child);
-                        let _ = child.wait().await;
+                        reap_child(&mut child).await;
                     }
                 }
                 false
@@ -1118,8 +1138,7 @@ pub(crate) async fn run_hls_ytdlp(
     let status = tokio::select! {
         biased;
         _ = abort => {
-            kill_tree(&mut child);
-            let _ = child.wait().await;
+            reap_child(&mut child).await;
             progress.abort();
             logs.abort();
             let _ = tokio::fs::remove_dir_all(staging).await;
@@ -1128,13 +1147,13 @@ pub(crate) async fn run_hls_ytdlp(
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
             Ok(Ok(status)) => status,
             Ok(Err(e)) => {
-                kill_tree(&mut child);
+                reap_child(&mut child).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
-                kill_tree(&mut child);
+                reap_child(&mut child).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::part_failed("timed out"));
