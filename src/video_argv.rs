@@ -277,6 +277,23 @@ pub(crate) fn unified_download_argv(
         "--progress".to_string(),
         "--progress-template".to_string(),
         YTDLP_PROGRESS_TEMPLATE.to_string(),
+        // Every leg embeds metadata, not just merged ones. The video id
+        // is no longer part of the filename, so the file's tags are the
+        // only place it survives: `--embed-metadata` writes the source
+        // `webpage_url` into `comment`, and that URL carries the id.
+        //
+        // This used to be passed only on the merged path, leaving
+        // progressive and audio-only downloads with no tags at all -- so
+        // whether the id was recoverable depended on which leg format
+        // selection happened to take. yt-dlp treats `--embed-metadata` as
+        // implying `--embed-chapters` and routes it through ffmpeg, so this
+        // costs one metadata pass per download; ffmpeg is already a hard
+        // requirement (`ensure_tool_versions`), so no new dependency.
+        //
+        // NOT `live_capture_argv`: yt-dlp would run ffmpeg against a
+        // capture that is still growing, and the live leg remuxes in
+        // Grab's own pass after the recorder is reaped.
+        "--embed-metadata".to_string(),
         "-f".to_string(),
         spec.to_string(),
         "-o".to_string(),
@@ -323,7 +340,6 @@ pub(crate) fn unified_download_argv(
     } else if merging {
         args.push("--merge-output-format".to_string());
         args.push(merge_ext.to_string());
-        args.push("--embed-metadata".to_string());
     }
     if job.embed_subs {
         // Opt-in post-processing: mux downloaded subtitle tracks into the
@@ -416,11 +432,19 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
 /// ffmpeg argv remuxing a stopped live capture (MPEG-TS bytes, possibly
 /// still in the `.part` shell) into the finished file: stream-copy with
 /// faststart for progressive playback. Pure for tests.
+///
+/// `page_url` is stamped into `comment` because this is the one leg
+/// `--embed-metadata` cannot cover: yt-dlp must not post-process a capture
+/// that is still growing, so Grab remuxes the reaped bytes itself. The id
+/// is out of the filename, so this pass is the only place a live recording
+/// can carry its provenance, and MPEG-TS input has no usable global
+/// metadata to copy from.
 pub(crate) fn live_remux_argv(
     ts_path: &Path,
     dest: &Path,
     audio_only: bool,
     with_bsf: bool,
+    page_url: &str,
 ) -> Vec<String> {
     let mut argv = vec![
         "-hide_banner".to_string(),
@@ -446,6 +470,14 @@ pub(crate) fn live_remux_argv(
     // line); anything else remuxes on the bare retry.
     if with_bsf {
         argv.extend(["-bsf:a".to_string(), "aac_adtstoasc".to_string()]);
+    }
+    // Same tag the other legs get from `--embed-metadata`, written here
+    // because they get it from yt-dlp and this leg does not. Trimmed: a
+    // padded value is a different string to anything reading it back.
+    let page_url = page_url.trim();
+    if !page_url.is_empty() {
+        // An output option, so it must precede the output filename.
+        argv.extend(["-metadata".to_string(), format!("comment={page_url}")]);
     }
     argv.extend([
         "-movflags".to_string(),
@@ -497,6 +529,23 @@ pub(crate) fn hls_download_argv(
         "--progress".to_string(),
         "--progress-template".to_string(),
         YTDLP_PROGRESS_TEMPLATE.to_string(),
+        // Every leg embeds metadata, not just merged ones. The video id
+        // is no longer part of the filename, so the file's tags are the
+        // only place it survives: `--embed-metadata` writes the source
+        // `webpage_url` into `comment`, and that URL carries the id.
+        //
+        // This used to be passed only on the merged path, leaving
+        // progressive and audio-only downloads with no tags at all -- so
+        // whether the id was recoverable depended on which leg format
+        // selection happened to take. yt-dlp treats `--embed-metadata` as
+        // implying `--embed-chapters` and routes it through ffmpeg, so this
+        // costs one metadata pass per download; ffmpeg is already a hard
+        // requirement (`ensure_tool_versions`), so no new dependency.
+        //
+        // NOT `live_capture_argv`: yt-dlp would run ffmpeg against a
+        // capture that is still growing, and the live leg remuxes in
+        // Grab's own pass after the recorder is reaped.
+        "--embed-metadata".to_string(),
         "-f".to_string(),
         hls_format_spec(&job.quality, Some(hls_format_id)),
         "-o".to_string(),

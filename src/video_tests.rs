@@ -990,7 +990,6 @@ fn pipeline_reports_missing_tools() {
 
 fn test_video_info(page_url: &str) -> ProbeResult {
     ProbeResult::Single(VideoInfo {
-        id: "x".into(),
         title: "T".into(),
         duration: None,
         duration_string: None,
@@ -1319,7 +1318,6 @@ fn picked_story_entry_parses_as_single_video() {
     let value = story_tray_json();
     let entry = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
     let video = parse_single_video(entry).expect("video");
-    assert_eq!(video.id, "s1");
     assert_eq!(video.title, "Story 1");
 }
 
@@ -1513,27 +1511,18 @@ fn ensure_tool_versions_refuses_missing_binary() {
 // ── default video filename ───────────────────────────────────────────
 
 #[test]
-fn default_video_filename_by_mode() {
-    assert_eq!(
-        default_video_filename("Clip", "abc123", false, None),
-        "Clip [abc123].mp4"
-    );
-    assert_eq!(
-        default_video_filename("Clip", "abc123", true, None),
-        "Clip [abc123].m4a"
-    );
-    // Empty id falls back to the bare title.
-    assert_eq!(default_video_filename("Clip", "", false, None), "Clip.mp4");
-    assert_eq!(
-        default_video_filename("Clip", "   ", true, None),
-        "Clip.m4a"
-    );
-    // Untouched otherwise: sanitizing is the intake's job.
-    assert_eq!(
-        default_video_filename("a/b", "x", false, None),
-        "a/b [x].mp4"
-    );
-    assert_eq!(default_video_filename("", "x", true, None), " [x].m4a");
+fn default_video_filename_carries_no_video_id() {
+    // The id used to ride along in the name as `Title [abc123].mp4`. It is
+    // metadata, not a name: the source URL lands in the file's `comment`
+    // tag via --embed-metadata, so the id is still recoverable after the
+    // file leaves Grab, and a media manager can read it there.
+    assert_eq!(default_video_filename("Clip", false, None), "Clip.mp4");
+    assert_eq!(default_video_filename("Clip", true, None), "Clip.m4a");
+    // Untouched otherwise: sanitizing is the intake's job. Note `a/b`
+    // survives here, so this is still not a safe path -- the intake folds
+    // it before the name reaches disk.
+    assert_eq!(default_video_filename("a/b", false, None), "a/b.mp4");
+    assert_eq!(default_video_filename("", true, None), ".m4a");
 }
 
 #[test]
@@ -1541,16 +1530,12 @@ fn default_video_filename_remux_ext() {
     // Remux target decides the video extension so the worker doesn't
     // claim matroska bytes under an mp4 name; audio-only ignores it.
     assert_eq!(
-        default_video_filename("Clip", "abc123", false, Some("mkv")),
-        "Clip [abc123].mkv"
-    );
-    assert_eq!(
-        default_video_filename("Clip", "", false, Some("mkv")),
+        default_video_filename("Clip", false, Some("mkv")),
         "Clip.mkv"
     );
     assert_eq!(
-        default_video_filename("Clip", "abc123", true, Some("mkv")),
-        "Clip [abc123].m4a"
+        default_video_filename("Clip", true, Some("mkv")),
+        "Clip.m4a"
     );
 }
 
@@ -3030,7 +3015,6 @@ fn fetch_video_page_parses_dump_json() {
     else {
         panic!("single-video dump must parse as Single");
     };
-    assert_eq!(video.id, "abc");
     assert!(video.formats.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3257,13 +3241,14 @@ fn live_argv_pins_planner_id_in_mpegts() {
 }
 
 #[test]
-fn live_remux_argv_copies_with_fixup() {
+fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
     // Map everything, stream-copy, ADTS fixup, faststart.
     let argv = live_remux_argv(
         std::path::Path::new("/tmp/st/live.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4"),
         false,
         true,
+        "https://x.com/watch?v=abc123",
     );
     assert!(argv.windows(2).any(|w| w == ["-map", "0"]));
     assert!(argv.windows(2).any(|w| w == ["-c", "copy"]));
@@ -3278,6 +3263,7 @@ fn live_remux_argv_copies_with_fixup() {
         std::path::Path::new("/tmp/st/final.mp4"),
         false,
         false,
+        "https://x.com/watch?v=abc123",
     );
     assert!(!argv.iter().any(|a| a == "-bsf:a"));
     // Audio-only maps audio alone.
@@ -3286,9 +3272,57 @@ fn live_remux_argv_copies_with_fixup() {
         std::path::Path::new("/tmp/st/final.m4a"),
         true,
         false,
+        "https://x.com/watch?v=abc123",
     );
     assert!(argv.windows(2).any(|w| w == ["-map", "0:a?"]));
     assert!(!argv.iter().any(|a| a == "-bsf:a"));
+}
+
+#[test]
+fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
+    // The live leg is the one path yt-dlp's `--embed-metadata` cannot
+    // cover: it must not post-process a capture that is still growing, so
+    // Grab remuxes the reaped bytes itself. Since the id is no longer in
+    // the filename, this pass is the only place the live recording can
+    // carry its provenance -- and MPEG-TS input has no usable global
+    // metadata to copy, so it has to be set explicitly.
+    let argv = live_remux_argv(
+        std::path::Path::new("/tmp/st/live.mp4.part"),
+        std::path::Path::new("/tmp/st/final.mp4"),
+        false,
+        true,
+        "  https://x.com/watch?v=abc123  ",
+    );
+    let at = argv
+        .iter()
+        .position(|a| a == "-metadata")
+        .expect("live captures must carry their source URL");
+    assert_eq!(
+        argv[at + 1],
+        "comment=https://x.com/watch?v=abc123",
+        "the URL must be trimmed: a padded value is a different string to \
+         anything reading the tag back"
+    );
+    // An output option, so it has to precede the output filename.
+    let out_at = argv.iter().position(|a| a == "--").expect("output");
+    assert!(
+        at < out_at,
+        "-metadata after the output filename is not an output option and \
+         ffmpeg would treat it as a trailing input"
+    );
+
+    // A row with no usable page URL gets no half-formed tag.
+    let argv = live_remux_argv(
+        std::path::Path::new("/tmp/st/live.mp4.part"),
+        std::path::Path::new("/tmp/st/final.mp4"),
+        false,
+        true,
+        "   ",
+    );
+    assert!(
+        !argv.iter().any(|a| a == "-metadata"),
+        "an empty source URL must not become comment="
+    );
 }
 
 /// Fake yt-dlp for live: emits one progress line, writes the `.part`
@@ -3368,6 +3402,7 @@ fn live_capture_adopts_part_and_remuxes() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3411,6 +3446,7 @@ fn live_capture_empty_fails_with_detail() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3474,6 +3510,7 @@ fn live_capture_stale_staging_never_adopts() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3506,6 +3543,7 @@ fn live_capture_refuses_existing_dest() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3548,6 +3586,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3613,6 +3652,7 @@ fn live_capture_abort_adopts_partial() {
             &fake_ff,
             &staging,
             &job,
+            "https://youtu.be/grabtest",
             "h1080",
             abort_rx,
             std::time::Duration::from_secs(30),
@@ -3724,6 +3764,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3798,6 +3839,7 @@ fn live_capture_barren_start_sweeps_state_file() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -3875,6 +3917,7 @@ fn live_capture_lost_rename_race_sweeps_state() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4037,6 +4080,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         &break_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort1,
         std::time::Duration::from_secs(30),
@@ -4069,6 +4113,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
         &copy_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort2,
         std::time::Duration::from_secs(30),
@@ -4156,6 +4201,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4199,6 +4245,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4292,6 +4339,7 @@ fn live_capture_retry_never_inherits_stale_state() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -4522,6 +4570,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
                 &fake_ff,
                 &staging_for_task,
                 &job,
+                "https://youtu.be/grabtest",
                 "h1080",
                 abort_rx,
                 std::time::Duration::from_secs(600),
@@ -5205,7 +5254,7 @@ fn fetch_video_page_resolves_without_flat_playlist() {
         })
         .to_string(),
     );
-    let FetchedVideo::Single(video) = crate::runtime::tokio_rt()
+    let FetchedVideo::Single(_video) = crate::runtime::tokio_rt()
         .block_on(fetch_video_page(
             &bin,
             "https://example.com/v",
@@ -5218,7 +5267,6 @@ fn fetch_video_page_resolves_without_flat_playlist() {
     else {
         panic!("single-video dump must parse as Single");
     };
-    assert_eq!(video.id, "abc");
     let argv = fake_bin_argv(&bin);
     assert!(
         !argv.lines().any(|l| l == "--flat-playlist"),
@@ -5671,6 +5719,58 @@ fn hls_argv_takes_subtitles() {
     let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
     assert_no_subtitle_tokens(&argv);
     assert!(argv.contains(&"--merge-output-format".to_string()));
+}
+
+#[test]
+fn every_download_path_embeds_metadata() {
+    // The id is no longer in the filename, so the file's own tags are the
+    // only place it survives. `--embed-metadata` writes the source
+    // `webpage_url` into `comment`, and that URL carries the id.
+    //
+    // It used to be passed only when merging, which left progressive and
+    // audio-only downloads with no tags at all -- so the id was
+    // recoverable only for some downloads. Coverage must not depend on
+    // which download path the format selection happened to take.
+    let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
+    let ff = std::path::Path::new("/usr/bin/ffmpeg");
+
+    let mut merged = direct_test_job();
+    merged.quality = "1080".into();
+    let m = unified_download_argv(&merged, "a456/ba/b", true, "", ff, out);
+    assert!(
+        m.contains(&"--embed-metadata".to_string()),
+        "merged path lost its tags"
+    );
+
+    // Progressive single stream: not merging, and previously untagged.
+    let mut progressive = direct_test_job();
+    progressive.quality = "best".into();
+    let p = unified_download_argv(&progressive, "a456/ba/b", false, "", ff, out);
+    assert!(
+        p.contains(&"--embed-metadata".to_string()),
+        "a progressive download has no tags, so its id is lost with the filename"
+    );
+
+    // Audio-only: same reasoning, and the most common id-bearing case.
+    let mut audio = direct_test_job();
+    audio.quality = "best".into();
+    audio.audio_only = true;
+    let a = unified_download_argv(&audio, "a456/ba/b", false, "", ff, out);
+    assert!(
+        a.contains(&"--embed-metadata".to_string()),
+        "an audio-only download has no tags, so its id is lost with the filename"
+    );
+
+    // The HLS and unified legs share the builder; the live leg has its own
+    // argv and is covered by its own test.
+    let mut hls = direct_test_job();
+    hls.quality = "best".into();
+    hls.audio_only = true;
+    let h = hls_download_argv(&hls, "h1080", ff, std::path::Path::new("/tmp/dl/v.mkv"));
+    assert!(
+        h.contains(&"--embed-metadata".to_string()),
+        "the HLS leg never embedded metadata, so its id is lost with the filename"
+    );
 }
 
 #[test]
@@ -6728,6 +6828,7 @@ fn live_part_shell_announces_recording_and_is_swept() {
         &fake_ff,
         &staging,
         &job,
+        "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),

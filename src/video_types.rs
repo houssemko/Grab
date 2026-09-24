@@ -125,8 +125,6 @@ pub fn has_fetchable_media(video: &Video) -> bool {
 /// title/duration, and the *page URL* for expiry-safe re-resolve.
 #[derive(Clone, Debug)]
 pub struct VideoInfo {
-    /// Extractor video id (not persisted; informational).
-    pub id: String,
     pub title: String,
     /// Duration in seconds. Read only in tests today; kept as probe
     /// model data alongside `duration_string`.
@@ -168,7 +166,6 @@ impl VideoInfo {
             .min()
             .map(|t| t + FORMAT_URL_LIFETIME);
         Self {
-            id: v.id.clone(),
             title: v.title.clone(),
             duration: v.duration,
             duration_string: v.duration_string.clone(),
@@ -202,15 +199,6 @@ impl ProbeResult {
         match self {
             ProbeResult::Single(v) => &v.title,
             ProbeResult::Playlist(p) => &p.title,
-        }
-    }
-
-    /// Extractor video id for a single-video probe; empty for collections
-    /// (their items carry their own ids, applied per row at queue time).
-    pub fn video_id(&self) -> &str {
-        match self {
-            ProbeResult::Single(v) => &v.id,
-            ProbeResult::Playlist(_) => "",
         }
     }
 
