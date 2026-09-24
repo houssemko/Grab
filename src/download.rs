@@ -47,6 +47,15 @@ pub use crate::download_store::DownloadStatus;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::video::AttemptGate;
 
+/// A removal whose worker is still tearing down.
+struct PendingDiscard {
+    /// Aborts the *worker* directly. Aborting the finalizer instead would
+    /// drop this handle, and dropping a `JoinHandle` detaches the task
+    /// rather than aborting it -- leaving yt-dlp unsupervised.
+    worker_abort: tokio::task::AbortHandle,
+    finalizer: tokio::task::JoinHandle<()>,
+}
+
 pub struct DownloadManager {
     // Borrow discipline: RefCells are never held across `set_*` property
     // notifies or `changed()` — GTK notifies re-enter through updater
@@ -97,12 +106,14 @@ pub struct DownloadManager {
     /// check cannot see the window between a worker deleting its shell and
     /// recreating it, and `unremove` bypasses intake entirely.
     reservations: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
-    /// Finalizers reclaiming a removed row's scratch, by row. Tracked
-    /// because a finalizer *owns* the worker handle: shutdown must be able
-    /// to stop those workers too, and merely aborting a task that holds a
-    /// JoinHandle would detach the worker rather than kill it -- leaving
-    /// yt-dlp running with no supervisor, which is what #180 fixed.
-    discards: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
+    /// Finalizers reclaiming a removed row's scratch, by row. Each
+    /// retains the worker's abort handle beside the finalizer: the
+    /// finalizer *owns* the worker handle, so aborting the finalizer
+    /// would drop it and detach the worker rather than stopping it --
+    /// leaving yt-dlp running with no supervisor, which is what #180
+    /// fixed. Shutdown stops the workers through these handles, then
+    /// awaits the finalizers so their cleanup still runs.
+    discards: RefCell<HashMap<u64, PendingDiscard>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only
     /// signal these (no task abort, no status preset): the worker
     /// finalizes the partial and its message drives the row to Done.
@@ -717,6 +728,12 @@ impl DownloadManager {
     }
 
     fn start_next(self: &Rc<Self>) {
+        // Completed discard finalizers linger by design (shutdown awaits
+        // them): prune them here so the registry does not grow by one entry
+        // per removed row for the life of the session.
+        self.discards
+            .borrow_mut()
+            .retain(|_, pending| !pending.finalizer.is_finished());
         while self.running.borrow().len() < self.max_concurrent() {
             let next = (0..self.store.n_items())
                 .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
@@ -1809,7 +1826,8 @@ impl DownloadManager {
         let reservations = std::sync::Arc::clone(&self.reservations);
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
-                let tracked = crate::runtime::tokio_rt().spawn(async move {
+                let worker_abort = handle.abort_handle();
+                let finalizer = crate::runtime::tokio_rt().spawn(async move {
                     let _ = handle.await;
                     crate::video::clean_staging(&staging);
                     crate::video::clean_dest_parts(&dest);
@@ -1824,10 +1842,17 @@ impl DownloadManager {
                         set.remove(&dest);
                     }
                 });
-                // Shutdown must be able to reap this too: it owns the
-                // worker, and dropping a task that merely holds a
-                // JoinHandle detaches the worker rather than stopping it.
-                self.discards.borrow_mut().insert(id, tracked);
+                // Retain the worker's abort beside the finalizer: shutdown
+                // stops the worker through it, because aborting the
+                // finalizer would drop the worker handle it owns and detach
+                // the worker instead of stopping it.
+                self.discards.borrow_mut().insert(
+                    id,
+                    PendingDiscard {
+                        worker_abort,
+                        finalizer,
+                    },
+                );
             }
             // No task to wait for, so nothing can be writing -- and no
             // orphan is possible either. Sweep the scratch, never the
@@ -2610,18 +2635,27 @@ impl DownloadManager {
     pub fn shutdown(&self) {
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
-        // Abandoned discard finalizers first: each owns a worker handle
-        // that nothing else references any more, so dropping one here would
-        // detach its worker instead of stopping it.
-        let finals: Vec<_> = self.discards.borrow_mut().drain().map(|(_, h)| h).collect();
-        for handle in handles.iter().chain(finals.iter()) {
+        // Discard workers first, through their retained abort handles:
+        // each finalizer owns its worker's JoinHandle, so aborting the
+        // finalizer would drop that handle and detach the worker instead
+        // of stopping it. The finalizers are then awaited (not aborted)
+        // so their cleanup still runs.
+        let finals: Vec<PendingDiscard> =
+            self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
+        for handle in handles.iter() {
             handle.abort();
+        }
+        for pending in &finals {
+            pending.worker_abort.abort();
         }
         // Engine tasks touch only the tokio runtime (never the main thread),
         // so joining them here is prompt and deadlock-free.
         tokio_rt().block_on(async {
-            for handle in handles.into_iter().chain(finals) {
+            for handle in handles {
                 let _ = handle.await;
+            }
+            for pending in finals {
+                let _ = pending.finalizer.await;
             }
         });
         let ids: Vec<u64> = self.segment_state.borrow().keys().cloned().collect();

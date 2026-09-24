@@ -4817,3 +4817,97 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it() {
+    // The finalizer owns the worker handle. Aborting the finalizer drops
+    // that handle, which *detaches* the worker -- yt-dlp would keep running
+    // with no supervisor, which is the regression #180 fixed.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("shutdown-discard");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 926_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-shutdisc-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+
+    // A worker that runs long and records that it was dropped.
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let flag = std::sync::Arc::clone(&dropped);
+    // Owned by the worker future from construction: aborting the task drops
+    // the future (and this guard) whether the abort lands before or after
+    // the first poll, so the flag fires in both orderings. Constructing the
+    // guard inside the future instead would miss an abort that wins the race
+    // with the first poll.
+    let guard = DropFlag(flag);
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    let worker_abort = handle.abort_handle();
+    // The finalizer owns the worker handle, exactly like finish_discard's
+    // awaited-worker arm: awaiting it is what reclaims the scratch.
+    let dest = dest_dir.join("v.mp4");
+    let staging = crate::video::staging_dir(id);
+    let reclaim_gate = std::sync::Arc::clone(&gate);
+    let reservations = std::sync::Arc::clone(&manager.reservations);
+    let finalizer = crate::runtime::tokio_rt().spawn(async move {
+        let _ = handle.await;
+        let _ = reclaim_gate.discard();
+        crate::video::clean_staging(&staging);
+        crate::video::clean_dest_parts(&dest);
+        if let Ok(mut set) = reservations.lock() {
+            set.remove(&dest);
+        }
+    });
+    manager.discards.borrow_mut().insert(
+        id,
+        crate::download::PendingDiscard {
+            worker_abort,
+            finalizer,
+        },
+    );
+
+    manager.shutdown();
+
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown left the worker running: the finalizer's handle was dropped, \
+         which detaches the task instead of aborting it"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
