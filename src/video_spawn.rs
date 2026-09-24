@@ -58,6 +58,7 @@ pub(crate) async fn fetch_raw_dump_json(
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
     let mut child = cmd.spawn().map_err(VideoError::fetch)?;
+    let mut group = ProcessGroupGuard::new(&child);
     let stdout = child
         .stdout
         .take()
@@ -82,13 +83,16 @@ pub(crate) async fn fetch_raw_dump_json(
     let out_task = drain(stdout);
     let err_task = drain(stderr);
     let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
+        Ok(Ok(status)) => {
+            group.disarm();
+            status
+        }
         Ok(Err(e)) => {
-            reap_child(&mut child).await;
+            reap_child(&mut child, &mut group).await;
             return Err(VideoError::fetch(&e));
         }
         Err(_) => {
-            reap_child(&mut child).await;
+            reap_child(&mut child, &mut group).await;
             return Err(VideoError::fetch(gettext("the lookup timed out")));
         }
     };
@@ -263,6 +267,19 @@ pub(crate) fn drain_stderr_to_tail(
     })
 }
 
+/// Signal a process group, ignoring whether it still exists.
+fn signal_group(pid: libc::pid_t) {
+    // Deliberately unconditional: the group outlives its leader by
+    // design (ffmpeg grandchildren), so an exited child still leaves
+    // a group worth signaling — a try_wait gate here would orphan
+    // ffmpeg on every abort-after-exit. The pid-reuse race (recycled
+    // pid that is also a group leader) needs churn no desktop hits.
+    // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
+    unsafe {
+        libc::killpg(pid, libc::SIGKILL);
+    }
+}
+
 /// SIGKILL a spawned downloader and the ffmpeg it may have started:
 /// both run in a dedicated process group (`process_group(0)` at
 /// spawn), so one killpg signals the whole group instead of orphaning
@@ -270,19 +287,88 @@ pub(crate) fn drain_stderr_to_tail(
 /// [`reap_child`], which pairs this with the wait.
 pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
-        // Deliberately unconditional: the group outlives its leader by
-        // design (ffmpeg grandchildren), so an exited child still leaves
-        // a group worth signaling — a try_wait gate here would orphan
-        // ffmpeg on every abort-after-exit. The pid-reuse race (recycled
-        // pid that is also a group leader) needs churn no desktop hits.
-        // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
-        unsafe {
-            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        signal_group(pid as libc::pid_t);
+    }
+}
+
+/// Kills a spawned process group when the task owning it is dropped,
+/// and stops guarding once the child has been reaped.
+///
+/// `Command::kill_on_drop` would cover only the direct child, and
+/// yt-dlp's ffmpeg lives in the same process group. `Drop` is the only
+/// hook that fires when a task is aborted mid-await — which is exactly
+/// what `DownloadManager::shutdown` does, so any cleanup written as an
+/// `async` step after an await simply never runs and the recorder would
+/// outlive the app with no supervisor, still writing to the capture.
+///
+/// **Disarm as soon as the child is reaped.** The guard holds a numeric
+/// PGID, and a reaped leader frees that number for reuse. Keeping the
+/// guard armed across the awaits that follow a normal exit would leave a
+/// window — drain joins alone can take seconds — in which the OS could
+/// recycle the PGID onto an unrelated process group and this would
+/// SIGKILL it. That is a much wider window than the one
+/// [`kill_tree`] already accepts, and unlike `kill_tree` it would fire
+/// when nothing is left to kill.
+///
+/// There are two ways a child gets reaped, and each has its own
+/// obligation:
+///
+/// * Killed and waited by [`reap_child`] — disarmed there, for the
+///   caller, so this path cannot be forgotten.
+/// * Exiting on its own, observed in a runner's own wait arm — the arm
+///   must call [`Self::disarm`] itself, before any post-wait work.
+///
+/// That second obligation is manual, and it has already been missed once
+/// (the cookie export). Every spawn site is expected to carry a guard
+/// *and* a completion-arm disarm; the current six are `run_ytdlp_attempt`
+/// (src/video_runner.rs), `remux_live_capture`, `run_live_ytdlp`,
+/// `run_hls_ytdlp`, `fetch_raw_dump_json` (src/video_spawn.rs) and
+/// `export_cookies` (src/cookies.rs).
+pub(crate) struct ProcessGroupGuard {
+    pid: Option<libc::pid_t>,
+}
+
+impl ProcessGroupGuard {
+    /// `None` when the child was already reaped, so there is no group
+    /// left to signal.
+    pub(crate) fn new(child: &tokio::process::Child) -> Self {
+        Self {
+            pid: child.id().map(|pid| pid as libc::pid_t),
+        }
+    }
+
+    /// Give up ownership: the child has been reaped, so its group id is
+    /// no longer ours to signal.
+    pub(crate) fn disarm(&mut self) {
+        self.pid = None;
+    }
+
+    /// Whether the guard would still signal on drop. Test-only: a guard
+    /// that outlives its child's reap is the bug this predicate exists
+    /// to catch.
+    #[cfg(test)]
+    pub(crate) fn is_armed(&self) -> bool {
+        self.pid.is_some()
+    }
+}
+
+impl Drop for ProcessGroupGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            signal_group(pid);
         }
     }
 }
 
-/// [`kill_tree`], then wait for the child to be reaped.
+/// [`kill_tree`], wait for the child to be reaped, then disarm its
+/// [`ProcessGroupGuard`].
+///
+/// Disarming here is what keeps the guard's PGID from outliving the
+/// process it refers to, for the one path where this helper owns the
+/// wait. A child that exits on its own is reaped by the caller's own
+/// wait arm instead, which must call [`ProcessGroupGuard::disarm`]
+/// itself — see that type's docs for the two obligations and the sites
+/// that carry them.
 ///
 /// `kill_tree` only *signals* the group, and says nothing about the
 /// ffmpeg grandchildren in it — only the direct yt-dlp child is reaped
@@ -313,9 +399,10 @@ pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
 /// either way, and propagating the error without a policy for what to do
 /// next would be a half-applied contract — the same reasoning that
 /// removed an earlier `bool` verdict from this helper.
-pub(crate) async fn reap_child(child: &mut tokio::process::Child) {
+pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut ProcessGroupGuard) {
     kill_tree(child);
     let _ = child.wait().await;
+    group.disarm();
 }
 
 /// Join a pipe-drain task with a grace period: a dead child can leave

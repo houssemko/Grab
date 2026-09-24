@@ -32,7 +32,9 @@ use crate::video_progress::{
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
-use crate::video_spawn::{fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command};
+use crate::video_spawn::{
+    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
+};
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
@@ -4079,6 +4081,207 @@ fn live_capture_retry_never_inherits_stale_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fake recorder that reports its own pid, lays down the scratch a real
+/// live capture writes, then blocks. Aborting the task that owns it
+/// simulates `DownloadManager::shutdown`.
+fn fake_ytdlp_live_abortable(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-live-abortable");
+    std::fs::write(
+        &bin,
+        format!(
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+printf 'partial' > "$out.part"
+printf '{{"downloader": {{}}}}' > "$out.ytdl"
+# Report the group leader (this shell) and a descendant in the same
+# group, so the test can prove the *group* died rather than just the
+# leader. A direct-child-only kill passes a leader-only oracle.
+printf '%s' "$$" > '{pidfile}'
+sleep 600 &
+printf '%s' "$!" > '{childpid}'
+wait
+exit 0
+"#,
+            pidfile = dir.join("recorder-pid").display(),
+            childpid = dir.join("recorder-child-pid").display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Test-only: SIGKILLs a process group on drop, so a failing abort test
+/// cannot leave a 600s orphan behind in CI. Separate from the production
+/// guard because that one is created from a live `Child` and this one is
+/// created from a pid read out of a fixture file.
+///
+/// Disarm it once the group is observed gone, so the harness cannot
+/// signal a PGID the kernel has already handed to something else.
+#[cfg(unix)]
+struct GroupCleanup(Option<libc::pid_t>);
+
+#[cfg(unix)]
+impl GroupCleanup {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for GroupCleanup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: constant signal number; ESRCH (already dead) is harmless.
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+/// Read a pid a fixture wrote, panicking if it is missing or malformed.
+/// Keeps the "wait until the fake is really up" polling readable.
+#[cfg(unix)]
+fn read_pid(path: &std::path::Path) -> libc::pid_t {
+    for _ in 0..200 {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(pid) = raw.trim().parse::<libc::pid_t>()
+        {
+            return pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{} never appeared or held a pid", path.display());
+}
+
+#[cfg(unix)]
+#[test]
+fn aborting_a_live_capture_kills_the_recorder() {
+    // `DownloadManager::shutdown` aborts every running task, which drops
+    // the future mid-await. Tokio does *not* kill a child when its handle
+    // drops, so without a Drop guard the recorder — and any ffmpeg it
+    // started in the same process group — outlives the app and keeps
+    // writing to the capture. This asserts the whole call site, so it can
+    // only pass if production actually installs the guard.
+    let dir = std::env::temp_dir().join(format!("grab-abortlive-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live_abortable(&dir);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let pidfile = dir.join("recorder-pid");
+
+    let recorder = crate::runtime::tokio_rt().spawn(async move {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        // Never fires: the only way this ends is the abort below.
+        let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        // A long stall timeout so the capture cannot finish on its own.
+        let _ = run_live_ytdlp(
+            &fake_yt,
+            &fake_ff,
+            &staging,
+            &job,
+            "h1080",
+            abort_rx,
+            std::time::Duration::from_secs(600),
+            tx,
+        )
+        .await;
+    });
+
+    // Wait for the fake to actually be up before aborting: aborting a
+    // not-yet-spawned task would pass vacuously. The leader pid is read
+    // first and the cleanup guard installed immediately, so any failure
+    // from here on cannot leave the group running behind in CI. Both pids
+    // are needed: the leader alone cannot tell a group kill from a
+    // direct-child kill.
+    let leader = read_pid(&pidfile);
+    let mut cleanup = GroupCleanup(Some(leader));
+    let childpid_file = dir.join("recorder-child-pid");
+    let descendant = crate::runtime::tokio_rt().block_on(async {
+        for _ in 0..200 {
+            if childpid_file.exists() {
+                return read_pid(&childpid_file);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the fake recorder never reported its descendant pid");
+    });
+    // SAFETY: signal 0 checks existence and delivers nothing.
+    unsafe {
+        assert_eq!(
+            libc::kill(leader, 0),
+            0,
+            "the recorder must be running before the abort"
+        );
+        assert_eq!(
+            libc::kill(descendant, 0),
+            0,
+            "the fixture's descendant must be running before the abort"
+        );
+    }
+
+    recorder.abort();
+    crate::runtime::tokio_rt().block_on(async {
+        let _ = recorder.await;
+    });
+
+    // `killpg` is signalled synchronously from the drop, but process
+    // termination and tokio's reaping of the leader are asynchronous, so
+    // poll. The oracle is the *group* plus the descendant: a direct-child
+    // kill (kill_on_drop, start_kill, kill(pid)) would satisfy a
+    // leader-only check while leaving the descendant running.
+    let mut group_gone = false;
+    let mut descendant_gone = false;
+    crate::runtime::tokio_rt().block_on(async {
+        for _ in 0..500 {
+            // SAFETY: both probes check existence and deliver nothing.
+            unsafe {
+                if libc::killpg(leader, 0) == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    group_gone = true;
+                }
+                if libc::kill(descendant, 0) == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                {
+                    descendant_gone = true;
+                }
+            }
+            if group_gone && descendant_gone {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    // The group is gone, so release the PGID: nothing left to signal.
+    cleanup.disarm();
+    drop(cleanup);
+    assert!(
+        group_gone,
+        "the process group survived the abort of its task: an app shutdown would \
+         leave yt-dlp running with no supervisor"
+    );
+    assert!(
+        descendant_gone,
+        "the recorder's descendant (pid {descendant}) survived: only the direct \
+         child was killed, so an ffmpeg would be orphaned on every shutdown"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fake recorder that stays blocked for the whole test, so the only
 /// thing that can end it is the group kill under test. The sleep is far
 /// longer than any plausible test: a recorder that outlived its own
@@ -4117,11 +4320,20 @@ fn reap_child_reaps_the_signalled_child() {
     let pid = crate::runtime::tokio_rt().block_on(async {
         let mut child = ytdlp_command(&sleeper).spawn().unwrap();
         let pid = child.id().expect("freshly spawned child has a pid") as libc::pid_t;
-        reap_child(&mut child).await;
+        let mut group = ProcessGroupGuard::new(&child);
+        reap_child(&mut child, &mut group).await;
         assert!(
             child.id().is_none(),
             "the child was signalled but never waited on: its pid is still cached. \
              A SIGKILLed `sleep` exits at once, so the reap must have returned"
+        );
+        // reap_child disarms for the caller. A guard left armed here would
+        // hold a PGID whose leader no longer exists, and the test's own
+        // teardown drop would signal whatever inherited that number.
+        assert!(
+            !group.is_armed(),
+            "reap_child must disarm the group guard: the reaped leader's PGID \
+             is no longer ours to signal"
         );
         pid
     });

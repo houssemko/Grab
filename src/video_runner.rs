@@ -17,8 +17,8 @@ use crate::video_progress::{
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
-    discover_ytdlp_output, drain_stderr_to_tail, fetch_video_page, join_drain, reap_child,
-    spawn_piped_ytdlp, ytdlp_command,
+    ProcessGroupGuard, discover_ytdlp_output, drain_stderr_to_tail, fetch_video_page, join_drain,
+    reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
@@ -496,6 +496,7 @@ async fn run_ytdlp_attempt(
     cmd.args(argv);
     apply_proxy_env(&mut cmd, proxy);
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
+    let mut group = ProcessGroupGuard::new(&child);
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         // `downloaded_bytes` resets per format leg, so plain max would
@@ -560,21 +561,27 @@ async fn run_ytdlp_attempt(
     let status = tokio::select! {
         biased;
         _ = &mut *abort => {
-            reap_child(&mut child).await;
+            reap_child(&mut child, &mut group).await;
             progress.abort();
             logs.abort();
             return Ok((None, None));
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
-            Ok(Ok(status)) => status,
+            Ok(Ok(status)) => {
+                // The leader is reaped, so release the PGID: holding it
+                // across the drain joins below would leave a window in
+                // which the OS could recycle it onto another group.
+                group.disarm();
+                status
+            }
             Ok(Err(e)) => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::part_failed("timed out"));
@@ -610,20 +617,27 @@ pub(crate) async fn remux_live_capture(
             cmd.process_group(0);
         }
         let mut child = cmd.spawn().map_err(VideoError::runtime)?;
+        let mut group = ProcessGroupGuard::new(&child);
         let stderr = child
             .stderr
             .take()
             .ok_or_else(|| VideoError::runtime("ffmpeg gave no log pipe"))?;
         let logs = drain_stderr_to_tail(stderr);
         let status = match tokio::time::timeout(timeout, child.wait()).await {
-            Ok(Ok(status)) => status,
+            Ok(Ok(status)) => {
+                // The leader is reaped, so release the PGID: holding it
+                // across the drain joins below would leave a window in
+                // which the OS could recycle it onto another group.
+                group.disarm();
+                status
+            }
             Ok(Err(e)) => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 join_drain(logs).await;
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 join_drain(logs).await;
                 return Err(VideoError::part_failed("timed out finalizing"));
             }
@@ -822,6 +836,11 @@ pub(crate) async fn run_live_ytdlp(
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
+        // An abort drops this future mid-await and tokio does not kill a
+        // child when its handle drops, so without this guard a shutdown
+        // orphans the recorder — and the ffmpeg it may have started —
+        // still writing to the capture.
+        let mut group = ProcessGroupGuard::new(&child);
         let tx_p = tx.clone();
         // Recording indicator: live captures often emit no yt-dlp progress
         // lines for long stretches, leaving the row stuck on "Resolving
@@ -884,12 +903,12 @@ pub(crate) async fn run_live_ytdlp(
         let aborted = tokio::select! {
             biased;
             _ = &mut abort => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 true
             }
             waited = tokio::time::timeout(timeout, child.wait()) => {
                 match waited {
-                    Ok(Ok(_)) => {}
+                    Ok(Ok(_)) => group.disarm(),
                     Ok(Err(e)) => {
                         // Reap, then reclaim — never the other way round.
                         // The recording may already exist, so the sweep
@@ -897,7 +916,7 @@ pub(crate) async fn run_live_ytdlp(
                         progress.abort();
                         logs.abort();
                         reap_then_sweep(
-                            reap_child(&mut child),
+                            reap_child(&mut child, &mut group),
                             || {
                                 sweep_live_capture(
                                     &out,
@@ -914,7 +933,7 @@ pub(crate) async fn run_live_ytdlp(
                     }
                     Err(_) => {
                         // A stalled live capture still yields what it got.
-                        reap_child(&mut child).await;
+                        reap_child(&mut child, &mut group).await;
                     }
                 }
                 false
@@ -1058,6 +1077,7 @@ pub(crate) async fn run_hls_ytdlp(
     cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
+    let mut group = ProcessGroupGuard::new(&child);
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
@@ -1138,22 +1158,28 @@ pub(crate) async fn run_hls_ytdlp(
     let status = tokio::select! {
         biased;
         _ = abort => {
-            reap_child(&mut child).await;
+            reap_child(&mut child, &mut group).await;
             progress.abort();
             logs.abort();
             let _ = tokio::fs::remove_dir_all(staging).await;
             return Ok(None);
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
-            Ok(Ok(status)) => status,
+            Ok(Ok(status)) => {
+                // The leader is reaped, so release the PGID: holding it
+                // across the drain joins below would leave a window in
+                // which the OS could recycle it onto another group.
+                group.disarm();
+                status
+            }
             Ok(Err(e)) => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::runtime(&e));
             }
             Err(_) => {
-                reap_child(&mut child).await;
+                reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
                 return Err(VideoError::part_failed("timed out"));

@@ -157,8 +157,15 @@ async fn export_cookies(
         cmd.process_group(0);
     }
     let mut child = cmd.spawn().ok()?;
+    let mut group = crate::video_spawn::ProcessGroupGuard::new(&child);
     let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
+        // Clean exit: the leader is reaped, so release the group id before
+        // any post-wait work. See `ProcessGroupGuard` on why an armed guard
+        // must not outlive its child.
+        Ok(Ok(status)) => {
+            group.disarm();
+            status
+        }
         _ => {
             // Timed out (or the wait itself failed): SIGKILL the process
             // group — the child runs under `process_group(0)` like the
@@ -167,7 +174,7 @@ async fn export_cookies(
             // actually exit before the temp file is removed; see
             // `reap_child` for why that wait is unbounded. Then fall back
             // to plain requests.
-            crate::video_spawn::reap_child(&mut child).await;
+            crate::video_spawn::reap_child(&mut child, &mut group).await;
             let _ = std::fs::remove_file(&path);
             return None;
         }
