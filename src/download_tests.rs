@@ -3186,17 +3186,83 @@ fn remove_cleans_video_staging() {
 }
 
 #[test]
-fn remove_keeps_live_staging_for_finalize() {
-    // Live rows are only signaled on remove, not aborted: the worker's
-    // own finalize path owns staging cleanup, so remove must not race it.
+fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
+    // Regression guard. An earlier attempt made removal cooperative for
+    // *every* row, so a plain HTTP or torrent row -- which has no
+    // `video_abort` sender and never reaches the video cleanup path -- kept
+    // its engine writing after the row was gone, and the completed handle
+    // then leaked a concurrency slot, because the pump tail early-returns
+    // on the epoch entry `remove` drops and so never clears it.
     let (_q, _l) = test_locks();
-    let _qf = test_queue_file("remove-live-staging");
+    let _qf = test_queue_file("remove-plain-abort");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let id = 920_000 + std::process::id() as u64;
-    let dir = crate::video::staging_dir(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    let item = DownloadItem::new(id, "https://x.com/u/status/1", "v.mp4", "/tmp/dl");
+    let id = 923_000 + std::process::id() as u64;
+    let item = DownloadItem::new(id, "https://example.com/x.bin", "x.bin", "/tmp/dl");
+    manager.store().append(&item);
+    manager.epoch.borrow_mut().insert(id, 1);
+
+    let finished = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let finished_task = std::sync::Arc::clone(&finished);
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        *finished_task.lock().unwrap() = true;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
+    manager.remove(id);
+
+    assert!(
+        manager.running.borrow().get(&id).is_none(),
+        "the concurrency slot was not freed immediately, so a long session \
+         would run out of slots"
+    );
+    // A long sleep the abort should have cancelled. If the task was left
+    // running, this returns early and the flag is set.
+    tokio_rt().block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    });
+    assert!(
+        !*finished.lock().unwrap(),
+        "a plain row's engine kept running after its row was removed"
+    );
+}
+
+#[test]
+fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
+    // Two things the old `remove` could neither do nor prove: say *how* to
+    // stop, and wait for the worker before reclaiming anything.
+    //
+    // The construction matters more than the assertions. The stand-in
+    // worker **recreates** the directories before its late write, because
+    // that is what a dying recorder does -- an earlier version of this
+    // test wrote into staging without recreating it, so an inline sweep
+    // had already removed the parent, the write failed, `.ok()` swallowed
+    // it, and the test passed against the very bug it claimed to catch.
+    // Recreating the parent is what makes the two orderings differ: under
+    // an inline sweep the late files reappear and this fails, and only a
+    // sweep that waits for teardown removes them.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-discard-live");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 922_000 + std::process::id() as u64;
+    // A destination unique to this test: `clean_dest_parts` scans the
+    // directory, so a shared one would let it delete files it does not own.
+    let dest_dir = std::env::temp_dir().join(format!("grab-rmdiscard-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let staging = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&staging).unwrap();
+    let part = dest_dir.join("v.live.mp4.part");
+    std::fs::write(&part, b"recorded").unwrap();
+
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
     manager.store().append(&item);
     manager.video_sources.borrow_mut().insert(
         id,
@@ -3212,9 +3278,73 @@ fn remove_keeps_live_staging_for_finalize() {
         },
     );
     manager.live_rows.borrow_mut().insert(id);
+    manager.epoch.borrow_mut().insert(id, 1);
+
+    let (intent_tx, intent_rx) = tokio::sync::oneshot::channel();
+    manager.video_abort.borrow_mut().insert(id, intent_tx);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen_task = std::sync::Arc::clone(&seen);
+    let done = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let done_task = std::sync::Arc::clone(&done);
+    let staging_task = staging.clone();
+    let dest_task = dest_dir.clone();
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let intent = intent_rx.await.ok();
+        *seen_task.lock().unwrap() = intent;
+        // A dying recorder is SIGKILLed, not politely shut down: give the
+        // teardown a beat, then recreate scratch the way a late write
+        // would -- recreating the parents, which is the whole point.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let _ = std::fs::create_dir_all(&staging_task);
+        std::fs::write(staging_task.join("late-remux"), b"late").ok();
+        std::fs::write(dest_task.join("v.live.mp4"), b"late delivery").ok();
+        *done_task.lock().unwrap() = true;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
     manager.remove(id);
-    assert!(dir.exists(), "live finalize still owns staging");
-    let _ = std::fs::remove_dir_all(&dir);
+
+    // Cleanup is deferred to a finalizer that waits for the worker, so it
+    // cannot have finished when `remove` returns. Wait for the worker to
+    // finish writing, then for the sweep to catch up -- a fixed sleep here
+    // would make the whole test a coin flip on machine speed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !*done.lock().unwrap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        *done.lock().unwrap(),
+        "the stand-in worker never ran to completion"
+    );
+    while staging.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !staging.exists(),
+        "staging survived the row: nothing reclaims it once the row is gone"
+    );
+    assert!(
+        !staging.join("late-remux").exists(),
+        "the manager swept before the worker stopped, so scratch recreated \
+         during teardown outlived the row"
+    );
+    assert!(
+        !part.exists() && !dest_dir.join("v.live.mp4").exists(),
+        "the recorder's scratch outlived the row, including anything it \
+         recreated after the sweep"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(crate::video::StopIntent::Discard),
+        "remove must say *how* to stop: a removed row told to Preserve runs \
+         the finalize path and delivers a file that has no row to belong to"
+    );
+    assert!(
+        !manager.live_rows.borrow().contains(&id),
+        "a removed row stayed marked live, so a later row reusing the id would \
+         take the live signal-only paths and skip the abort"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
 #[test]

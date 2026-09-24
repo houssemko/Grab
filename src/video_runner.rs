@@ -35,6 +35,27 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use yt_dlp::model::Video;
 
+/// What a stop means for the attempt it reaches.
+///
+/// This was a bare `oneshot<()>`, which could say "stop" but not *how* to
+/// stop, so the worker had exactly one response: adopt the partial, remux
+/// it, deliver. Row removal inherited that, and a removed row delivered a
+/// file with no row behind it.
+///
+/// The worker applies the intent rather than asking the manager, because
+/// the worker is the only party that knows whether it is capturing live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopIntent {
+    /// Stop and keep what is recorded: a user pressing Stop, pause or
+    /// cancel. A live capture adopts its partial and delivers it.
+    Preserve,
+    /// Stop and throw it away: the row is being removed. The worker reaps
+    /// its recorder and returns without adopting, remuxing or delivering.
+    /// It leaves the scratch, because the manager can only reclaim it
+    /// safely once the task has actually returned.
+    Discard,
+}
+
 /// Run one attempt: resolve → download parts → merge → rename into place.
 /// Returns the final size, or `None` when aborted (the pauser/canceller
 /// already set the row status; the caller sends nothing).
@@ -43,7 +64,7 @@ use yt_dlp::model::Video;
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
 pub async fn run_video_download(
     mut job: VideoJob,
-    mut abort: oneshot::Receiver<()>,
+    mut abort: oneshot::Receiver<StopIntent>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
     use crate::engine_msg::EngineMsg;
@@ -365,7 +386,7 @@ pub(crate) async fn run_unified_ytdlp(
     spec: &str,
     video_ext: Option<&str>,
     total: Option<u64>,
-    abort: &mut oneshot::Receiver<()>,
+    abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
@@ -488,7 +509,7 @@ async fn run_ytdlp_attempt(
     report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
     on_merge: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    abort: &mut oneshot::Receiver<()>,
+    abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
@@ -685,6 +706,10 @@ enum Exit {
     RenameFailed,
     /// Nothing was recorded, so there is nothing to salvage.
     NothingRecorded,
+    /// The row was removed while this attempt was finalizing. There is no
+    /// row left for a delivered file to belong to, so the completed remux
+    /// and the raw shell are both discarded.
+    Discarded,
 }
 
 /// What a terminal exit does with the row's staging directory.
@@ -793,7 +818,7 @@ pub(crate) async fn run_live_ytdlp(
     staging: &Path,
     job: &VideoJob,
     hls_format_id: &str,
-    mut abort: oneshot::Receiver<()>,
+    mut abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
@@ -914,11 +939,11 @@ pub(crate) async fn run_live_ytdlp(
         // `aborted` gates the live-edge retry below: a stopped attempt must
         // never come back as a fresh capture. `&mut abort` keeps the receiver
         // usable for the second attempt when it didn't fire.
-        let aborted = tokio::select! {
+        let (aborted, discarded) = tokio::select! {
             biased;
-            _ = &mut abort => {
+            intent = &mut abort => {
                 reap_child(&mut child, &mut group).await;
-                true
+                (true, matches!(intent, Ok(StopIntent::Discard)))
             }
             waited = tokio::time::timeout(timeout, child.wait()) => {
                 match waited {
@@ -951,10 +976,23 @@ pub(crate) async fn run_live_ytdlp(
                         reap_child(&mut child, &mut group).await;
                     }
                 }
-                false
+                (false, false)
             }
         };
         let _ = join_drain(progress).await;
+        // A discard is not a stop. There is no row left to deliver to, so
+        // the finalize path below must not run: adopting the partial and
+        // remuxing it would place a file at a destination with no row
+        // behind it. The recorder is already reaped, so nothing can write
+        // after this point.
+        //
+        // The scratch is deliberately left. The manager reclaims it only
+        // after this task has returned -- sweeping from inside a task that
+        // may still be running is the race this avoids.
+        if discarded {
+            logs.abort();
+            return Ok(None);
+        }
         let log_tail = join_drain(logs).await.unwrap_or_default();
         // Whatever stopped the capture — user stop, stall, stream end, or
         // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
@@ -1045,6 +1083,25 @@ pub(crate) async fn run_live_ytdlp(
         .await;
         return Err(e);
     }
+    // The second discard observation point, and the linearization one. A
+    // removal can land while the remux is in flight -- long after the
+    // recorder-wait select -- and a oneshot nobody reads is a signal that
+    // never happens, so the worker would carry on and deliver. Here the
+    // row is either still here and this delivers, or it is gone and the
+    // manager's finalizer reclaims the result.
+    if matches!(abort.try_recv(), Ok(StopIntent::Discard)) {
+        sweep_live_capture(
+            &out,
+            &part,
+            &state,
+            staging,
+            Some(&final_tmp),
+            Staging::Sweep,
+            Exit::Discarded,
+        )
+        .await;
+        return Ok(None);
+    }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -1103,7 +1160,7 @@ pub(crate) async fn run_hls_ytdlp(
     staging: &Path,
     job: &VideoJob,
     hls_format_id: &str,
-    abort: oneshot::Receiver<()>,
+    abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {

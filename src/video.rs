@@ -37,7 +37,7 @@ pub use crate::video_quality::{
     default_quality_index, default_video_filename, quality_for_height, quality_labels,
 };
 /// Facade: attempt orchestration lives in [`video_runner`](crate::video_runner) now.
-pub use crate::video_runner::run_video_download;
+pub use crate::video_runner::{StopIntent, run_video_download};
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
 pub use crate::video_spawn::fetch_video_infos;

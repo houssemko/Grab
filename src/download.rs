@@ -86,7 +86,13 @@ pub struct DownloadManager {
     /// Abort senders for running resolver workers, by row. Signalled (then
     /// dropped) from pause/park/cancel paths so the worker stops its
     /// extractor streams promptly; the pump tail also drops them.
-    video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<()>>>,
+    video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
+    /// Finalizers reclaiming a removed row's scratch, by row. Tracked
+    /// because a finalizer *owns* the worker handle: shutdown must be able
+    /// to stop those workers too, and merely aborting a task that holds a
+    /// JoinHandle would detach the worker rather than kill it -- leaving
+    /// yt-dlp running with no supervisor, which is what #180 fixed.
+    discards: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     /// Rows currently capturing a live stream. Pause/cancel/park only
     /// signal these (no task abort, no status preset): the worker
     /// finalizes the partial and its message drives the row to Done.
@@ -95,6 +101,21 @@ pub struct DownloadManager {
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
+}
+
+/// What a stop means for the worker and the bytes it has written.
+///
+/// Distinct from the `StopIntent` the worker receives: this is the
+/// manager's policy decision, that is the instruction it sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// Keep what is recorded. The worker is only signalled, so it runs its
+    /// finalizer, adopts the partial and delivers it -- the semantics
+    /// behind Stop, pause, cancel and cancel-all.
+    Preserve,
+    /// Throw it away. Only row removal does this: the row is gone, so a
+    /// file the worker went on to deliver would have no row to belong to.
+    Discard,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +161,7 @@ impl DownloadManager {
             server_mtime: RefCell::new(HashMap::new()),
             video_sources: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
+            discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
         });
@@ -1374,7 +1396,7 @@ impl DownloadManager {
         let generation = self.epoch.borrow().get(&id).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(id, generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
         // Overwrite any stale sender: its task is dead or guarded stale.
         self.video_abort.borrow_mut().insert(id, abort_tx);
         // Live rows finalize in the worker on stop: track them so
@@ -1511,10 +1533,10 @@ impl DownloadManager {
             // its Finished flip the row to Done. Aborting the task or
             // presetting Paused would drop the recording or strand it.
             // The pump tail frees the slot on completion.
-            self.stop_video_worker(id);
+            self.stop_video_worker(id, crate::video::StopIntent::Preserve);
             return;
         }
-        self.stop_video_worker(id);
+        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -1619,9 +1641,13 @@ impl DownloadManager {
     /// Signal a running resolver worker to stop its extractor streams. The
     /// Grab task abort follows (or already ran): whichever wins, the
     /// attempt is over and a later resume replays from the sidecar.
-    fn stop_video_worker(&self, id: u64) {
+    /// Signal the worker for `id` to stop, with the intent that decides
+    /// what stopping means. The worker applies it: only the worker knows
+    /// whether it is capturing live, including a dialog-less row that
+    /// discovered it mid-resolve.
+    fn stop_video_worker(&self, id: u64, intent: crate::video::StopIntent) {
         if let Some(stop) = self.video_abort.borrow_mut().remove(&id) {
-            let _ = stop.send(());
+            let _ = stop.send(intent);
         }
     }
 
@@ -1631,10 +1657,10 @@ impl DownloadManager {
     /// the worker finalizes and its message completes the row.
     fn park(&self, id: u64) {
         if self.live_rows.borrow().contains(&id) {
-            self.stop_video_worker(id);
+            self.stop_video_worker(id, crate::video::StopIntent::Preserve);
             return;
         }
-        self.stop_video_worker(id);
+        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
         if let Some(handle) = self.running.borrow().get(&id) {
             handle.abort();
         }
@@ -1688,23 +1714,85 @@ impl DownloadManager {
 
     /// Cancel a download; retry with [`DownloadManager::retry`].
     pub fn cancel(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id, false);
+        self.cancel_inner(id, false, Stop::Preserve);
         self.persist_queue();
         self.changed();
         self.start_next();
     }
 
-    fn cancel_inner(&self, id: u64, keep_partial: bool) {
-        // Live rows keep what's recorded (Stop, not Cancel): signal the
-        // worker and skip the task abort plus the Cancelled preset, so
-        // its Finished still lands. Discard via explicit row removal.
-        let live = self.live_rows.borrow().contains(&id);
-        self.stop_video_worker(id);
-        if !live {
-            if let Some(handle) = self.running.borrow().get(&id) {
-                handle.abort();
+    /// Reclaim a removed video row's scratch, but only once its worker
+    /// has actually stopped.
+    ///
+    /// This is why removal cannot sweep inline. A worker mid-teardown can
+    /// recreate what a sweep removed -- yt-dlp rewrites its state file on
+    /// the way out, and a finalize path can still be mid-rename -- so
+    /// unlinking first just loses the race. Awaiting the task is sound
+    /// because the worker drops its process-group guards before it
+    /// returns, and a killed process cannot write again.
+    ///
+    /// Both destinations, not just staging. The worker can still be inside
+    /// its final rename when the row is removed, so the file can land
+    /// *after* an inline sweep; sweeping once the task has returned closes
+    /// that window without needing a tombstone.
+    fn finish_discard(&self, id: u64, dest: std::path::PathBuf) {
+        let staging = crate::video::staging_dir(id);
+        match self.running.borrow_mut().remove(&id) {
+            Some(handle) => {
+                let tracked = crate::runtime::tokio_rt().spawn(async move {
+                    let _ = handle.await;
+                    crate::video::clean_staging(&staging);
+                    crate::video::clean_dest_parts(&dest);
+                });
+                // Shutdown must be able to reap this too: it owns the
+                // worker, and dropping a task that merely holds a
+                // JoinHandle detaches the worker rather than stopping it.
+                self.discards.borrow_mut().insert(id, tracked);
             }
-            self.running.borrow_mut().remove(&id);
+            // No task to wait for, so nothing can be writing.
+            None => {
+                crate::video::clean_staging(&staging);
+                crate::video::clean_dest_parts(&dest);
+            }
+        }
+    }
+
+    fn cancel_inner(&self, id: u64, keep_partial: bool, stop: Stop) {
+        // Live rows keep what's recorded (Stop, not Cancel): signal the
+        // worker and skip the task abort plus the Cancelled preset, so its
+        // Finished still lands. Removal is the one caller that discards,
+        // because the row is gone and a delivered file would have no row to
+        // belong to.
+        let live = self.live_rows.borrow().contains(&id);
+        // Only a *video* worker can be told to discard. A plain HTTP or
+        // torrent row has no `video_abort` sender, so a Discard-only path
+        // would leave its engine writing after the row is gone and leak the
+        // concurrency slot when the pump tail never runs to clear it.
+        let video = self.video_sources.borrow().contains_key(&id);
+        match stop {
+            Stop::Preserve => {
+                self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+                if !live {
+                    if let Some(handle) = self.running.borrow().get(&id) {
+                        handle.abort();
+                    }
+                    self.running.borrow_mut().remove(&id);
+                }
+            }
+            Stop::Discard if video => {
+                self.stop_video_worker(id, crate::video::StopIntent::Discard);
+                // The pump tail normally clears this, but it early-returns
+                // on the epoch entry `remove` drops -- so without this the
+                // marker outlives the row and a later row reusing the id
+                // would take the live signal-only paths.
+                self.live_rows.borrow_mut().remove(&id);
+            }
+            Stop::Discard => {
+                self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+                if let Some(handle) = self.running.borrow().get(&id) {
+                    handle.abort();
+                }
+                self.running.borrow_mut().remove(&id);
+            }
         }
         self.pending_names.borrow_mut().remove(&id);
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
@@ -1722,7 +1810,9 @@ impl DownloadManager {
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
                 crate::torrent::forget_download(id);
             }
-            if !live {
+            // A removed row's status is moot, and a live one must keep
+            // Downloading so its Finished still lands.
+            if stop == Stop::Preserve && !live {
                 item.set_status(DownloadStatus::Cancelled);
                 item.set_detail(item.status().label());
             }
@@ -1754,21 +1844,22 @@ impl DownloadManager {
     /// The partial file is kept so Undo can resume segmented rows instead
     /// of restarting them (plain cancel still discards it).
     pub fn remove(self: &Rc<Self>, id: u64) {
-        self.cancel_inner(id, true);
+        self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
         // Video rows keep split parts beside the finished file
         // (`<stem>.<kind>.<ext>`, yt-dlp defaults) plus the staging
         // sidecar: drop both with the row. Pause/cancel keep them for
         // resume; remove and delete never resume (an Undo'd row
         // re-extracts fresh URLs and restarts), so orphaned parts would
-        // otherwise sit in Downloads until deleted by hand. Live rows are
-        // exempt: their worker was only signaled, not aborted, and its
-        // finalize path cleans up after itself.
-        if !self.live_rows.borrow().contains(&id) && self.video_sources.borrow().contains_key(&id) {
-            crate::video::clean_staging(&crate::video::staging_dir(id));
-            if let Some(item) = self.find(id) {
-                crate::video::clean_dest_parts(&item.file_path());
-            }
+        // otherwise sit in Downloads until deleted by hand.
+        //
+        // Video rows defer the sweep to `finish_discard`, which waits for
+        // the worker: sweeping now would race a teardown that recreates the
+        // files, and a finalize path that is still inside its rename would
+        // deliver a file for a row that no longer exists.
+        if self.video_sources.borrow().contains_key(&id) {
+            let dest = self.find(id).map(|i| i.file_path()).unwrap_or_default();
+            self.finish_discard(id, dest);
         }
         // The snapshot carries the source for Undo; the live map drops it
         // with the row (cancel keeps it, remove doesn't).
@@ -1918,7 +2009,7 @@ impl DownloadManager {
                     DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
                 )
             },
-            |m, id| m.cancel_inner(id, false),
+            |m, id| m.cancel_inner(id, false, Stop::Preserve),
         );
         self.persist_queue();
         self.changed();
@@ -2401,13 +2492,17 @@ impl DownloadManager {
     pub fn shutdown(&self) {
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
-        for handle in &handles {
+        // Abandoned discard finalizers first: each owns a worker handle
+        // that nothing else references any more, so dropping one here would
+        // detach its worker instead of stopping it.
+        let finals: Vec<_> = self.discards.borrow_mut().drain().map(|(_, h)| h).collect();
+        for handle in handles.iter().chain(finals.iter()) {
             handle.abort();
         }
         // Engine tasks touch only the tokio runtime (never the main thread),
         // so joining them here is prompt and deadlock-free.
         tokio_rt().block_on(async {
-            for handle in handles {
+            for handle in handles.into_iter().chain(finals) {
                 let _ = handle.await;
             }
         });
