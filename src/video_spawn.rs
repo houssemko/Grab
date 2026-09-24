@@ -360,6 +360,60 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
+/// Removes a live capture's yt-dlp state file if the task owning it is
+/// dropped.
+///
+/// The file-side sibling of [`ProcessGroupGuard`]. `Drop` is the only
+/// hook that runs when a task is aborted mid-await, which is what
+/// `DownloadManager::shutdown` does, so every `async` cleanup step after
+/// an await is skipped on that path.
+///
+/// **State file only — deliberately not staging.** A blanket staging
+/// sweep is unsafe here: `Staging::Keep` parks a completed remux at
+/// `staging/final.<ext>` as the user's only copy, a Retry reuses the
+/// same staging dir, and a blanket `remove_dir_all` from the retry's
+/// guard would delete the parked recording. The parked file also occupies
+/// the exact name this path writes, so the two cannot be told apart
+/// without a parked-media lifecycle. Leaving staging alone is safe: it
+/// holds no live reference, and the next attempt's per-attempt reset or
+/// the row's own removal reclaims it.
+///
+/// No disarm is needed. Every terminal exit already sweeps the state
+/// file via `sweep_live_capture`, so this is a redundant no-op there; it
+/// only does work when the task was cancelled before reaching one.
+///
+/// **The recorded media is left alone** (`out`, `part`): a user-initiated
+/// Stop adopts a partial recording, so an *involuntary* shutdown must not
+/// destroy hours of captured video. Note the salvage window is the
+/// current session only — the next launch requeues the row, and the
+/// following attempt wipes the shell — so this is "not deleted by the
+/// shutdown", not "preserved for the user indefinitely".
+///
+/// Synchronous `std::fs`: `Drop` cannot await, and a bounded wait here
+/// would be of little use — a killed member can sit at state `Z`
+/// indefinitely under a non-reaping init, so any wait has to give up.
+/// A recorder that is still dying can in principle recreate the state
+/// file after this unlink, but that is self-healing: the next attempt's
+/// per-attempt reset deletes the state path before spawning, so the
+/// residue cannot seed a bad resume.
+pub(crate) struct LiveScratchGuard {
+    state: std::path::PathBuf,
+}
+
+impl LiveScratchGuard {
+    pub(crate) fn new(state: &std::path::Path) -> Self {
+        Self {
+            state: state.to_path_buf(),
+        }
+    }
+}
+
+impl Drop for LiveScratchGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.state);
+    }
+}
+
 /// [`kill_tree`], wait for the child to be reaped, then disarm its
 /// [`ProcessGroupGuard`].
 ///

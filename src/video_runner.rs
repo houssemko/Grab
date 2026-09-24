@@ -17,8 +17,8 @@ use crate::video_progress::{
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
-    ProcessGroupGuard, discover_ytdlp_output, drain_stderr_to_tail, fetch_video_page, join_drain,
-    reap_child, spawn_piped_ytdlp, ytdlp_command,
+    LiveScratchGuard, ProcessGroupGuard, discover_ytdlp_output, drain_stderr_to_tail,
+    fetch_video_page, join_drain, reap_child, spawn_piped_ytdlp, ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
@@ -820,6 +820,10 @@ pub(crate) async fn run_live_ytdlp(
     // other `job` use below stays valid on both attempts.
     let part = out.with_extension(format!("{ext}.part"));
     let state = out.with_extension(format!("{ext}.ytdl"));
+    // Covers the await windows a shutdown can cancel, so the state file
+    // does not outlive the app. The recorded media is left for the user.
+    // Held purely for its `Drop`, hence the underscore.
+    let _scratch = LiveScratchGuard::new(&state);
     let mut downgraded: Option<VideoJob> = None;
     let src = loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);

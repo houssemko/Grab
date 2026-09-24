@@ -4127,17 +4127,17 @@ exit 0
 ///
 /// Disarm it once the group is observed gone, so the harness cannot
 /// signal a PGID the kernel has already handed to something else.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct GroupCleanup(Option<libc::pid_t>);
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl GroupCleanup {
     fn disarm(&mut self) {
         self.0 = None;
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl Drop for GroupCleanup {
     fn drop(&mut self) {
         if let Some(pid) = self.0 {
@@ -4149,9 +4149,95 @@ impl Drop for GroupCleanup {
     }
 }
 
+/// Whether a pid can still execute: present in `/proc` *and* not a
+/// zombie.
+///
+/// A SIGKILLed process is dead the moment the signal lands, but it stays
+/// in the process table as a zombie until it is reaped, and reaping an
+/// orphan is PID 1's policy rather than anything this crate controls. So
+/// "the pid still exists" is the wrong oracle — it fails under a
+/// container whose init never reaps. Reading the scheduler state instead
+/// asks the question that actually matters: can this process run again?
+///
+/// Fails closed: only a `NotFound` read means dead. An unreadable or
+/// unparseable `/proc` returns "still running", so a missing procfs
+/// cannot make every process look killed and pass the assertion.
+#[cfg(target_os = "linux")]
+fn still_running(pid: libc::pid_t) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        // `pid (comm) state ...`, and `comm` may contain spaces and
+        // parens, so the state is the first field after the *last* ')'.
+        Ok(stat) => match stat.rsplit_once(')') {
+            Some((_, rest)) => !rest.trim_start().starts_with('Z'),
+            None => true,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
+    }
+}
+
+/// The oracle itself: an exited-but-unreaped child must read as dead.
+///
+/// This is the condition that broke CI. A child that has exited but not
+/// been waited on is a zombie — it holds its pid until reaped, and is
+/// never scheduled again. `std::process::Child` does not reap on drop, so
+/// simply not calling `wait()` here reproduces a non-reaping-init
+/// environment exactly, without needing one.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unreaped_exited_child_reads_as_dead() {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .unwrap();
+    let pid = child.id() as libc::pid_t;
+    // Poll for the zombie state rather than sleeping a fixed amount: on a
+    // loaded worker the child may not have exited yet, and "not a zombie
+    // yet" must not be mistaken for "dead".
+    let mut state = None;
+    for _ in 0..500 {
+        state = scheduler_state(pid);
+        if matches!(state, Some('Z')) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(
+        state,
+        Some('Z'),
+        "the child should have exited and become a zombie, but its scheduler \
+         state was {state:?} — the fixture is not reproducing the CI condition"
+    );
+    // The pid is still very much present: this is exactly what the old
+    // pid-existence oracle asserted against, and why it failed in CI.
+    // SAFETY: signal 0 checks existence and delivers nothing.
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "the zombie should still hold its pid, since nothing reaped it"
+    );
+    assert!(
+        !still_running(pid),
+        "a zombie can never run again and must not read as running"
+    );
+    let _ = child.wait();
+}
+
+/// The scheduler state letter from `/proc/<pid>/stat`, or `None` when the
+/// process is gone. `None` for any unreadable/unparseable procfs too, so
+/// this is only ever used to *confirm* a state, never to infer one.
+#[cfg(target_os = "linux")]
+fn scheduler_state(pid: libc::pid_t) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // `pid (comm) state ...`; comm may contain spaces and parens, so the
+    // state is the first field after the last ')'.
+    let (_, rest) = stat.rsplit_once(')')?;
+    rest.trim_start().chars().next()
+}
+
 /// Read a pid a fixture wrote, panicking if it is missing or malformed.
 /// Keeps the "wait until the fake is really up" polling readable.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_pid(path: &std::path::Path) -> libc::pid_t {
     for _ in 0..200 {
         if let Ok(raw) = std::fs::read_to_string(path)
@@ -4164,7 +4250,10 @@ fn read_pid(path: &std::path::Path) -> libc::pid_t {
     panic!("{} never appeared or held a pid", path.display());
 }
 
-#[cfg(unix)]
+// Linux-gated: the "dead or just an unreaped zombie" oracle needs /proc.
+// Elsewhere it degrades to a pid-existence probe that cannot tell the two
+// apart, which would be environment-dependent again.
+#[cfg(target_os = "linux")]
 #[test]
 fn aborting_a_live_capture_kills_the_recorder() {
     // `DownloadManager::shutdown` aborts every running task, which drops
@@ -4181,24 +4270,28 @@ fn aborting_a_live_capture_kills_the_recorder() {
     let staging = dir.join("staging");
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
     let pidfile = dir.join("recorder-pid");
 
-    let recorder = crate::runtime::tokio_rt().spawn(async move {
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        // Never fires: the only way this ends is the abort below.
-        let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-        // A long stall timeout so the capture cannot finish on its own.
-        let _ = run_live_ytdlp(
-            &fake_yt,
-            &fake_ff,
-            &staging,
-            &job,
-            "h1080",
-            abort_rx,
-            std::time::Duration::from_secs(600),
-            tx,
-        )
-        .await;
+    let recorder = crate::runtime::tokio_rt().spawn({
+        let staging_for_task = staging.clone();
+        async move {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            // Never fires: the only way this ends is the abort below.
+            let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+            // A long stall timeout so the capture cannot finish on its own.
+            let _ = run_live_ytdlp(
+                &fake_yt,
+                &fake_ff,
+                &staging_for_task,
+                &job,
+                "h1080",
+                abort_rx,
+                std::time::Duration::from_secs(600),
+                tx,
+            )
+            .await;
+        }
     });
 
     // Wait for the fake to actually be up before aborting: aborting a
@@ -4219,65 +4312,88 @@ fn aborting_a_live_capture_kills_the_recorder() {
         }
         panic!("the fake recorder never reported its descendant pid");
     });
-    // SAFETY: signal 0 checks existence and delivers nothing.
-    unsafe {
-        assert_eq!(
-            libc::kill(leader, 0),
-            0,
-            "the recorder must be running before the abort"
-        );
-        assert_eq!(
-            libc::kill(descendant, 0),
-            0,
-            "the fixture's descendant must be running before the abort"
-        );
-    }
+    assert!(
+        still_running(leader),
+        "the recorder must be running before the abort"
+    );
+    assert!(
+        still_running(descendant),
+        "the fixture's descendant must be running before the abort"
+    );
 
     recorder.abort();
     crate::runtime::tokio_rt().block_on(async {
         let _ = recorder.await;
     });
 
-    // `killpg` is signalled synchronously from the drop, but process
-    // termination and tokio's reaping of the leader are asynchronous, so
-    // poll. The oracle is the *group* plus the descendant: a direct-child
-    // kill (kill_on_drop, start_kill, kill(pid)) would satisfy a
+    // `killpg` is signalled synchronously from the drop, but delivery and
+    // termination are asynchronous, so poll. The oracle is "can no longer
+    // execute", checked on *both* the group leader and the descendant: a
+    // direct-child kill (kill_on_drop, start_kill, kill(pid)) satisfies a
     // leader-only check while leaving the descendant running.
-    let mut group_gone = false;
-    let mut descendant_gone = false;
+    //
+    // Deliberately not "the pid is gone": a SIGKILLed process becomes a
+    // zombie and stays in the process table until something reaps it, and
+    // for an orphan that is PID 1's policy, not the code's. A container
+    // whose init does not reap promptly leaves the pid visible forever —
+    // which is exactly how this test passed locally and failed in CI. A
+    // zombie is dead: it will never run another instruction.
+    let mut leader_dead = false;
+    let mut descendant_dead = false;
     crate::runtime::tokio_rt().block_on(async {
         for _ in 0..500 {
-            // SAFETY: both probes check existence and deliver nothing.
-            unsafe {
-                if libc::killpg(leader, 0) == -1
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                {
-                    group_gone = true;
-                }
-                if libc::kill(descendant, 0) == -1
-                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-                {
-                    descendant_gone = true;
-                }
-            }
-            if group_gone && descendant_gone {
+            leader_dead = !still_running(leader);
+            descendant_dead = !still_running(descendant);
+            if leader_dead && descendant_dead {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
-    // The group is gone, so release the PGID: nothing left to signal.
-    cleanup.disarm();
-    drop(cleanup);
+    // Assert before disarming: if either process is still live the guard
+    // must stay armed so its drop reaps the 600s fixture on the way out.
     assert!(
-        group_gone,
-        "the process group survived the abort of its task: an app shutdown would \
-         leave yt-dlp running with no supervisor"
+        leader_dead,
+        "the recorder (pid {leader}) can still run after the abort of its task: an \
+         app shutdown would leave yt-dlp executing with no supervisor"
     );
     assert!(
-        descendant_gone,
-        "the recorder's descendant (pid {descendant}) survived: only the direct \
-         child was killed, so an ffmpeg would be orphaned on every shutdown"
+        descendant_dead,
+        "the recorder's descendant (pid {descendant}) can still run: only the \
+         direct child was killed, so an ffmpeg would be orphaned on every shutdown"
+    );
+    // Both are dead, so release the PGID: nothing left to signal.
+    cleanup.disarm();
+    drop(cleanup);
+
+    // File half of the same abort. The recorded media is deliberately kept:
+    // a user-initiated Stop adopts a partial, so an involuntary shutdown
+    // must not destroy hours of captured video. The state file is scratch
+    // that actively corrupts a later attempt, so it must not outlive the
+    // row.
+    assert!(
+        !dir.join("v.live.mp4.ytdl").exists(),
+        "the abort left yt-dlp's state file behind: a later attempt would resume \
+         fragment N against a shell Grab wipes first, producing a corrupt recording"
+    );
+    // Staging is deliberately NOT swept on an abort. A `Staging::Keep`
+    // exit parks a completed remux there as the user's only copy, a Retry
+    // reuses the same dir, and a blanket sweep from the retry would
+    // delete it — the parked file occupies the same name this path
+    // writes, so the two cannot be told apart.
+    assert!(
+        staging.exists(),
+        "staging must be left alone on an abort: a blanket sweep would destroy a \
+         parked completed remux from an earlier attempt"
+    );
+    assert_eq!(
+        std::fs::read(dir.join("v.live.mp4.part")).unwrap(),
+        b"partial",
+        "the partial recording must not be destroyed by an involuntary shutdown"
+    );
+    assert!(
+        !dest.exists(),
+        "nothing is delivered from an aborted capture"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
