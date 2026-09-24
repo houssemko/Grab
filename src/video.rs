@@ -15,6 +15,10 @@
 //! Grab only *extracts* with yt-dlp: format URLs are resolved here and the
 //! bytes are pulled by the existing engine as ordinary queue items.
 
+/// Facade: the per-attempt delivery decision lives in
+/// [`attempt_gate`](crate::attempt_gate) now.
+#[allow(unused_imports)]
+pub use crate::attempt_gate::AttemptGate;
 /// Facade: attempt inputs + argv builders live in
 /// [`video_argv`](crate::video_argv) now.
 pub use crate::video_argv::VideoJob;
