@@ -644,6 +644,96 @@ pub(crate) async fn remux_live_capture(
     unreachable!("bsf retry always returns");
 }
 
+/// Why a live capture ended, which decides what scratch is redundant.
+///
+/// Raw media (the dest-side `live.` shell) and the staging dir (which
+/// can hold the *completed* remux) are tracked separately on purpose:
+/// conflating them deletes a finished recording on the one exit where
+/// both are the user's only copy.
+#[derive(Clone, Copy)]
+enum Exit {
+    /// The remuxed file was claimed at dest: the shell and the emptied
+    /// staging dir are both redundant.
+    Delivered,
+    /// Dest was claimed mid-capture; the row requeues under a fresh
+    /// name and records again, so this attempt's shell and its remux
+    /// temp are both redundant.
+    Requeued,
+    /// Reaping the recorder failed, so no remux was ever attempted. The
+    /// raw shell may hold bytes the user wants; staging has no remux
+    /// temp to protect.
+    CaptureWaitFailed,
+    /// The remux failed, so `final.<ext>` never materialized and the
+    /// raw shell is the only copy of the capture.
+    RemuxFailed,
+    /// The rename failed unexpectedly (permissions, I/O). Both the raw
+    /// shell and the completed remux are the user's recording: keep
+    /// everything for salvage.
+    RenameFailed,
+    /// Nothing was recorded, so there is nothing to salvage.
+    NothingRecorded,
+}
+
+/// What a terminal exit does with the row's staging directory.
+#[derive(Clone, Copy)]
+enum Staging {
+    /// Remove the whole directory; nothing in it is the user's.
+    Sweep,
+    /// Leave it in place: it still holds the completed recording.
+    Keep,
+}
+
+/// Reclaim one live capture's scratch on any terminal exit.
+///
+/// The `.ytdl` downloader-state file is always *attempted* for removal.
+/// yt-dlp writes it beside its `-o` target for fragment downloads and
+/// deletes it only on a clean exit, but a killed capture (Stop, stall
+/// timeout) never reaches that cleanup. It is pure scratch with a
+/// second, sharper cost: Grab wipes the output and `.part` shell before
+/// every attempt, so a stale state file would make the next attempt
+/// resume fragment N against a shell that no longer exists — a corrupt
+/// recording rather than merely litter.
+///
+/// Staging is swept whole except on [`Exit::RenameFailed`], where
+/// `final.<ext>` is the completed recording the rename could not place.
+/// Leaving it there is the pre-existing behavior for that exit; making
+/// it *durable* across a Retry needs a parked-media lifecycle (a stable
+/// per-row identity, no-clobber moves, reclamation from every row-drop
+/// path), which is a deliberate follow-up rather than part of this
+/// cleanup fix.
+///
+/// Kept dest-side media is reclaimed with the row via
+/// `clean_dest_parts`. A row removed while its finalizer is still in
+/// flight is also a known follow-up (see `DownloadManager::remove`).
+///
+/// Best-effort throughout: a sweep that races a vanished file (or hits
+/// a read-only dir) is a no-op, never an error worth failing a row over.
+async fn sweep_live_capture(
+    out: &Path,
+    part: &Path,
+    state: &Path,
+    staging: &Path,
+    staging_mode: Staging,
+    exit: Exit,
+) {
+    if matches!(
+        exit,
+        Exit::Delivered | Exit::Requeued | Exit::NothingRecorded
+    ) {
+        let _ = tokio::fs::remove_file(out).await;
+        let _ = tokio::fs::remove_file(part).await;
+    }
+    let _ = tokio::fs::remove_file(state).await;
+    match staging_mode {
+        Staging::Sweep => {
+            let _ = tokio::fs::remove_dir_all(staging).await;
+        }
+        // The completed remux is still in staging and is the user's
+        // only copy: leave the directory alone.
+        Staging::Keep => {}
+    }
+}
+
 /// One live capture through the yt-dlp binary: variant choice, audio
 /// rendition, keys and fragment retries are yt-dlp's; the MPEG-TS
 /// container keeps every kill point playable, so Stop is kill, adopt
@@ -676,8 +766,13 @@ pub(crate) async fn run_live_ytdlp(
     // Overwrite pre-flight (Parabolic parity): a finished file already
     // at dest means the capture's rename claim fails at the end — refuse
     // before recording so the pump requeues under a fresh name instead
-    // of wasting an entire stream.
+    // of wasting an entire stream. The refusal also reclaims this
+    // stem's part-namespace scratch: the requeued row carries a fresh
+    // name, so a crashed run's leftover `live.` shells and state would
+    // otherwise never be swept by `clean_dest_parts` again. Only the
+    // part namespace is touched — the finished file at dest is left be.
     if job.dest.exists() {
+        clean_dest_parts(&job.dest);
         return Err(VideoError::exists());
     }
     tokio::fs::create_dir_all(staging)
@@ -689,13 +784,19 @@ pub(crate) async fn run_live_ytdlp(
     // (the other fields the capture argv reads stay as cloned), so every
     // other `job` use below stays valid on both attempts.
     let part = out.with_extension(format!("{ext}.part"));
+    let state = out.with_extension(format!("{ext}.ytdl"));
     let mut downgraded: Option<VideoJob> = None;
     let src = loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
         // Fresh shell per attempt: a failed attempt must never leave a
-        // stale (possibly empty) output for the retry to trip over.
+        // stale (possibly empty) output for the retry to trip over. The
+        // state file joins them for a sharper reason than litter — it
+        // must not survive into a retry whose media shell was just
+        // deleted, or yt-dlp resumes fragment N against a shell that no
+        // longer exists and writes a corrupt recording.
         let _ = tokio::fs::remove_file(&out).await;
         let _ = tokio::fs::remove_file(&part).await;
+        let _ = tokio::fs::remove_file(&state).await;
         let mut cmd = ytdlp_command(youtube_bin);
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
@@ -770,9 +871,24 @@ pub(crate) async fn run_live_ytdlp(
                 match waited {
                     Ok(Ok(_)) => {}
                     Ok(Err(e)) => {
+                        // Reap before sweeping: a still-terminating
+                        // recorder could otherwise write media or state
+                        // after the sweep passes. The recording may
+                        // already exist, so keep it and reclaim only the
+                        // scratch around it.
                         kill_tree(&mut child);
+                        let _ = child.wait().await;
                         progress.abort();
                         logs.abort();
+                        sweep_live_capture(
+                            &out,
+                            &part,
+                            &state,
+                            staging,
+                            Staging::Sweep,
+                            Exit::CaptureWaitFailed,
+                        )
+                        .await;
                         return Err(VideoError::runtime(&e));
                     }
                     Err(_) => {
@@ -815,7 +931,17 @@ pub(crate) async fn run_live_ytdlp(
                 downgraded = Some(edge);
                 continue;
             }
-            let _ = tokio::fs::remove_dir_all(staging).await;
+            // Nothing was recorded, so there is no media to salvage —
+            // drop whatever shells and state yt-dlp left behind.
+            sweep_live_capture(
+                &out,
+                &part,
+                &state,
+                staging,
+                Staging::Sweep,
+                Exit::NothingRecorded,
+            )
+            .await;
             // Startup failure: surface yt-dlp's line, not a generic miss.
             let detail = log_tail
                 .lines()
@@ -832,27 +958,57 @@ pub(crate) async fn run_live_ytdlp(
     let final_tmp = staging.join(format!("final.{ext}"));
     if let Err(e) = remux_live_capture(ffmpeg_bin, &src, &final_tmp, job.audio_only, timeout).await
     {
-        let _ = tokio::fs::remove_dir_all(staging).await;
+        // The remuxed file never materialized, so the recorded shell is
+        // the user's only copy of the capture: keep it for salvage and
+        // drop only the scratch around it.
+        sweep_live_capture(
+            &out,
+            &part,
+            &state,
+            staging,
+            Staging::Sweep,
+            Exit::RemuxFailed,
+        )
+        .await;
         return Err(e);
     }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            // The name was claimed mid-capture; the row requeues under a
+            // fresh name and records again, so the shell is redundant.
+            sweep_live_capture(&out, &part, &state, staging, Staging::Sweep, Exit::Requeued).await;
             return Err(VideoError::exists());
         }
-        Err(e) => return Err(VideoError::combine(&e)),
+        Err(e) => {
+            // An unexpected rename failure (permissions, I/O) leaves both
+            // the recorded shell and the completed remux in staging as the
+            // user's only copies: keep both for salvage. Staging is
+            // deliberately left alone rather than swept — see
+            // `sweep_live_capture` on why that stays a follow-up.
+            sweep_live_capture(
+                &out,
+                &part,
+                &state,
+                staging,
+                Staging::Keep,
+                Exit::RenameFailed,
+            )
+            .await;
+            return Err(VideoError::combine(&e));
+        }
     }
-    // The killed recorder never renames its shell: sweep it now that the
-    // remux is claimed, so stopped captures leave no litter beside the
-    // finished file. A clean yt-dlp exit renamed it already (no-op).
-    // Its `.ytdl` downloader-state file needs the same sweep for a
-    // different reason: yt-dlp deletes that itself only on a clean exit,
-    // so any killed capture that recorded bytes (Stop, stall timeout)
-    // would otherwise strand a JSON sidecar beside the recording. Both
-    // are best-effort; barren attempts never wrote either file.
-    let _ = tokio::fs::remove_file(&part).await;
-    let _ = tokio::fs::remove_file(out.with_extension(format!("{ext}.ytdl"))).await;
-    let _ = tokio::fs::remove_dir_all(staging).await;
+    // Claimed: the remuxed file is at its final name, so the shell and
+    // the state file are both redundant now.
+    sweep_live_capture(
+        &out,
+        &part,
+        &state,
+        staging,
+        Staging::Sweep,
+        Exit::Delivered,
+    )
+    .await;
     Ok(file_len(&job.dest))
 }
 
