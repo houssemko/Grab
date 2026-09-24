@@ -3,6 +3,7 @@ use crate::attempt_gate::AttemptGate;
 #[test]
 fn a_fresh_gate_allows_a_commit() {
     let gate = AttemptGate::new();
+    assert!(!gate.is_discarded(), "a fresh gate is active");
     assert!(gate.try_commit(), "nothing has claimed the attempt yet");
 }
 
@@ -19,6 +20,7 @@ fn a_discard_before_a_commit_blocks_the_commit() {
     // first must win outright, and the worker must then deliver nothing.
     let gate = AttemptGate::new();
     assert!(gate.discard(), "the first discard wins");
+    assert!(!gate.discard(), "a second discard must not also win");
     assert!(!gate.try_commit(), "a discarded attempt must not deliver");
     assert!(gate.is_discarded());
 }
@@ -26,8 +28,8 @@ fn a_discard_before_a_commit_blocks_the_commit() {
 #[test]
 fn a_commit_before_a_discard_blocks_the_discard() {
     // The mirror, and the reason the manager needs `was_delivered`: the
-    // commit wins, so the attempt *will* place a file, and the finalizer
-    // has to know to remove it.
+    // commit wins, so the attempt may attempt delivery, and the finalizer
+    // has to know whether it actually placed a file to remove it.
     let gate = AttemptGate::new();
     assert!(gate.try_commit());
     assert!(!gate.discard(), "the commit already had it");
@@ -35,7 +37,7 @@ fn a_commit_before_a_discard_blocks_the_discard() {
 }
 
 #[test]
-fn delivery_is_recorded_only_once_marked() {
+fn delivery_is_recorded_only_after_marking() {
     let gate = AttemptGate::new();
     assert!(!gate.was_delivered());
     gate.mark_delivered();
