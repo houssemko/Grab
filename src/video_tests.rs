@@ -38,8 +38,9 @@ use crate::video_spawn::{
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
-    is_sparse_shell, is_ytdlp_fragment, read_manifest, resume_plan, sidecar_path_for, staging_dir,
-    staging_root, stem_reserved_in, unified_candidate, unified_temp_limit, ytdlp_output_template,
+    is_sparse_shell, is_ytdlp_fragment, read_manifest, release_remux_lease, reserve_remux_temp,
+    resume_plan, sidecar_path_for, staging_dir, staging_root, stem_reserved_in, unified_candidate,
+    unified_temp_limit, ytdlp_output_template,
 };
 use crate::video_tools::VideoError;
 use crate::video_tools::{
@@ -3676,9 +3677,23 @@ exit 0
 
 /// Fake ffmpeg that always fails: exercises the live path's remux
 /// error branch.
-fn fake_ffmpeg_fail(dir: &std::path::Path) -> std::path::PathBuf {
+/// Fake ffmpeg that fails, optionally after writing a partial output.
+/// The partial is the interesting case: the sweep is no longer recursive,
+/// so this path has to remove its own temp explicitly.
+fn fake_ffmpeg_fail(dir: &std::path::Path, partial: bool) -> std::path::PathBuf {
     let bin = dir.join("fake-ffmpeg-fail");
-    std::fs::write(&bin, "#!/bin/sh\necho \"ffmpeg: nope\" >&2\nexit 1\n").unwrap();
+    let body = if partial {
+        r#"#!/bin/sh
+last=""
+for a in "$@"; do last="$a"; done
+printf 'partial-remux' > "$last"
+echo "ffmpeg: gave up halfway" >&2
+exit 1
+"#
+    } else {
+        "#!/bin/sh\necho \"ffmpeg: nope\" >&2\nexit 1\n"
+    };
+    std::fs::write(&bin, body).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3698,7 +3713,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let fake_yt = fake_ytdlp_live_with_state(&dir);
-    let fake_ff = fake_ffmpeg_fail(&dir);
+    let fake_ff = fake_ffmpeg_fail(&dir, true);
     let staging = dir.join("staging");
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
@@ -3725,6 +3740,15 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         "the recording is the only copy: it must survive a failed remux"
     );
     assert!(!job.dest.exists(), "no file is delivered on a failed remux");
+    // A failed ffmpeg can leave a partial `final.<n>.mp4` behind. It is
+    // not a completed recording, so it is worth nothing to the user, and
+    // the sweep is no longer recursive -- so this path has to remove its
+    // own temp explicitly or the partial would linger for the row's
+    // whole lifetime.
+    assert!(
+        !staging.exists(),
+        "a failed remux left its partial remux temp in staging"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -3933,6 +3957,219 @@ exit 0
     bin
 }
 
+/// Fake recorder that writes a caller-chosen payload, so two attempts
+/// on the same row can be told apart in the filesystem.
+/// Write an executable fake at `path`. Kept separate from the fake
+/// constructors so a test can place one outside the destination
+/// directory -- several fixtures replace that directory with a file, so
+/// anything written into it afterwards would fail.
+fn write_fake(path: &std::path::Path, body: &str) -> std::path::PathBuf {
+    std::fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path.to_path_buf()
+}
+
+/// A live recorder that writes `payload` into its `.part` shell and a
+/// state sidecar, then exits cleanly.
+fn fake_ytdlp_live_payload(
+    dir: &std::path::Path,
+    bin_name: &str,
+    payload: &str,
+) -> std::path::PathBuf {
+    write_fake(
+        &dir.join(bin_name),
+        &format!(
+            r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+printf '{payload}' > "$out.part"
+printf '{{"downloader": {{}}}}' > "$out.ytdl"
+exit 0
+"#,
+            payload = payload
+        ),
+    )
+}
+
+#[test]
+fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
+    // The bug: every attempt remuxed into the same `staging/final.<ext>`
+    // and its cleanup wiped the whole directory, so a retry destroyed the
+    // previous attempt's completed recording -- the only copy of a
+    // capture that could not be placed.
+    //
+    // Attempt 1 cannot place its recording (the destination stops being a
+    // directory, so the final rename fails with ENOTDIR), the obstruction
+    // clears, and attempt 2 succeeds. Attempt 1's recording must survive.
+    //
+    // The trigger is structural, never a permission bit: CI runs this
+    // suite as root in `container: fedora:44`, where CAP_DAC_OVERRIDE
+    // makes a read-only mode a no-op, so a chmod fixture would silently
+    // deliver instead of failing.
+    let base = std::env::temp_dir().join(format!("grab-retryremux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("dest");
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&staging).unwrap();
+    // Attempt 1 replaces `dir` with a file, so every other fake has to
+    // live outside it.
+    let break_ff = fake_ffmpeg_breaking_dest_dir(&dir);
+    let first_yt = fake_ytdlp_live_payload(&dir, "fake-yt-first", "first-attempt");
+    let second_yt = fake_ytdlp_live_payload(&base, "fake-yt-second", "second-attempt");
+    let copy_ff = fake_ffmpeg_copy(&base);
+
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+
+    let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
+    let (_a1, abort1) = tokio::sync::oneshot::channel();
+    let first = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &first_yt,
+        &break_ff,
+        &staging,
+        &job,
+        "h1080",
+        abort1,
+        std::time::Duration::from_secs(30),
+        tx1,
+    ));
+    // Must be the unexpected-rename branch: a requeue would sweep away
+    // the very temp this guards.
+    match first {
+        Err(e) => assert_ne!(
+            e.to_string(),
+            crate::engine_msg::DEST_EXISTS,
+            "the fixture must fail the rename itself, not the pre-flight or the \
+             lost-name race: {e}"
+        ),
+        ok => panic!("a broken destination must fail the row, got {ok:?}"),
+    }
+    assert_eq!(
+        std::fs::read(staging.join("final.1.mp4")).unwrap(),
+        b"first-attempt",
+        "a remux that could not be placed must be kept in staging"
+    );
+
+    // The obstruction clears and the user retries.
+    std::fs::remove_file(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
+    let (_a2, abort2) = tokio::sync::oneshot::channel();
+    let second = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &second_yt,
+        &copy_ff,
+        &staging,
+        &job,
+        "h1080",
+        abort2,
+        std::time::Duration::from_secs(30),
+        tx2,
+    ));
+    assert!(
+        matches!(second, Ok(Some(_))),
+        "the retry must now succeed, got {second:?}"
+    );
+    assert_eq!(
+        std::fs::read(&job.dest).unwrap(),
+        b"second-attempt",
+        "the retry delivers its own recording"
+    );
+    assert_eq!(
+        std::fs::read(staging.join("final.1.mp4")).unwrap(),
+        b"first-attempt",
+        "a successful retry destroyed the earlier attempt's completed remux: \
+         attempt-scoped temp names plus a non-recursive sweep are what prevent this"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_remux_slot_is_claimed_exactly_once() {
+    // Picking a "free" name by scanning is check-then-use: two attempts
+    // that overlap could both see slot 1 free, and the loser's cleanup
+    // would then unlink the winner's completed recording. The lease makes
+    // the claim atomic, and must also fail rather than return a slot that
+    // is already occupied.
+    let dir = std::env::temp_dir().join(format!("grab-remuxslot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+
+    let first = reserve_remux_temp(&staging, "mp4").unwrap();
+    assert_eq!(first.file_name().unwrap(), "final.1.mp4");
+    assert!(
+        first.with_extension("mp4.lease").exists(),
+        "the slot must be claimed with a lease, not merely observed free"
+    );
+
+    // A second claim cannot land on the same slot, even though the temp
+    // file itself does not exist yet.
+    let second = reserve_remux_temp(&staging, "mp4").unwrap();
+    assert_eq!(second.file_name().unwrap(), "final.2.mp4");
+    assert_ne!(second, first, "two claims shared one remux slot");
+
+    // An occupied temp is skipped too, not just an occupied lease.
+    release_remux_lease(&first);
+    std::fs::write(&first, b"an earlier recording").unwrap();
+    let third = reserve_remux_temp(&staging, "mp4").unwrap();
+    assert_eq!(
+        third.file_name().unwrap(),
+        "final.3.mp4",
+        "an existing completed remux must never be handed out as a new slot"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sweep_never_removes_another_attempts_remux() {
+    // The cleanup has to stop being recursive. A pre-existing completed
+    // remux from an earlier attempt is the user's only copy of that
+    // capture, so an attempt that fails before it even remuxes must not
+    // take it out along with the directory.
+    let base = std::env::temp_dir().join(format!("grab-othersremux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("dest");
+    let staging = base.join("staging");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&staging).unwrap();
+    let survivor = staging.join("final.1.mp4");
+    std::fs::write(&survivor, b"earlier-attempt").unwrap();
+
+    // A barren attempt: records nothing, so it never reaches the remux.
+    let fake_yt = fake_ytdlp_live_barren_with_state(&dir);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_a, abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(res.is_err(), "a barren attempt must fail the row");
+    assert_eq!(
+        std::fs::read(&survivor).unwrap(),
+        b"earlier-attempt",
+        "a failing attempt swept an earlier attempt's completed remux out of staging"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn live_capture_rename_failure_keeps_completed_remux() {
     // A final rename that fails is not a requeue: the row keeps failing
@@ -3980,7 +4217,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         ok => panic!("a broken destination must fail the row, got {ok:?}"),
     }
     assert_eq!(
-        std::fs::read(staging.join("final.mp4")).unwrap(),
+        std::fs::read(staging.join("final.1.mp4")).unwrap(),
         b"recorded",
         "the completed remux must survive a failed rename, not be swept"
     );

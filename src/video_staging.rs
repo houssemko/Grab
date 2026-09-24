@@ -143,6 +143,62 @@ pub(crate) fn ytdlp_output_template(path: &Path) -> String {
 /// touches. The finished file itself (`<stem>.<ext>`) never matches.
 const PART_KINDS: &[&str] = &["video.", "audio.", "hls.", "live."];
 
+/// Reserve a remux-temp slot in `staging` for this attempt:
+/// `final.<n>.<ext>`, claimed with a `<...>.lease` sidecar.
+///
+/// The counter is what makes a completed remux durable across attempts.
+/// Every attempt used to write the same `final.<ext>`, so a retry either
+/// overwrote the previous attempt's finished recording or had its cleanup
+/// sweep delete it — the only copy of a capture that could not be placed.
+///
+/// The lease is what makes the claim *exclusive*. Scanning for a free name
+/// and then writing it is check-then-use: two attempts that overlap (a
+/// cancelled worker whose child is still terminating, say) can both see
+/// slot 1 free, and the loser's cleanup would then unlink the winner's
+/// completed recording. `create_new` makes the claim atomic, and also
+/// means an unreadable directory fails closed instead of looking empty.
+///
+/// The lease is a separate file because the temp itself cannot be
+/// pre-created: ffmpeg is invoked without `-y` and refuses to overwrite an
+/// existing output.
+///
+/// Fails rather than handing back an occupied slot — an exhausted range
+/// must not produce a path the caller would later delete.
+pub(crate) fn reserve_remux_temp(staging: &Path, ext: &str) -> Result<PathBuf, VideoError> {
+    let taken = dir_file_names(staging);
+    for n in 1..=9999u32 {
+        let name = format!("final.{n}.{ext}");
+        if taken
+            .iter()
+            .any(|t| t == &name || t == &format!("{name}.lease"))
+        {
+            continue;
+        }
+        let lease = staging.join(format!("{name}.lease"));
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&lease)
+        {
+            Ok(_) => return Ok(staging.join(name)),
+            // Someone else claimed it between the scan and the create.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // Unwritable staging: fail closed. Returning a guess here is
+            // how two attempts end up sharing one slot.
+            Err(e) => return Err(VideoError::staging(e.to_string())),
+        }
+    }
+    Err(VideoError::staging("no free remux slot"))
+}
+
+/// Drop the lease that [`reserve_remux_temp`] created. Best-effort: a
+/// stale lease only costs one slot, never a recording.
+pub(crate) fn release_remux_lease(temp: &Path) {
+    let mut lease = temp.as_os_str().to_os_string();
+    lease.push(".lease");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(lease));
+}
+
 /// Suffix of `file_name` past a `<stem>.` prefix, if it has one.
 /// `strip_prefix` (not slicing past `starts_with`): panic-free even if a
 /// future edit reorders the guards. Pure.

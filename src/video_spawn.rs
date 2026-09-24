@@ -369,14 +369,11 @@ impl Drop for ProcessGroupGuard {
 /// an await is skipped on that path.
 ///
 /// **State file only — deliberately not staging.** A blanket staging
-/// sweep is unsafe here: `Staging::Keep` parks a completed remux at
-/// `staging/final.<ext>` as the user's only copy, a Retry reuses the
-/// same staging dir, and a blanket `remove_dir_all` from the retry's
-/// guard would delete the parked recording. The parked file also occupies
-/// the exact name this path writes, so the two cannot be told apart
-/// without a parked-media lifecycle. Leaving staging alone is safe: it
-/// holds no live reference, and the next attempt's per-attempt reset or
-/// the row's own removal reclaims it.
+/// sweep would delete a sibling `final.<n>.<ext>`: those are earlier
+/// attempts' completed remuxes, and a capture that could not be placed
+/// at its destination is often the user's only copy of it.
+/// `run_live_ytdlp` reclaims precisely its own temp and leaves the rest;
+/// the row's own removal (`clean_staging`) reclaims the directory.
 ///
 /// No disarm is needed. Every terminal exit already sweeps the state
 /// file via `sweep_live_capture`, so this is a redundant no-op there; it

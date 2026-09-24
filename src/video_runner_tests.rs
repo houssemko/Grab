@@ -14,6 +14,11 @@ use super::*;
 /// has to destroy the destination directory in order to fail the rename,
 /// which takes the raw shell with it. This drives the same `matches!` the
 /// runner uses, so adding `RenameFailed` to the drop set fails here.
+///
+/// Also pins the non-recursive staging sweep, which is what makes a
+/// completed remux durable: an earlier attempt's temp is the only copy of
+/// a capture that could not be placed, so no exit may take it out with the
+/// directory.
 #[test]
 fn rename_failed_exit_keeps_media_and_staging_but_sweeps_state() {
     let dir = std::env::temp_dir().join(format!("grab-sweep-rename-{}", std::process::id()));
@@ -25,11 +30,14 @@ fn rename_failed_exit_keeps_media_and_staging_but_sweeps_state() {
     let out = dir.join("v.live.mp4");
     let part = dir.join("v.live.mp4.part");
     let state = dir.join("v.live.mp4.ytdl");
-    let final_tmp = staging.join("final.mp4");
+    let final_tmp = staging.join("final.1.mp4");
+    // A sibling from an earlier attempt on this row.
+    let sibling = staging.join("final.9.mp4");
     std::fs::write(&out, b"finalized").unwrap();
     std::fs::write(&part, b"shell").unwrap();
     std::fs::write(&state, b"fragment-3").unwrap();
     std::fs::write(&final_tmp, b"recorded").unwrap();
+    std::fs::write(&sibling, b"earlier-attempt").unwrap();
 
     crate::runtime::tokio_rt().block_on(async {
         sweep_live_capture(
@@ -37,6 +45,7 @@ fn rename_failed_exit_keeps_media_and_staging_but_sweeps_state() {
             &part,
             &state,
             &staging,
+            None,
             Staging::Keep,
             Exit::RenameFailed,
         )
@@ -60,7 +69,73 @@ fn rename_failed_exit_keeps_media_and_staging_but_sweeps_state() {
     assert_eq!(
         std::fs::read(&final_tmp).unwrap(),
         b"recorded",
-        "the completed remux must survive: Staging::Keep means no directory sweep"
+        "the completed remux must survive: Staging::Keep means no temp is removed"
+    );
+    assert_eq!(
+        std::fs::read(&sibling).unwrap(),
+        b"earlier-attempt",
+        "an earlier attempt's completed remux must survive: the sweep is not recursive"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The sweeping exits remove exactly the temp they were handed, and leave
+/// every sibling alone.
+#[test]
+fn a_sweep_removes_only_its_own_temp() {
+    let dir = std::env::temp_dir().join(format!("grab-sweep-own-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let out = dir.join("v.live.mp4");
+    let part = dir.join("v.live.mp4.part");
+    let state = dir.join("v.live.mp4.ytdl");
+    let mine = staging.join("final.1.mp4");
+    let sibling = staging.join("final.2.mp4");
+    std::fs::write(&mine, b"mine").unwrap();
+    std::fs::write(&sibling, b"sibling").unwrap();
+
+    crate::runtime::tokio_rt().block_on(async {
+        sweep_live_capture(
+            &out,
+            &part,
+            &state,
+            &staging,
+            Some(&mine),
+            Staging::Sweep,
+            Exit::Delivered,
+        )
+        .await;
+    });
+
+    assert!(!mine.exists(), "this attempt's own temp must be swept");
+    assert_eq!(
+        std::fs::read(&sibling).unwrap(),
+        b"sibling",
+        "a sibling attempt's completed remux must survive the sweep"
+    );
+    assert!(
+        staging.exists(),
+        "the directory must stay while a sibling temp is in it"
+    );
+
+    // With the last temp gone, the now-empty directory is reclaimed.
+    std::fs::remove_file(&sibling).unwrap();
+    crate::runtime::tokio_rt().block_on(async {
+        sweep_live_capture(
+            &out,
+            &part,
+            &state,
+            &staging,
+            None,
+            Staging::Sweep,
+            Exit::Delivered,
+        )
+        .await;
+    });
+    assert!(
+        !staging.exists(),
+        "an emptied staging dir should be reclaimed, not left as litter"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

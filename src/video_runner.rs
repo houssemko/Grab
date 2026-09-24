@@ -22,8 +22,8 @@ use crate::video_spawn::{
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, collect_sidecar, dest_part_path,
-    discover_unified_output, ensure_staging_dir, file_len, read_manifest, resume_plan,
-    sidecar_path_for, staging_dir,
+    discover_unified_output, ensure_staging_dir, file_len, read_manifest, release_remux_lease,
+    reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir,
 };
 use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
 use crate::video_types::{FetchedVideo, VideoOutcome};
@@ -671,16 +671,17 @@ enum Exit {
     /// name and records again, so this attempt's shell and its remux
     /// temp are both redundant.
     Requeued,
-    /// Reaping the recorder failed, so no remux was ever attempted. The
-    /// raw shell may hold bytes the user wants; staging has no remux
-    /// temp to protect.
+    /// Reaping the recorder failed, so no remux was ever attempted and
+    /// this attempt claimed no temp. The raw shell may hold bytes the
+    /// user wants.
     CaptureWaitFailed,
-    /// The remux failed, so `final.<ext>` never materialized and the
-    /// raw shell is the only copy of the capture.
+    /// The remux failed, so this attempt's `final.<n>.<ext>` is at best a
+    /// partial and the raw shell is the only usable copy of the capture.
     RemuxFailed,
-    /// The rename failed unexpectedly (permissions, I/O). Both the raw
-    /// shell and the completed remux are the user's recording: keep
-    /// everything for salvage.
+    /// The rename failed unexpectedly (permissions, a destination that
+    /// stopped being a directory, I/O). Both the raw shell and this
+    /// attempt's completed `final.<n>.<ext>` are the user's recording:
+    /// keep both.
     RenameFailed,
     /// Nothing was recorded, so there is nothing to salvage.
     NothingRecorded,
@@ -689,9 +690,12 @@ enum Exit {
 /// What a terminal exit does with the row's staging directory.
 #[derive(Clone, Copy)]
 enum Staging {
-    /// Remove the whole directory; nothing in it is the user's.
+    /// Remove this attempt's own remux temp (when one was claimed), then
+    /// drop the directory if that left it empty. Not recursive: a sibling
+    /// `final.<n>.<ext>` is an earlier attempt's completed recording.
     Sweep,
-    /// Leave it in place: it still holds the completed recording.
+    /// Leave this attempt's temp in place: it is the completed recording
+    /// the final rename could not place.
     Keep,
 }
 
@@ -706,17 +710,21 @@ enum Staging {
 /// resume fragment N against a shell that no longer exists — a corrupt
 /// recording rather than merely litter.
 ///
-/// Staging is swept whole except on [`Exit::RenameFailed`], where
-/// `final.<ext>` is the completed recording the rename could not place.
-/// Leaving it there is the pre-existing behavior for that exit; making
-/// it *durable* across a Retry needs a parked-media lifecycle (a stable
-/// per-row identity, no-clobber moves, reclamation from every row-drop
-/// path), which is a deliberate follow-up rather than part of this
-/// cleanup fix.
+/// Staging is **not** swept recursively. Each attempt remuxes into its
+/// own `final.<n>.<ext>` (see [`remux_temp_path`]), so a sibling temp is
+/// an earlier attempt's completed recording — often the only copy of a
+/// capture that could not be placed at its destination. This removes
+/// exactly this attempt's temp, then drops the directory only if that
+/// left it empty. A whole-directory wipe is what made a Retry destroy
+/// the recording it was retrying.
+///
+/// [`Staging::Keep`] is the one exit that leaves a temp in place, and it
+/// passes no `final_tmp` to remove.
 ///
 /// Kept dest-side media is reclaimed with the row via
-/// `clean_dest_parts`. A row removed while its finalizer is still in
-/// flight is also a known follow-up (see `DownloadManager::remove`).
+/// `clean_dest_parts`, and kept staging by `clean_staging` when the row
+/// is dropped. A row removed while its finalizer is still in flight is
+/// also a known follow-up (see `DownloadManager::remove`).
 ///
 /// Best-effort throughout: a sweep that races a vanished file (or hits
 /// a read-only dir) is a no-op, never an error worth failing a row over.
@@ -725,6 +733,7 @@ async fn sweep_live_capture(
     part: &Path,
     state: &Path,
     staging: &Path,
+    final_tmp: Option<&Path>,
     staging_mode: Staging,
     exit: Exit,
 ) {
@@ -736,14 +745,15 @@ async fn sweep_live_capture(
         let _ = tokio::fs::remove_file(part).await;
     }
     let _ = tokio::fs::remove_file(state).await;
-    match staging_mode {
-        Staging::Sweep => {
-            let _ = tokio::fs::remove_dir_all(staging).await;
-        }
-        // The completed remux is still in staging and is the user's
-        // only copy: leave the directory alone.
-        Staging::Keep => {}
+    if let Staging::Sweep = staging_mode
+        && let Some(path) = final_tmp
+    {
+        let _ = tokio::fs::remove_file(path).await;
+        release_remux_lease(path);
     }
+    // Non-recursive: succeeds only when nothing else is in there, so a
+    // sibling attempt's remux is never collateral.
+    let _ = tokio::fs::remove_dir(staging).await;
 }
 
 /// Reap the recorder, and *only then* reclaim its scratch.
@@ -927,6 +937,7 @@ pub(crate) async fn run_live_ytdlp(
                                     &part,
                                     &state,
                                     staging,
+                                    None,
                                     Staging::Sweep,
                                     Exit::CaptureWaitFailed,
                                 )
@@ -981,6 +992,7 @@ pub(crate) async fn run_live_ytdlp(
                 &part,
                 &state,
                 staging,
+                None,
                 Staging::Sweep,
                 Exit::NothingRecorded,
             )
@@ -998,7 +1010,24 @@ pub(crate) async fn run_live_ytdlp(
         break src;
     };
     tx.send(EngineMsg::Phase(gettext("Finalizing…"))).ok();
-    let final_tmp = staging.join(format!("final.{ext}"));
+    let final_tmp = match reserve_remux_temp(staging, ext) {
+        Ok(path) => path,
+        // No claimable slot: leave the recorded shell for salvage rather
+        // than risk sharing one. This is the pre-existing behaviour.
+        Err(e) => {
+            sweep_live_capture(
+                &out,
+                &part,
+                &state,
+                staging,
+                None,
+                Staging::Sweep,
+                Exit::RemuxFailed,
+            )
+            .await;
+            return Err(e);
+        }
+    };
     if let Err(e) = remux_live_capture(ffmpeg_bin, &src, &final_tmp, job.audio_only, timeout).await
     {
         // The remuxed file never materialized, so the recorded shell is
@@ -1009,6 +1038,7 @@ pub(crate) async fn run_live_ytdlp(
             &part,
             &state,
             staging,
+            Some(&final_tmp),
             Staging::Sweep,
             Exit::RemuxFailed,
         )
@@ -1020,7 +1050,16 @@ pub(crate) async fn run_live_ytdlp(
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // The name was claimed mid-capture; the row requeues under a
             // fresh name and records again, so the shell is redundant.
-            sweep_live_capture(&out, &part, &state, staging, Staging::Sweep, Exit::Requeued).await;
+            sweep_live_capture(
+                &out,
+                &part,
+                &state,
+                staging,
+                Some(&final_tmp),
+                Staging::Sweep,
+                Exit::Requeued,
+            )
+            .await;
             return Err(VideoError::exists());
         }
         Err(e) => {
@@ -1034,6 +1073,7 @@ pub(crate) async fn run_live_ytdlp(
                 &part,
                 &state,
                 staging,
+                None,
                 Staging::Keep,
                 Exit::RenameFailed,
             )
@@ -1048,6 +1088,7 @@ pub(crate) async fn run_live_ytdlp(
         &part,
         &state,
         staging,
+        Some(&final_tmp),
         Staging::Sweep,
         Exit::Delivered,
     )
