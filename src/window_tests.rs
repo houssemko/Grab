@@ -1,7 +1,26 @@
 use crate::download::DownloadStatus;
 use crate::media_types::PlaylistKind;
 use crate::window_dialogs::{fmt_item_duration, playlist_count_label};
-use crate::window_rows::should_pulse;
+use crate::window_rows::{StopCopy, should_pulse, stop_copy};
+
+#[test]
+fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
+    // The stop button is the one control whose meaning inverts: stopping
+    // a normal download throws it away, stopping a live capture keeps the
+    // recording. Shipped, both read "Cancel" (tooltip) and pressing it
+    // gave no feedback at all, so a live user could not tell their
+    // recording was safe.
+    assert_eq!(
+        stop_copy(false),
+        StopCopy::Cancel,
+        "a normal download is discarded, so the discard verb is right"
+    );
+    assert_eq!(
+        stop_copy(true),
+        StopCopy::StopRecording,
+        "a live capture is kept, so the copy must not read as a discard"
+    );
+}
 
 #[test]
 fn should_pulse_covers_row_states() {

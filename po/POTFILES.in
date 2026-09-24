@@ -8,3 +8,4 @@ src/secrets.rs
 src/torrent.rs
 src/video.rs
 src/window.rs
+src/window_rows.rs

@@ -155,6 +155,34 @@ pub(crate) fn should_pulse(status: DownloadStatus, is_live: bool, progress: f64)
     status == DownloadStatus::Downloading && (is_live || progress <= 0.0)
 }
 
+/// Which of the two meanings the row's stop button currently carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StopCopy {
+    /// A normal download: stopping it discards the bytes.
+    Cancel,
+    /// A live capture: stopping it keeps the recording.
+    StopRecording,
+}
+
+/// The stop button is the one control whose meaning inverts — cancelling
+/// a normal download discards it, stopping a live capture keeps the
+/// recording — so the copy has to follow the row's state rather than
+/// staying "Cancel" for both.
+///
+/// The decision is pure and testable; the wording is not here on purpose.
+/// `xgettext` only extracts *literal* `gettext("…")` arguments, so
+/// returning strings from this function and translating them at the call
+/// site would put every label permanently out of reach of translators.
+/// The enum keeps the logic testable while the UI keeps the literals at
+/// the translation boundary.
+pub(crate) fn stop_copy(is_live: bool) -> StopCopy {
+    if is_live {
+        StopCopy::StopRecording
+    } else {
+        StopCopy::Cancel
+    }
+}
+
 /// Set a row button's icon, tooltip, and screen-reader label from one
 /// verb: the three always agree for state-toggle buttons, so binding
 /// them keeps the accessible name from drifting off the visual one.
@@ -194,17 +222,15 @@ fn refresh_row(
     let live_capturing = active && is_live;
     w.toggle_btn.set_visible(running && !live_capturing);
     w.stop_btn.set_visible(running);
-    if live_capturing {
-        w.stop_btn.set_tooltip_text(Some(&gettext("Stop")));
-        w.stop_btn
-            .update_property(&[gtk4::accessible::Property::Label(&gettext(
-                "Stop recording",
-            ))]);
-    } else {
-        w.stop_btn.set_tooltip_text(Some(&gettext("Cancel")));
-        w.stop_btn
-            .update_property(&[gtk4::accessible::Property::Label(&gettext("Cancel"))]);
-    }
+    // Header capitalization for the tooltip, sentence case for the
+    // accessible name — an a11y label is a spoken phrase, not a caption.
+    let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {
+        StopCopy::Cancel => (gettext("Cancel"), gettext("Cancel")),
+        StopCopy::StopRecording => (gettext("Stop Recording"), gettext("Stop recording")),
+    };
+    w.stop_btn.set_tooltip_text(Some(&stop_tip));
+    w.stop_btn
+        .update_property(&[gtk4::accessible::Property::Label(&stop_a11y)]);
     // Deferring only makes sense while holding a slot that someone else
     // is waiting for; queued rows are already waiting.
     w.queue_btn.set_visible(
@@ -705,7 +731,26 @@ pub(crate) fn build_row(
     }
     {
         let m = Rc::clone(manager);
-        stop_btn.connect_clicked(move |_| m.cancel(id));
+        let t = Rc::clone(toasts);
+        stop_btn.connect_clicked(move |_| {
+            // Read the live flag first: `cancel` may change the row's
+            // state, and the toast is about the state the user clicked
+            // in, not the one they were left in.
+            let copy = stop_copy(m.is_live_video(id));
+            m.cancel(id);
+            // The HIG says not to rely on a tooltip for essential
+            // information — it is unavailable on touch. Whether the
+            // recording survives is essential, and this is the one
+            // control whose meaning inverts, so it gets a real channel.
+            //
+            // Progress, not completion: at click time the remux has not
+            // run and can still fail (a capture stopped before any bytes
+            // records nothing and the row goes Failed), so promising a
+            // finished save would be a promise the code cannot keep.
+            if copy == StopCopy::StopRecording {
+                t.add_toast(adw::Toast::new(&gettext("Saving recording…")));
+            }
+        });
     }
     {
         let m = Rc::clone(manager);
