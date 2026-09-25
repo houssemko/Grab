@@ -74,23 +74,25 @@ jobs:
           --repo=flatpak-repo --install-deps-from=flathub build
           build-aux/io.github.houssemko.Grab.json
 
-      - name: Bundle
-        run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.houssemko.Grab
-
-      # Read back what the bundle actually embeds: the app version, the
-      # metainfo release notes, and the vendored crate list. A tag
-      # published before a lock/metainfo change would otherwise ship the
-      # previous dependency set and notes with no visible sign. Test-mode
-      # bundles have no tag, so the version is read from the tree.
+      # Read back what the repo actually embeds before packing it: the
+      # installed metainfo's newest release must match the tag, or a tag
+      # published before the metainfo was updated ships stale release
+      # notes with no visible sign. The .flatpak file itself is an opaque
+      # ostree GVariant (not a tarball), so the repo -- exactly what
+      # build-bundle packs -- is inspected with the ostree CLI. Test-mode
+      # bundles have no tag, so the version is read from Cargo.toml.
       - name: Check bundle contents
         env:
           TAG: ${{ inputs.release-tag }}
         run: |
           if [ -n "$TAG" ]; then
-            ./build-aux/check-bundle-contents.py Grab.flatpak --tag "$TAG"
+            ./build-aux/check-bundle-contents.py --repo flatpak-repo --tag "$TAG"
           else
-            ./build-aux/check-bundle-contents.py Grab.flatpak --tag "v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+            ./build-aux/check-bundle-contents.py --repo flatpak-repo --tag "v$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
           fi
+
+      - name: Bundle
+        run: flatpak build-bundle flatpak-repo Grab.flatpak io.github.houssemko.Grab
 
       - name: Attach to the release
         if: inputs.release-tag != ''

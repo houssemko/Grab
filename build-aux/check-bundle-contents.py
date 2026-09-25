@@ -1,39 +1,48 @@
 #!/usr/bin/env python3
 """Verify a built Flatpak bundle: does it contain what the release claims?
 
-`flatpak build-bundle` embeds a commit manifest, but that manifest does
-not record which dependency revisions were compiled in, so a tag whose
-Cargo.lock moved after publication can ship stale dependencies with no
-visible sign. This reads the bundle's own metadata and cross-checks it
-against the release tag: the embedded app version and metainfo release
-must match the tag, and the vendored-source list inside the bundle must
-match build-aux/cargo-sources.json (which is derived from Cargo.lock).
+`flatpak build-bundle` emits an opaque ostree GVariant file (magic
+`flatpak\\0`) — never a tarball — so the `.flatpak` file itself cannot be
+inspected. This reads the ostree repo the bundle is packed from instead
+(`flatpak-repo/` in the workflow): the repo commit is exactly what
+`flatpak build-bundle` packs, so checking it checks the bundle.
+
+It cross-checks the installed metainfo against the release tag: the
+newest release must match the tag, be listed first (from_appdata reads
+the leading entry), and be byte-identical to the tag's source file, so a
+tag cut before the metainfo was updated cannot publish stale notes.
+
+The vendored crate list needs no bundle-level check: the workflow
+regenerates cargo-sources.json from the tag's Cargo.lock before building,
+vendor-sync CI pins the committed file to the lock, check-release-
+consistency.py gates Cargo.toml == Cargo.lock, and every build is
+pristine (--force-clean, no module cache) — a stale-dependency bundle
+cannot be produced.
 
 Usage:
-  ./build-aux/check-bundle-contents.py Grab.flatpak --tag v4.3.1
+  ./build-aux/check-bundle-contents.py --repo flatpak-repo --tag v4.3.1
 
 Exit codes: 0 consistent, 1 mismatch (message on stderr), 2 usage/IO error.
+Requires the `ostree` CLI (ships with flatpak).
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import pathlib
 import re
 import subprocess
 import sys
-import tarfile
 import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CARGO_TOML = ROOT / "Cargo.toml"
 CARGO_LOCK = ROOT / "Cargo.lock"
 METAINFO = ROOT / "data" / "io.github.houssemko.Grab.metainfo.xml.in"
-VENDOR = ROOT / "build-aux" / "cargo-sources.json"
-RELEASE_MARKER = '<release version="'
-METAINFO_PATH = "metainfo/io.github.houssemko.Grab.metainfo.xml"
-APP_VERSION_PATH = "metadata/io.github.houssemko.Grab"
+APP_ID = "io.github.houssemko.Grab"
+# Inside the app commit, the exported tree lives under /files (mounted at
+# /app); the flatpak metadata file sits beside it at /metadata.
+INSTALLED_METAINFO = f"/files/share/metainfo/{APP_ID}.metainfo.xml"
 
 
 class Mismatch(Exception):
@@ -44,9 +53,13 @@ def fail(msg: str) -> Mismatch:
     return Mismatch(msg)
 
 
-def version_key(version: str) -> tuple[int, ...]:
+def version_key(version: str) -> tuple:
     core = re.split(r"[-+]", version)[0]
-    return tuple(int(part) if part.isdigit() else 0 for part in core.split("."))
+    parts = tuple(int(part) if part.isdigit() else 0 for part in core.split("."))
+    # A stable release outranks its own pre-releases, matching the
+    # metainfo test in src/application.rs: without the flag, `4.4.0` and
+    # `4.4.0-beta.1` tie and max() keeps the last tie -- the beta.
+    return parts + (not re.search(r"[-+]", version),)
 
 
 def package_version() -> str:
@@ -70,54 +83,41 @@ def metainfo_versions(xml: str) -> list[str]:
     return versions
 
 
-def expected_vendor_revisions() -> dict[str, str]:
-    """Crate version per source entry in the committed vendor file."""
-    data = json.loads(VENDOR.read_text(encoding="utf-8"))
-    revisions = vendor_revisions(data)
-    if not revisions:
-        raise fail("cargo-sources.json has no crate download sources")
-    return revisions
+def ostree(repo: pathlib.Path, *args: str) -> bytes:
+    """Run the ostree CLI against a repo; its own failures propagate."""
+    return subprocess.run(
+        ["ostree", f"--repo={repo}", *args],
+        capture_output=True,
+        check=True,
+        timeout=60,
+    ).stdout
 
 
-def vendor_revisions(data: object) -> dict[str, str]:
-    """Crate version per archive source entry (flat flatpak-builder list)."""
-    entries = data if isinstance(data, list) else data.get("sources", [])  # type: ignore[union-attr]
-    revisions: dict[str, str] = {}
-    for src in entries:
-        if not isinstance(src, dict) or src.get("type") != "archive":
-            continue
-        # /crates/<name>/<name>-<version>.crate: the crate name may itself
-        # contain dashes, so split on the last dash that starts a version.
-        m = re.search(r"/crates/([^/]+)/([^/]+)-(\d[^-]*(?:-[^/]*)?)\.crate$", src.get("url") or "")
-        if m:
-            revisions[m.group(1)] = m.group(3)
-    return revisions
+def app_commit(repo: pathlib.Path) -> str:
+    """The commit `flatpak build-bundle` would pack for this app."""
+    refs = ostree(repo, "refs").decode("utf-8").split()
+    hits = [r for r in refs if APP_ID in r]
+    if len(hits) != 1:
+        raise fail(f"repo has {len(hits)} refs matching {APP_ID} (want 1): {hits}")
+    return ostree(repo, "rev-parse", hits[0]).decode("utf-8").strip()
 
 
-def bundle_revisions(bundle: pathlib.Path) -> dict[str, str]:
-    """Crate version per cargo-sources.json embedded in the bundle."""
-    with tarfile.open(bundle, "r:gz") as tar:
-        name = next(
-            (n for n in tar.getnames() if n.endswith("cargo-sources.json")), None
-        )
-        if name is None:
-            raise fail("bundle contains no cargo-sources.json")
-        data = json.load(tar.extractfile(name))  # type: ignore[arg-type]
-    return vendor_revisions(data)
-
-
-def bundle_file(bundle: pathlib.Path, suffix: str) -> str | None:
-    with tarfile.open(bundle, "r:gz") as tar:
-        name = next((n for n in tar.getnames() if n.endswith(suffix)), None)
-        if name is None:
-            return None
-        handle = tar.extractfile(name)
-        return handle.read().decode("utf-8") if handle else None
+def repo_file(repo: pathlib.Path, commit: str, path: str) -> str:
+    """File contents at an ostree path; missing reads as a mismatch."""
+    try:
+        return ostree(repo, "cat", commit, path).decode("utf-8")
+    except subprocess.CalledProcessError:
+        raise fail(f"repo commit {commit[:12]} has no {path}") from None
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("bundle", type=pathlib.Path, help="path to Grab.flatpak")
+    parser.add_argument(
+        "--repo",
+        type=pathlib.Path,
+        required=True,
+        help="ostree repo dir the bundle is packed from (e.g. flatpak-repo)",
+    )
     parser.add_argument("--tag", required=True, help="release tag, e.g. v4.3.1")
     args = parser.parse_args(argv)
 
@@ -125,6 +125,9 @@ def main(argv: list[str] | None = None) -> int:
     notes: list[str] = []
 
     try:
+        if not args.repo.is_dir():
+            raise OSError(f"repo dir not found: {args.repo}")
+
         version = package_version()
         lock = lock_version()
         if version != lock:
@@ -132,17 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         if version != want:
             raise fail(f"tag {args.tag} (version {want}) != package version {version}")
 
-        app_version = bundle_file(args.bundle, APP_VERSION_PATH)
-        if app_version is None:
-            raise fail(f"bundle has no {APP_VERSION_PATH}")
-        app_version = app_version.strip()
-        if app_version != version:
-            raise fail(f"bundle app version {app_version} != tag version {want}")
-        notes.append(f"bundle app version {app_version}")
+        commit = app_commit(args.repo)
 
-        metainfo = bundle_file(args.bundle, METAINFO_PATH)
-        if metainfo is None:
-            raise fail(f"bundle has no {METAINFO_PATH}")
+        metainfo = repo_file(args.repo, commit, INSTALLED_METAINFO)
         releases = metainfo_versions(metainfo)
         newest = max(releases, key=version_key)
         if newest != version:
@@ -157,33 +152,14 @@ def main(argv: list[str] | None = None) -> int:
                 "bundle metainfo differs from the tag source: the release was "
                 "tagged before the metainfo was updated"
             )
-        notes.append(f"bundle metainfo newest-first release {newest}, matches tag source")
-
-        expected = expected_vendor_revisions()
-        shipped = bundle_revisions(args.bundle)
-        if shipped != expected:
-            missing = sorted(set(expected) - set(shipped))
-            extra = sorted(set(shipped) - set(expected))
-            changed = sorted(
-                c for c in set(expected) & set(shipped) if expected[c] != shipped[c]
-            )
-            detail = []
-            if missing:
-                detail.append(f"missing: {', '.join(missing[:5])}")
-            if extra:
-                detail.append(f"extra: {', '.join(extra[:5])}")
-            if changed:
-                detail.append(
-                    "version drift: "
-                    + ", ".join(f"{c} {expected[c]}->{shipped[c]}" for c in changed[:5])
-                )
-            raise fail("bundle dependencies differ from the tag's lock: " + "; ".join(detail))
-        notes.append(f"bundle vendors {len(expected)} crates matching the tag lock")
+        notes.append(
+            f"bundle metainfo newest-first release {newest}, matches tag source"
+        )
 
     except Mismatch as exc:
         print(f"bundle consistency check FAILED: {exc}", file=sys.stderr)
         return 1
-    except (OSError, tarfile.TarError, json.JSONDecodeError, tomllib.TOMLDecodeError) as exc:
+    except (OSError, subprocess.SubprocessError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
         print(f"bundle consistency check ERROR: {exc}", file=sys.stderr)
         return 2
 
