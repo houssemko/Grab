@@ -99,7 +99,13 @@ pub async fn run_video_download(
 
     // Resolve (with retries, always fresh: without a cache backend every
     // attempt re-extracts, so expired format URLs never survive a retry).
-    phase(if job.audio_only {
+    // A staging manifest means a previous attempt got far enough to
+    // probe: label the re-resolve as a resume so a parked row doesn't
+    // read as starting over.
+    let resuming = read_manifest(&staging).is_some();
+    phase(if resuming {
+        gettext("Resuming download…")
+    } else if job.audio_only {
         gettext("Resolving audio…")
     } else {
         gettext("Resolving media…")
