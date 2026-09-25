@@ -271,6 +271,77 @@ fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     v.audio.set_visible(true);
 }
 
+/// The add dialog's "Torrent file" row: pick a .torrent, offer the
+/// per-file switches for multi-file torrents, queue singles directly.
+fn wire_torrent_picker(
+    torrent_btn: &gtk4::Button,
+    manager: Rc<DownloadManager>,
+    dest_dir: Rc<RefCell<String>>,
+    dialog: glib::WeakRef<adw::Dialog>,
+    error_label: gtk4::Label,
+) {
+    torrent_btn.connect_clicked(move |_| {
+        let m = manager.clone();
+        let dd = dest_dir.clone();
+        let dialog = dialog.clone();
+        let error_label = error_label.clone();
+        glib::spawn_future_local(async move {
+            let filter = gtk4::FileFilter::new();
+            filter.set_name(Some(&gettext("Torrent files")));
+            filter.add_mime_type("application/x-bittorrent");
+            filter.add_pattern("*.torrent");
+            let filters = gio::ListStore::new::<gtk4::FileFilter>();
+            filters.append(&filter);
+            let picker = gtk4::FileDialog::builder()
+                .title(gettext("Choose torrent file"))
+                .accept_label(gettext("Add Torrent"))
+                .filters(&filters)
+                .build();
+            let Ok(file) = picker.open_future(None::<&gtk4::Window>).await else {
+                return; // dismissed
+            };
+            let name = file
+                .basename()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "download.torrent".to_string());
+            let bytes = match file
+                .path()
+                .and_then(|p| crate::torrent::read_torrent_bytes(&p))
+            {
+                Some(b) => b,
+                None => {
+                    error_label.set_text(&gettext("Could not read that .torrent file"));
+                    error_label.set_visible(true);
+                    return;
+                }
+            };
+            let (_tname, entries) = match crate::torrent::torrent_file_list(&bytes) {
+                Ok(v) => v,
+                Err(e) => {
+                    error_label.set_text(&e);
+                    error_label.set_visible(true);
+                    return;
+                }
+            };
+            if entries.len() <= 1 {
+                match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
+                    Ok(_) => {
+                        if let Some(d) = dialog.upgrade() {
+                            d.close();
+                        }
+                    }
+                    Err(e) => {
+                        error_label.set_text(&e);
+                        error_label.set_visible(true);
+                    }
+                }
+                return;
+            }
+            show_torrent_files_dialog(m, dd, Some(dialog), name, bytes, entries);
+        });
+    });
+}
+
 /// New-download dialog, optionally pre-filled (drag-and-drop / Open With
 /// hands a URL in; the normal lookup flow then takes over, including
 /// video-page detection, so drops never bypass the media pipeline).
@@ -891,72 +962,13 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         });
     }
 
-    {
-        let m = manager.clone();
-        let dd = dest_dir.clone();
-        let dialog = dialog.downgrade();
-        let error_label = error_label.clone();
-        torrent_btn.connect_clicked(move |_| {
-            let m = m.clone();
-            let dd = dd.clone();
-            let dialog = dialog.clone();
-            let error_label = error_label.clone();
-            glib::spawn_future_local(async move {
-                let filter = gtk4::FileFilter::new();
-                filter.set_name(Some(&gettext("Torrent files")));
-                filter.add_mime_type("application/x-bittorrent");
-                filter.add_pattern("*.torrent");
-                let filters = gio::ListStore::new::<gtk4::FileFilter>();
-                filters.append(&filter);
-                let picker = gtk4::FileDialog::builder()
-                    .title(gettext("Choose torrent file"))
-                    .accept_label(gettext("Add Torrent"))
-                    .filters(&filters)
-                    .build();
-                let Ok(file) = picker.open_future(None::<&gtk4::Window>).await else {
-                    return; // dismissed
-                };
-                let name = file
-                    .basename()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "download.torrent".to_string());
-                let bytes = match file
-                    .path()
-                    .and_then(|p| crate::torrent::read_torrent_bytes(&p))
-                {
-                    Some(b) => b,
-                    None => {
-                        error_label.set_text(&gettext("Could not read that .torrent file"));
-                        error_label.set_visible(true);
-                        return;
-                    }
-                };
-                let (_tname, entries) = match crate::torrent::torrent_file_list(&bytes) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error_label.set_text(&e);
-                        error_label.set_visible(true);
-                        return;
-                    }
-                };
-                if entries.len() <= 1 {
-                    match m.enqueue_torrent_file(bytes, &name, Some(&dd.borrow()), None) {
-                        Ok(_) => {
-                            if let Some(d) = dialog.upgrade() {
-                                d.close();
-                            }
-                        }
-                        Err(e) => {
-                            error_label.set_text(&e);
-                            error_label.set_visible(true);
-                        }
-                    }
-                    return;
-                }
-                show_torrent_files_dialog(m, dd, Some(dialog), name, bytes, entries);
-            });
-        });
-    }
+    wire_torrent_picker(
+        &torrent_btn,
+        manager.clone(),
+        dest_dir.clone(),
+        dialog.downgrade(),
+        error_label.clone(),
+    );
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
@@ -1271,6 +1283,49 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
     }
 }
 
+/// Wire a picker's selection bar to its checkboxes: the confirm action
+/// counts the live selection (`count_label` builds its text — the msgids
+/// differ per picker), Select All/None flip every box, and the count
+/// renders once up front. With nothing selected the action reads "… 0 …"
+/// and clicking it shows the error label.
+fn wire_selection_bar(
+    checks: &[gtk4::CheckButton],
+    select_all_btn: &gtk4::Button,
+    select_none_btn: &gtk4::Button,
+    add_btn: &gtk4::Button,
+    count_label: impl Fn(usize) -> String + 'static,
+) {
+    let refresh = Rc::new({
+        let add_btn = add_btn.clone();
+        let checks = checks.to_vec();
+        move || {
+            let n = checks.iter().filter(|c| c.is_active()).count();
+            add_btn.set_label(&count_label(n));
+        }
+    });
+    for check in checks {
+        let refresh = refresh.clone();
+        check.connect_toggled(move |_| refresh());
+    }
+    {
+        let checks = checks.to_vec();
+        select_all_btn.connect_clicked(move |_| {
+            for c in &checks {
+                c.set_active(true);
+            }
+        });
+    }
+    {
+        let checks = checks.to_vec();
+        select_none_btn.connect_clicked(move |_| {
+            for c in &checks {
+                c.set_active(false);
+            }
+        });
+    }
+    refresh();
+}
+
 /// Item picker for probed playlists, stories and highlights, mirroring
 /// [`show_torrent_files_dialog`]: one checkbox per entry, all checked
 /// by default (HIG selection: checkboxes pick items, switches flip
@@ -1365,38 +1420,9 @@ fn push_playlist_items_page(
     // The action counts the live selection; with nothing selected it
     // reads "Queue 0 items" and clicking it shows the error label,
     // mirroring the torrent picker.
-    let refresh_add = Rc::new({
-        let add_btn = add_btn.clone();
-        let checks = checks.clone();
-        move || {
-            let n = checks.iter().filter(|c| c.is_active()).count();
-            add_btn.set_label(
-                &ngettext("_Queue {} item", "_Queue {} items", n as u32)
-                    .replace("{}", &n.to_string()),
-            );
-        }
+    wire_selection_bar(&checks, &select_all_btn, &select_none_btn, &add_btn, |n| {
+        ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
-    for check in &checks {
-        let refresh = refresh_add.clone();
-        check.connect_toggled(move |_| refresh());
-    }
-    {
-        let checks = checks.clone();
-        select_all_btn.connect_clicked(move |_| {
-            for c in &checks {
-                c.set_active(true);
-            }
-        });
-    }
-    {
-        let checks = checks.clone();
-        select_none_btn.connect_clicked(move |_| {
-            for c in &checks {
-                c.set_active(false);
-            }
-        });
-    }
-    refresh_add();
 
     {
         let parent_weak = parent.clone();
@@ -1555,37 +1581,9 @@ pub fn show_torrent_files_dialog(
 
     // The action counts the live selection; with nothing selected it
     // reads "Add 0 files" and clicking it shows the error label.
-    let refresh_add = Rc::new({
-        let add_btn = add_btn.clone();
-        let checks = checks.clone();
-        move || {
-            let n = checks.iter().filter(|c| c.is_active()).count();
-            add_btn.set_label(
-                &ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string()),
-            );
-        }
+    wire_selection_bar(&checks, &select_all_btn, &select_none_btn, &add_btn, |n| {
+        ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
     });
-    for check in &checks {
-        let refresh = refresh_add.clone();
-        check.connect_toggled(move |_| refresh());
-    }
-    {
-        let checks = checks.clone();
-        select_all_btn.connect_clicked(move |_| {
-            for c in &checks {
-                c.set_active(true);
-            }
-        });
-    }
-    {
-        let checks = checks.clone();
-        select_none_btn.connect_clicked(move |_| {
-            for c in &checks {
-                c.set_active(false);
-            }
-        });
-    }
-    refresh_add();
 
     {
         let dialog_weak = dialog.downgrade();

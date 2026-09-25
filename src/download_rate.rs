@@ -50,9 +50,6 @@ pub(crate) fn live_rate_limit() -> Option<u64> {
     }
 }
 
-/// Throttle one chunk against the shared speed limit. The limit arrives
-/// per call (never hoisted or cached) so preference edits apply
-/// mid-download; `paced`/`pace_start` carry the running account.
 /// Progress message for the direct engine: HTTP rows never carry
 /// upload counters (zeros keep the torrent-only upload suffix in the
 /// pump empty). Callers pass their own byte counts.
@@ -65,6 +62,9 @@ pub(crate) fn progress_msg(downloaded: u64, total: Option<u64>) -> EngineMsg {
     }
 }
 
+/// Throttle one chunk against the shared speed limit. The limit arrives
+/// per call (never hoisted or cached) so preference edits apply
+/// mid-download; `paced`/`pace_start` carry the running account.
 pub(crate) async fn pace_chunk(paced: &mut u64, pace_start: Instant, rate: Option<u64>, n: usize) {
     if let Some(r) = rate {
         *paced += n as u64;

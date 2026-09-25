@@ -121,6 +121,15 @@ fn decrement<K: Eq + std::hash::Hash>(counts: &mut std::collections::HashMap<K, 
     }
 }
 
+/// Row detail while a video row waits for the resolver worker.
+fn pending_resolve_detail(audio_only: bool) -> String {
+    if audio_only {
+        gettext("Waiting to resolve audio…")
+    } else {
+        gettext("Waiting to resolve media…")
+    }
+}
+
 pub struct DownloadManager {
     // Borrow discipline: RefCells are never held across `set_*` property
     // notifies or `changed()` — GTK notifies re-enter through updater
@@ -377,8 +386,7 @@ impl DownloadManager {
 
     fn changed(&self) {
         self.queued.set(
-            (0..self.store.n_items())
-                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            self.items()
                 .filter(|it| it.status() == DownloadStatus::Queued)
                 .count(),
         );
@@ -423,9 +431,25 @@ impl DownloadManager {
 
     /// Find an item by id.
     pub fn find(&self, id: u64) -> Option<DownloadItem> {
-        (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-            .find(|it| it.id() == id)
+        self.items().find(|it| it.id() == id)
+    }
+
+    /// Every row in the list store, in list order. The store scan it
+    /// replaces was copy-pasted across the manager; a named helper keeps
+    /// the call sites about their filter instead of the iteration.
+    fn items(&self) -> impl Iterator<Item = DownloadItem> + '_ {
+        let store = &self.store;
+        (0..store.n_items()).filter_map(|i| store.item(i).and_downcast::<DownloadItem>())
+    }
+
+    /// Position of the row with `id`, if it is still listed.
+    fn position_of(&self, id: u64) -> Option<u32> {
+        (0..self.store.n_items()).find(|&i| {
+            self.store
+                .item(i)
+                .and_downcast::<DownloadItem>()
+                .is_some_and(|it| it.id() == id)
+        })
     }
 
     /// Preferences backing this queue (for dialog defaults).
@@ -471,10 +495,6 @@ impl DownloadManager {
         self.live_rows.borrow().contains(&id)
     }
 
-    /// Validate, dedupe and queue a download, starting it when a slot is free.
-    ///
-    /// # Errors
-    /// Returns a display-ready message when the URL or filename is invalid.
     /// Explicit absolute dest, else the effective download dir. Shared by
     /// enqueue and the torrent collision check so both agree on the folder.
     fn resolve_dir(&self, dest_dir: Option<&str>) -> String {
@@ -487,6 +507,10 @@ impl DownloadManager {
             .unwrap_or_else(|| self.effective_download_dir())
     }
 
+    /// Validate, dedupe and queue a download, starting it when a slot is free.
+    ///
+    /// # Errors
+    /// Returns a display-ready message when the URL or filename is invalid.
     pub fn enqueue(
         self: &Rc<Self>,
         url: &str,
@@ -520,8 +544,7 @@ impl DownloadManager {
                 // still does: a discard tearing down that path owns it
                 // until its finalizer releases it.
                 || self.dest_reserved(&p)
-                || (0..self.store.n_items())
-                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                || self.items()
                     .any(|it| {
                         (it.dest_dir() == dir && it.filename() == n)
                             || it.output_dir() == p.to_string_lossy()
@@ -575,8 +598,7 @@ impl DownloadManager {
                         // Subfolder claims need no part-namespace gate (see
                         // plain `enqueue` above): only video-row finished
                         // names reserve stems.
-                        || (0..self.store.n_items())
-                            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                        || self.items()
                             .any(|it| it.output_dir() == p.to_string_lossy())
                 });
                 item.set_output_dir(
@@ -648,19 +670,14 @@ impl DownloadManager {
                 // parts, and part files on disk cannot show the
                 // pre-recreation window.
                 || self.dest_reserved(&p)
-                || (0..self.store.n_items())
-                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                || self.items()
                     .any(|it| {
                         (it.dest_dir() == dir && it.filename() == n)
                             || it.output_dir() == p.to_string_lossy()
                     })
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
-        item.set_detail(if choices.audio_only {
-            gettext("Waiting to resolve audio…")
-        } else {
-            gettext("Waiting to resolve media…")
-        });
+        item.set_detail(pending_resolve_detail(choices.audio_only));
         self.video_sources.borrow_mut().insert(
             item.id(),
             crate::media_types::VideoSource::Page {
@@ -793,11 +810,7 @@ impl DownloadManager {
                         ..
                     }
                 );
-                item.set_detail(if audio_only {
-                    gettext("Waiting to resolve audio…")
-                } else {
-                    gettext("Waiting to resolve media…")
-                });
+                item.set_detail(pending_resolve_detail(audio_only));
                 self.video_sources
                     .borrow_mut()
                     .insert(item.id(), src.clone());
@@ -893,8 +906,8 @@ impl DownloadManager {
             .borrow_mut()
             .retain(|_, pending| !pending.finalizer.is_finished());
         while self.running.borrow().len() < self.max_concurrent() {
-            let next = (0..self.store.n_items())
-                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            let next = self
+                .items()
                 // A discard still tearing down owns its destination: starting
                 // a row (restored or fresh) into the finalizer's stem-wide
                 // sweep would collide with it. The row stays Queued until
@@ -1041,8 +1054,7 @@ impl DownloadManager {
             // stem: the finalizer's sweep (and the orphan removal when the
             // commit won) must not meet a row that claimed the name meanwhile.
             || self.dest_reserved(&std::path::Path::new(dir).join(n))
-            || (0..self.store.n_items())
-                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            || self.items()
                 .any(|it| it.dest_dir() == dir && it.filename() == n)
     }
 
@@ -1527,7 +1539,7 @@ impl DownloadManager {
             };
         // Invalid manual proxy fails loudly like every other engine: no
         // silent direct torrent while the user asked for a tunnel.
-        let proxy = match crate::download::DownloadOptions::from_settings(settings).proxy_config() {
+        let proxy = match DownloadOptions::from_settings(settings).proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
                 item.set_status(DownloadStatus::Failed);
@@ -1776,19 +1788,11 @@ impl DownloadManager {
 
     /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
-        if self.live_rows.borrow().contains(&id) {
-            // Live captures finalize in the worker: signal it and let
-            // its Finished flip the row to Done. Aborting the task or
-            // presetting Paused would drop the recording or strand it.
-            // The pump tail frees the slot on completion.
-            self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+        // Live captures finalize in the worker (see `stop_engine`); the
+        // pump tail frees the slot on completion.
+        if !self.stop_engine(id) {
             return;
         }
-        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
-        if let Some(handle) = self.running.borrow().get(&id) {
-            handle.abort();
-        }
-        self.running.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             if crate::torrent::is_torrent(&item.url()) {
                 crate::torrent::pause_download(id);
@@ -1899,20 +1903,35 @@ impl DownloadManager {
         }
     }
 
+    /// Stop the engine for `id` without touching the row: signal the
+    /// worker, then abort its task and free the slot. Live rows only get
+    /// signalled, never task-aborted: the worker finalizes the capture
+    /// itself and its Finished message drives the row, so aborting or
+    /// presetting would drop the recording or strand it. Returns whether
+    /// the engine was actually stopped (false for live rows, whose caller
+    /// must also leave status and slots alone).
+    fn stop_engine(&self, id: u64) -> bool {
+        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+        if self.live_rows.borrow().contains(&id) {
+            return false;
+        }
+        if let Some(handle) = self.running.borrow().get(&id) {
+            handle.abort();
+        }
+        self.running.borrow_mut().remove(&id);
+        true
+    }
+
     /// Stop the engine for `id`, keeping file, bitmap and progress, and
     /// mark it queued. Unlike pause the row yields its slot; unlike cancel
     /// nothing is deleted and progress is kept. Live rows only signal:
     /// the worker finalizes and its message completes the row.
     fn park(&self, id: u64) {
-        if self.live_rows.borrow().contains(&id) {
-            self.stop_video_worker(id, crate::video::StopIntent::Preserve);
+        // Live rows only signal: the worker finalizes and its message
+        // completes the row (see `stop_engine`).
+        if !self.stop_engine(id) {
             return;
         }
-        self.stop_video_worker(id, crate::video::StopIntent::Preserve);
-        if let Some(handle) = self.running.borrow().get(&id) {
-            handle.abort();
-        }
-        self.running.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
             if crate::torrent::is_torrent(&item.url()) {
                 crate::torrent::pause_download(id);
@@ -1928,14 +1947,7 @@ impl DownloadManager {
     }
 
     fn move_to_back(&self, id: u64) {
-        let pos = (0..self.store.n_items()).find(|&i| {
-            self.store
-                .item(i)
-                .and_downcast::<DownloadItem>()
-                .map(|it| it.id() == id)
-                .unwrap_or(false)
-        });
-        if let Some(pos) = pos
+        if let Some(pos) = self.position_of(id)
             && let Some(obj) = self.store.item(pos)
         {
             self.store.remove(pos);
@@ -2058,15 +2070,6 @@ impl DownloadManager {
         // concurrency slot when the pump tail never runs to clear it.
         let video = self.video_sources.borrow().contains_key(&id);
         match stop {
-            Stop::Preserve => {
-                self.stop_video_worker(id, crate::video::StopIntent::Preserve);
-                if !live {
-                    if let Some(handle) = self.running.borrow().get(&id) {
-                        handle.abort();
-                    }
-                    self.running.borrow_mut().remove(&id);
-                }
-            }
             Stop::Discard if video => {
                 self.stop_video_worker(id, crate::video::StopIntent::Discard);
                 // The pump tail normally clears this, but it early-returns
@@ -2075,12 +2078,11 @@ impl DownloadManager {
                 // would take the live signal-only paths.
                 self.live_rows.borrow_mut().remove(&id);
             }
-            Stop::Discard => {
-                self.stop_video_worker(id, crate::video::StopIntent::Preserve);
-                if let Some(handle) = self.running.borrow().get(&id) {
-                    handle.abort();
-                }
-                self.running.borrow_mut().remove(&id);
+            // Preserve and non-video Discard stop the engine the same way:
+            // signal the worker, then abort its task unless a live capture
+            // is finalizing itself (see `stop_engine`).
+            _ => {
+                self.stop_engine(id);
             }
         }
         self.pending_names.borrow_mut().remove(&id);
@@ -2166,13 +2168,7 @@ impl DownloadManager {
         // The snapshot carries the source for Undo; the live map drops it
         // with the row (cancel keeps it, remove doesn't).
         self.video_sources.borrow_mut().remove(&id);
-        if let Some(pos) = (0..self.store.n_items()).find(|&i| {
-            self.store
-                .item(i)
-                .and_downcast::<DownloadItem>()
-                .map(|it| it.id() == id)
-                .unwrap_or(false)
-        }) {
+        if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
         }
         self.persist_queue();
@@ -2365,8 +2361,8 @@ impl DownloadManager {
             // Same hygiene as a restart: archives and staged selections
             // no remaining row references go now (cleared rows have no
             // Undo path holding them, unlike `remove`).
-            let referenced: std::collections::HashSet<String> = (0..self.store.n_items())
-                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            let referenced: std::collections::HashSet<String> = self
+                .items()
                 .map(|it| it.url().to_string())
                 .filter(|u| crate::torrent::is_torrent_url(u))
                 .collect();
@@ -2380,8 +2376,7 @@ impl DownloadManager {
 
     /// Finished rows (for the clear-finished confirm and toast counts).
     pub fn finished_count(&self) -> usize {
-        (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+        self.items()
             .filter(|it| it.status() == DownloadStatus::Done)
             .count()
     }
@@ -2391,8 +2386,7 @@ impl DownloadManager {
     /// so the snapshot is just the record [`DownloadManager::unremove`]
     /// needs to re-insert it.
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
-        (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+        self.items()
             .filter(|it| it.status() == DownloadStatus::Done)
             .map(|it| RemovedSnapshot {
                 url: it.url().to_string(),
@@ -2418,8 +2412,8 @@ impl DownloadManager {
         let Ok(key) = normalize_url(url) else {
             return;
         };
-        let ids: Vec<u64> = (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+        let ids: Vec<u64> = self
+            .items()
             .filter(|it| {
                 it.status() == DownloadStatus::Done
                     && it.id() != keep_id
@@ -2445,13 +2439,7 @@ impl DownloadManager {
         }
         self.video_sources.borrow_mut().remove(&id);
         self.epoch.borrow_mut().remove(&id);
-        if let Some(pos) = (0..self.store.n_items()).find(|&i| {
-            self.store
-                .item(i)
-                .and_downcast::<DownloadItem>()
-                .map(|it| it.id() == id)
-                .unwrap_or(false)
-        }) {
+        if let Some(pos) = self.position_of(id) {
             self.store.remove(pos);
         }
     }
@@ -2461,8 +2449,8 @@ impl DownloadManager {
         matches: impl Fn(DownloadStatus) -> bool,
         mut op: impl FnMut(&Rc<Self>, u64),
     ) {
-        let ids: Vec<u64> = (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+        let ids: Vec<u64> = self
+            .items()
             .filter(|it| matches(it.status()))
             .map(|it| it.id())
             .collect();
@@ -2488,8 +2476,7 @@ impl DownloadManager {
 
     /// Rows `cancel_all` would touch (queued, downloading, paused).
     pub fn active_count(&self) -> usize {
-        (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+        self.items()
             .filter(|it| {
                 matches!(
                     it.status(),
@@ -2519,9 +2506,7 @@ impl DownloadManager {
     }
 
     fn any_status(&self, pred: impl Fn(DownloadStatus) -> bool) -> bool {
-        (0..self.store.n_items())
-            .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
-            .any(|it| pred(it.status()))
+        self.items().any(|it| pred(it.status()))
     }
 
     fn queue_file() -> std::path::PathBuf {
@@ -2553,33 +2538,31 @@ impl DownloadManager {
             return;
         }
         let mut items = Vec::new();
-        for i in 0..self.store.n_items() {
-            if let Some(it) = self.store.item(i).and_downcast::<DownloadItem>() {
-                // Cancelled rows carry no intent: never persisted.
-                if it.status() != DownloadStatus::Cancelled {
-                    let segments = self.segment_state.borrow().get(&it.id()).cloned();
-                    let selected_files = crate::torrent::get_selection(&it.url().to_string());
-                    // Empty means "no folder tracked": omit it so old files
-                    // stay clean and old app versions keep reading new ones.
-                    // Same for the video source: only Page rows write it.
-                    let output_dir = it.output_dir().to_string();
-                    let output_dir = (!output_dir.is_empty()).then_some(output_dir);
-                    let video_source = self
-                        .video_source(it.id())
-                        .filter(|s| matches!(s, crate::media_types::VideoSource::Page { .. }));
-                    items.push(StoredItem {
-                        id: Some(it.id()),
-                        url: it.url().to_string(),
-                        dest_dir: it.dest_dir().to_string(),
-                        filename: it.filename().to_string(),
-                        status: it.status(),
-                        progress: it.progress(),
-                        segments,
-                        selected_files,
-                        output_dir,
-                        video_source,
-                    });
-                }
+        for it in self.items() {
+            // Cancelled rows carry no intent: never persisted.
+            if it.status() != DownloadStatus::Cancelled {
+                let segments = self.segment_state.borrow().get(&it.id()).cloned();
+                let selected_files = crate::torrent::get_selection(&it.url().to_string());
+                // Empty means "no folder tracked": omit it so old files
+                // stay clean and old app versions keep reading new ones.
+                // Same for the video source: only Page rows write it.
+                let output_dir = it.output_dir().to_string();
+                let output_dir = (!output_dir.is_empty()).then_some(output_dir);
+                let video_source = self
+                    .video_source(it.id())
+                    .filter(|s| matches!(s, crate::media_types::VideoSource::Page { .. }));
+                items.push(StoredItem {
+                    id: Some(it.id()),
+                    url: it.url().to_string(),
+                    dest_dir: it.dest_dir().to_string(),
+                    filename: it.filename().to_string(),
+                    status: it.status(),
+                    progress: it.progress(),
+                    segments,
+                    selected_files,
+                    output_dir,
+                    video_source,
+                });
             }
         }
         let data = StoredQueue {
@@ -2781,8 +2764,8 @@ impl DownloadManager {
             // Drop archived .torrent files no row references anymore
             // (removed rows keep theirs until now; explicit deletes drop
             // theirs at once, Finished engines drop theirs on completion).
-            let referenced: std::collections::HashSet<String> = (0..self.store.n_items())
-                .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+            let referenced: std::collections::HashSet<String> = self
+                .items()
                 .map(|it| it.url().to_string())
                 .filter(|u| crate::torrent::is_torrent_url(u))
                 .collect();
@@ -2798,8 +2781,8 @@ impl DownloadManager {
             // already left the session).
             // No session yet: the sweep would no-op, so skip the store walk.
             if crate::torrent::session_handle().is_some() {
-                let keep: std::collections::HashSet<String> = (0..self.store.n_items())
-                    .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
+                let keep: std::collections::HashSet<String> = self
+                    .items()
                     .filter(|it| {
                         it.status() != DownloadStatus::Done && crate::torrent::is_torrent(&it.url())
                     })

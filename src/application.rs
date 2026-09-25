@@ -4,9 +4,10 @@
 use crate::download::DownloadManager;
 use crate::settings::AppSettings;
 use crate::window::{self, show_add_dialog};
+use crate::window_rows::ngettext_count;
 use crate::{APP_ID, preferences};
 use adw::prelude::*;
-use gettextrs::{gettext, ngettext};
+use gettextrs::gettext;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -70,24 +71,24 @@ pub fn setup(app: &adw::Application) {
                 None => return,
             };
             for f in files {
-                if let Ok(uri) = f.uri().parse::<url::Url>() {
-                    // magnet: links arrive here when Grab is the system's
-                    // magnet handler (x-scheme-handler/magnet); enqueue
-                    // validates them the same way as pasted links.
-                    if matches!(uri.scheme(), "http" | "https" | "magnet") {
-                        // Video pages take the dialog path (pre-filled):
-                        // plain enqueue would save the raw HTML page as a
-                        // file. The dialog's lookup flow then resolves
-                        // quality, liveness and choices as usual.
-                        if crate::video::is_video_page(uri.as_str()) {
-                            show_add_dialog(s.manager.clone(), Some(uri.as_str()));
-                            continue;
-                        }
-                        if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
-                            s.toasts.add_toast(adw::Toast::new(&e));
-                        }
+                // magnet: links arrive here when Grab is the system's
+                // magnet handler (x-scheme-handler/magnet); enqueue
+                // validates them the same way as pasted links.
+                if let Ok(uri) = f.uri().parse::<url::Url>()
+                    && matches!(uri.scheme(), "http" | "https" | "magnet")
+                {
+                    // Video pages take the dialog path (pre-filled):
+                    // plain enqueue would save the raw HTML page as a
+                    // file. The dialog's lookup flow then resolves
+                    // quality, liveness and choices as usual.
+                    if crate::video::is_video_page(uri.as_str()) {
+                        show_add_dialog(s.manager.clone(), Some(uri.as_str()));
                         continue;
                     }
+                    if let Err(e) = s.manager.enqueue(uri.as_str(), None, None) {
+                        s.toasts.add_toast(adw::Toast::new(&e));
+                    }
+                    continue;
                 }
                 if let Some(path) = f.path() {
                     // .torrent files go to the torrent intake; anything
@@ -227,12 +228,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     if n == 0 {
                         return;
                     }
-                    let body = ngettext(
+                    let body = ngettext_count(
                         "This will cancel the active download.",
                         "This will cancel {n} active downloads.",
-                        n as u32,
-                    )
-                    .replace("{n}", &n.to_string());
+                        n,
+                    );
                     let manager = s.manager.clone();
                     let toasts = s.toasts.clone();
                     destructive_confirm(
@@ -245,14 +245,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             // the queue may have changed while it sat open.
                             let n = manager.active_count();
                             manager.cancel_all();
-                            let toast = adw::Toast::new(
-                                &ngettext(
-                                    "Cancelled download",
-                                    "Cancelled {n} downloads",
-                                    n as u32,
-                                )
-                                .replace("{n}", &n.to_string()),
-                            );
+                            let toast = adw::Toast::new(&ngettext_count(
+                                "Cancelled download",
+                                "Cancelled {n} downloads",
+                                n,
+                            ));
                             toasts.add_toast(toast);
                         },
                     );
@@ -266,14 +263,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     if let Some(s) = st.borrow().as_ref() {
                         let n = s.manager.retry_failed();
                         if n > 0 {
-                            s.toasts.add_toast(adw::Toast::new(
-                                &ngettext(
-                                    "Retrying failed download",
-                                    "Retrying {n} failed downloads",
-                                    n as u32,
-                                )
-                                .replace("{n}", &n.to_string()),
-                            ));
+                            s.toasts.add_toast(adw::Toast::new(&ngettext_count(
+                                "Retrying failed download",
+                                "Retrying {n} failed downloads",
+                                n,
+                            )));
                         }
                     }
                 })
@@ -294,12 +288,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     // so in the body — a destructive confirm for a
                     // non-destructive (to files) action still needs the
                     // scope spelled out.
-                    let body = ngettext(
+                    let body = ngettext_count(
                         "This will remove the finished download from the list. The file stays on disk.",
                         "This will remove {n} finished downloads from the list. The files stay on disk.",
-                        n as u32,
-                    )
-                    .replace("{n}", &n.to_string());
+                        n,
+                    );
                     let manager = s.manager.clone();
                     let toasts = s.toasts.clone();
                     destructive_confirm(
@@ -313,14 +306,11 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                             if n == 0 {
                                 return;
                             }
-                            let toast = adw::Toast::new(
-                                &ngettext(
-                                    "Cleared finished download",
-                                    "Cleared {n} finished downloads",
-                                    n as u32,
-                                )
-                                .replace("{n}", &n.to_string()),
-                            );
+                            let toast = adw::Toast::new(&ngettext_count(
+                                "Cleared finished download",
+                                "Cleared {n} finished downloads",
+                                n,
+                            ));
                             toast.set_button_label(Some(&gettext("Undo")));
                             let m2 = manager.clone();
                             toast.connect_button_clicked(move |_| {

@@ -31,13 +31,10 @@ fn send_last_modified(
     }
 }
 
-/// Lock a worker-shared mutex, recovering the guarded value when a
-/// previous worker panic poisoned it. The item then fails with an error
-/// instead of the panic cascading through every worker into the app.
-/// First recorded attempt error, or a generic interruption message.
-/// Each outcome tail wraps it in its own `AttemptFail` variant (changed
-/// vs throttled vs retryable drive different recovery), so the helper
-/// returns the message and callers keep their variants.
+/// First recorded worker error, or a generic interruption message when
+/// no worker recorded one. Callers wrap it in their own `AttemptFail`
+/// variant (changed vs throttled vs retryable drive different recovery),
+/// so the helper returns the message and callers keep their variants.
 fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
     lock_recover(first_err)
         .take()
