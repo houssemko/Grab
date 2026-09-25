@@ -64,7 +64,7 @@ fn submit_probed_single(
     let settings = manager.settings();
     let auto = typed
         .is_empty()
-        .then(|| default_name_for(settings, &v.title, &v.id, audio_only));
+        .then(|| default_name_for(settings, &v.title, audio_only));
     let name = if typed.is_empty() {
         auto.as_deref()
     } else {
@@ -703,7 +703,6 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                         default_name_for(
                                             &settings_b,
                                             &v.title,
-                                            &v.id,
                                             step_b.audio.is_active(),
                                         )
                                     } else {
@@ -867,12 +866,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let settings = manager.settings().clone();
         step.revert.connect_clicked(move |_| {
             if let Some(p) = info.borrow().as_ref() {
-                name.set_text(&default_name_for(
-                    &settings,
-                    p.title(),
-                    p.video_id(),
-                    audio.is_active(),
-                ));
+                name.set_text(&default_name_for(&settings, p.title(), audio.is_active()));
                 name.grab_focus();
             }
         });
@@ -889,14 +883,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 let active = sw.is_active();
                 let current = name.text().to_string();
                 if current.trim().is_empty()
-                    || current == default_name_for(&settings, p.title(), p.video_id(), !active)
+                    || current == default_name_for(&settings, p.title(), !active)
                 {
-                    name.set_text(&default_name_for(
-                        &settings,
-                        p.title(),
-                        p.video_id(),
-                        active,
-                    ));
+                    name.set_text(&default_name_for(&settings, p.title(), active));
                 }
             }
         });
@@ -1438,7 +1427,7 @@ fn push_playlist_items_page(
                 let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
-                let name = default_name_for(settings, &item.title, &item.id, audio_only);
+                let name = default_name_for(settings, &item.title, audio_only);
                 if let Err(e) = manager.enqueue_video(
                     &page_url,
                     Some(&dest_dir.borrow()),

@@ -31,11 +31,10 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
 pub(crate) fn default_name_for(
     settings: &crate::settings::AppSettings,
     title: &str,
-    id: &str,
     audio_only: bool,
 ) -> String {
     let remux = crate::video_prefs::remux_video_active(&settings.remux_video());
-    crate::video::default_video_filename(title, id, audio_only, remux.as_deref())
+    crate::video::default_video_filename(title, audio_only, remux.as_deref())
 }
 
 /// Hidden error caption for a preferences group: callers set its text
