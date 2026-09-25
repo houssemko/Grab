@@ -1202,6 +1202,10 @@ msgstr ""
 msgid "None"
 msgstr ""
 
+#: src/video_spawn.rs:135
+msgid "the lookup produced too much output"
+msgstr ""
+
 #: src/video.rs:2052 src/video.rs:2205
 msgid "the lookup timed out"
 msgstr ""

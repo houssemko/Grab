@@ -106,12 +106,8 @@ pub fn setup(app: &adw::Application) {
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_else(|| format!("{stem}.torrent"));
                         glib::spawn_future_local(async move {
-                            const MAX_TORRENT_BYTES: u64 = 10_000_000;
                             let bytes = gio::spawn_blocking(move || {
-                                std::fs::metadata(&path)
-                                    .ok()
-                                    .filter(|m| m.len() <= MAX_TORRENT_BYTES)
-                                    .and_then(|_| std::fs::read(&path).ok())
+                                crate::torrent::read_torrent_bytes(&path)
                             })
                             .await
                             .ok()

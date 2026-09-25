@@ -920,12 +920,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                     .basename()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "download.torrent".to_string());
-                let bytes = match file.path().and_then(|p| {
-                    std::fs::metadata(&p)
-                        .ok()
-                        .filter(|md| md.len() <= 10_000_000)
-                        .and_then(|_| std::fs::read(&p).ok())
-                }) {
+                let bytes = match file
+                    .path()
+                    .and_then(|p| crate::torrent::read_torrent_bytes(&p))
+                {
                     Some(b) => b,
                     None => {
                         error_label.set_text(&gettext("Could not read that .torrent file"));
@@ -1519,9 +1517,9 @@ pub fn show_torrent_files_dialog(
     let mut checks = Vec::new();
     for e in &entries {
         let check = gtk4::CheckButton::builder().active(true).build();
-        check.update_property(&[gtk4::accessible::Property::Label(&e.path)]);
+        check.update_property(&[gtk4::accessible::Property::Label(&e.display_path)]);
         let row = adw::ActionRow::builder()
-            .title(&e.path)
+            .title(&e.display_path)
             .subtitle(crate::file_names::fmt_bytes(e.length))
             .activatable(true)
             .build();

@@ -23,6 +23,37 @@ use yt_dlp::model::Video;
 /// forever; the error path (with Retry) is strictly more useful.
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
+/// Byte ceilings for the drained child pipes. The fetch timeout bounds
+/// *time*, not memory: without a cap a runaway child could grow these
+/// buffers without bound inside the timeout window. Stdout carries the
+/// `--dump-single-json` document (megabytes for big pages); stderr only
+/// ever contributes its last log line.
+const MAX_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_STDERR_BYTES: u64 = 1024 * 1024;
+
+/// Drain one child pipe with a hard byte ceiling. One byte past the
+/// limit is read so an oversize stream is detected and failed instead
+/// of silently truncated; overflow surfaces as
+/// [`std::io::ErrorKind::QuotaExceeded`], not a bigger buffer.
+async fn read_bounded(
+    stream: impl tokio::io::AsyncRead + Unpin,
+    limit: u64,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+    let mut buf = Vec::new();
+    tokio::io::BufReader::new(stream)
+        .take(limit + 1)
+        .read_to_end(&mut buf)
+        .await?;
+    if buf.len() as u64 > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::QuotaExceeded,
+            "child output exceeded the size limit",
+        ));
+    }
+    Ok(buf)
+}
+
 /// Fetch one page's raw `--dump-single-json` through a direct spawn
 /// (same spawn/timeout/output semantics as the crate's extractors),
 /// then parse leniently (see [`crate::video_probe::sanitize_video_json`]). Used instead of
@@ -69,19 +100,15 @@ pub(crate) async fn fetch_raw_dump_json(
         .ok_or_else(|| VideoError::fetch("yt-dlp gave no log pipe"))?;
     // Drain both pipes concurrently: `--dump-single-json` output is
     // megabytes, and an unread pipe would stall yt-dlp once full.
+    // Each drain carries a hard byte ceiling (see MAX_*_BYTES above).
     fn drain(
         stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-    ) -> tokio::task::JoinHandle<Vec<u8>> {
-        tokio::spawn(async move {
-            use tokio::io::AsyncReadExt as _;
-            let mut buf = Vec::new();
-            let mut reader = tokio::io::BufReader::new(stream);
-            reader.read_to_end(&mut buf).await.ok();
-            buf
-        })
+        limit: u64,
+    ) -> tokio::task::JoinHandle<std::io::Result<Vec<u8>>> {
+        tokio::spawn(async move { read_bounded(stream, limit).await })
     }
-    let out_task = drain(stdout);
-    let err_task = drain(stderr);
+    let out_task = drain(stdout, MAX_STDOUT_BYTES);
+    let err_task = drain(stderr, MAX_STDERR_BYTES);
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) => {
             group.disarm();
@@ -96,8 +123,21 @@ pub(crate) async fn fetch_raw_dump_json(
             return Err(VideoError::fetch(gettext("the lookup timed out")));
         }
     };
-    let stdout = out_task.await.unwrap_or_default();
-    let stderr = err_task.await.unwrap_or_default();
+    // A drained pipe fails three ways: the task died (JoinError), a
+    // genuine pipe IO error, or the byte ceiling tripped. Only the last
+    // gets the size-limit message; the rest keep the old lenient path
+    // (empty stdout fails downstream at JSON parse, as before) instead
+    // of claiming a cause that was not observed.
+    let stdout = match out_task.await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+            return Err(VideoError::fetch(gettext(
+                "the lookup produced too much output",
+            )));
+        }
+        _ => Vec::new(),
+    };
+    let stderr = err_task.await.ok().and_then(|r| r.ok()).unwrap_or_default();
     if !status.success() {
         let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
         return Err(VideoError::fetch(detail));
@@ -551,4 +591,37 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
                 })
         })
         .max_by_key(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bounded_drain_passes_small_streams() {
+        let rt = crate::runtime::tokio_rt();
+        let data = vec![7u8; 1024];
+        let out = rt
+            .block_on(read_bounded(std::io::Cursor::new(data.clone()), 2048))
+            .expect("a stream under the limit must pass through");
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn bounded_drain_accepts_exactly_at_limit() {
+        let rt = crate::runtime::tokio_rt();
+        let out = rt
+            .block_on(read_bounded(std::io::Cursor::new(vec![9u8; 64]), 64))
+            .expect("a stream at exactly the limit must pass through");
+        assert_eq!(out.len(), 64);
+    }
+
+    #[test]
+    fn bounded_drain_rejects_oversize_stream() {
+        let rt = crate::runtime::tokio_rt();
+        let err = rt
+            .block_on(read_bounded(std::io::Cursor::new(vec![9u8; 65]), 64))
+            .expect_err("a stream past the limit must fail, not grow");
+        assert_eq!(err.kind(), std::io::ErrorKind::QuotaExceeded);
+    }
 }

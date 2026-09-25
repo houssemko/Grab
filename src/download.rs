@@ -172,6 +172,18 @@ pub struct DownloadManager {
     /// check cannot see the window between a worker deleting its shell and
     /// recreating it, and `unremove` bypasses intake entirely.
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
+    /// Queue wakeups from worker threads. The discard finalizer runs on
+    /// the tokio runtime (the manager is `!Send`), so after it releases a
+    /// destination reservation it sends here; the main-thread loop in
+    /// `new()` re-runs `start_next()` so a row parked by `unremove()`
+    /// starts instead of waiting for an unrelated trigger.
+    wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Handle of the `wake_tx` receiver task. Kept so `Drop` can abort it:
+    /// a `spawn_future_local` task outliving its manager would be reaped
+    /// by a later test's main-loop iteration on a different thread,
+    /// tripping glib's thread guard (libtest runs each test on its own
+    /// thread).
+    wake_task: Cell<Option<glib::JoinHandle<()>>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Each
     /// retains the worker's abort handle beside the finalizer: the
     /// finalizer *owns* the worker handle, so aborting the finalizer
@@ -229,10 +241,24 @@ struct PendingRestore {
     segments: Option<SegmentState>,
 }
 
+impl Drop for DownloadManager {
+    fn drop(&mut self) {
+        // Destroy the discard-wakeup task now. A `spawn_future_local` task
+        // is only reaped when the main loop next polls it, so without this
+        // a stale task would outlive the manager and be dispatched by a
+        // later test's main-loop iteration running on a different thread,
+        // tripping glib's thread guard.
+        if let Some(handle) = self.wake_task.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
     pub fn new(store: gio::ListStore, settings: crate::settings::AppSettings) -> Rc<Self> {
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let this = Rc::new(Self {
             store,
             settings,
@@ -250,10 +276,35 @@ impl DownloadManager {
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
+            wake_tx,
+            wake_task: Cell::new(None),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
         });
+        // Queue wakeups from worker threads (see `wake_tx`): a discard
+        // finalizer releasing a destination reservation is the main
+        // producer. Weak ref: the loop must not keep the manager alive.
+        {
+            let weak = Rc::downgrade(&this);
+            let handle = glib::spawn_future_local(async move {
+                while wake_rx.recv().await.is_some() {
+                    if let Some(m) = weak.upgrade() {
+                        // Shutdown awaits discard finalizers, and each one
+                        // sends a wakeup on its way out: never start rows
+                        // while tearing down.
+                        if !m.draining.get() {
+                            m.start_next();
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            });
+            // The task must die with the manager: a stale local task reaped
+            // on another thread trips glib's thread guard (see `Drop`).
+            this.wake_task.set(Some(handle));
+        }
         // Live preferences: raising the download limit must wake queued
         // rows now (nothing else re-runs start_next until the next
         // insert/finish event); lowering it parks the newest running rows
@@ -539,6 +590,25 @@ impl DownloadManager {
         Ok(item)
     }
 
+    /// Final filename policy, shared by intake naming and late
+    /// server/container name suggestions: shorten, then the opt-in
+    /// ASCII fold. Dedupe stays at the call sites — it needs the
+    /// destination context. Folding here (not just at intake) keeps
+    /// the "restrict to ASCII" guarantee for names adopted after
+    /// intake, e.g. `Content-Disposition` or container-truth renames.
+    fn finalize_filename(&self, name: &str) -> String {
+        let name = shorten_filename(name);
+        if self.settings.restrict_filenames() {
+            // Opt-in ASCII-only filenames. yt-dlp's --restrict-filenames only
+            // sanitizes its own output-template fields, but Grab passes yt-dlp
+            // literal output paths, so the flag would be a no-op here: fold
+            // where Grab actually names the file, before dedupe reserves it.
+            restrict_filename_ascii(&name)
+        } else {
+            name
+        }
+    }
+
     /// Enqueue a video page: dialog-routed (listed domains) or probe-
     /// proven (unlisted pages with extractable media). No domain gate
     /// here — the dialog owns routing, and misuse fails loudly at
@@ -560,20 +630,12 @@ impl DownloadManager {
     ) -> Result<DownloadItem, String> {
         let url = normalize_url(page_url)?;
         let dir = self.resolve_dir(dest_dir);
-        let name = filename
-            .filter(|s| sane_filename(s))
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| filename_from_url(&url));
-        let name = shorten_filename(&name);
-        let name = if self.settings.restrict_filenames() {
-            // Opt-in ASCII-only filenames. yt-dlp's --restrict-filenames only
-            // sanitizes its own output-template fields, but Grab passes yt-dlp
-            // literal output paths, so the flag would be a no-op here: fold
-            // where Grab actually names the file, before dedupe reserves it.
-            restrict_filename_ascii(&name)
-        } else {
-            name
-        };
+        let name = self.finalize_filename(
+            &filename
+                .filter(|s| sane_filename(s))
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| filename_from_url(&url)),
+        );
         // One readdir per intake: the reservation probe below must not
         // stat the download dir once per dedupe candidate.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
@@ -1093,6 +1155,13 @@ impl DownloadManager {
                             // single-stream attempts never re-suggest.
                             let pending = this.pending_names.borrow_mut().remove(&id);
                             if let Some(name) = pending {
+                                // Re-apply the final name policy here: the
+                                // stash points already finalize, but adoption
+                                // is the last gate before dedupe/rename, so a
+                                // future sender cannot slip an unpoliced name
+                                // through this path. Idempotent on already
+                                // finalized names.
+                                let name = this.finalize_filename(&name);
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
                                 let existing = crate::video_staging::dir_file_names(
@@ -1359,7 +1428,9 @@ impl DownloadManager {
                             // Same shortening the Chromium path applies:
                             // the stem is unchanged from an already-short
                             // intake, so this is symmetry, not truncation.
-                            let name = shorten_filename(&name);
+                            // Routed through the shared final policy so the
+                            // opt-in ASCII fold covers container-truth names.
+                            let name = this.finalize_filename(&name);
                             this.pending_names.borrow_mut().insert(id, name);
                             continue;
                         }
@@ -1374,7 +1445,7 @@ impl DownloadManager {
                         if !placeholder && !(name.contains('.') && name.len() < current.len()) {
                             continue;
                         }
-                        let name = shorten_filename(&name);
+                        let name = this.finalize_filename(&name);
                         if name == current || !sane_filename(&name) {
                             continue;
                         }
@@ -1921,8 +1992,10 @@ impl DownloadManager {
         let staging = crate::video::staging_dir(id);
         // The tracked task runs on the tokio runtime, where `self` (Rc,
         // !Send) cannot go: carry the reservation set as an `Arc` clone and
-        // release through it directly once the sweep is done.
+        // release through it directly once the sweep is done. The queue
+        // wakeup travels the same way, through the `Send` channel.
         let reservations = std::sync::Arc::clone(&self.reservations);
+        let wake_tx = self.wake_tx.clone();
         match self.running.borrow_mut().remove(&id) {
             Some(handle) => {
                 let worker_abort = handle.abort_handle();
@@ -1940,6 +2013,10 @@ impl DownloadManager {
                     if let Ok(mut r) = reservations.lock() {
                         r.remove(&dest);
                     }
+                    // The destination is free: wake the queue on the main
+                    // thread so a row parked by `unremove()` starts now
+                    // instead of waiting for an unrelated `start_next()`.
+                    wake_tx.send(()).ok();
                 });
                 // Retain the worker's abort beside the finalizer: shutdown
                 // stops the worker through it, because aborting the
@@ -1961,6 +2038,9 @@ impl DownloadManager {
                 crate::video::clean_staging(&staging);
                 crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
+                // Same wakeup as the async finalizer above; already on the
+                // main thread, so it travels the channel like any other.
+                self.wake_tx.send(()).ok();
             }
         }
     }
@@ -2135,11 +2215,10 @@ impl DownloadManager {
         // start on their own, so narrowing keeps them byte-identical to the
         // unreserved path.
         //
-        // Known limitation: the row requeues without starting, and nothing
-        // wakes it when the finalizer releases the destination — it waits
-        // for the next `start_next` trigger. TODO(Tasks 7–9): deliver a
-        // main-thread wakeup with the quiescence work instead of relying on
-        // a later queue event.
+        // Reservation released: the finalizer wakes the queue through
+        // `wake_tx`, so the row starts on the next main-loop iteration
+        // once the destination is free, instead of waiting for an
+        // unrelated `start_next` trigger.
         if item.status() == DownloadStatus::Queued && self.dest_reserved(&item.file_path()) {
             item.set_status(DownloadStatus::Queued);
             self.store.append(&item);

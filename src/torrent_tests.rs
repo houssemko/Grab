@@ -351,3 +351,89 @@ fn seed_limits_hit_matrix() {
     assert!(seed_limits_hit(0.0, 60, old, 1000, 0));
     assert!(!seed_limits_hit(0.0, 60, t0, 1000, 0));
 }
+
+#[test]
+fn file_list_keeps_raw_path_beside_display_path() {
+    // Synthetic two-file torrent: one short name, one past the 120-char
+    // display cap. The display form must truncate; the raw path must not.
+    let long = "x".repeat(200);
+    // Info-dict keys sorted (files < name < piece length < pieces), as in
+    // the other synthetic torrents in this file.
+    let mut b = b"d8:announce7:x-local4:infod5:filesl".to_vec();
+    b.extend_from_slice(b"d6:lengthi2e4:pathl8:keep.isoee");
+    b.extend_from_slice(format!("d6:lengthi3e4:pathl{}:{}ee", long.len(), long).as_bytes());
+    b.extend_from_slice(b"e4:name4:test12:piece lengthi16384e6:pieces0:ee");
+    let (_name, entries) = torrent_file_list(&b).expect("synthetic torrent must parse");
+    assert_eq!(entries.len(), 2);
+    let short = entries
+        .iter()
+        .find(|e| e.raw_path == "keep.iso")
+        .expect("short entry");
+    assert_eq!(short.display_path, "keep.iso");
+    let long_entry = entries
+        .iter()
+        .find(|e| e.raw_path == long)
+        .expect("long entry keeps its raw path");
+    assert_eq!(long_entry.display_path.chars().count(), 121);
+    assert!(long_entry.display_path.ends_with('…'));
+    assert_eq!(long_entry.raw_path.chars().count(), 200);
+}
+
+#[test]
+fn deletion_target_uses_raw_path_not_display() {
+    let folder = std::path::Path::new("/tmp/dl/Cosmos");
+    let long = "x".repeat(200);
+    let entry = TorrentFileEntry {
+        raw_path: long.clone(),
+        display_path: format!("{}…", "x".repeat(120)),
+        length: 3,
+    };
+    // The target is the raw on-disk name: joining the truncated display
+    // path would address a file that does not exist.
+    assert_eq!(
+        deletion_target(folder, 1, &std::collections::HashSet::new(), &entry),
+        Some(folder.join(&long))
+    );
+}
+
+#[test]
+fn deletion_target_skips_kept_and_hostile_entries() {
+    let folder = std::path::Path::new("/tmp/dl/Cosmos");
+    let entry = TorrentFileEntry {
+        raw_path: "keep.iso".to_string(),
+        display_path: "keep.iso".to_string(),
+        length: 2,
+    };
+    let mut keep = std::collections::HashSet::new();
+    keep.insert(0);
+    assert_eq!(deletion_target(folder, 0, &keep, &entry), None);
+    let hostile = TorrentFileEntry {
+        raw_path: "../evil.iso".to_string(),
+        display_path: "../evil.iso".to_string(),
+        length: 2,
+    };
+    assert_eq!(
+        deletion_target(folder, 1, &std::collections::HashSet::new(), &hostile),
+        None
+    );
+}
+
+#[test]
+fn read_torrent_bytes_enforces_single_bounded_open() {
+    let dir = std::env::temp_dir().join(format!("grab-torrent-read-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let small = dir.join("small.torrent");
+    std::fs::write(&small, b"d4:infod4:name4:testee").unwrap();
+    assert_eq!(
+        read_torrent_bytes(&small),
+        Some(b"d4:infod4:name4:testee".to_vec())
+    );
+    // Over the cap: rejected, never read unbounded.
+    let big = dir.join("big.torrent");
+    let f = std::fs::File::create(&big).unwrap();
+    f.set_len(MAX_TORRENT_BYTES + 1).unwrap();
+    assert_eq!(read_torrent_bytes(&big), None);
+    assert_eq!(read_torrent_bytes(&dir.join("missing.torrent")), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
