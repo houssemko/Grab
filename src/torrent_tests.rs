@@ -380,6 +380,23 @@ fn file_list_keeps_raw_path_beside_display_path() {
 }
 
 #[test]
+fn raw_path_collapses_distinct_invalid_utf8() {
+    // `raw_path` is a lossy UTF-8 decode, not the raw bytes: two files
+    // whose names differ only in invalid UTF-8 collapse to one string.
+    // This pins the known limitation documented on `TorrentFileEntry`.
+    let mut b = b"d8:announce7:x-local4:infod5:filesl".to_vec();
+    b.extend_from_slice(b"d6:lengthi2e4:pathl2:");
+    b.extend_from_slice(b"a\xff");
+    b.extend_from_slice(b"eed6:lengthi2e4:pathl2:");
+    b.extend_from_slice(b"a\xfe");
+    b.extend_from_slice(b"eee4:name4:test12:piece lengthi16384e6:pieces0:ee");
+    let (_name, entries) = torrent_file_list(&b).expect("synthetic torrent must parse");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].raw_path, "a\u{fffd}");
+    assert_eq!(entries[0].raw_path, entries[1].raw_path);
+}
+
+#[test]
 fn deletion_target_uses_raw_path_not_display() {
     let folder = std::path::Path::new("/tmp/dl/Cosmos");
     let long = "x".repeat(200);
@@ -436,4 +453,13 @@ fn read_torrent_bytes_enforces_single_bounded_open() {
     assert_eq!(read_torrent_bytes(&big), None);
     assert_eq!(read_torrent_bytes(&dir.join("missing.torrent")), None);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_archive_bytes_rejects_unresolvable_urls() {
+    // Not a pseudo-URL, a relative torrent: path, and an absolute path
+    // outside the archive dir: all unresolvable without touching disk.
+    assert_eq!(read_archive_bytes("magnet:?xt=urn:btih:abc"), None);
+    assert_eq!(read_archive_bytes("torrent:relative.torrent"), None);
+    assert_eq!(read_archive_bytes("torrent:/tmp/evil.torrent"), None);
 }
