@@ -283,6 +283,7 @@ fn refresh_row(
 /// a positional tuple: every element has the same type, so a tuple
 /// silently accepts a swapped pair and the mistake only shows up as a
 /// wrong widget at refresh time.
+#[derive(Clone)]
 struct RowWeaks {
     detail: glib::WeakRef<gtk4::Widget>,
     progress: glib::WeakRef<gtk4::Widget>,
