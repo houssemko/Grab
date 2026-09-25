@@ -44,9 +44,13 @@ def fail(msg: str) -> Mismatch:
     return Mismatch(msg)
 
 
-def version_key(version: str) -> tuple[int, ...]:
+def version_key(version: str) -> tuple:
     core = re.split(r"[-+]", version)[0]
-    return tuple(int(part) if part.isdigit() else 0 for part in core.split("."))
+    parts = tuple(int(part) if part.isdigit() else 0 for part in core.split("."))
+    # A stable release outranks its own pre-releases, matching the
+    # metainfo test in src/application.rs: without the flag, `4.4.0` and
+    # `4.4.0-beta.1` tie and max() keeps the last tie -- the beta.
+    return parts + (not re.search(r"[-+]", version),)
 
 
 def package_version() -> str:

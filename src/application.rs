@@ -455,13 +455,19 @@ mod tests {
     }
 
     /// Version tuple for comparison (numeric parts, patch-suffix last).
-    fn version_key(v: &str) -> (u32, u32, u32) {
+    fn version_key(v: &str) -> (u32, u32, u32, bool) {
         let core = v.split(['-', '+']).next().unwrap_or(v);
         let mut parts = core.split('.').map(|p| p.parse().unwrap_or(0));
+        // A stable release outranks its own pre-releases: without the
+        // flag, `4.4.0` and `4.4.0-beta.1` tie and `max_by_key` keeps the
+        // last tie -- the beta -- so keeping beta history alongside a
+        // stable entry would fail the newest-match test below.
+        let stable = !v.contains(['-', '+']);
         (
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
+            stable,
         )
     }
 
