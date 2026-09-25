@@ -3202,13 +3202,35 @@ fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
     manager.store().append(&item);
     manager.epoch.borrow_mut().insert(id, 1);
 
-    let finished = std::sync::Arc::new(std::sync::Mutex::new(false));
-    let finished_task = std::sync::Arc::clone(&finished);
+    // A Drop flag inside the task, not an absence checked after a sleep:
+    // asserting a flag was *not* set passes just as well when the task was
+    // detached as when it was aborted.
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped_task = std::sync::Arc::clone(&dropped);
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_task = std::sync::Arc::clone(&started);
     let handle = crate::runtime::tokio_rt().spawn(async move {
+        let _flag = DropFlag(dropped_task);
+        started_task.store(true, std::sync::atomic::Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        *finished_task.lock().unwrap() = true;
     });
     manager.running.borrow_mut().insert(id, handle);
+    // The task must be genuinely up before the removal: aborting a
+    // never-polled task would pass without proving anything ran.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "the stand-in engine never started, so the removal proved nothing"
+    );
 
     manager.remove(id);
 
@@ -3217,14 +3239,16 @@ fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
         "the concurrency slot was not freed immediately, so a long session \
          would run out of slots"
     );
-    // A long sleep the abort should have cancelled. If the task was left
-    // running, this returns early and the flag is set.
-    tokio_rt().block_on(async {
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    });
+    // The abort must have destroyed the task, not detached it: dropping
+    // the handle alone leaves the future (and its flag) alive.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dropped.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(
-        !*finished.lock().unwrap(),
-        "a plain row's engine kept running after its row was removed"
+        dropped.load(Ordering::SeqCst),
+        "a plain row's engine was detached rather than aborted: it kept running \
+         after its row was removed"
     );
 }
 
@@ -3286,6 +3310,8 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     let seen_task = std::sync::Arc::clone(&seen);
     let done = std::sync::Arc::new(std::sync::Mutex::new(false));
     let done_task = std::sync::Arc::clone(&done);
+    let wrote = std::sync::Arc::new(std::sync::Mutex::new((false, false)));
+    let wrote_task = std::sync::Arc::clone(&wrote);
     let staging_task = staging.clone();
     let dest_task = dest_dir.clone();
     let handle = crate::runtime::tokio_rt().spawn(async move {
@@ -3295,9 +3321,10 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         // teardown a beat, then recreate scratch the way a late write
         // would -- recreating the parents, which is the whole point.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        let _ = std::fs::create_dir_all(&staging_task);
-        std::fs::write(staging_task.join("late-remux"), b"late").ok();
-        std::fs::write(dest_task.join("v.live.mp4"), b"late delivery").ok();
+        let staging_ok = std::fs::create_dir_all(&staging_task).is_ok()
+            && std::fs::write(staging_task.join("late-remux"), b"late").is_ok();
+        let dest_ok = std::fs::write(dest_task.join("v.live.mp4"), b"late delivery").is_ok();
+        *wrote_task.lock().unwrap() = (staging_ok, dest_ok);
         *done_task.lock().unwrap() = true;
     });
     manager.running.borrow_mut().insert(id, handle);
@@ -3315,6 +3342,15 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     assert!(
         *done.lock().unwrap(),
         "the stand-in worker never ran to completion"
+    );
+    // Both late writes must actually have landed: a fixture that silently
+    // failed to write would pass against the very bug this catches, since
+    // absent files are what the sweep is supposed to leave behind.
+    let (staging_ok, dest_ok) = *wrote.lock().unwrap();
+    assert!(
+        staging_ok && dest_ok,
+        "the stand-in worker failed to write its late files (staging: {staging_ok}, \
+         dest: {dest_ok}), so the sweep below proved nothing"
     );
     while staging.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));

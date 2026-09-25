@@ -1014,8 +1014,8 @@ pub(crate) async fn run_live_ytdlp(
         // A discard is not a stop. There is no row left to deliver to, so
         // the finalize path below must not run: adopting the partial and
         // remuxing it would place a file at a destination with no row
-        // behind it. The recorder is already reaped, so nothing can write
-        // after this point.
+        // behind it. Only the direct child is reaped here; group
+        // descendants may still be writing (see the quiescence wait below).
         //
         // The scratch is deliberately left. The manager reclaims it only
         // after this task has returned -- sweeping from inside a task that

@@ -3973,6 +3973,7 @@ exit 0
     bin
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
     // The real runner, not a stand-in. Two things an earlier version of
@@ -4089,11 +4090,15 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake ffmpeg that announces itself, then takes long enough for a stop to
-/// land while the remux is in flight.
-fn fake_ffmpeg_slow_signalled(dir: &std::path::Path) -> std::path::PathBuf {
-    let bin = dir.join("fake-ffmpeg-slow-signalled");
+/// Fake ffmpeg that announces itself, then blocks until the test releases
+/// the remux. A fixed sleep stands in for an ordering guarantee: a delayed
+/// sender can miss the window and the stop lands after the remux is done,
+/// passing without proving anything. A release the test creates only after
+/// the discard was sent cannot be missed.
+fn fake_ffmpeg_release_signalled(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ffmpeg-release-signalled");
     let marker = dir.join("ffmpeg-started");
+    let release = dir.join("ffmpeg-release");
     std::fs::write(
         &bin,
         format!(
@@ -4107,11 +4112,12 @@ for a in "$@"; do
     last="$a"
 done
 : > '{}'
-sleep 2
+while [ ! -e '{}' ]; do sleep 0.05; done
 cat "$input" > "$last"
 exit 0
 "#,
-            marker.display()
+            marker.display(),
+            release.display()
         ),
     )
     .unwrap();
@@ -4136,17 +4142,19 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
     // A recorder that finishes on its own, so the capture ends without any
     // stop: the discard can then only be observed after the select.
     let fake_yt = fake_ytdlp_live(&dir, false);
-    let fake_ff = fake_ffmpeg_slow_signalled(&dir);
+    let fake_ff = fake_ffmpeg_release_signalled(&dir);
     let staging = dir.join("staging");
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let dest = job.dest.clone();
     let marker = dir.join("ffmpeg-started");
+    let release = dir.join("ffmpeg-release");
     let gate = AttemptGate::new();
 
     let task = crate::runtime::tokio_rt().spawn({
         let staging = staging.clone();
         let marker = marker.clone();
+        let release = release.clone();
         let gate = std::sync::Arc::clone(&gate);
         async move {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -4164,6 +4172,11 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                     // The removal itself: the prompt above is unread this
                     // late, so only the gate claim stops the delivery.
                     let _ = gate.discard();
+                    // Unblock the remux only after the discard was sent, so
+                    // the removal provably landed mid-remux. Unconditional:
+                    // without a remux waiting this is a harmless file, and
+                    // without it a missed marker would hang the run.
+                    let _ = std::fs::write(&release, b"release");
                 }
             });
             run_live_ytdlp(
@@ -4605,6 +4618,10 @@ fn live_capture_retry_never_inherits_stale_state() {
 /// Fake recorder that reports its own pid, lays down the scratch a real
 /// live capture writes, then blocks. Aborting the task that owns it
 /// simulates `DownloadManager::shutdown`.
+///
+/// Linux-only like its two callers: the pid/group oracles need procfs, so
+/// elsewhere this would be dead code.
+#[cfg(target_os = "linux")]
 fn fake_ytdlp_live_abortable(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-abortable");
     std::fs::write(
@@ -4622,9 +4639,12 @@ printf '{{"downloader": {{}}}}' > "$out.ytdl"
 # Report the group leader (this shell) and a descendant in the same
 # group, so the test can prove the *group* died rather than just the
 # leader. A direct-child-only kill passes a leader-only oracle.
-printf '%s' "$$" > '{pidfile}'
+# Ordering: the descendant is spawned and reported first, the leader
+# pid last, so a waiter that sees the leader marker knows the
+# descendant already exists.
 sleep 600 &
 printf '%s' "$!" > '{childpid}'
+printf '%s' "$$" > '{pidfile}'
 wait
 exit 0
 "#,
@@ -7991,7 +8011,13 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
         "a live process group was reported as quiesced, so a reclaim would run \
          under a writer that never stopped"
     );
-    let _ = child.kill();
+    // Kill the whole group, not just the direct child: the script's
+    // `sleep 30` grandchild shares the group, and killing only the leader
+    // would leak it.
+    // SAFETY: constant signal number; ESRCH (already dead) is harmless.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
     let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
