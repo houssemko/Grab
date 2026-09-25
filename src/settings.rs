@@ -29,7 +29,6 @@ pub mod key {
     pub const TORRENT_LSD: &str = "torrent-lsd";
     pub const VIDEO_QUALITY: &str = "video-quality";
     pub const VIDEO_CODEC_PRIORITY: &str = "video-codec-priority";
-    pub const AUDIO_QUALITY: &str = "audio-quality";
     pub const SUBTITLE_LANGUAGE: &str = "subtitle-language";
     pub const EMBED_SUBS: &str = "embed-subs";
     pub const COOKIES_BROWSER: &str = "cookies-browser";
@@ -118,11 +117,6 @@ impl AppSettings {
     }
     pub fn video_codec_priority(&self) -> String {
         self.0.string(key::VIDEO_CODEC_PRIORITY).to_string()
-    }
-    /// Audio extraction quality for audio-only downloads (`--audio-quality`).
-    /// 0 is best, 10 is worst; 5 is yt-dlp's default. Clamped at spawn.
-    pub fn audio_quality(&self) -> i32 {
-        self.0.int(key::AUDIO_QUALITY)
     }
     pub fn video_codec_newest(&self) -> bool {
         self.video_codec_priority() == crate::video::CODEC_PRIORITY_NEWEST
