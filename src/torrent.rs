@@ -114,12 +114,21 @@ pub fn parse_magnet(s: &str) -> Result<librqbit::Magnet, String> {
     Ok(m)
 }
 
-/// Raw torrent display name, lossy-decoded. Callers apply their own
-/// `sane_filename` gate and fallback (info-hash hex, `"torrent"`, or
-/// stub), which deliberately differ per site — this helper only
-/// decodes.
+/// Raw torrent display name, lossy-decoded. Callers apply their own gate
+/// via [`safe_torrent_name`] and pick their own fallback (info-hash hex,
+/// `"torrent"`, or stub), which deliberately differ per site — this helper
+/// only decodes.
 fn raw_torrent_name<B: AsRef<[u8]>>(name: Option<&B>) -> Option<String> {
     name.map(|n| String::from_utf8_lossy(n.as_ref()).into_owned())
+}
+
+/// A torrent's advertised name prepared for the filesystem: it must pass
+/// the filename gate, then is shortened. `None` when the caller must fall
+/// back (info-hash hex, `"torrent"`, … — the fallback deliberately differs
+/// per site, so it stays with the caller).
+fn safe_torrent_name(name: Option<String>) -> Option<String> {
+    name.filter(|n| sane_filename(n))
+        .map(|n| shorten_filename(&n))
 }
 
 /// Display stub for a magnet row: the advertised name, else the info-hash hex.
@@ -159,7 +168,7 @@ fn torrents_dir() -> PathBuf {
 /// Constrained to the app's own archive dir (plus a `.torrent` suffix) so
 /// queue rows can only ever resolve to — and delete — files Grab archived.
 pub fn archive_path_for_url(url: &str) -> Option<PathBuf> {
-    let path = url.trim_start().get(8..)?;
+    let path = url.trim_start().get("torrent:".len()..)?;
     let path = PathBuf::from(path);
     // Existence is part of validity: intake rejects doodled pseudo-URLs
     // fast, and restore only ever sees swept-kept archives.
@@ -202,11 +211,9 @@ pub fn archive_torrent_file(file_name: &str, bytes: &[u8]) -> Result<String, Str
 
 /// Stub row name for an archived file: the sanitized file stem.
 pub fn stub_name_for_file(file_name: &str) -> String {
-    let stem = safe_stem(file_name);
-    match stem {
-        Some(s) => crate::file_names::shorten_filename(s),
-        None => "torrent".to_string(),
-    }
+    safe_stem(file_name)
+        .map(shorten_filename)
+        .unwrap_or_else(|| "torrent".to_string())
 }
 
 /// One listed file of a multi-file torrent: the lossy-decoded entry
@@ -363,10 +370,7 @@ fn output_folder_for(
     if !multi {
         return dest.to_path_buf();
     }
-    let dir = name
-        .filter(|n| sane_filename(n))
-        .map(|n| shorten_filename(&n))
-        .unwrap_or_else(|| fallback.to_string());
+    let dir = safe_torrent_name(name).unwrap_or_else(|| fallback.to_string());
     dest.join(dir)
 }
 
@@ -385,10 +389,7 @@ pub(crate) fn intake_plan(bytes: &[u8]) -> Option<(String, bool)> {
     let meta = librqbit::torrent_from_bytes(bytes).ok()?;
     let raw = raw_torrent_name(meta.info.data.name.as_ref());
     let multi = is_multi_file(meta.info.data.files.as_deref());
-    let base = raw
-        .filter(|n| sane_filename(n))
-        .map(|n| shorten_filename(&n))
-        .unwrap_or_else(|| meta.info_hash.as_string());
+    let base = safe_torrent_name(raw).unwrap_or_else(|| meta.info_hash.as_string());
     Some((base, multi))
 }
 
@@ -1051,11 +1052,8 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
                     let hash_hex = hash_id.as_string();
                     let raw_name = raw_torrent_name(meta.info.data.name.as_ref());
                     let multi = is_multi_file(meta.info.data.files.as_deref());
-                    let stub = raw_name
-                        .clone()
-                        .filter(|n| sane_filename(n))
-                        .map(|n| shorten_filename(&n))
-                        .unwrap_or_else(|| hash_hex.clone());
+                    let stub =
+                        safe_torrent_name(raw_name.clone()).unwrap_or_else(|| hash_hex.clone());
                     // Collision-recorded subfolder from intake: already final.
                     let folder = if dest_is_final {
                         dest

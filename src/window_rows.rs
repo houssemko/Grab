@@ -7,7 +7,7 @@ use crate::download::{DownloadManager, RemovedSnapshot};
 use crate::download_pieces::{BLOCK_CELLS, aggregate};
 use crate::download_store::DownloadStatus;
 use adw::prelude::*;
-use gettextrs::gettext;
+use gettextrs::{gettext, ngettext};
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
@@ -35,6 +35,12 @@ pub(crate) fn default_name_for(
 ) -> String {
     let remux = crate::video_prefs::remux_video_active(&settings.remux_video());
     crate::video::default_video_filename(title, audio_only, remux.as_deref())
+}
+
+/// ngettext with the "{n}" count slot filled: the msgids keep "{n}"
+/// so translators can reposition the count, filled here for display.
+pub(crate) fn ngettext_count(singular: &str, plural: &str, n: usize) -> String {
+    ngettext(singular, plural, n as u32).replace("{n}", &n.to_string())
 }
 
 /// Hidden error caption for a preferences group: callers set its text
@@ -250,19 +256,12 @@ fn refresh_row(
     w.reveal_btn.set_visible(done);
     w.delete_btn.set_visible(done);
 
-    if item.status() == DownloadStatus::Paused {
-        set_toggle_verb(
-            &w.toggle_btn,
-            "media-playback-start-symbolic",
-            &gettext("Resume"),
-        );
+    let (icon, tip) = if item.status() == DownloadStatus::Paused {
+        ("media-playback-start-symbolic", gettext("Resume"))
     } else {
-        set_toggle_verb(
-            &w.toggle_btn,
-            "media-playback-pause-symbolic",
-            &gettext("Pause"),
-        );
-    }
+        ("media-playback-pause-symbolic", gettext("Pause"))
+    };
+    set_toggle_verb(&w.toggle_btn, icon, &tip);
 
     // Block map: only while pieces are still landing. Other states
     // collapse it so finished rows stay compact.
@@ -280,24 +279,26 @@ fn refresh_row(
     }
 }
 
-/// Weak refs to one row's refreshable widgets, in build order: detail,
-/// progress, spinner, toggle, stop, queue, retry, reveal, delete,
-/// revealer, blocks, status, name.
-type RowWeaks = (
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-    glib::WeakRef<gtk4::Widget>,
-);
+/// Weak refs to one row's refreshable widgets. Named fields instead of
+/// a positional tuple: every element has the same type, so a tuple
+/// silently accepts a swapped pair and the mistake only shows up as a
+/// wrong widget at refresh time.
+#[derive(Clone)]
+struct RowWeaks {
+    detail: glib::WeakRef<gtk4::Widget>,
+    progress: glib::WeakRef<gtk4::Widget>,
+    spinner: glib::WeakRef<gtk4::Widget>,
+    toggle_btn: glib::WeakRef<gtk4::Widget>,
+    stop_btn: glib::WeakRef<gtk4::Widget>,
+    queue_btn: glib::WeakRef<gtk4::Widget>,
+    retry_btn: glib::WeakRef<gtk4::Widget>,
+    reveal_btn: glib::WeakRef<gtk4::Widget>,
+    delete_btn: glib::WeakRef<gtk4::Widget>,
+    map_revealer: glib::WeakRef<gtk4::Widget>,
+    blocks: glib::WeakRef<gtk4::Widget>,
+    status: glib::WeakRef<gtk4::Widget>,
+    name: glib::WeakRef<gtk4::Widget>,
+}
 
 /// Strongly-held row widgets for one refresh tick: the two text labels
 /// plus the refresh bundle.
@@ -311,21 +312,21 @@ struct LiveRow {
 /// widgets are gone (row destroyed — normal, silent) or mistyped (UI
 /// drift — warns here, never panics, per the no-panic-rows rule).
 fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
-    let (
-        w_detail,
-        w_prog,
-        w_spin,
-        w_tog,
-        w_stop,
-        w_queue,
-        w_retry,
-        w_reveal,
-        w_del,
-        w_rev,
-        w_map,
-        w_status,
-        w_name,
-    ) = weaks;
+    let RowWeaks {
+        detail: w_detail,
+        progress: w_prog,
+        spinner: w_spin,
+        toggle_btn: w_tog,
+        stop_btn: w_stop,
+        queue_btn: w_queue,
+        retry_btn: w_retry,
+        reveal_btn: w_reveal,
+        delete_btn: w_del,
+        map_revealer: w_rev,
+        blocks: w_map,
+        status: w_status,
+        name: w_name,
+    } = weaks;
     let (
         Some(detail_w),
         Some(progress_w),
@@ -638,21 +639,21 @@ pub(crate) fn build_row(
     }
 
     let w = |w: &gtk4::Widget| w.downgrade();
-    let weaks = (
-        w(detail.upcast_ref()),
-        w(progress.upcast_ref()),
-        w(spinner.upcast_ref()),
-        w(toggle_btn.upcast_ref()),
-        w(stop_btn.upcast_ref()),
-        w(queue_btn.upcast_ref()),
-        w(retry_btn.upcast_ref()),
-        w(reveal_btn.upcast_ref()),
-        w(delete_btn.upcast_ref()),
-        w(map_revealer.upcast_ref()),
-        w(blocks.upcast_ref()),
-        w(status.upcast_ref()),
-        w(name.upcast_ref()),
-    );
+    let weaks = RowWeaks {
+        detail: w(detail.upcast_ref()),
+        progress: w(progress.upcast_ref()),
+        spinner: w(spinner.upcast_ref()),
+        toggle_btn: w(toggle_btn.upcast_ref()),
+        stop_btn: w(stop_btn.upcast_ref()),
+        queue_btn: w(queue_btn.upcast_ref()),
+        retry_btn: w(retry_btn.upcast_ref()),
+        reveal_btn: w(reveal_btn.upcast_ref()),
+        delete_btn: w(delete_btn.upcast_ref()),
+        map_revealer: w(map_revealer.upcast_ref()),
+        blocks: w(blocks.upcast_ref()),
+        status: w(status.upcast_ref()),
+        name: w(name.upcast_ref()),
+    };
     let m_sync = Rc::clone(manager);
     let exp_sync = Rc::clone(&expanded);
     let updater = move |it: &crate::download::DownloadItem| {

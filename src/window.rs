@@ -1,6 +1,6 @@
 use crate::download::DownloadManager;
 use adw::prelude::*;
-use gettextrs::{gettext, ngettext};
+use gettextrs::gettext;
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
 use libadwaita as adw;
@@ -15,6 +15,7 @@ pub use crate::window_dialogs::{show_add_dialog, show_torrent_files_dialog};
 /// the re-export keeps the in-tree `crate::window::X` path working.
 use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
+use crate::window_rows::ngettext_count;
 
 pub const BACKGROUND_NOTIF_ID: &str = "grab-background";
 
@@ -520,14 +521,11 @@ pub fn build_window(
         banner.connect_button_clicked(move |_| {
             let n = m.retry_failed();
             if n > 0 {
-                t.add_toast(adw::Toast::new(
-                    &ngettext(
-                        "Retrying failed download",
-                        "Retrying {n} failed downloads",
-                        n as u32,
-                    )
-                    .replace("{n}", &n.to_string()),
-                ));
+                t.add_toast(adw::Toast::new(&ngettext_count(
+                    "Retrying failed download",
+                    "Retrying {n} failed downloads",
+                    n,
+                )));
             }
         });
     }
@@ -600,6 +598,13 @@ pub fn build_window(
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
 
+    // Flip a named app action on/off; silently skips a missing one
+    // (lookup only misses on UI drift, which must not crash the hook).
+    let set_action = |app: &adw::Application, name: &str, enabled: bool| {
+        if let Some(a) = app.lookup_action(name).and_downcast::<gio::SimpleAction>() {
+            a.set_enabled(enabled);
+        }
+    };
     {
         let app_weak = app.downgrade();
         let m = Rc::clone(&manager);
@@ -611,24 +616,9 @@ pub fn build_window(
             sync();
             inhibit();
             if let Some(app) = app_weak.upgrade() {
-                if let Some(a) = app
-                    .lookup_action("cancel-all")
-                    .and_downcast::<gio::SimpleAction>()
-                {
-                    a.set_enabled(m.has_active());
-                }
-                if let Some(a) = app
-                    .lookup_action("retry-failed")
-                    .and_downcast::<gio::SimpleAction>()
-                {
-                    a.set_enabled(m.has_failed());
-                }
-                if let Some(a) = app
-                    .lookup_action("clear-finished")
-                    .and_downcast::<gio::SimpleAction>()
-                {
-                    a.set_enabled(m.finished_count() > 0);
-                }
+                set_action(&app, "cancel-all", m.has_active());
+                set_action(&app, "retry-failed", m.has_failed());
+                set_action(&app, "clear-finished", m.finished_count() > 0);
             }
             banner.set_revealed(m.has_errored());
             // Same predicate as close-request: only quit/withdraw when
