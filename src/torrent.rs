@@ -209,10 +209,38 @@ pub fn stub_name_for_file(file_name: &str) -> String {
     }
 }
 
-/// One listed file of a multi-file torrent: display path + byte length.
+/// One listed file of a multi-file torrent: the raw entry path for
+/// filesystem operations, its sanitized display form for the UI, and
+/// the byte length. The two paths are deliberately separate: the
+/// display form is truncated and control-stripped, so it can differ
+/// from the on-disk name and must never be joined against folders.
 pub struct TorrentFileEntry {
-    pub path: String,
+    /// Entry path exactly as joined from the torrent's byte-string
+    /// components. The only path ever used for filesystem operations.
+    pub raw_path: String,
+    /// Display form of `raw_path` (see `sanitize_display_path`). UI
+    /// only — never a filesystem path.
+    pub display_path: String,
     pub length: u64,
+}
+
+/// Upper bound for a `.torrent` file read from disk: torrents are
+/// small metadata documents, and the read itself needs a ceiling.
+pub(crate) const MAX_TORRENT_BYTES: u64 = 10_000_000;
+
+/// Read a `.torrent` file with a single bounded open. The size gate and
+/// the read must not be separate opens — a concurrent replacement
+/// between `metadata` and `read` would invalidate the check — and
+/// `std::fs::read` itself has no byte limit. Pure filesystem helper.
+pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_TORRENT_BYTES + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    (buf.len() as u64 <= MAX_TORRENT_BYTES).then_some(buf)
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker.
@@ -258,7 +286,8 @@ pub fn torrent_file_list(bytes: &[u8]) -> Result<(String, Vec<TorrentFileEntry>)
                     let raw = parts.join("/");
                     let shown = sanitize_display_path(&raw);
                     TorrentFileEntry {
-                        path: if shown.is_empty() {
+                        raw_path: raw,
+                        display_path: if shown.is_empty() {
                             format!("file {i}")
                         } else {
                             shown
@@ -391,11 +420,26 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     }
     let keep: std::collections::HashSet<usize> = selected.into_iter().collect();
     for (i, entry) in entries.iter().enumerate() {
-        if keep.contains(&i) || is_hostile_entry(&entry.path) {
-            continue;
+        if let Some(target) = deletion_target(folder, i, &keep, entry) {
+            remove_file_and_prune_parents(&target, folder);
         }
-        remove_file_and_prune_parents(&folder.join(&entry.path), folder);
     }
+}
+
+/// Deletion target for one unselected torrent entry, if any: kept and
+/// hostile entries yield `None`. The target joins the entry's RAW path
+/// — the sanitized display path is truncated and control-stripped and
+/// can name a file that does not exist on disk. Pure.
+pub(crate) fn deletion_target(
+    folder: &std::path::Path,
+    index: usize,
+    keep: &std::collections::HashSet<usize>,
+    entry: &TorrentFileEntry,
+) -> Option<std::path::PathBuf> {
+    if keep.contains(&index) || is_hostile_entry(&entry.raw_path) {
+        return None;
+    }
+    Some(folder.join(&entry.raw_path))
 }
 
 /// Whether a torrent entry path may escape its folder (`..`, absolute

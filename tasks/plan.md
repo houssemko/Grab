@@ -1,12 +1,12 @@
 # Implementation Plan: Grab Health Follow-up
 
 ## Overview
-Sentrux scan of `grab` (44 files, 37k lines, quality 4708, bottleneck modularity 2947) shows clean layering (0 above-diagonal) but 3 oversized modules, thin window tests, and no architectural guardrails. Baseline is green: `cargo fmt --check` clean, `clippy --all-targets -- -D warnings` clean, `cargo test -- --test-threads=1` 387 passed. This plan locks the good layering, closes the real test gap, and stages decomposition without a big-bang refactor.
+Sentrux scan of `grab` (44 files, 37k lines, quality 4708, bottleneck modularity 2947) shows clean layering (0 above-diagonal) but 3 oversized modules, thin window tests, and no architectural guardrails. Baseline is green: `cargo fmt --check` clean, `clippy --all-targets -- -D warnings` clean, `cargo test -- --test-threads=1` 454 passed (462 after this PR). This plan locks the good layering, closes the real test gap, and stages decomposition without a big-bang refactor.
 
 ## Architecture Decisions
 - Keep single-binary GTK4/libadwaita layout from CONTRIBUTING.md; no new crates.
 - Sentrux `dsm.size=14` covers the import graph core; `video.rs`/`download.rs`/`window.rs` are the hotspots (5.3k / 4.5k / 3.1k lines, all >1000-line inspection signal).
-- Sentrux `test_gaps` (35 untested, score 0.10) undercounts Rust `#[cfg(test)]` inline + `*_tests.rs` modules (387 real tests). Fix the gap that is real: `window_tests.rs` has 1 test for 3131 lines.
+- Sentrux `test_gaps` (35 untested, score 0.10) undercounts Rust `#[cfg(test)]` inline + `*_tests.rs` modules (454 real tests). Fix the gap that is real: `window_tests.rs` has 1 test for 3131 lines.
 - Threading rule stays: tokio runtime -> `EngineMsg` channel -> `glib::spawn_future_local` on main thread.
 - Refactors split from behavior changes per code-review skill; each task leaves tree green.
 
@@ -57,7 +57,7 @@ Runtime edges confirm at least `download<->video` (`VideoSource`/`combo_*` vs
 to prevent new cycles; Task 4 RFC targets reduction toward 0.
 `check_rules` now passes. Rescan quality 4773 (up from 4708 baseline).
 
-**Coverage reconciliation (Task 2):** `cargo test -- --list` = 387 tests:
+**Coverage reconciliation (Task 2):** `cargo test -- --list` = 454 tests (462 with this PR):
 video 252, download 109, torrent 24, window 1, application 1.
 Sentrux `test_gaps` reports 39 source / 5 test files / 4 tested / 35 untested /
 score 0.10 because it counts all 44 scanned files (data/, po/, build-aux,

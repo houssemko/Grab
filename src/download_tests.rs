@@ -16,7 +16,7 @@ use crate::download_row::DownloadItem;
 use crate::download_store::{QUEUE_VERSION, StoredItem, StoredQueue};
 use crate::file_names::{
     PIECE_MAX, PIECE_MIN, dedupe_filename, filename_from_url, piece_len, rename_noreplace,
-    shorten_filename,
+    restrict_filename_ascii, shorten_filename,
 };
 
 use crate::video::test_support::NoVideoTools;
@@ -4945,17 +4945,21 @@ fn a_finished_name_claim_honours_a_pending_discard() {
 }
 
 #[test]
-fn a_reserved_destination_parks_an_unremoved_row_until_start_next() {
-    // Undo bypasses intake dedupe: a reserved destination must requeue the
-    // row without starting it, later triggers must not start it while
-    // reserved, and releasing alone must not wake it (no wakeup exists yet:
-    // the next `start_next` trigger starts it).
+fn released_reservation_wakes_parked_unremoved_row() {
+    // Undo bypasses intake dedupe: a reserved destination requeues the row
+    // without starting it, and later triggers must not start it while
+    // reserved. When the discard finalizer releases the reservation it
+    // wakes the queue through `wake_tx`: the parked row starts without
+    // waiting for an unrelated `start_next()` trigger. This drives the
+    // async finalizer branch — a discard for a row with a worker in
+    // flight, the real scenario — so the wakeup crosses the tokio/main
+    // thread hop, not the synchronous no-worker path.
     let (_q, _l) = test_locks();
-    let _qf = test_queue_file("reserve-unremove-park");
+    let _qf = test_queue_file("reserve-unremove-wake");
     let _notools = NoVideoTools::apply();
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let dest = std::env::temp_dir().join(format!("grab-reserve-park-{}", std::process::id()));
+    let dest = std::env::temp_dir().join(format!("grab-reserve-wake-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::create_dir_all(&dest).unwrap();
     let dest_s = dest.to_string_lossy().into_owned();
@@ -4995,15 +4999,34 @@ fn a_reserved_destination_parks_an_unremoved_row_until_start_next() {
         "a later trigger started a row whose destination is still reserved"
     );
     assert!(!manager.running.borrow().contains_key(&id));
-    manager.release_dest(&reserved);
+    // The discard finalizer frees the destination. A stand-in worker
+    // stands in for the row's real task so the async finalizer branch
+    // runs: it waits on the worker, sweeps, releases the reservation,
+    // and sends the wakeup from the tokio runtime thread. Awaiting the
+    // tracked finalizer handle is the deterministic signal that all of
+    // that finished — no polling, no deadline to starve.
+    manager
+        .running
+        .borrow_mut()
+        .insert(4242, crate::runtime::tokio_rt().spawn(async {}));
+    manager.finish_discard(4242, reserved.clone(), AttemptGate::new());
+    let finalizer = manager
+        .discards
+        .borrow_mut()
+        .remove(&4242)
+        .expect("finish_discard tracks a finalizer for a live worker")
+        .finalizer;
+    let _ = crate::runtime::tokio_rt().block_on(finalizer);
+    assert!(
+        !manager.dest_reserved(&reserved),
+        "the finalizer must release the destination reservation"
+    );
+    quiesce(&glib::MainContext::default());
     assert_eq!(
         revived.status(),
-        DownloadStatus::Queued,
-        "releasing the reservation must not start the row on its own"
+        DownloadStatus::Downloading,
+        "releasing the reservation must wake the parked row"
     );
-    assert!(!manager.running.borrow().contains_key(&id));
-    manager.start_next();
-    assert_eq!(revived.status(), DownloadStatus::Downloading);
     assert!(manager.running.borrow().contains_key(&id));
     drain_engine(&manager, id);
     crate::video::clean_staging(&crate::video::staging_dir(id));
@@ -5259,4 +5282,30 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
     );
     let _ = std::fs::remove_dir_all(&dest_dir);
     let _ = std::fs::remove_dir_all(&staging);
+}
+
+#[test]
+fn finalize_filename_applies_ascii_fold_for_late_names() {
+    // The opt-in ASCII fold must cover names adopted after intake
+    // (server/container suggestions via SuggestName), not just the
+    // intake name: finalize_filename is the single policy point.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("finalize-restrict");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    settings.set_boolean("restrict-filenames", true).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let folded = manager.finalize_filename("Café & Croissants.mp4");
+    assert!(folded.is_ascii(), "late name must fold to ASCII: {folded}");
+    assert_eq!(
+        folded,
+        restrict_filename_ascii(&shorten_filename("Café & Croissants.mp4"))
+    );
+    // Pref off: only shortening applies, non-ASCII survives.
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    assert_eq!(
+        manager.finalize_filename("Café & Croissants.mp4"),
+        shorten_filename("Café & Croissants.mp4")
+    );
 }
