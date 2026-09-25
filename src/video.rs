@@ -43,7 +43,9 @@ pub use crate::video_runner::run_video_download;
 pub use crate::video_spawn::fetch_video_infos;
 /// Facade: staging/parts/manifest/resume lives in
 /// [`video_staging`](crate::video_staging) now.
-pub use crate::video_staging::{clean_dest_parts, clean_staging, staging_dir, staging_root};
+pub use crate::video_staging::{
+    clean_dest_parts, clean_staging, highest_staging_index, staging_dir, staging_root,
+};
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
 pub use crate::video_tools::{install_ffmpeg, install_ytdlp, latest_ytdlp_tag, resolve_libraries};
 /// Facade: probe identity lives in [`video_types`](crate::video_types) now.
