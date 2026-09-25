@@ -3,6 +3,7 @@
 //! leaf and mid-level module: the engine drives `run_video_download`
 //! through the `video` facade.
 
+use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
@@ -36,6 +37,27 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use yt_dlp::model::Video;
 
+/// What a stop means for the attempt it reaches.
+///
+/// This was a bare `oneshot<()>`, which could say "stop" but not *how* to
+/// stop, so the worker had exactly one response: adopt the partial, remux
+/// it, deliver. Row removal inherited that, and a removed row delivered a
+/// file with no row behind it.
+///
+/// The worker applies the intent rather than asking the manager, because
+/// the worker is the only party that knows whether it is capturing live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopIntent {
+    /// Stop and keep what is recorded: a user pressing Stop, pause or
+    /// cancel. A live capture adopts its partial and delivers it.
+    Preserve,
+    /// Stop and throw it away: the row is being removed. The worker reaps
+    /// its recorder and returns without adopting, remuxing or delivering.
+    /// It leaves the scratch, because the manager can only reclaim it
+    /// safely once the task has actually returned.
+    Discard,
+}
+
 /// Run one attempt: resolve → download parts → merge → rename into place.
 /// Returns the final size, or `None` when aborted (the pauser/canceller
 /// already set the row status; the caller sends nothing).
@@ -44,7 +66,8 @@ use yt_dlp::model::Video;
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
 pub async fn run_video_download(
     mut job: VideoJob,
-    mut abort: oneshot::Receiver<()>,
+    gate: &std::sync::Arc<AttemptGate>,
+    mut abort: oneshot::Receiver<StopIntent>,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<VideoOutcome, VideoError> {
     use crate::engine_msg::EngineMsg;
@@ -201,6 +224,7 @@ pub async fn run_video_download(
                 &ffmpeg_bin,
                 &staging,
                 &job,
+                gate,
                 canonical,
                 &hls.format_id,
                 abort,
@@ -215,6 +239,7 @@ pub async fn run_video_download(
             &ffmpeg_bin,
             &staging,
             &job,
+            gate,
             &hls.format_id,
             abort,
             timeout,
@@ -349,6 +374,7 @@ pub async fn run_video_download(
         &ffmpeg_bin,
         &staging,
         &job,
+        gate,
         &spec,
         video_sel.as_ref().map(|s| s.ext.as_str()),
         combined_total,
@@ -373,10 +399,11 @@ pub(crate) async fn run_unified_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     spec: &str,
     video_ext: Option<&str>,
     total: Option<u64>,
-    abort: &mut oneshot::Receiver<()>,
+    abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
@@ -453,8 +480,17 @@ pub(crate) async fn run_unified_ytdlp(
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
+    // The linearization point, as on the live leg: either this wins and
+    // the row is still here, or the removal already won and there is
+    // nothing to deliver.
+    if !gate.try_commit() {
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Ok(None);
+    }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {}
+        Ok(()) => {
+            gate.mark_delivered();
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
         }
@@ -499,7 +535,7 @@ async fn run_ytdlp_attempt(
     report: std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>,
     on_merge: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
     proxy: Option<&crate::net_types::ResolvedProxy>,
-    abort: &mut oneshot::Receiver<()>,
+    abort: &mut oneshot::Receiver<StopIntent>,
     timeout: Duration,
 ) -> Result<(Option<()>, Option<String>), VideoError> {
     use tokio::io::AsyncBufReadExt as _;
@@ -724,6 +760,10 @@ enum Exit {
     RenameFailed,
     /// Nothing was recorded, so there is nothing to salvage.
     NothingRecorded,
+    /// The row was removed while this attempt was finalizing. There is no
+    /// row left for a delivered file to belong to, so the completed remux
+    /// and the raw shell are both discarded.
+    Discarded,
 }
 
 /// What a terminal exit does with the row's staging directory.
@@ -831,9 +871,10 @@ pub(crate) async fn run_live_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     page_url: &str,
     hls_format_id: &str,
-    mut abort: oneshot::Receiver<()>,
+    mut abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
@@ -956,14 +997,29 @@ pub(crate) async fn run_live_ytdlp(
             have
         });
         let logs = drain_stderr_to_tail(stderr);
+        // The numeric group id for the quiescence wait on the discard
+        // path below: `reap_child` disarms the guard, so it must be read
+        // while the guard is still armed.
+        let pgid = group.pgid();
         // `aborted` gates the live-edge retry below: a stopped attempt must
         // never come back as a fresh capture. `&mut abort` keeps the receiver
         // usable for the second attempt when it didn't fire.
-        let aborted = tokio::select! {
+        let (aborted, discarded) = tokio::select! {
             biased;
-            _ = &mut abort => {
+            intent = &mut abort => {
                 reap_child(&mut child, &mut group).await;
-                true
+                match intent {
+                    Ok(StopIntent::Preserve) => (true, false),
+                    Ok(StopIntent::Discard) => (true, true),
+                    Err(_) => {
+                        // No sender remains to authorise anything: fail
+                        // closed. Claim the gate so the pre-rename commit
+                        // below cannot deliver either, and take the
+                        // discarded path.
+                        let _ = gate.discard();
+                        (true, true)
+                    }
+                }
             }
             waited = tokio::time::timeout(timeout, child.wait()) => {
                 match waited {
@@ -996,10 +1052,35 @@ pub(crate) async fn run_live_ytdlp(
                         reap_child(&mut child, &mut group).await;
                     }
                 }
-                false
+                (false, false)
             }
         };
         let _ = join_drain(progress).await;
+        // A discard is not a stop. There is no row left to deliver to, so
+        // the finalize path below must not run: adopting the partial and
+        // remuxing it would place a file at a destination with no row
+        // behind it. Only the direct child is reaped here; group
+        // descendants may still be writing (see the quiescence wait below).
+        //
+        // The scratch is deliberately left. The manager reclaims it only
+        // after this task has returned -- sweeping from inside a task that
+        // may still be running is the race this avoids.
+        if discarded {
+            logs.abort();
+            // `reap_child` waited only the direct child, and the guard only
+            // *signalled* the group: a descendant may still be writing when
+            // this returns and the manager reclaims the scratch, so wait
+            // for the group, bounded, and report rather than assume.
+            if let Some(pgid) = pgid
+                && !crate::video_spawn::await_group_quiescence(pgid, timeout)
+            {
+                tracing::warn!(
+                    "recorder process group did not quiesce; reclaiming anyway with a \
+                     writer possibly still present"
+                );
+            }
+            return Ok(None);
+        }
         let log_tail = join_drain(logs).await.unwrap_or_default();
         // Whatever stopped the capture — user stop, stall, stream end, or
         // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
@@ -1098,8 +1179,27 @@ pub(crate) async fn run_live_ytdlp(
         .await;
         return Err(e);
     }
+    // The linearization point. `try_commit` is a CAS, so there is no window
+    // between deciding and acting for a concurrent removal to slip into:
+    // either this wins and the row is still here, or the removal already
+    // won and there is nothing to deliver.
+    if !gate.try_commit() {
+        sweep_live_capture(
+            &out,
+            &part,
+            &state,
+            staging,
+            Some(&final_tmp),
+            Staging::Sweep,
+            Exit::Discarded,
+        )
+        .await;
+        return Ok(None);
+    }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {}
+        Ok(()) => {
+            gate.mark_delivered();
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             // The name was claimed mid-capture; the row requeues under a
             // fresh name and records again, so the shell is redundant.
@@ -1155,8 +1255,9 @@ pub(crate) async fn run_hls_ytdlp(
     ffmpeg_bin: &Path,
     staging: &Path,
     job: &VideoJob,
+    gate: &std::sync::Arc<AttemptGate>,
     hls_format_id: &str,
-    abort: oneshot::Receiver<()>,
+    abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
@@ -1303,8 +1404,19 @@ pub(crate) async fn run_hls_ytdlp(
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
     // Atomic claim into place (EXDEV-safe, no clobber).
+    // The linearization point, as on the live leg: either this wins and
+    // the row is still here, or the removal already won and there is
+    // nothing to deliver. The part shells beside the finished file are
+    // ours to sweep: no rename means no delivery happened.
+    if !gate.try_commit() {
+        clean_dest_parts(&job.dest);
+        let _ = tokio::fs::remove_dir_all(staging).await;
+        return Ok(None);
+    }
     match crate::file_names::rename_noreplace(&final_tmp, &job.dest) {
-        Ok(()) => {}
+        Ok(()) => {
+            gate.mark_delivered();
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VideoError::exists());
         }

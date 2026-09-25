@@ -15,6 +15,9 @@
 //! Grab only *extracts* with yt-dlp: format URLs are resolved here and the
 //! bytes are pulled by the existing engine as ordinary queue items.
 
+/// Facade: the per-attempt delivery decision lives in
+/// [`attempt_gate`](crate::attempt_gate) now.
+pub use crate::attempt_gate::AttemptGate;
 /// Facade: attempt inputs + argv builders live in
 /// [`video_argv`](crate::video_argv) now.
 pub use crate::video_argv::VideoJob;
@@ -37,7 +40,7 @@ pub use crate::video_quality::{
     default_quality_index, default_video_filename, quality_for_height, quality_labels,
 };
 /// Facade: attempt orchestration lives in [`video_runner`](crate::video_runner) now.
-pub use crate::video_runner::run_video_download;
+pub use crate::video_runner::{StopIntent, run_video_download};
 /// Facade: spawn plumbing + fetch resolve live in
 /// [`video_spawn`](crate::video_spawn) now.
 pub use crate::video_spawn::fetch_video_infos;

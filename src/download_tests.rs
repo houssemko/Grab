@@ -3356,17 +3356,107 @@ fn remove_cleans_video_staging() {
 }
 
 #[test]
-fn remove_keeps_live_staging_for_finalize() {
-    // Live rows are only signaled on remove, not aborted: the worker's
-    // own finalize path owns staging cleanup, so remove must not race it.
+fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
+    // Regression guard. An earlier attempt made removal cooperative for
+    // *every* row, so a plain HTTP or torrent row -- which has no
+    // `video_abort` sender and never reaches the video cleanup path -- kept
+    // its engine writing after the row was gone, and the completed handle
+    // then leaked a concurrency slot, because the pump tail early-returns
+    // on the epoch entry `remove` drops and so never clears it.
     let (_q, _l) = test_locks();
-    let _qf = test_queue_file("remove-live-staging");
+    let _qf = test_queue_file("remove-plain-abort");
     let settings = test_settings();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
-    let id = 920_000 + std::process::id() as u64;
-    let dir = crate::video::staging_dir(id);
-    std::fs::create_dir_all(&dir).unwrap();
-    let item = DownloadItem::new(id, "https://x.com/u/status/1", "v.mp4", "/tmp/dl");
+    let id = 923_000 + std::process::id() as u64;
+    let item = DownloadItem::new(id, "https://example.com/x.bin", "x.bin", "/tmp/dl");
+    manager.store().append(&item);
+    manager.epoch.borrow_mut().insert(id, 1);
+
+    // A Drop flag inside the task, not an absence checked after a sleep:
+    // asserting a flag was *not* set passes just as well when the task was
+    // detached as when it was aborted.
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped_task = std::sync::Arc::clone(&dropped);
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started_task = std::sync::Arc::clone(&started);
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let _flag = DropFlag(dropped_task);
+        started_task.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+    // The task must be genuinely up before the removal: aborting a
+    // never-polled task would pass without proving anything ran.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !started.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        started.load(Ordering::SeqCst),
+        "the stand-in engine never started, so the removal proved nothing"
+    );
+
+    manager.remove(id);
+
+    assert!(
+        manager.running.borrow().get(&id).is_none(),
+        "the concurrency slot was not freed immediately, so a long session \
+         would run out of slots"
+    );
+    // The abort must have destroyed the task, not detached it: dropping
+    // the handle alone leaves the future (and its flag) alive.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !dropped.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "a plain row's engine was detached rather than aborted: it kept running \
+         after its row was removed"
+    );
+}
+
+#[test]
+fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
+    // Two things the old `remove` could neither do nor prove: say *how* to
+    // stop, and wait for the worker before reclaiming anything.
+    //
+    // The construction matters more than the assertions. The stand-in
+    // worker **recreates** the directories before its late write, because
+    // that is what a dying recorder does -- an earlier version of this
+    // test wrote into staging without recreating it, so an inline sweep
+    // had already removed the parent, the write failed, `.ok()` swallowed
+    // it, and the test passed against the very bug it claimed to catch.
+    // Recreating the parent is what makes the two orderings differ: under
+    // an inline sweep the late files reappear and this fails, and only a
+    // sweep that waits for teardown removes them.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-discard-live");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 922_000 + std::process::id() as u64;
+    // A destination unique to this test: `clean_dest_parts` scans the
+    // directory, so a shared one would let it delete files it does not own.
+    let dest_dir = std::env::temp_dir().join(format!("grab-rmdiscard-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let staging = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&staging).unwrap();
+    let part = dest_dir.join("v.live.mp4.part");
+    std::fs::write(&part, b"recorded").unwrap();
+
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
     manager.store().append(&item);
     manager.video_sources.borrow_mut().insert(
         id,
@@ -3382,9 +3472,107 @@ fn remove_keeps_live_staging_for_finalize() {
         },
     );
     manager.live_rows.borrow_mut().insert(id);
+    manager.epoch.borrow_mut().insert(id, 1);
+
+    let (intent_tx, intent_rx) = tokio::sync::oneshot::channel();
+    manager.video_abort.borrow_mut().insert(id, intent_tx);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen_task = std::sync::Arc::clone(&seen);
+    let done = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let done_task = std::sync::Arc::clone(&done);
+    let wrote = std::sync::Arc::new(std::sync::Mutex::new((false, false)));
+    let wrote_task = std::sync::Arc::clone(&wrote);
+    let staging_task = staging.clone();
+    let dest_task = dest_dir.clone();
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let intent = intent_rx.await.ok();
+        *seen_task.lock().unwrap() = intent;
+        // A dying recorder is SIGKILLed, not politely shut down: give the
+        // teardown a beat, then recreate scratch the way a late write
+        // would -- recreating the parents, which is the whole point.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let staging_ok = std::fs::create_dir_all(&staging_task).is_ok()
+            && std::fs::write(staging_task.join("late-remux"), b"late").is_ok();
+        let dest_ok = std::fs::write(dest_task.join("v.live.mp4"), b"late delivery").is_ok();
+        *wrote_task.lock().unwrap() = (staging_ok, dest_ok);
+        *done_task.lock().unwrap() = true;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
     manager.remove(id);
-    assert!(dir.exists(), "live finalize still owns staging");
-    let _ = std::fs::remove_dir_all(&dir);
+
+    // Cleanup is deferred to a finalizer that waits for the worker, so it
+    // cannot have finished when `remove` returns. The worker must still
+    // finish writing first -- a fixed sleep here would make the whole test
+    // a coin flip on machine speed, so poll with a deadline instead.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !*done.lock().unwrap() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        *done.lock().unwrap(),
+        "the stand-in worker never ran to completion"
+    );
+    // Both late writes must actually have landed: a fixture that silently
+    // failed to write would pass against the very bug this catches, since
+    // absent files are what the sweep is supposed to leave behind.
+    let (staging_ok, dest_ok) = *wrote.lock().unwrap();
+    assert!(
+        staging_ok && dest_ok,
+        "the stand-in worker failed to write its late files (staging: {staging_ok}, \
+         dest: {dest_ok}), so the sweep below proved nothing"
+    );
+    // The finalizer handle is the deterministic signal: awaiting it proves
+    // the sweep ran to completion after the worker stopped, with no
+    // polling and no shared deadline to starve on a loaded machine. The
+    // previous version inferred completion by polling `staging.exists()`,
+    // which left the tail assertions racing scheduler delays they could
+    // not observe -- exactly the shape of the one unattributed CI failure
+    // this test ever produced.
+    let finalizer = manager
+        .discards
+        .borrow_mut()
+        .remove(&id)
+        .expect("remove tracks a finalizer for a live video row")
+        .finalizer;
+    let _ = crate::runtime::tokio_rt().block_on(finalizer);
+    let listing = || {
+        std::fs::read_dir(&dest_dir)
+            .map(|r| {
+                r.filter_map(|e| e.ok())
+                    .map(|e| format!("{:?}", e.file_name()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|e| vec![format!("READDIR-ERR {e:?}")])
+    };
+    assert!(
+        !staging.exists(),
+        "staging survived the row: nothing reclaims it once the row is gone"
+    );
+    assert!(
+        !staging.join("late-remux").exists(),
+        "the manager swept before the worker stopped, so scratch recreated \
+         during teardown outlived the row"
+    );
+    if part.exists() || dest_dir.join("v.live.mp4").exists() {
+        panic!(
+            "the recorder's scratch outlived the row, including anything it \
+             recreated after the sweep; dest_dir holds {:?}",
+            listing()
+        );
+    }
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some(crate::video::StopIntent::Discard),
+        "remove must say *how* to stop: a removed row told to Preserve runs \
+         the finalize path and delivers a file that has no row to belong to"
+    );
+    assert!(
+        !manager.live_rows.borrow().contains(&id),
+        "a removed row stayed marked live, so a later row reusing the id would \
+         take the live signal-only paths and skip the abort"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
 }
 
 #[test]
@@ -4257,4 +4445,703 @@ fn enqueue_video_accepts_unlisted_url() {
     drain_engine(&manager, item.id());
     manager.cancel_all();
     crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+}
+
+#[test]
+fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
+    // The gate is the only thing that can arbitrate delivery, so a video
+    // attempt must have one and a plain row must not: a plain row is
+    // aborted outright and never arbitrates anything.
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("gate-spawn");
+    let settings = test_settings();
+    // Fail validation after gate creation but before the worker/pump starts,
+    // keeping this ownership test synchronous and free of thread-affine
+    // futures.
+    settings
+        .set_string(
+            crate::settings::key::PROXY_MODE,
+            crate::download_net::PROXY_MODE_MANUAL,
+        )
+        .unwrap();
+    settings
+        .set_string(crate::settings::key::PROXY_HOST, "")
+        .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+
+    let plain = DownloadItem::new(700_001, "https://example.com/a.bin", "a.bin", "/tmp/dl");
+    manager.store().append(&plain);
+    manager.epoch.borrow_mut().insert(plain.id(), 1);
+    assert!(
+        manager.gate_for(plain.id()).is_none(),
+        "a plain row must not be given a gate to arbitrate"
+    );
+
+    let mut row = stored_row(
+        "https://example.com/v.mp4",
+        "/tmp/dl",
+        "v.mp4",
+        DownloadStatus::Queued,
+    );
+    row.video_source = Some(crate::media_types::VideoSource::Page {
+        page_url: "https://example.com/v.mp4".to_string(),
+        media_url: None,
+        expires_at: None,
+        quality: "1080p".to_string(),
+        audio_only: false,
+        is_live: false,
+        video_format_id: None,
+        playlist_item_id: None,
+    });
+    let item = manager.restore_existing(&row).expect("video row");
+    assert!(
+        manager.gate_for(item.id()).is_some(),
+        "a video row with no gate cannot arbitrate delivery, so a removal \
+         could not stop it placing a file"
+    );
+
+    manager
+        .settings()
+        .set_string(crate::settings::key::PROXY_MODE, PROXY_MODE_DIRECT)
+        .unwrap();
+    let _ = std::fs::remove_file(qf);
+}
+
+#[test]
+fn a_removal_claims_the_gate_before_the_worker_can_commit() {
+    // The decision must be claimed at `remove` time, not discovered later:
+    // a worker that has not reached its rename yet must find the row gone.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-claims-gate");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 924_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-gateclaim-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    let part = dest_dir.join("v.live.mp4.part");
+    std::fs::write(&part, b"recorded").unwrap();
+
+    manager.remove(id);
+
+    assert!(
+        !gate.try_commit(),
+        "remove returned without claiming the gate, so a worker that had not \
+         reached its rename could still deliver"
+    );
+    assert!(!gate.was_delivered());
+    assert!(
+        !part.exists(),
+        "remove claimed the gate but left the row's part shell behind: the \
+         inline reclaim must sweep it"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
+    // When the commit wins, the file *is* placed, and the row is gone, so
+    // the finalizer has to remove it. This is the only sanctioned exception
+    // to `clean_dest_parts` never touching a finished file.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-orphan");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 925_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-orphan-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("v.mp4");
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    // The commit already won, so the attempt will place the file.
+    assert!(gate.try_commit());
+    let worker_dest = dest.clone();
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        // Stand in for a worker that was already inside its rename.
+        std::fs::write(&worker_dest, b"orphan").expect("stand-in worker must place the orphan");
+        gate.mark_delivered();
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
+    manager.remove(id);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while dest.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !dest.exists(),
+        "the commit won, so the attempt placed a file, and the row is gone: \
+         the orphan outlived it"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn removing_a_settled_video_row_keeps_the_users_finished_file() {
+    // A delivered attempt leaves its gate COMMITTING + delivered in the
+    // map (the pump tail clears the worker handle but never the gate),
+    // with no worker in flight. Removing that settled row must keep the
+    // file the user owns: only a worker the finalizer actually awaited
+    // can have left an orphan behind.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("remove-settled-keeps");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 926_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-settled-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("v.mp4");
+    std::fs::write(&dest, b"owned").unwrap();
+    let staging = crate::video::staging_dir(id);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    assert!(gate.try_commit());
+    gate.mark_delivered();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    // No running handle: the attempt settled long ago.
+
+    manager.remove(id);
+
+    assert!(
+        dest.exists(),
+        "no worker was in flight, so nothing could have orphaned this file: \
+         the finished file belongs to the user"
+    );
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        b"owned",
+        "the settled row's file must survive removal byte-for-byte"
+    );
+    assert!(
+        !staging.exists(),
+        "the settled row's scratch must still go with the row"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn a_pending_discard_reserves_the_destination_against_intake() {
+    // Between remove and its finalizer, the stem must not be claimable:
+    // otherwise the finalizer's stem-wide sweep deletes the *new* row's
+    // part files.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-intake");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::path::PathBuf::from("/tmp/dl/v.mp4");
+    assert!(!manager.dest_reserved(&dest));
+    manager.reserve_dest(&dest);
+    assert!(
+        manager.dest_reserved(&dest),
+        "intake could claim a destination whose row is still tearing down"
+    );
+    manager.release_dest(&dest);
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the reservation outlived the cleanup"
+    );
+}
+
+#[test]
+fn an_undo_does_not_reclaim_a_destination_with_a_pending_discard() {
+    // Undo bypasses intake dedupe and starts a row with the same filename
+    // immediately, so it has to consult the reservation too.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-undo");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::path::PathBuf::from("/tmp/dl/v.mp4");
+    manager.reserve_dest(&dest);
+    assert!(
+        manager.dest_reserved(&dest),
+        "Undo was allowed to reclaim a destination with a pending discard"
+    );
+}
+
+#[test]
+fn a_reserved_destination_forces_video_intake_to_dedupe() {
+    // Between remove and its finalizer the destination must count as taken
+    // at intake, or the finalizer's stem-wide sweep deletes the new row's
+    // part files.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-video-intake");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-intake-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    manager.reserve_dest(&dest.join("Clip.mp4"));
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest_s),
+            Some("Clip.mp4"),
+            crate::media_types::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+                playlist_item_id: None,
+            },
+        )
+        .expect("video enqueue");
+    assert_eq!(
+        item.filename(),
+        "Clip (1).mp4",
+        "intake claimed a destination whose row is still tearing down"
+    );
+    drain_engine(&manager, item.id());
+    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    manager.release_dest(&dest.join("Clip.mp4"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_reserved_destination_forces_plain_intake_to_dedupe() {
+    // The exact-path reservation applies to plain intake too: a plain row
+    // claiming a tearing-down destination meets the finalizer's sweep.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-plain-intake");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-plain-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    manager.reserve_dest(&dest.join("a.bin"));
+    let item = manager
+        .enqueue("https://example.com/a.bin", Some(&dest_s), Some("a.bin"))
+        .expect("plain enqueue");
+    assert_eq!(
+        item.filename(),
+        "a (1).bin",
+        "plain intake claimed a destination whose row is still tearing down"
+    );
+    manager.cancel(item.id());
+    // Let the aborted engine's pump tail settle here, so no woken future
+    // outlives this test's queue file.
+    quiesce(&glib::MainContext::default());
+    manager.release_dest(&dest.join("a.bin"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_finished_name_claim_honours_a_pending_discard() {
+    // The Finished claim loop and the DEST_EXISTS requeue share
+    // `is_name_taken`: a reserved destination must read as taken there too.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-claim");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-claim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let existing = crate::video_staging::dir_file_names(&dest);
+    assert!(!manager.is_name_taken(&dest_s, &existing, "Clip.mp4"));
+    manager.reserve_dest(&dest.join("Clip.mp4"));
+    assert!(
+        manager.is_name_taken(&dest_s, &existing, "Clip.mp4"),
+        "a finished-name claim could take a destination still tearing down"
+    );
+    manager.release_dest(&dest.join("Clip.mp4"));
+    assert!(!manager.is_name_taken(&dest_s, &existing, "Clip.mp4"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_reserved_destination_parks_an_unremoved_row_until_start_next() {
+    // Undo bypasses intake dedupe: a reserved destination must requeue the
+    // row without starting it, later triggers must not start it while
+    // reserved, and releasing alone must not wake it (no wakeup exists yet:
+    // the next `start_next` trigger starts it).
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-unremove-park");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-park-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let reserved = dest.join("Clip.mp4");
+    manager.reserve_dest(&reserved);
+    let snap = RemovedSnapshot {
+        url: "https://vimeo.com/123456".to_string(),
+        dest_dir: dest_s,
+        filename: "Clip.mp4".to_string(),
+        status: DownloadStatus::Downloading,
+        progress: 0.3,
+        detail: String::new(),
+        output_dir: String::new(),
+        segments: None,
+        video_source: Some(crate::media_types::VideoSource::Page {
+            page_url: "https://vimeo.com/123456".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "720p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        }),
+    };
+    let revived = manager.unremove(snap);
+    let id = revived.id();
+    assert_eq!(revived.status(), DownloadStatus::Queued);
+    assert!(
+        !manager.running.borrow().contains_key(&id),
+        "unremove started a row whose destination is still tearing down"
+    );
+    manager.start_next();
+    assert_eq!(
+        revived.status(),
+        DownloadStatus::Queued,
+        "a later trigger started a row whose destination is still reserved"
+    );
+    assert!(!manager.running.borrow().contains_key(&id));
+    manager.release_dest(&reserved);
+    assert_eq!(
+        revived.status(),
+        DownloadStatus::Queued,
+        "releasing the reservation must not start the row on its own"
+    );
+    assert!(!manager.running.borrow().contains_key(&id));
+    manager.start_next();
+    assert_eq!(revived.status(), DownloadStatus::Downloading);
+    assert!(manager.running.borrow().contains_key(&id));
+    drain_engine(&manager, id);
+    crate::video::clean_staging(&crate::video::staging_dir(id));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
+    // Only rows that would actually start divert to the requeue path: a
+    // Done snapshot (e.g. clear-finished Undo) over a reserved destination
+    // restores as Done and never starts on its own.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-unremove-done");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-done-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let reserved = dest.join("Clip.mp4");
+    manager.reserve_dest(&reserved);
+    let snap = RemovedSnapshot {
+        url: "https://vimeo.com/123456".to_string(),
+        dest_dir: dest_s,
+        filename: "Clip.mp4".to_string(),
+        status: DownloadStatus::Done,
+        progress: 1.0,
+        detail: String::new(),
+        output_dir: String::new(),
+        segments: None,
+        video_source: Some(crate::media_types::VideoSource::Page {
+            page_url: "https://vimeo.com/123456".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "720p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        }),
+    };
+    let revived = manager.unremove(snap);
+    assert_eq!(
+        revived.status(),
+        DownloadStatus::Done,
+        "a settled restore must not be diverted into a re-download"
+    );
+    assert!(!manager.running.borrow().contains_key(&revived.id()));
+    manager.release_dest(&reserved);
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_finalizer_releases_the_reservation_after_the_worker() {
+    // The awaited-worker arm holds the destination until the sweep is done,
+    // then releases it.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-release-async");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 927_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-reserve-async-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("v.mp4");
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
+    manager.remove(id);
+
+    assert!(
+        manager.dest_reserved(&dest),
+        "remove must hold the destination until the finalizer finishes"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while manager.dest_reserved(&dest) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the finalizer never released the destination"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[test]
+fn removing_a_never_spawned_video_row_releases_synchronously() {
+    // With no worker in flight the reclaim runs inline, so the reservation
+    // is already gone when remove returns.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-release-sync");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 928_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-reserve-sync-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let dest = dest_dir.join("w.mp4");
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/2",
+        "w.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/2".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.remove(id);
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the inline reclaim must release the destination before remove returns"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it() {
+    // The finalizer owns the worker handle. Aborting the finalizer drops
+    // that handle, which *detaches* the worker -- yt-dlp would keep running
+    // with no supervisor, which is the regression #180 fixed.
+    //
+    // Driven through the real path: the long-running worker is inserted as
+    // the row's running handle and `remove` hands it to `finish_discard`,
+    // which retains the abort handle and tracks the finalizer. A
+    // hand-built `PendingDiscard` would pass even if `finish_discard`
+    // regressed, so this test must not construct one.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("shutdown-discard");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let id = 926_000 + std::process::id() as u64;
+    let dest_dir = std::env::temp_dir().join(format!("grab-shutdisc-{id}"));
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    let item = DownloadItem::new(
+        id,
+        "https://x.com/u/status/1",
+        "v.mp4",
+        &dest_dir.to_string_lossy(),
+    );
+    manager.store().append(&item);
+    manager.video_sources.borrow_mut().insert(
+        id,
+        crate::media_types::VideoSource::Page {
+            page_url: "https://x.com/u/status/1".to_string(),
+            media_url: None,
+            expires_at: None,
+            quality: "1080p".to_string(),
+            audio_only: false,
+            is_live: false,
+            video_format_id: None,
+            playlist_item_id: None,
+        },
+    );
+    manager.epoch.borrow_mut().insert(id, 1);
+    let gate = crate::video::AttemptGate::new();
+    manager
+        .gates
+        .borrow_mut()
+        .insert(id, std::sync::Arc::clone(&gate));
+
+    // Scratch the real finalizer must reclaim once the worker stops: a
+    // staging sidecar plus a dest-dir part in yt-dlp's split namespace.
+    let staging = crate::video::staging_dir(id);
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    let part = dest_dir.join("v.video.mp4");
+    std::fs::write(&part, b"recorded").unwrap();
+
+    // A worker that runs long and records that it was dropped.
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let flag = std::sync::Arc::clone(&dropped);
+    // Owned by the worker future from construction: aborting the task drops
+    // the future (and this guard) whether the abort lands before or after
+    // the first poll, so the flag fires in both orderings. Constructing the
+    // guard inside the future instead would miss an abort that wins the race
+    // with the first poll.
+    let guard = DropFlag(flag);
+    let handle = crate::runtime::tokio_rt().spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    manager.running.borrow_mut().insert(id, handle);
+
+    // The real path: `remove` claims the gate and hands the running worker
+    // to `finish_discard`, which retains its abort handle beside the
+    // finalizer it spawns.
+    manager.remove(id);
+
+    manager.shutdown();
+
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown left the worker running: the finalizer's handle was dropped, \
+         which detaches the task instead of aborting it"
+    );
+    assert!(
+        !staging.exists(),
+        "shutdown never ran the finalizer's staging sweep: aborting finalizers \
+         instead of awaiting them would leave this behind"
+    );
+    assert!(
+        !part.exists(),
+        "shutdown never ran the finalizer's dest-parts sweep: aborting finalizers \
+         instead of awaiting them would leave this behind"
+    );
+    let _ = std::fs::remove_dir_all(&dest_dir);
+    let _ = std::fs::remove_dir_all(&staging);
 }

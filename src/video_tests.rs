@@ -1,4 +1,5 @@
 use super::*;
+use crate::attempt_gate::AttemptGate;
 use crate::file_names::{is_url_derived_name, strip_dedupe_suffix};
 use crate::media_types::{
     PlaylistInfo, PlaylistItem, PlaylistKind, VIDEO_QUALITY_VALUES, VideoSource, quality_index,
@@ -33,7 +34,8 @@ use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{remux_live_capture, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
 use crate::video_spawn::{
-    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
+    ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
+    ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
@@ -975,8 +977,13 @@ fn pipeline_reports_missing_tools() {
         proxy: None,
     };
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
-    let res = crate::runtime::tokio_rt().block_on(run_video_download(job, abort_rx, tx));
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_video_download(
+        job,
+        &AttemptGate::new(),
+        abort_rx,
+        tx,
+    ));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
     // Nothing else was sent: resolving never started without the tools.
     // The abandoned (empty) staging dir is the caller's to drop.
@@ -3392,7 +3399,7 @@ fn live_capture_adopts_part_and_remuxes() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     // Natural end (fake exits 0) with a `.part` shell: adopted,
     // remuxed, delivered.
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
@@ -3400,6 +3407,7 @@ fn live_capture_adopts_part_and_remuxes() {
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3438,12 +3446,13 @@ fn live_capture_empty_fails_with_detail() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3502,12 +3511,13 @@ fn live_capture_stale_staging_never_adopts() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3535,12 +3545,13 @@ fn live_capture_refuses_existing_dest() {
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3578,12 +3589,13 @@ fn live_capture_refusal_reclaims_stale_scratch() {
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.join("staging");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3624,7 +3636,7 @@ fn live_capture_abort_adopts_partial() {
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let res = crate::runtime::tokio_rt().block_on(async {
-        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
         let state = dir.join("v.live.mp4.ytdl");
         let seen = dir.join("abort-saw-state");
         tokio::spawn(async move {
@@ -3643,13 +3655,14 @@ fn live_capture_abort_adopts_partial() {
             if observed {
                 std::fs::write(&seen, b"1").ok();
             }
-            let _ = abort_tx.send(());
+            let _ = abort_tx.send(crate::video::StopIntent::Preserve);
         });
         run_live_ytdlp(
             &fake_yt,
             &fake_ff,
             &staging,
             &job,
+            &AttemptGate::new(),
             "https://youtu.be/grabtest",
             "h1080",
             abort_rx,
@@ -3756,12 +3769,13 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3831,12 +3845,13 @@ fn live_capture_barren_start_sweeps_state_file() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3909,12 +3924,13 @@ fn live_capture_lost_rename_race_sweeps_state() {
     let fake_ff = fake_ffmpeg_racing_dest(&dir, &job.dest, &dir.join("v.live.mp4"));
     let staging = dir.join("staging");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -3996,6 +4012,245 @@ exit 0
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     bin
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
+    // The real runner, not a stand-in. Two things an earlier version of
+    // this check got wrong: asserting only that the *timeout* returned
+    // (which an inner error also satisfies), and checking only the group
+    // leader (a direct-child kill passes that while leaving a descendant
+    // alive -- and a descendant is exactly what an ffmpeg would be).
+    let dir = std::env::temp_dir().join(format!("grab-discardreal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live_abortable(&dir);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+    let pidfile = dir.join("recorder-pid");
+    let childpid_file = dir.join("recorder-child-pid");
+
+    let task = crate::runtime::tokio_rt().spawn({
+        let staging = staging.clone();
+        let pidfile = pidfile.clone();
+        async move {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            // Discard only once the recorder is genuinely up, so this
+            // cannot pass by taking a stop-before-start path.
+            tokio::spawn(async move {
+                for _ in 0..500 {
+                    if pidfile.exists() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                let _ = stop_tx.send(StopIntent::Discard);
+            });
+            run_live_ytdlp(
+                &fake_yt,
+                &fake_ff,
+                &staging,
+                &job,
+                &AttemptGate::new(),
+                "https://youtu.be/grabtest",
+                "h1080",
+                stop_rx,
+                std::time::Duration::from_secs(600),
+                tx,
+            )
+            .await
+        }
+    });
+
+    let leader = read_pid(&pidfile);
+    let mut cleanup = GroupCleanup(Some(leader));
+    // Assert the full nested result: an inner Err, or a JoinError, must
+    // fail here rather than read as "the timeout returned".
+    let outcome = crate::runtime::tokio_rt()
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(30), task).await });
+    let inner = outcome
+        .expect(
+            "the discard signal did not end the capture: it only finished \
+                 because the wait timed out",
+        )
+        .expect("the capture task itself was cancelled or panicked");
+    assert!(
+        matches!(inner, Ok(None)),
+        "a discarded capture must report no delivery, got {inner:?}"
+    );
+    assert!(
+        !dest.exists(),
+        "a discarded live capture was delivered: the row is gone, so a file \
+         at the destination would have no row to belong to"
+    );
+
+    let descendant = crate::runtime::tokio_rt().block_on(async {
+        for _ in 0..200 {
+            if childpid_file.exists() {
+                return read_pid(&childpid_file);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        libc::pid_t::from(0)
+    });
+    assert_ne!(
+        descendant, 0,
+        "the fixture never reported its descendant, so this cannot prove the \
+         whole group died"
+    );
+    // "Can no longer execute", on both: a SIGKILLed process becomes a
+    // zombie and stays visible until something reaps it, which is PID 1's
+    // policy, not the code's. A zombie is dead.
+    let mut leader_dead = false;
+    let mut descendant_dead = false;
+    crate::runtime::tokio_rt().block_on(async {
+        for _ in 0..500 {
+            leader_dead = !still_running(leader);
+            descendant_dead = !still_running(descendant);
+            if leader_dead && descendant_dead {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    });
+    assert!(
+        leader_dead,
+        "the recorder (pid {leader}) can still run after a discard"
+    );
+    assert!(
+        descendant_dead,
+        "the recorder's descendant (pid {descendant}) can still run: only the \
+         direct child was killed, so an ffmpeg would be orphaned"
+    );
+    cleanup.disarm();
+    drop(cleanup);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake ffmpeg that announces itself, then blocks until the test releases
+/// the remux. A fixed sleep stands in for an ordering guarantee: a delayed
+/// sender can miss the window and the stop lands after the remux is done,
+/// passing without proving anything. A release the test creates only after
+/// the discard was sent cannot be missed.
+fn fake_ffmpeg_release_signalled(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ffmpeg-release-signalled");
+    let marker = dir.join("ffmpeg-started");
+    let release = dir.join("ffmpeg-release");
+    std::fs::write(
+        &bin,
+        format!(
+            r#"#!/bin/sh
+input=""
+prev=""
+last=""
+for a in "$@"; do
+    if [ "$prev" = "-i" ]; then input="$a"; fi
+    prev="$a"
+    last="$a"
+done
+: > '{}'
+while [ ! -e '{}' ]; do sleep 0.05; done
+cat "$input" > "$last"
+exit 0
+"#,
+            marker.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
+    // The window the recorder-wait select cannot cover. A capture that
+    // ends on its own has already passed that select, so a removal arriving
+    // during the remux must claim the gate: the stop prompt alone sits
+    // unread in the oneshot, and only the pre-rename commit arbitrates
+    // delivery now. The gate CAS is the linearization point that closes it.
+    let dir = std::env::temp_dir().join(format!("grab-discardremux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // A recorder that finishes on its own, so the capture ends without any
+    // stop: the discard can then only be observed after the select.
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_release_signalled(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+    let marker = dir.join("ffmpeg-started");
+    let release = dir.join("ffmpeg-release");
+    let gate = AttemptGate::new();
+
+    let task = crate::runtime::tokio_rt().spawn({
+        let staging = staging.clone();
+        let marker = marker.clone();
+        let release = release.clone();
+        let gate = std::sync::Arc::clone(&gate);
+        async move {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn({
+                let gate = std::sync::Arc::clone(&gate);
+                async move {
+                    for _ in 0..500 {
+                        if marker.exists() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    let _ = stop_tx.send(StopIntent::Discard);
+                    // The removal itself: the prompt above is unread this
+                    // late, so only the gate claim stops the delivery.
+                    let _ = gate.discard();
+                    // Unblock the remux only after the discard was sent, so
+                    // the removal provably landed mid-remux. Unconditional:
+                    // without a remux waiting this is a harmless file, and
+                    // without it a missed marker would hang the run.
+                    let _ = std::fs::write(&release, b"release");
+                }
+            });
+            run_live_ytdlp(
+                &fake_yt,
+                &fake_ff,
+                &staging,
+                &job,
+                &gate,
+                "https://youtu.be/grabtest",
+                "h1080",
+                stop_rx,
+                std::time::Duration::from_secs(60),
+                tx,
+            )
+            .await
+        }
+    });
+
+    let inner = crate::runtime::tokio_rt()
+        .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(30), task).await })
+        .expect("the run never finished")
+        .expect("the task was cancelled or panicked");
+    assert!(
+        matches!(inner, Ok(None)),
+        "a capture discarded during its remux must report no delivery, got {inner:?}"
+    );
+    assert!(
+        !dest.exists(),
+        "a removal that landed mid-remux still delivered: the gate was \
+         never claimed, so the commit went ahead"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -4121,6 +4376,45 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
 }
 
 #[test]
+fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
+    // #179's overlap hazard, and the reason the dest-side sweep is
+    // deferred rather than done inline during `remove`. A new row may
+    // claim the same filename the moment the old row's scratch is gone, so
+    // the reservation has to hold for the whole teardown. It does, without
+    // any new mechanism: the recorder's shell sits in the part namespace
+    // for exactly as long as the worker is alive, and intake already
+    // refuses a stem that hosts part files.
+    let dir = std::env::temp_dir().join(format!("grab-stemreserve-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dest = dir.join("v.mp4");
+    // The name a live capture actually writes beside the destination.
+    let shell = dest_part_path(&dest, "live", "mp4").with_extension("mp4.part");
+    std::fs::write(&shell, b"recording").unwrap();
+
+    let names = dir_file_names(&dir);
+    assert!(
+        stem_reserved_in(&names, "v"),
+        "intake could claim the stem while a live capture is still writing to \
+         it, so a new row would land on the same filename"
+    );
+    assert!(
+        !stem_reserved_in(&names, "other"),
+        "an unrelated stem must still be claimable"
+    );
+
+    // Once the finalizer has swept, the stem is free again -- which is the
+    // point of deferring: the reservation ends when the row really is gone.
+    crate::video::clean_dest_parts(&dest);
+    let names = dir_file_names(&dir);
+    assert!(
+        !stem_reserved_in(&names, "v"),
+        "the stem stayed reserved after the row's scratch was reclaimed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_failed_live_remux_leaves_no_partial_behind() {
     // The mirror: a failure must not leave a file a later sweep has to
     // reason about, and must not leave a half-written file that looks
@@ -4233,12 +4527,13 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
     job.dest = dir.join("v.mp4");
 
     let (tx1, _rx1) = tokio::sync::mpsc::unbounded_channel();
-    let (_a1, abort1) = tokio::sync::oneshot::channel();
+    let (_a1, abort1) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let first = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &first_yt,
         &break_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort1,
@@ -4266,12 +4561,13 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
     std::fs::remove_file(&dir).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     let (tx2, _rx2) = tokio::sync::mpsc::unbounded_channel();
-    let (_a2, abort2) = tokio::sync::oneshot::channel();
+    let (_a2, abort2) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let second = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &second_yt,
         &copy_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort2,
@@ -4354,12 +4650,13 @@ fn a_sweep_never_removes_another_attempts_remux() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_a, abort_rx) = tokio::sync::oneshot::channel();
+    let (_a, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -4398,12 +4695,13 @@ fn live_capture_rename_failure_keeps_completed_remux() {
     let fake_yt = fake_ytdlp_live_with_state(&dir);
     let fake_ff = fake_ffmpeg_breaking_dest_dir(&dir);
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -4492,12 +4790,13 @@ fn live_capture_retry_never_inherits_stale_state() {
     let fake_ff = fake_ffmpeg_copy(&dir);
     let staging = dir.join("staging");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -4528,6 +4827,10 @@ fn live_capture_retry_never_inherits_stale_state() {
 /// Fake recorder that reports its own pid, lays down the scratch a real
 /// live capture writes, then blocks. Aborting the task that owns it
 /// simulates `DownloadManager::shutdown`.
+///
+/// Linux-only like its two callers: the pid/group oracles need procfs, so
+/// elsewhere this would be dead code.
+#[cfg(target_os = "linux")]
 fn fake_ytdlp_live_abortable(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-abortable");
     std::fs::write(
@@ -4545,9 +4848,12 @@ printf '{{"downloader": {{}}}}' > "$out.ytdl"
 # Report the group leader (this shell) and a descendant in the same
 # group, so the test can prove the *group* died rather than just the
 # leader. A direct-child-only kill passes a leader-only oracle.
-printf '%s' "$$" > '{pidfile}'
+# Ordering: the descendant is spawned and reported first, the leader
+# pid last, so a waiter that sees the leader marker knows the
+# descendant already exists.
 sleep 600 &
 printf '%s' "$!" > '{childpid}'
+printf '%s' "$$" > '{pidfile}'
 wait
 exit 0
 "#,
@@ -4722,13 +5028,14 @@ fn aborting_a_live_capture_kills_the_recorder() {
         async move {
             let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
             // Never fires: the only way this ends is the abort below.
-            let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+            let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
             // A long stall timeout so the capture cannot finish on its own.
             let _ = run_live_ytdlp(
                 &fake_yt,
                 &fake_ff,
                 &staging_for_task,
                 &job,
+                &AttemptGate::new(),
                 "https://youtu.be/grabtest",
                 "h1080",
                 abort_rx,
@@ -4971,12 +5278,13 @@ fn hls_map_survives_estimate_wobble() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -5071,12 +5379,14 @@ fn vod_hls_pins_planner_variant_id() {
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &gate,
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -5084,6 +5394,11 @@ fn vod_hls_pins_planner_variant_id() {
     ));
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
+    assert!(
+        gate.was_delivered(),
+        "the HLS leg delivered a file without recording it: the orphan \
+         finalizer would never know to reclaim it"
+    );
     // argv log lands next to the dest-dir template (`v.hls.%(ext)s`):
     // parts download beside the finished file, never into staging.
     // (The fake logs to dirname(-o) + ".argv.log", i.e. beside `dir`.)
@@ -5136,12 +5451,13 @@ fn vod_hls_refuses_existing_dest() {
     };
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -6788,12 +7104,13 @@ fn hls_collects_sidecar_beside_finished_file() {
         proxy: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -6824,12 +7141,13 @@ fn hls_embed_skips_sidecar_collection() {
     job.subtitles = Some("en".into());
     job.embed_subs = true;
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "h1080",
         abort_rx,
         std::time::Duration::from_secs(30),
@@ -6941,12 +7259,13 @@ fn live_part_shell_announces_recording_and_is_swept() {
     let mut job = live_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
         &staging,
         &job,
+        &AttemptGate::new(),
         "https://youtu.be/grabtest",
         "h1080",
         abort_rx,
@@ -7075,12 +7394,14 @@ fn unified_runner_downloads_claims_and_collects() {
     job.dest = dir.join("v.mp4");
     job.subtitles = Some("en".into());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let gate = AttemptGate::new();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &gate,
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
@@ -7090,6 +7411,11 @@ fn unified_runner_downloads_claims_and_collects() {
     ));
     assert!(matches!(res, Ok(Some(7))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
+    assert!(
+        gate.was_delivered(),
+        "the unified leg delivered a file without recording it: the orphan \
+         finalizer would never know to reclaim it"
+    );
     assert_eq!(std::fs::read(dir.join("v.en.srt")).unwrap(), b"subtitles");
     assert!(!staging.exists(), "staging cleaned");
     let mut progress = false;
@@ -7135,6 +7461,7 @@ fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         Some(7),
@@ -7169,12 +7496,13 @@ fn unified_runner_surfaces_failure_tail() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
@@ -7209,13 +7537,14 @@ fn unified_runner_abort_stays_quiet() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let handle = std::thread::spawn(move || {
         crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
             &bin,
             std::path::Path::new("/usr/bin/ffmpeg"),
             &staging,
             &job,
+            &AttemptGate::new(),
             "v123+a456/bv*+ba/b",
             Some("mp4"),
             None,
@@ -7246,12 +7575,13 @@ fn unified_runner_refuses_existing_dest() {
     job.dest = dir.join("v.mp4");
     std::fs::write(&job.dest, b"already").unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
@@ -7300,12 +7630,13 @@ exit 0
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &bin,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v123+a456/bv*+ba/b",
         Some("mp4"),
         None,
@@ -7546,12 +7877,13 @@ fn unified_runner_sums_two_leg_progress() {
     let mut job = direct_test_job();
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
     let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
         &fake,
         std::path::Path::new("/usr/bin/ffmpeg"),
         &staging,
         &job,
+        &AttemptGate::new(),
         "v1+a2/bv*+a2/bv*+ba/b",
         Some("mp4"),
         Some(150),
@@ -7712,4 +8044,253 @@ fn direct_file_exts_stay_sorted() {
             .position(|(a, b)| a != b);
         panic!("DIRECT_FILE_EXTS out of order at {at:?}");
     }
+}
+
+#[test]
+fn a_discard_before_the_commit_delivers_nothing() {
+    // The live leg must consult the gate, not just the stop signal: the
+    // signal is only a prompt, and a prompt can arrive after the one
+    // place the worker stops looking.
+    let dir = std::env::temp_dir().join(format!("grab-gate-discard-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    assert!(
+        gate.discard(),
+        "the removal claims the row before the worker starts"
+    );
+
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &gate,
+        "https://youtu.be/grabtest",
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a discarded attempt must not deliver: {res:?}"
+    );
+    assert!(!dest.exists(), "a discarded capture was delivered");
+    assert!(
+        !gate.was_delivered(),
+        "the gate must not record a delivery that never happened"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_commit_before_the_discard_delivers_and_is_recorded() {
+    // The mirror: when the commit wins, the file *is* placed, and the gate
+    // says so — which is what tells the finalizer there is an orphan.
+    let dir = std::env::temp_dir().join(format!("grab-gate-commit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &gate,
+        "https://youtu.be/grabtest",
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(Some(_))),
+        "an un-discarded attempt must deliver: {res:?}"
+    );
+    assert!(dest.exists(), "nothing was placed");
+    assert!(gate.was_delivered(), "the gate must record the delivery");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_unified_leg_honours_a_discard_before_its_commit() {
+    let dir = std::env::temp_dir().join(format!("grab-gate-unified-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    assert!(gate.discard());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &gate,
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        Some(7),
+        &mut stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a discarded VOD attempt must not deliver: {res:?}"
+    );
+    assert!(!dest.exists(), "a discarded VOD attempt was delivered");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_hls_leg_honours_a_discard_before_its_commit() {
+    let dir = std::env::temp_dir().join(format!("grab-gate-hls-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mkv");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    assert!(gate.discard());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &gate,
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a discarded HLS attempt must not deliver: {res:?}"
+    );
+    assert!(!dest.exists(), "a discarded HLS attempt was delivered");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
+    // `Empty` means "no stop yet" and carrying on is right. `Closed` means
+    // no sender remains to authorise anything, so it must fail closed.
+    let dir = std::env::temp_dir().join(format!("grab-gate-closed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake_yt = fake_ytdlp_live(&dir, false);
+    let fake_ff = fake_ffmpeg_copy(&dir);
+    let staging = dir.join("staging");
+    let mut job = live_test_job();
+    job.dest = dir.join("v.mp4");
+    let dest = job.dest.clone();
+
+    let gate = AttemptGate::new();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // Sender dropped immediately: the receiver observes Closed.
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<StopIntent>();
+    drop(stop_tx);
+    let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
+        &fake_yt,
+        &fake_ff,
+        &staging,
+        &job,
+        &gate,
+        "https://youtu.be/grabtest",
+        "h1080",
+        stop_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(None)),
+        "a closed receiver must stop quietly, not deliver and not fail: {res:?}"
+    );
+    assert!(
+        !gate.was_delivered(),
+        "a closed receiver authorised a delivery: nothing was left to permit it"
+    );
+    assert!(!dest.exists(), "a closed receiver delivered a file");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
+    // A descendant that ignores its group kill must be *reported*, not
+    // silently treated as gone: the caller sweeps anyway (there is nothing
+    // better to do) but the outcome is observable rather than assumed.
+    use std::os::unix::process::CommandExt as _;
+    let dir = std::env::temp_dir().join(format!("grab-quiesce-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("still-writing");
+    // A process in its own group that writes, then sleeps well past the wait.
+    let script = dir.join("stubborn");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf 'x' >> '{}'\nsleep 30\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut child = std::process::Command::new(&script)
+        .process_group(0)
+        .spawn()
+        .expect("stubborn descendant");
+    let pgid = child.id() as i32;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let quiesced = await_group_quiescence(pgid, std::time::Duration::from_millis(300));
+    assert!(
+        !quiesced,
+        "a live process group was reported as quiesced, so a reclaim would run \
+         under a writer that never stopped"
+    );
+    // Kill the whole group, not just the direct child: the script's
+    // `sleep 30` grandchild shares the group, and killing only the leader
+    // would leak it.
+    // SAFETY: constant signal number; ESRCH (already dead) is harmless.
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
 }

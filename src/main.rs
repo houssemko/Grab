@@ -1,4 +1,5 @@
 mod application;
+mod attempt_gate;
 mod cookies;
 mod download;
 mod download_fetch;
