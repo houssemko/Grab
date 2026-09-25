@@ -4777,6 +4777,103 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
 }
 
 #[test]
+fn a_pending_discard_reserves_the_stem_against_a_different_extension() {
+    // The finalizer's sweep is stem-wide, so the reservation must be too:
+    // a different extension on the same stem is still the old row's.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-stem");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dir = std::path::PathBuf::from("/tmp/dl");
+    manager.reserve_dest(&dir.join("v.mp4"));
+    assert!(
+        manager.dest_reserved(&dir.join("v.m4a")),
+        "same stem, different extension was not reserved"
+    );
+    assert!(
+        !manager.dest_reserved(&dir.join("w.mp4")),
+        "a different stem in the same dir read as reserved"
+    );
+    assert!(
+        !manager.dest_reserved(&std::path::PathBuf::from("/tmp/other/v.m4a")),
+        "the same stem in a different dir read as reserved"
+    );
+    manager.release_dest(&dir.join("v.mp4"));
+    assert!(
+        !manager.dest_reserved(&dir.join("v.m4a")),
+        "the stem reservation outlived the cleanup"
+    );
+}
+
+#[test]
+fn a_reserved_stem_forces_video_intake_to_dedupe() {
+    // Same stem, different extension: without the stem-wide reservation
+    // intake would claim it and the old finalizer's sweep would delete
+    // the new row's part files.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-stem-intake");
+    let _notools = NoVideoTools::apply();
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::env::temp_dir().join(format!("grab-reserve-stem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest_s = dest.to_string_lossy().into_owned();
+    manager.reserve_dest(&dest.join("Clip.mp4"));
+    let item = manager
+        .enqueue_video(
+            "https://www.youtube.com/watch?v=gXtp6C-3JKo",
+            Some(&dest_s),
+            Some("Clip.m4a"),
+            crate::media_types::VideoChoices {
+                quality: "1080p".to_string(),
+                audio_only: false,
+                video_format_id: None,
+                is_live: false,
+                playlist_item_id: None,
+            },
+        )
+        .expect("video enqueue");
+    assert_eq!(
+        item.filename(),
+        "Clip (1).m4a",
+        "intake claimed a stem whose row is still tearing down"
+    );
+    drain_engine(&manager, item.id());
+    crate::video::clean_staging(&crate::video::staging_dir(item.id()));
+    manager.release_dest(&dest.join("Clip.mp4"));
+    let _ = std::fs::remove_dir_all(&dest);
+}
+
+#[test]
+fn a_second_discard_keeps_the_reservation_after_the_first_releases() {
+    // Remove, Undo, remove again before the first finalizer lands: the
+    // same destination is reserved twice, and the first release must not
+    // reopen the window while the second teardown is still in flight.
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("reserve-refcount");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let dest = std::path::PathBuf::from("/tmp/dl/v.mp4");
+    manager.reserve_dest(&dest);
+    manager.reserve_dest(&dest);
+    manager.release_dest(&dest);
+    assert!(
+        manager.dest_reserved(&dest),
+        "the first release dropped a reservation a second discard still holds"
+    );
+    assert!(
+        manager.dest_reserved(&std::path::PathBuf::from("/tmp/dl/v.m4a")),
+        "the stem half of the reservation was dropped early too"
+    );
+    manager.release_dest(&dest);
+    assert!(
+        !manager.dest_reserved(&dest),
+        "the reservation outlived both cleanups"
+    );
+}
+
+#[test]
 fn a_reserved_destination_forces_plain_intake_to_dedupe() {
     // The exact-path reservation applies to plain intake too: a plain row
     // claiming a tearing-down destination meets the finalizer's sweep.

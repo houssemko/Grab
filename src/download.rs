@@ -56,6 +56,74 @@ struct PendingDiscard {
     finalizer: tokio::task::JoinHandle<()>,
 }
 
+/// Destinations with a discard in flight.
+///
+/// The finalizer's sweep is stem-wide (`clean_dest_parts` deletes
+/// `<stem>.<kind>.*`), so the reservation must be stem-wide too: an
+/// exact-path key lets a new row claim the same stem under a different
+/// extension and meet the old sweep. The key mirrors the sweeper's --
+/// parent dir plus `file_stem` -- so a reservation covers exactly what
+/// the sweep would delete, no more.
+///
+/// Counts, not a set: the same destination can be reserved twice (remove,
+/// Undo, remove again before the first finalizer lands), and the second
+/// teardown's release must not reopen the window while the first is
+/// still in flight.
+#[derive(Debug, Default)]
+struct Reservations {
+    /// Exact destination paths with a discard in flight, by active count.
+    paths: std::collections::HashMap<std::path::PathBuf, usize>,
+    /// `(parent dir, file stem)` pairs with a discard in flight, by count.
+    stems: std::collections::HashMap<(std::path::PathBuf, String), usize>,
+}
+
+/// The key `clean_dest_parts` sweeps by. `None` exactly when the sweeper
+/// would early-return (no parent or no stem), so a reservation is
+/// claimed exactly when a sweep could delete something.
+fn reservation_stem(dest: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
+    match (
+        dest.parent(),
+        dest.file_stem().and_then(|s| s.to_str()),
+    ) {
+        (Some(dir), Some(stem)) => Some((dir.to_path_buf(), stem.to_string())),
+        _ => None,
+    }
+}
+
+impl Reservations {
+    fn insert(&mut self, dest: &std::path::Path) {
+        *self.paths.entry(dest.to_path_buf()).or_default() += 1;
+        if let Some(key) = reservation_stem(dest) {
+            *self.stems.entry(key).or_default() += 1;
+        }
+    }
+
+    fn remove(&mut self, dest: &std::path::Path) {
+        decrement(&mut self.paths, &dest.to_path_buf());
+        if let Some(key) = reservation_stem(dest) {
+            decrement(&mut self.stems, &key);
+        }
+    }
+
+    fn contains(&self, dest: &std::path::Path) -> bool {
+        self.paths.contains_key(dest)
+            || reservation_stem(dest).is_some_and(|key| self.stems.contains_key(&key))
+    }
+}
+
+fn decrement<K: Eq + std::hash::Hash>(counts: &mut std::collections::HashMap<K, usize>, key: &K) {
+    let empty = counts
+        .get_mut(key)
+        .map(|n| {
+            *n = n.saturating_sub(1);
+            *n == 0
+        })
+        .unwrap_or(false);
+    if empty {
+        counts.remove(key);
+    }
+}
+
 pub struct DownloadManager {
     // Borrow discipline: RefCells are never held across `set_*` property
     // notifies or `changed()` — GTK notifies re-enter through updater
@@ -101,11 +169,12 @@ pub struct DownloadManager {
     /// attempt is spawned so the manager and the worker arbitrate on one
     /// object; see `attempt_gate`.
     gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
-    /// Destinations with a discard in flight, by canonical path. Consulted
-    /// by intake *and* `unremove`: the filesystem-derived `stem_reserved_in`
+    /// Destinations with a discard in flight, by exact path and by the
+    /// stem-wide key the finalizer's sweep uses. Consulted by intake
+    /// *and* `unremove`: the filesystem-derived `stem_reserved_in`
     /// check cannot see the window between a worker deleting its shell and
     /// recreating it, and `unremove` bypasses intake entirely.
-    reservations: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+    reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Each
     /// retains the worker's abort handle beside the finalizer: the
     /// finalizer *owns* the worker handle, so aborting the finalizer
@@ -183,9 +252,7 @@ impl DownloadManager {
             video_sources: RefCell::new(HashMap::new()),
             video_abort: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
-            reservations: std::sync::Arc::new(std::sync::Mutex::new(
-                std::collections::HashSet::new(),
-            )),
+            reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
@@ -328,23 +395,25 @@ impl DownloadManager {
         self.gates.borrow().get(&id).cloned()
     }
 
-    /// Whether `dest` has a row removal still tearing down.
+    /// Whether `dest` has a row removal still tearing down. Matches the
+    /// exact path and the stem-wide sweep key, so a different extension
+    /// on the same stem counts as reserved too.
     pub(crate) fn dest_reserved(&self, dest: &std::path::Path) -> bool {
         self.reservations
             .lock()
-            .map(|set| set.contains(dest))
+            .map(|r| r.contains(dest))
             .unwrap_or(false)
     }
 
     fn reserve_dest(&self, dest: &std::path::Path) {
-        if let Ok(mut set) = self.reservations.lock() {
-            set.insert(dest.to_path_buf());
+        if let Ok(mut r) = self.reservations.lock() {
+            r.insert(dest);
         }
     }
 
     fn release_dest(&self, dest: &std::path::Path) {
-        if let Ok(mut set) = self.reservations.lock() {
-            set.remove(dest);
+        if let Ok(mut r) = self.reservations.lock() {
+            r.remove(dest);
         }
     }
 
@@ -908,9 +977,9 @@ impl DownloadManager {
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         std::path::Path::new(dir).join(n).exists()
             || crate::video_staging::stem_reserved_in(existing, name_stem(n))
-            // A discard still tearing down owns this exact destination: the
-            // finalizer's sweep (and the orphan removal when the commit won)
-            // must not meet a row that claimed the name meanwhile.
+            // A discard still tearing down owns this destination and its
+            // stem: the finalizer's sweep (and the orphan removal when the
+            // commit won) must not meet a row that claimed the name meanwhile.
             || self.dest_reserved(&std::path::Path::new(dir).join(n))
             || (0..self.store.n_items())
                 .filter_map(|i| self.store.item(i).and_downcast::<DownloadItem>())
@@ -1864,8 +1933,8 @@ impl DownloadManager {
                         // file.
                         let _ = std::fs::remove_file(&dest);
                     }
-                    if let Ok(mut set) = reservations.lock() {
-                        set.remove(&dest);
+                    if let Ok(mut r) = reservations.lock() {
+                        r.remove(&dest);
                     }
                 });
                 // Retain the worker's abort beside the finalizer: shutdown
