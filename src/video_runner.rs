@@ -1070,9 +1070,20 @@ pub(crate) async fn run_live_ytdlp(
             // `reap_child` waited only the direct child, and the guard only
             // *signalled* the group: a descendant may still be writing when
             // this returns and the manager reclaims the scratch, so wait
-            // for the group, bounded, and report rather than assume.
+            // for the group and report rather than assume.
+            //
+            // Bounded at five seconds, not the attempt timeout: the reap
+            // already killed everything real, so this is grace for stragglers
+            // only. Tying it to the attempt timeout would park the discard
+            // path for minutes on a wedged group -- and, before this helper
+            // was async, park a runtime thread with it, starving unrelated
+            // tasks into their own timeouts.
             if let Some(pgid) = pgid
-                && !crate::video_spawn::await_group_quiescence(pgid, timeout)
+                && !crate::video_spawn::await_group_quiescence(
+                    pgid,
+                    std::time::Duration::from_secs(5),
+                )
+                .await
             {
                 tracing::warn!(
                     "recorder process group did not quiesce; reclaiming anyway with a \
