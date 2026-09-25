@@ -3332,9 +3332,9 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     manager.remove(id);
 
     // Cleanup is deferred to a finalizer that waits for the worker, so it
-    // cannot have finished when `remove` returns. Wait for the worker to
-    // finish writing, then for the sweep to catch up -- a fixed sleep here
-    // would make the whole test a coin flip on machine speed.
+    // cannot have finished when `remove` returns. The worker must still
+    // finish writing first -- a fixed sleep here would make the whole test
+    // a coin flip on machine speed, so poll with a deadline instead.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !*done.lock().unwrap() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -3352,9 +3352,29 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         "the stand-in worker failed to write its late files (staging: {staging_ok}, \
          dest: {dest_ok}), so the sweep below proved nothing"
     );
-    while staging.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    // The finalizer handle is the deterministic signal: awaiting it proves
+    // the sweep ran to completion after the worker stopped, with no
+    // polling and no shared deadline to starve on a loaded machine. The
+    // previous version inferred completion by polling `staging.exists()`,
+    // which left the tail assertions racing scheduler delays they could
+    // not observe -- exactly the shape of the one unattributed CI failure
+    // this test ever produced.
+    let finalizer = manager
+        .discards
+        .borrow_mut()
+        .remove(&id)
+        .expect("remove tracks a finalizer for a live video row")
+        .finalizer;
+    let _ = crate::runtime::tokio_rt().block_on(finalizer);
+    let listing = || {
+        std::fs::read_dir(&dest_dir)
+            .map(|r| {
+                r.filter_map(|e| e.ok())
+                    .map(|e| format!("{:?}", e.file_name()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|e| vec![format!("READDIR-ERR {e:?}")])
+    };
     assert!(
         !staging.exists(),
         "staging survived the row: nothing reclaims it once the row is gone"
@@ -3364,11 +3384,13 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         "the manager swept before the worker stopped, so scratch recreated \
          during teardown outlived the row"
     );
-    assert!(
-        !part.exists() && !dest_dir.join("v.live.mp4").exists(),
-        "the recorder's scratch outlived the row, including anything it \
-         recreated after the sweep"
-    );
+    if part.exists() || dest_dir.join("v.live.mp4").exists() {
+        panic!(
+            "the recorder's scratch outlived the row, including anything it \
+             recreated after the sweep; dest_dir holds {:?}",
+            listing()
+        );
+    }
     assert_eq!(
         *seen.lock().unwrap(),
         Some(crate::video::StopIntent::Discard),
