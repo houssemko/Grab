@@ -131,7 +131,7 @@ pub(crate) async fn fetch_raw_dump_json(
     let stdout = match out_task.await {
         Ok(Ok(buf)) => buf,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
-            return Err(VideoError::fetch(&gettext(
+            return Err(VideoError::fetch(gettext(
                 "the lookup produced too much output",
             )));
         }

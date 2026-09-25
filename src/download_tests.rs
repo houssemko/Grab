@@ -1276,9 +1276,9 @@ fn torrent_file_list_parses() {
     let (name, entries) = crate::torrent::torrent_file_list(&multi_torrent_bytes()).unwrap();
     assert_eq!(name, "bar");
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].path, "a.txt");
+    assert_eq!(entries[0].raw_path, "a.txt");
     assert_eq!(entries[0].length, 2);
-    assert_eq!(entries[1].path, "sub/b.txt");
+    assert_eq!(entries[1].raw_path, "sub/b.txt");
     assert_eq!(entries[1].length, 3);
     assert!(crate::torrent::torrent_file_list(b"not a torrent").is_err());
 }
