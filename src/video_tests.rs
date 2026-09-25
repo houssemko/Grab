@@ -40,8 +40,8 @@ use crate::video_spawn::{
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
-    is_sparse_shell, is_ytdlp_fragment, read_manifest, release_remux_lease, reserve_remux_temp,
-    resume_plan, sidecar_path_for, staging_dir, staging_root, stem_reserved_in,
+    is_sparse_shell, is_ytdlp_fragment, manifest_path, read_manifest, release_remux_lease,
+    reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir, staging_root, stem_reserved_in,
     sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
     unified_temp_limit, ytdlp_output_template,
 };
@@ -943,6 +943,85 @@ fn manifest_serde_round_trip() {
     // Corrupt sidecars read as absent (fresh attempt), never fatal.
     std::fs::write(dir.join("manifest.json"), b"{nope").unwrap();
     assert_eq!(read_manifest(&dir), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── resume re-resolve label ──────────────────────────────────────────
+
+#[test]
+fn resume_attempt_labels_reresolve_as_resuming() {
+    // A parked row keeps its staging manifest across attempts: the
+    // re-resolve phase must read "Resuming download…" rather than
+    // "Resolving media…", since the bytes are kept and only the probe is
+    // fresh. The probe itself fails here (dumb fakes) — harmless: the
+    // first phase is sent before any probing starts.
+    let dir = std::env::temp_dir().join(format!("grab-resume-label-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let libs = dir.join("xdg").join("grab").join("libs");
+    std::fs::create_dir_all(&libs).unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    for (name, body) in [
+        ("yt-dlp", "#!/bin/sh\necho 2026.09.25\n"),
+        ("ffmpeg", "#!/bin/sh\necho ffmpeg version test\n"),
+    ] {
+        let bin = libs.join(name);
+        std::fs::write(&bin, body).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
+
+    let item_id = 900_000 + std::process::id() as u64;
+    // Simulate the parked row: the previous attempt's manifest survives
+    // in staging.
+    let staging = staging_dir(item_id);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(
+        manifest_path(&staging),
+        serde_json::to_string(&test_manifest()).unwrap(),
+    )
+    .unwrap();
+
+    let job = VideoJob {
+        item_id,
+        page_url: "https://vimeo.com/123456".into(),
+        playlist_item_id: None,
+        quality: "1080p".into(),
+        audio_only: false,
+        dest: dir.join("v.mp4"),
+        speed_limit: None,
+        keep_server_date: false,
+        video_format_id: None,
+        is_live: false,
+        live_from_start: false,
+        newest_codecs: true,
+        cookies_browser: "none".into(),
+        subtitles: None,
+        embed_subs: false,
+        sponsorblock_remove: false,
+        sponsorblock_mark: false,
+        remux_video: None,
+        embed_chapters: false,
+        proxy: None,
+    };
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let _ = crate::runtime::tokio_rt().block_on(run_video_download(
+        job,
+        &AttemptGate::new(),
+        abort_rx,
+        tx,
+    ));
+    let mut first_phase = None;
+    while let Ok(msg) = rx.try_recv() {
+        if let crate::engine_msg::EngineMsg::Phase(p) = msg
+            && first_phase.is_none()
+        {
+            first_phase = Some(p);
+        }
+    }
+    assert_eq!(first_phase.as_deref(), Some("Resuming download…"));
+    drop(_env);
+    clean_staging(&staging);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

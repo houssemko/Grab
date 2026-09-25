@@ -1654,11 +1654,17 @@ impl DownloadManager {
         });
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
+        // A parked, paused or failed row keeps its fraction: the new
+        // attempt is a resume, so label it as one instead of
+        // "Resolving media…".
+        let resuming = item.progress() > 0.0;
         // Attempts start indeterminate (see spawn): a retried row may
         // carry its old fraction, which would otherwise sit frozen
         // through the whole "Resolving media…" phase.
         item.set_progress(0.0);
-        item.set_detail(if audio_only {
+        item.set_detail(if resuming {
+            gettext("Resuming download…")
+        } else if audio_only {
             gettext("Resolving audio…")
         } else {
             gettext("Resolving media…")
