@@ -1,7 +1,7 @@
 use crate::engine_msg::{DEST_EXISTS, EngineMsg};
 use crate::file_names::{
-    dedupe_filename, filename_from_url, fmt_bytes, name_stem, piece_len, rename_noreplace,
-    restrict_filename_ascii, sane_filename, shorten_filename,
+    dedupe_filename, filename_from_url, fmt_bytes, name_stem, path_size, piece_len,
+    rename_noreplace, restrict_filename_ascii, sane_filename, shorten_filename,
 };
 use crate::runtime::tokio_rt;
 use gettextrs::{gettext, ngettext};
@@ -781,9 +781,10 @@ impl DownloadManager {
         if let Some(folder) = output_dir {
             item.set_output_dir(folder);
         }
-        let size = std::fs::metadata(item.file_path())
-            .map(|m| m.len())
-            .unwrap_or(0);
+        // Size off the final path: the engine measured the pre-rename one.
+        // Folders (multi-file torrents) sum their contents — a dir's own
+        // metadata length is just its entry size.
+        let size = path_size(&item.file_path()).unwrap_or(0);
         item.set_detail(if size > 0 {
             gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
         } else {
@@ -1128,10 +1129,10 @@ impl DownloadManager {
                                 }
                             }
                             // Size off the final path: the engine measured the
-                            // pre-rename one.
-                            let size = std::fs::metadata(item.file_path())
-                                .map(|m| m.len())
-                                .unwrap_or(size);
+                            // pre-rename one. Folders (multi-file torrents)
+                            // sum their contents — a dir's own metadata
+                            // length is just its entry size.
+                            let size = path_size(&item.file_path()).unwrap_or(size);
                             // Server file date, when asked: best-effort (a
                             // read-only handle suffices; failure keeps the
                             // download-time mtime, never fails the row).

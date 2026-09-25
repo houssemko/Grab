@@ -1138,6 +1138,24 @@ fn formats_bytes() {
 }
 
 #[test]
+fn path_size_sums_folders() {
+    // Multi-file torrents finish into a folder: the finished detail must
+    // show the content total, not the directory entry's own byte count.
+    let dir = std::env::temp_dir().join(format!("grab-path-size-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(dir.join("a.bin"), vec![0u8; 100]).unwrap();
+    std::fs::write(sub.join("b.bin"), vec![0u8; 200]).unwrap();
+    std::fs::write(dir.join("empty.bin"), []).unwrap();
+    assert_eq!(path_size(&dir), Some(300));
+    // Files still report their own length; missing paths read as absent.
+    assert_eq!(path_size(&dir.join("a.bin")), Some(100));
+    assert_eq!(path_size(&dir.join("nope")), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn formats_eta() {
     assert_eq!(fmt_eta(0), "0 seconds");
     assert_eq!(fmt_eta(1), "1 second");

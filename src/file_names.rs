@@ -242,6 +242,39 @@ pub(crate) fn fmt_bytes(n: u64) -> String {
     }
 }
 
+/// On-disk size for the finished detail. Files report their length;
+/// folders (multi-file torrents) sum their contents — a directory's own
+/// metadata length is just its entry size, not the download total.
+/// Symlinked dirs are not descended (no cycle risk). `None` when the
+/// path can't be read at all.
+pub(crate) fn path_size(path: &std::path::Path) -> Option<u64> {
+    let meta = std::fs::metadata(path).ok()?;
+    if meta.is_file() {
+        return Some(meta.len());
+    }
+    if !meta.is_dir() {
+        return None;
+    }
+    let mut total = 0u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else if ft.is_file() {
+                total = total.saturating_add(entry.metadata().map(|m| m.len()).unwrap_or(0));
+            }
+        }
+    }
+    Some(total)
+}
+
 /// Smallest piece size: everything at or under ~4 GB splits into 1 MB
 /// pieces, so one slow connection only ever delays the tail by ~1 MB.
 pub(crate) const PIECE_MIN: u64 = 1024 * 1024;
