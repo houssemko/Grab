@@ -43,6 +43,22 @@ jobs:
       # threads, and glib futures are bound to their spawning thread, so
       # parallel runs abort when one test's loop polls another's source.
       - run: cargo test -- --test-threads=1
+  # Guards the module structure: sentrux enforces the architectural rules
+  # in .sentrux/rules.toml (currently: zero import cycles). Pinned to
+  # v0.5.7 so an upstream release can't silently change the verdict; runs
+  # in Fedora like the check job because the binary links libgtk-3.
+  structure:
+    runs-on: ubuntu-latest
+    container: fedora:44
+    steps:
+      - name: Install system dependencies
+        run: dnf install -y curl gtk3
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: Install sentrux
+        run: |
+          curl -sSL --fail https://github.com/sentrux/sentrux/releases/download/v0.5.7/sentrux-linux-x86_64 -o /usr/local/bin/sentrux
+          chmod +x /usr/local/bin/sentrux
+      - run: sentrux check
   # Guards the offline Flatpak build: a Cargo.lock stale against
   # Cargo.toml heals silently wherever cargo has network (local builds,
   # the tarball job) but is fatal under --offline, and an unregenerated
