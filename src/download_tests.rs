@@ -5301,8 +5301,12 @@ fn finalize_filename_applies_ascii_fold_for_late_names() {
         folded,
         restrict_filename_ascii(&shorten_filename("Café & Croissants.mp4"))
     );
-    // Pref off: only shortening applies, non-ASCII survives.
+    // Pref off: only shortening applies, non-ASCII survives. Set it
+    // explicitly: the GSettings memory backend is process-shared, so an
+    // earlier test's `set_boolean(true)` is still in effect here. This
+    // also leaves the shared backend false for later tests.
     let settings = test_settings();
+    settings.set_boolean("restrict-filenames", false).unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
     assert_eq!(
         manager.finalize_filename("Café & Croissants.mp4"),

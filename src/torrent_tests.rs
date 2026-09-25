@@ -357,10 +357,12 @@ fn file_list_keeps_raw_path_beside_display_path() {
     // Synthetic two-file torrent: one short name, one past the 120-char
     // display cap. The display form must truncate; the raw path must not.
     let long = "x".repeat(200);
-    let mut b = b"d8:announce7:x-local4:infod4:name4:test5:filesl".to_vec();
+    // Info-dict keys sorted (files < name < piece length < pieces), as in
+    // the other synthetic torrents in this file.
+    let mut b = b"d8:announce7:x-local4:infod5:filesl".to_vec();
     b.extend_from_slice(b"d6:lengthi2e4:pathl8:keep.isoee");
     b.extend_from_slice(format!("d6:lengthi3e4:pathl{}:{}ee", long.len(), long).as_bytes());
-    b.extend_from_slice(b"eee");
+    b.extend_from_slice(b"e4:name4:test12:piece lengthi16384e6:pieces0:ee");
     let (_name, entries) = torrent_file_list(&b).expect("synthetic torrent must parse");
     assert_eq!(entries.len(), 2);
     let short = entries
