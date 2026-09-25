@@ -1408,9 +1408,6 @@ impl DownloadManager {
             // unlimited (the preferences row flags junk live).
             speed_limit: parse_rate(opts.limit_rate.as_str()),
             keep_server_date: self.settings.keep_server_date(),
-            // Extraction quality for audio-only rows; the schema range is
-            // 0..=10 and 5 is yt-dlp's own default, clamped at spawn.
-            audio_quality: self.settings.audio_quality().clamp(0, 10),
             video_format_id,
             is_live,
             live_from_start: self.settings.live_from_start(),

@@ -59,13 +59,6 @@ pub struct VideoJob {
     /// New Download dialog owns it). Skips video selection, merging,
     /// and subtitles; HLS takes its audio rendition, live records m4a.
     pub audio_only: bool,
-    /// Audio extraction quality for audio-only rows (`--audio-quality`),
-    /// from the "audio quality" preference. 0 is best, 10 is worst; 5 is
-    /// yt-dlp's default, so the flag is omitted at 5 unless the user
-    /// moves the row. Only audio-only VOD legs take it (there is no
-    /// extraction step on live rows — they remux through ffmpeg after
-    /// capture).
-    pub audio_quality: i32,
     /// Raw browser-auth setting (`none` when off). Resolved to a
     /// `--cookies-from-browser` spec inside the worker.
     pub cookies_browser: String,
@@ -329,14 +322,8 @@ pub(crate) fn unified_download_argv(
         args.push("--extract-audio".to_string());
         args.push("--audio-format".to_string());
         args.push("m4a".to_string());
-        // Extraction quality from the "audio quality" preference (0 is
-        // best, 10 is worst). 5 is yt-dlp's own default, so the flag is
-        // a no-op unless the user moves the row — like the other
-        // opt-ins, it is omitted at the default.
-        if job.audio_quality != 5 {
-            args.push("--audio-quality".to_string());
-            args.push(job.audio_quality.to_string());
-        }
+        // No `--audio-quality`: yt-dlp's own default (5) applies, so
+        // audio-only extraction always runs at the stock quality.
     } else if merging {
         args.push("--merge-output-format".to_string());
         args.push(merge_ext.to_string());
@@ -571,12 +558,8 @@ pub(crate) fn hls_download_argv(
         args.push("--extract-audio".to_string());
         args.push("--audio-format".to_string());
         args.push("m4a".to_string());
-        // Same extraction quality as the unified audio-only legs;
-        // omitted at yt-dlp's own default of 5.
-        if job.audio_quality != 5 {
-            args.push("--audio-quality".to_string());
-            args.push(job.audio_quality.to_string());
-        }
+        // Same as the unified audio-only legs: yt-dlp's own default
+        // quality, no flag.
     } else {
         args.push("--merge-output-format".to_string());
         args.push("mp4".to_string());

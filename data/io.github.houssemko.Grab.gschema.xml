@@ -115,12 +115,6 @@
       <summary>Preferred video codec</summary>
       <description>Newest first prefers AV1, then VP9, HEVC and H.264; most compatible prefers H.264 first for players without newer decoders.</description>
     </key>
-    <key name="audio-quality" type="i">
-      <default>5</default>
-      <range min="0" max="10"/>
-      <summary>Audio quality</summary>
-      <description>Quality for audio-only downloads: 0 is best, 10 is worst (variable bitrate). 5 matches yt-dlp's default.</description>
-    </key>
     <key name="subtitle-language" type="s">
       <default>'en'</default>
       <summary>Subtitle language</summary>

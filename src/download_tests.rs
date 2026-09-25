@@ -3606,7 +3606,6 @@ fn proxy_argv_precedes_end_of_options() {
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         speed_limit: None,
         keep_server_date: false,
