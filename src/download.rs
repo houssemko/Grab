@@ -178,6 +178,12 @@ pub struct DownloadManager {
     /// `new()` re-runs `start_next()` so a row parked by `unremove()`
     /// starts instead of waiting for an unrelated trigger.
     wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Handle of the `wake_tx` receiver task. Kept so `Drop` can abort it:
+    /// a `spawn_future_local` task outliving its manager would be reaped
+    /// by a later test's main-loop iteration on a different thread,
+    /// tripping glib's thread guard (libtest runs each test on its own
+    /// thread).
+    wake_task: Cell<Option<glib::JoinHandle<()>>>,
     /// Finalizers reclaiming a removed row's scratch, by row. Each
     /// retains the worker's abort handle beside the finalizer: the
     /// finalizer *owns* the worker handle, so aborting the finalizer
@@ -235,6 +241,19 @@ struct PendingRestore {
     segments: Option<SegmentState>,
 }
 
+impl Drop for DownloadManager {
+    fn drop(&mut self) {
+        // Destroy the discard-wakeup task now. A `spawn_future_local` task
+        // is only reaped when the main loop next polls it, so without this
+        // a stale task would outlive the manager and be dispatched by a
+        // later test's main-loop iteration running on a different thread,
+        // tripping glib's thread guard.
+        if let Some(handle) = self.wake_task.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
@@ -258,6 +277,7 @@ impl DownloadManager {
             gates: RefCell::new(HashMap::new()),
             reservations: std::sync::Arc::new(std::sync::Mutex::new(Reservations::default())),
             wake_tx,
+            wake_task: Cell::new(None),
             discards: RefCell::new(HashMap::new()),
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
@@ -267,7 +287,7 @@ impl DownloadManager {
         // producer. Weak ref: the loop must not keep the manager alive.
         {
             let weak = Rc::downgrade(&this);
-            glib::spawn_future_local(async move {
+            let handle = glib::spawn_future_local(async move {
                 while wake_rx.recv().await.is_some() {
                     if let Some(m) = weak.upgrade() {
                         // Shutdown awaits discard finalizers, and each one
@@ -281,6 +301,9 @@ impl DownloadManager {
                     }
                 }
             });
+            // The task must die with the manager: a stale local task reaped
+            // on another thread trips glib's thread guard (see `Drop`).
+            this.wake_task.set(Some(handle));
         }
         // Live preferences: raising the download limit must wake queued
         // rows now (nothing else re-runs start_next until the next
