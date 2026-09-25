@@ -4860,6 +4860,12 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
     // The finalizer owns the worker handle. Aborting the finalizer drops
     // that handle, which *detaches* the worker -- yt-dlp would keep running
     // with no supervisor, which is the regression #180 fixed.
+    //
+    // Driven through the real path: the long-running worker is inserted as
+    // the row's running handle and `remove` hands it to `finish_discard`,
+    // which retains the abort handle and tracks the finalizer. A
+    // hand-built `PendingDiscard` would pass even if `finish_discard`
+    // regressed, so this test must not construct one.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("shutdown-discard");
     let settings = test_settings();
@@ -4895,6 +4901,15 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         .borrow_mut()
         .insert(id, std::sync::Arc::clone(&gate));
 
+    // Scratch the real finalizer must reclaim once the worker stops: a
+    // staging sidecar plus a dest-dir part in yt-dlp's split namespace.
+    let staging = crate::video::staging_dir(id);
+    let _ = std::fs::remove_dir_all(&staging);
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    let part = dest_dir.join("v.video.mp4");
+    std::fs::write(&part, b"recorded").unwrap();
+
     // A worker that runs long and records that it was dropped.
     let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
@@ -4914,29 +4929,12 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         let _guard = guard;
         std::future::pending::<()>().await;
     });
-    let worker_abort = handle.abort_handle();
-    // The finalizer owns the worker handle, exactly like finish_discard's
-    // awaited-worker arm: awaiting it is what reclaims the scratch.
-    let dest = dest_dir.join("v.mp4");
-    let staging = crate::video::staging_dir(id);
-    let reclaim_gate = std::sync::Arc::clone(&gate);
-    let reservations = std::sync::Arc::clone(&manager.reservations);
-    let finalizer = crate::runtime::tokio_rt().spawn(async move {
-        let _ = handle.await;
-        let _ = reclaim_gate.discard();
-        crate::video::clean_staging(&staging);
-        crate::video::clean_dest_parts(&dest);
-        if let Ok(mut set) = reservations.lock() {
-            set.remove(&dest);
-        }
-    });
-    manager.discards.borrow_mut().insert(
-        id,
-        crate::download::PendingDiscard {
-            worker_abort,
-            finalizer,
-        },
-    );
+    manager.running.borrow_mut().insert(id, handle);
+
+    // The real path: `remove` claims the gate and hands the running worker
+    // to `finish_discard`, which retains its abort handle beside the
+    // finalizer it spawns.
+    manager.remove(id);
 
     manager.shutdown();
 
@@ -4945,5 +4943,16 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         "shutdown left the worker running: the finalizer's handle was dropped, \
          which detaches the task instead of aborting it"
     );
+    assert!(
+        !staging.exists(),
+        "shutdown never ran the finalizer's staging sweep: aborting finalizers \
+         instead of awaiting them would leave this behind"
+    );
+    assert!(
+        !part.exists(),
+        "shutdown never ran the finalizer's dest-parts sweep: aborting finalizers \
+         instead of awaiting them would leave this behind"
+    );
     let _ = std::fs::remove_dir_all(&dest_dir);
+    let _ = std::fs::remove_dir_all(&staging);
 }
