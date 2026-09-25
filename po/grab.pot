@@ -1378,7 +1378,7 @@ msgstr ""
 msgid "Torrent is already in the queue"
 msgstr ""
 
-#: src/torrent.rs:1042
+#: src/torrent.rs:1045
 msgid "Cannot read torrent file"
 msgstr ""
 

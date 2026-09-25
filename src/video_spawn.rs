@@ -132,21 +132,28 @@ pub(crate) async fn fetch_raw_dump_json(
             return Err(VideoError::fetch(gettext("the lookup timed out")));
         }
     };
-    // A drained pipe fails three ways: the task died (JoinError), a
-    // genuine pipe IO error, or the byte ceiling tripped. Only the last
-    // gets the size-limit message; the rest keep the old lenient path
-    // (empty stdout fails downstream at JSON parse, as before) instead
-    // of claiming a cause that was not observed.
-    let stdout = match out_task.await {
-        Ok(Ok(buf)) => buf,
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
+    // A drained pipe fails four ways: the task died (JoinError), the
+    // drain grace period ran out (aborted), a genuine pipe IO error, or
+    // the byte ceiling tripped. Only the last gets the size-limit
+    // message; the rest keep the old lenient path (empty stdout fails
+    // downstream at JSON parse, as before) instead of claiming a cause
+    // that was not observed. The drains are joined with a grace period
+    // rather than awaited bare: past the quota ceiling the drain loops
+    // run to EOF, so a pipe-holder that outlives the child would stall
+    // a bare await forever.
+    let stdout = match join_drain(out_task).await {
+        Some(Ok(buf)) => buf,
+        Some(Err(e)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
             return Err(VideoError::fetch(gettext(
                 "the lookup produced too much output",
             )));
         }
         _ => Vec::new(),
     };
-    let stderr = err_task.await.ok().and_then(|r| r.ok()).unwrap_or_default();
+    let stderr = join_drain(err_task)
+        .await
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
     if !status.success() {
         let detail = last_log_line(&String::from_utf8_lossy(&stderr), "yt-dlp reported failure");
         return Err(VideoError::fetch(detail));
