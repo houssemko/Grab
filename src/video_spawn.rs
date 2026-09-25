@@ -343,6 +343,11 @@ impl ProcessGroupGuard {
         self.pid = None;
     }
 
+    /// The process group id this guard signals.
+    pub(crate) fn pgid(&self) -> Option<libc::pid_t> {
+        self.pid
+    }
+
     /// Whether the guard would still signal on drop. Test-only: a guard
     /// that outlives its child's reap is the bug this predicate exists
     /// to catch.
@@ -454,6 +459,36 @@ pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut Pr
     kill_tree(child);
     let _ = child.wait().await;
     group.disarm();
+}
+
+/// Wait until no process remains in `pgid`, bounded.
+///
+/// `reap_child` waits only the direct child, and the group guards *signal*
+/// SIGKILL and return, so task completion is not by itself proof that no
+/// writer remains. `false` means the group did not quiesce in time, and the
+/// caller must treat a writer as possibly still present.
+#[cfg(target_os = "linux")]
+pub(crate) fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        // SAFETY: signal 0 performs error checking only; a constant signal.
+        let alive = unsafe { libc::killpg(pgid, 0) } == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+        if !alive {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn await_group_quiescence(_pgid: i32, _timeout: std::time::Duration) -> bool {
+    // No process-group introspection available; the direct-child reap is
+    // the strongest guarantee this platform offers.
+    true
 }
 
 /// Join a pipe-drain task with a grace period: a dead child can leave

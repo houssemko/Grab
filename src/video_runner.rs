@@ -952,6 +952,10 @@ pub(crate) async fn run_live_ytdlp(
             have
         });
         let logs = drain_stderr_to_tail(stderr);
+        // The numeric group id for the quiescence wait on the discard
+        // path below: `reap_child` disarms the guard, so it must be read
+        // while the guard is still armed.
+        let pgid = group.pgid();
         // `aborted` gates the live-edge retry below: a stopped attempt must
         // never come back as a fresh capture. `&mut abort` keeps the receiver
         // usable for the second attempt when it didn't fire.
@@ -1018,6 +1022,18 @@ pub(crate) async fn run_live_ytdlp(
         // may still be running is the race this avoids.
         if discarded {
             logs.abort();
+            // `reap_child` waited only the direct child, and the guard only
+            // *signalled* the group: a descendant may still be writing when
+            // this returns and the manager reclaims the scratch, so wait
+            // for the group, bounded, and report rather than assume.
+            if let Some(pgid) = pgid
+                && !crate::video_spawn::await_group_quiescence(pgid, timeout)
+            {
+                tracing::warn!(
+                    "recorder process group did not quiesce; reclaiming anyway with a \
+                     writer possibly still present"
+                );
+            }
             return Ok(None);
         }
         let log_tail = join_drain(logs).await.unwrap_or_default();

@@ -34,7 +34,8 @@ use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
 use crate::video_runner::{run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
 use crate::video_spawn::{
-    ProcessGroupGuard, fetch_raw_dump_json, fetch_video_page, reap_child, ytdlp_command,
+    ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
+    ytdlp_command,
 };
 use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
@@ -7949,5 +7950,48 @@ fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
         "a closed receiver authorised a delivery: nothing was left to permit it"
     );
     assert!(!dest.exists(), "a closed receiver delivered a file");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
+    // A descendant that ignores its group kill must be *reported*, not
+    // silently treated as gone: the caller sweeps anyway (there is nothing
+    // better to do) but the outcome is observable rather than assumed.
+    use std::os::unix::process::CommandExt as _;
+    let dir = std::env::temp_dir().join(format!("grab-quiesce-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let marker = dir.join("still-writing");
+    // A process in its own group that writes, then sleeps well past the wait.
+    let script = dir.join("stubborn");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf 'x' >> '{}'\nsleep 30\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut child = std::process::Command::new(&script)
+        .process_group(0)
+        .spawn()
+        .expect("stubborn descendant");
+    let pgid = child.id() as i32;
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let quiesced = await_group_quiescence(pgid, std::time::Duration::from_millis(300));
+    assert!(
+        !quiesced,
+        "a live process group was reported as quiesced, so a reclaim would run \
+         under a writer that never stopped"
+    );
+    let _ = child.kill();
+    let _ = child.wait();
     let _ = std::fs::remove_dir_all(&dir);
 }
