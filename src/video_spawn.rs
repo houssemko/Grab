@@ -467,8 +467,14 @@ pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut Pr
 /// SIGKILL and return, so task completion is not by itself proof that no
 /// writer remains. `false` means the group did not quiesce in time, and the
 /// caller must treat a writer as possibly still present.
+///
+/// Async for one reason: this runs on the shared runtime, and a blocking
+/// sleep here would park a worker thread for the whole bound. A wedged
+/// group must cost wall-clock time only, never thread time — two parked
+/// threads starve every task scheduled after, which is exactly how a
+/// discard-path wait turns into an unrelated timeout elsewhere.
 #[cfg(target_os = "linux")]
-pub(crate) fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) -> bool {
+pub(crate) async fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
     loop {
         // SAFETY: signal 0 performs error checking only; a constant signal.
@@ -480,12 +486,12 @@ pub(crate) fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) ->
         if std::time::Instant::now() >= deadline {
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn await_group_quiescence(_pgid: i32, _timeout: std::time::Duration) -> bool {
+pub(crate) async fn await_group_quiescence(_pgid: i32, _timeout: std::time::Duration) -> bool {
     // No process-group introspection available; the direct-child reap is
     // the strongest guarantee this platform offers.
     true
