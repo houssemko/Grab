@@ -35,23 +35,32 @@ const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 /// limit is read so an oversize stream is detected and failed instead
 /// of silently truncated; overflow surfaces as
 /// [`std::io::ErrorKind::QuotaExceeded`], not a bigger buffer.
+///
+/// The stream is always drained to EOF, even past the ceiling: the
+/// overflow is discarded into a fixed-size buffer instead of buffered,
+/// so the child can never block on a full pipe. Without that, an
+/// oversize child would stall on its write end and turn the quota
+/// failure into the fetch timeout.
 async fn read_bounded(
     stream: impl tokio::io::AsyncRead + Unpin,
     limit: u64,
 ) -> std::io::Result<Vec<u8>> {
     use tokio::io::AsyncReadExt as _;
     let mut buf = Vec::new();
-    tokio::io::BufReader::new(stream)
-        .take(limit + 1)
-        .read_to_end(&mut buf)
-        .await?;
-    if buf.len() as u64 > limit {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::QuotaExceeded,
-            "child output exceeded the size limit",
-        ));
+    let mut reader = tokio::io::BufReader::new(stream);
+    (&mut reader).take(limit + 1).read_to_end(&mut buf).await?;
+    if buf.len() as u64 <= limit {
+        return Ok(buf);
     }
-    Ok(buf)
+    // Over the ceiling: keep draining into a fixed discard buffer.
+    // Memory stays flat; only time is spent, and the caller already
+    // bounds the child with the fetch timeout.
+    let mut discard = [0u8; 8192];
+    while reader.read(&mut discard).await? != 0 {}
+    Err(std::io::Error::new(
+        std::io::ErrorKind::QuotaExceeded,
+        "child output exceeded the size limit",
+    ))
 }
 
 /// Fetch one page's raw `--dump-single-json` through a direct spawn
@@ -623,5 +632,33 @@ mod tests {
             .block_on(read_bounded(std::io::Cursor::new(vec![9u8; 65]), 64))
             .expect_err("a stream past the limit must fail, not grow");
         assert_eq!(err.kind(), std::io::ErrorKind::QuotaExceeded);
+    }
+
+    #[test]
+    fn bounded_drain_keeps_draining_after_quota() {
+        // Regression: the drain used to stop reading at the ceiling, so a
+        // child writing past it blocked on a full pipe and the quota
+        // failure degraded into the fetch timeout. The writer below must
+        // finish: the drain keeps consuming into a discard buffer.
+        let rt = crate::runtime::tokio_rt();
+        rt.block_on(async {
+            use tokio::io::AsyncWriteExt as _;
+            let (mut writer, reader) = tokio::io::duplex(8192);
+            let write_task = tokio::spawn(async move {
+                let chunk = vec![7u8; 8192];
+                for _ in 0..32 {
+                    writer.write_all(&chunk).await.unwrap();
+                }
+                writer.shutdown().await.unwrap();
+            });
+            let err = read_bounded(reader, 64)
+                .await
+                .expect_err("a stream past the limit must fail");
+            assert_eq!(err.kind(), std::io::ErrorKind::QuotaExceeded);
+            tokio::time::timeout(std::time::Duration::from_secs(10), write_task)
+                .await
+                .expect("the drain must not stall the writer")
+                .unwrap();
+        });
     }
 }

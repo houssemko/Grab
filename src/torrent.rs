@@ -209,14 +209,20 @@ pub fn stub_name_for_file(file_name: &str) -> String {
     }
 }
 
-/// One listed file of a multi-file torrent: the raw entry path for
-/// filesystem operations, its sanitized display form for the UI, and
-/// the byte length. The two paths are deliberately separate: the
-/// display form is truncated and control-stripped, so it can differ
+/// One listed file of a multi-file torrent: the lossy-decoded entry
+/// path for filesystem operations, its sanitized display form for the
+/// UI, and the byte length. The two paths are deliberately separate:
+/// the display form is truncated and control-stripped, so it can differ
 /// from the on-disk name and must never be joined against folders.
 pub struct TorrentFileEntry {
-    /// Entry path exactly as joined from the torrent's byte-string
-    /// components. The only path ever used for filesystem operations.
+    /// Entry path joined from the torrent's byte-string components with
+    /// invalid UTF-8 replaced (`String::from_utf8_lossy`) — not the raw
+    /// bytes. Distinct non-UTF-8 components can collapse to the same
+    /// string (pinned by `raw_path_collapses_distinct_invalid_utf8`).
+    /// Still the only path ever used for filesystem operations: for
+    /// UTF-8 torrents it matches the names the engine writes, because
+    /// the engine decodes components the same lossy way before
+    /// touching disk.
     pub raw_path: String,
     /// Display form of `raw_path` (see `sanitize_display_path`). UI
     /// only — never a filesystem path.
@@ -241,6 +247,18 @@ pub(crate) fn read_torrent_bytes(path: &std::path::Path) -> Option<Vec<u8>> {
         .read_to_end(&mut buf)
         .ok()?;
     (buf.len() as u64 <= MAX_TORRENT_BYTES).then_some(buf)
+}
+
+/// Bounded read of the archived `.torrent` behind a queue pseudo-URL.
+/// The single funnel for every archive read by pseudo-URL: the path is
+/// constrained by `archive_path_for_url` and the bytes by
+/// `read_torrent_bytes`, so a replaced or corrupted archive can never be
+/// loaded unbounded. `None` when the archive is missing, unreadable, or
+/// over the byte ceiling. (`run_torrent`'s `TorrentSource::File` arm
+/// holds an already-resolved archive path, so it calls
+/// `read_torrent_bytes` directly instead.)
+pub(crate) fn read_archive_bytes(url: &str) -> Option<Vec<u8>> {
+    read_torrent_bytes(&archive_path_for_url(url)?)
 }
 
 /// Parse `.torrent` bytes into a display list for the file picker.
@@ -383,8 +401,7 @@ pub fn torrent_output_dir(dest: &std::path::Path, url: &str) -> Option<PathBuf> 
     if !is_torrent_url(url) {
         return None;
     }
-    let path = archive_path_for_url(url)?;
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = read_archive_bytes(url)?;
     let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
     let multi = is_multi_file(meta.info.data.files.as_deref());
     if !multi {
@@ -409,7 +426,7 @@ pub(crate) fn cleanup_unselected(folder: &std::path::Path, url: &str) {
     if selected.is_empty() {
         return;
     }
-    let Some(bytes) = archive_path_for_url(url).and_then(|p| std::fs::read(p).ok()) else {
+    let Some(bytes) = read_archive_bytes(url) else {
         return;
     };
     let Ok((_, entries)) = torrent_file_list(&bytes) else {
@@ -655,7 +672,7 @@ pub(crate) fn info_hash_for_url(url: &str) -> Option<String> {
         return parse_magnet(url).ok()?.as_id20().map(|h| h.as_string());
     }
     if is_torrent_url(url) {
-        let bytes = std::fs::read(archive_path_for_url(url)?).ok()?;
+        let bytes = read_archive_bytes(url)?;
         let meta = librqbit::torrent_from_bytes(&bytes).ok()?;
         return Some(meta.info_hash.as_string());
     }
@@ -1024,12 +1041,9 @@ pub(crate) async fn run_torrent(job: TorrentJob) {
             }
         },
         TorrentSource::File(path) => {
-            let bytes = match std::fs::read(path) {
-                Ok(b) => b,
-                Err(e) => {
-                    fail(format!("Cannot read torrent file: {e}"));
-                    return;
-                }
+            let Some(bytes) = read_torrent_bytes(path) else {
+                fail(gettext("Cannot read torrent file"));
+                return;
             };
             match librqbit::torrent_from_bytes(&bytes) {
                 Ok(meta) => {
