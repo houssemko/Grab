@@ -48,7 +48,7 @@
   <releases>
     <release version="4.4.2" date="2026-09-25">
       <description>
-        <p>Security hardening from a code audit: all <em>.torrent</em> archive reads now go through a bounded reader so a malformed archive can't exhaust memory, and oversized yt-dlp probe output is drained past the limit so a stuck pipe can no longer hang the video worker. Also a whole-code readability pass with no behavior change.</p>
+        <p>All <em>.torrent</em> archive reads now go through a bounded reader so a malformed archive can't exhaust memory, and oversized yt-dlp probe output is drained past the limit so a stuck pipe can no longer hang the video worker. Also a whole-code readability pass with no behavior change.</p>
       </description>
     </release>
     <release version="4.4.1" date="2026-09-25">
