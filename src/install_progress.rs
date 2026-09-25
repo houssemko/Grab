@@ -14,6 +14,7 @@ use std::time::Duration;
 use gettextrs::gettext;
 use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
+use libadwaita as adw;
 
 // The one install currently in flight (if any) and its progress popover.
 //
@@ -30,7 +31,7 @@ thread_local! {
 /// a wrapping error label that only appears on failure.
 struct ToolRow {
     root: gtk4::Box,
-    spinner: gtk4::Spinner,
+    spinner: adw::Spinner,
     icon: gtk4::Image,
     status: gtk4::Label,
     bar: gtk4::ProgressBar,
@@ -45,12 +46,28 @@ impl ToolRow {
     /// progress bar; the status label next to it already announces state
     /// changes, the bar needs its own name too.
     fn new(name: &str, bar_label: &str, active: &Rc<RefCell<Option<gtk4::ProgressBar>>>) -> Self {
-        let spinner = gtk4::Spinner::new();
-        // Stopped until the stage starts; still allocates its slot so the
-        // row doesn't shift when downloading begins.
-        spinner.stop();
+        // AdwSpinner, not GtkSpinner: it has no start/stop state to go
+        // stale (it animates whenever it is visible), which is what left
+        // the old spinner frozen after the window was hidden and reshown.
+        let spinner = adw::Spinner::new();
+        spinner.set_visible(false);
         let icon = gtk4::Image::from_icon_name("emblem-ok-symbolic");
+        icon.set_pixel_size(16);
         icon.set_visible(false);
+
+        // One fixed, centered slot for both indicators. Toggling two
+        // different widgets' visibility in the header directly would move
+        // the text column and misalign the indicator against the two-line
+        // title, so the swap happens inside a slot whose size never changes.
+        let slot = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        slot.set_size_request(16, 16);
+        slot.set_valign(gtk4::Align::Center);
+        spinner.set_halign(gtk4::Align::Center);
+        spinner.set_valign(gtk4::Align::Center);
+        icon.set_halign(gtk4::Align::Center);
+        icon.set_valign(gtk4::Align::Center);
+        slot.append(&spinner);
+        slot.append(&icon);
 
         let name_label = gtk4::Label::new(Some(name));
         name_label.set_halign(gtk4::Align::Start);
@@ -65,8 +82,7 @@ impl ToolRow {
         titles.append(&status);
 
         let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        header.append(&spinner);
-        header.append(&icon);
+        header.append(&slot);
         header.append(&titles);
 
         let bar = gtk4::ProgressBar::new();
@@ -100,7 +116,9 @@ impl ToolRow {
 
     /// Mark the row active: spinner runs and its bar becomes the pulse target.
     fn set_downloading(&self) {
-        self.spinner.start();
+        // No start() call: AdwSpinner animates whenever it is visible, so
+        // there is no animation state that can go stale.
+        self.spinner.set_visible(true);
         self.status.set_text(&gettext("Downloading…"));
         *self.active.borrow_mut() = Some(self.bar.clone());
     }
