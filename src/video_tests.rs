@@ -32,7 +32,7 @@ use crate::video_progress::{
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
-use crate::video_runner::{run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
+use crate::video_runner::{remux_live_capture, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
 use crate::video_spawn::{
     ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
     ytdlp_command,
@@ -41,7 +41,8 @@ use crate::video_staging::{
     ResumePlan, ResumeQuery, VideoManifest, clean_dest_parts, clean_staging, collect_sidecar,
     dest_part_path, dir_file_names, discover_unified_output, ensure_staging_dir, is_grab_part,
     is_sparse_shell, is_ytdlp_fragment, read_manifest, release_remux_lease, reserve_remux_temp,
-    resume_plan, sidecar_path_for, staging_dir, staging_root, stem_reserved_in, unified_candidate,
+    resume_plan, sidecar_path_for, staging_dir, staging_root, stem_reserved_in,
+    sweep_partial_remuxes, sweep_staging_preserving_recordings, unified_candidate,
     unified_temp_limit, ytdlp_output_template,
 };
 use crate::video_tools::VideoError;
@@ -959,7 +960,6 @@ fn pipeline_reports_missing_tools() {
         playlist_item_id: None,
         quality: "1080p".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: std::env::temp_dir().join("grab-pipeline-probe.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -2949,7 +2949,6 @@ fn direct_test_job() -> VideoJob {
         playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -3197,7 +3196,6 @@ fn live_test_job() -> VideoJob {
         playlist_item_id: None,
         quality: "720p".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -4256,6 +4254,128 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
 }
 
 #[test]
+fn a_non_live_sweep_keeps_a_live_recordings_remux() {
+    // The live path leaves `final.<n>.<ext>` in the row's staging when it
+    // cannot place a recording, and a retry may resolve through VOD or HLS
+    // instead. That leg used to finish with `remove_dir_all(staging)`,
+    // destroying the preserved recording -- #178's whole point, undone by
+    // a route change.
+    let dir = std::env::temp_dir().join(format!("grab-sweepscope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    // Scratch the finishing leg owns, and a recording it does not.
+    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+    std::fs::write(staging.join("video.f137.mp4"), b"part").unwrap();
+    std::fs::write(staging.join("final.1.mp4"), b"a live recording").unwrap();
+    std::fs::write(staging.join("final.1.mp4.lease"), b"").unwrap();
+
+    sweep_staging_preserving_recordings(&staging);
+
+    assert_eq!(
+        std::fs::read(staging.join("final.1.mp4")).unwrap(),
+        b"a live recording",
+        "a non-live leg destroyed a live attempt's completed remux"
+    );
+    assert!(
+        staging.join("final.1.mp4.lease").exists(),
+        "the lease marks a claimed remux slot and must survive with it"
+    );
+    assert!(
+        !staging.join("manifest.json").exists() && !staging.join("video.f137.mp4").exists(),
+        "the finishing leg's own scratch was not reclaimed"
+    );
+
+    // With the recordings gone the directory itself is reclaimed, so an
+    // idle row does not leave a directory behind in temp forever.
+    std::fs::remove_file(staging.join("final.1.mp4")).unwrap();
+    std::fs::remove_file(staging.join("final.1.mp4.lease")).unwrap();
+    sweep_staging_preserving_recordings(&staging);
+    assert!(
+        !staging.exists(),
+        "an emptied staging dir should be reclaimed, not left as litter"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
+    // Retention can only be bounded if a completed recording is
+    // distinguishable from the debris of a crash. A remux therefore
+    // writes `final.<n>.<ext>.part` and is renamed to `final.<n>.<ext>`
+    // only once ffmpeg succeeded -- so a `.part` is worthless by
+    // construction and can be swept, while a real capture never is.
+    let dir = std::env::temp_dir().join(format!("grab-partialremux-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("final.1.mp4.part"), b"half a remux").unwrap();
+    std::fs::write(staging.join("final.2.mp4"), b"a completed recording").unwrap();
+    std::fs::write(staging.join("final.2.mp4.lease"), b"").unwrap();
+    std::fs::write(staging.join("manifest.json"), b"{}").unwrap();
+
+    sweep_partial_remuxes(&staging);
+
+    assert!(
+        !staging.join("final.1.mp4.part").exists(),
+        "a partial remux from a crashed attempt was not reclaimed"
+    );
+    assert_eq!(
+        std::fs::read(staging.join("final.2.mp4")).unwrap(),
+        b"a completed recording",
+        "bounded retention must never cost a completed recording -- that is \
+         the whole reason the partial is named differently"
+    );
+    assert!(staging.join("final.2.mp4.lease").exists(), "lease lost");
+    assert!(
+        staging.join("manifest.json").exists(),
+        "this sweep is only about partials; other scratch is the finishing \
+         leg's business"
+    );
+    // A file that merely contains "part" is not a partial remux.
+    std::fs::write(staging.join("final.3.partial.mp4"), b"not a partial").unwrap();
+    sweep_partial_remuxes(&staging);
+    assert!(
+        staging.join("final.3.partial.mp4").exists(),
+        "the sweep matched a name that is not a partial remux"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
+    // The rename is the whole mechanism: until it happens the file is a
+    // `.part` and any sweep may take it.
+    let dir = std::env::temp_dir().join(format!("grab-remuxrename-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("live.mp4.part");
+    std::fs::write(&src, b"recorded").unwrap();
+    let final_tmp = dir.join("final.1.mp4");
+    let fake_ff = fake_ffmpeg_copy(&dir);
+
+    let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
+        &fake_ff,
+        &src,
+        &final_tmp,
+        false,
+        std::time::Duration::from_secs(30),
+        "https://x.com/watch?v=abc123",
+    ));
+    assert!(res.is_ok(), "{res:?}");
+    assert_eq!(
+        std::fs::read(&final_tmp).unwrap(),
+        b"recorded",
+        "a successful remux must land under its final name"
+    );
+    assert!(
+        !dir.join("final.1.mp4.part").exists(),
+        "the partial was left behind after the rename"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
     // #179's overlap hazard, and the reason the dest-side sweep is
     // deferred rather than done inline during `remove`. A new row may
@@ -4290,6 +4410,45 @@ fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
     assert!(
         !stem_reserved_in(&names, "v"),
         "the stem stayed reserved after the row's scratch was reclaimed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_failed_live_remux_leaves_no_partial_behind() {
+    // The mirror: a failure must not leave a file a later sweep has to
+    // reason about, and must not leave a half-written file that looks
+    // like a recording.
+    let dir = std::env::temp_dir().join(format!("grab-remuxfail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let src = dir.join("live.mp4.part");
+    std::fs::write(&src, b"recorded").unwrap();
+    let final_tmp = dir.join("final.1.mp4");
+    let fake_ff = fake_ffmpeg_fail(&dir, true);
+
+    let res = crate::runtime::tokio_rt().block_on(remux_live_capture(
+        &fake_ff,
+        &src,
+        &final_tmp,
+        false,
+        std::time::Duration::from_secs(30),
+        "https://x.com/watch?v=abc123",
+    ));
+    assert!(res.is_err(), "the remux must fail");
+    assert!(
+        !final_tmp.exists(),
+        "a failed remux published a file under the name a completed \
+         recording would take"
+    );
+    assert!(
+        !dir.join("final.1.mp4.part").exists(),
+        "a failed remux left a partial behind for a later sweep to clean"
+    );
+    assert_eq!(
+        std::fs::read(&src).unwrap(),
+        b"recorded",
+        "the raw capture was taken"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -5203,7 +5362,6 @@ fn vod_hls_pins_planner_variant_id() {
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: dir.join("v.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -5275,7 +5433,6 @@ fn vod_hls_refuses_existing_dest() {
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: dir.join("v.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -6676,12 +6833,11 @@ fn live_capture_argv_never_mtime() {
 }
 
 #[test]
-fn unified_argv_audio_quality_when_audio_only() {
-    // Audio-only extraction takes the preferred quality (0 is best,
-    // 10 is worst; 5 is yt-dlp's default).
+fn audio_only_legs_never_pass_an_extraction_quality() {
+    // The preference is gone: audio-only extraction always runs at
+    // yt-dlp's own default, so the flag must not appear on any leg.
     let mut job = direct_test_job();
     job.audio_only = true;
-    job.audio_quality = 0;
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let argv = unified_download_argv(
         &job,
@@ -6691,26 +6847,15 @@ fn unified_argv_audio_quality_when_audio_only() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
     );
-    let pos = argv
-        .iter()
-        .position(|a| a == "--audio-quality")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "0");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "audio-quality must precede the URL separator");
-    // At yt-dlp's own default of 5 the flag is a no-op, so it is
-    // omitted — like the other opt-ins.
-    job.audio_quality = 5;
-    let argv = unified_download_argv(
-        &job,
-        "ba/b",
-        false,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
-    );
+    assert!(argv.contains(&"--extract-audio".to_string()));
+    assert!(argv.contains(&"--audio-format".to_string()));
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
-    // Video legs never extract, so the flag must not appear.
+    let dest = std::path::Path::new("/tmp/dl/v.m4a");
+    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
+    assert!(argv.contains(&"--extract-audio".to_string()));
+    assert!(argv.contains(&"--audio-format".to_string()));
+    assert!(!argv.iter().any(|a| a == "--audio-quality"));
+    // Video legs never extract, so the flag must not appear there either.
     job.audio_only = false;
     let argv = unified_download_argv(
         &job,
@@ -6724,36 +6869,11 @@ fn unified_argv_audio_quality_when_audio_only() {
 }
 
 #[test]
-fn hls_argv_audio_quality_when_audio_only() {
-    let mut job = direct_test_job();
-    job.audio_only = true;
-    job.audio_quality = 2;
-    let dest = std::path::Path::new("/tmp/dl/v.m4a");
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let pos = argv
-        .iter()
-        .position(|a| a == "--audio-quality")
-        .expect("flag");
-    assert_eq!(argv[pos + 1], "2");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(pos < sep, "audio-quality must precede the URL separator");
-    // At yt-dlp's own default of 5 the flag is a no-op, so it is omitted.
-    job.audio_quality = 5;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--audio-quality"));
-    // Video legs never extract, so the flag must not appear.
-    job.audio_only = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--audio-quality"));
-}
-
-#[test]
 fn live_capture_argv_never_audio_quality() {
     // Live rows remux through ffmpeg after capture — there is no
     // yt-dlp extraction step, so the flag must not appear.
     let mut job = live_test_job();
     job.audio_only = true;
-    job.audio_quality = 0;
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
     assert!(!argv.iter().any(|a| a == "--audio-quality"));
 }
@@ -6967,7 +7087,6 @@ fn hls_collects_sidecar_beside_finished_file() {
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: dir.join("v.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -7314,6 +7433,54 @@ fn unified_runner_downloads_claims_and_collects() {
     assert!(logged.contains("-f v123+a456/bv*+ba/b"), "{logged}");
     assert!(logged.contains("--merge-output-format mp4"), "{logged}");
     assert!(logged.contains("grab-media.%(ext)s"), "{logged}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
+    // End-to-end proof for the wiring, not just the sweep helper: a retry
+    // that resolves through the unified/VOD route shares the row's staging
+    // directory with the live path, and used to end in `remove_dir_all`.
+    // The recording a live attempt could not place is often the user's
+    // only copy, so the finishing leg has to step around it.
+    let dir = std::env::temp_dir().join(format!("grab-unified-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp(&dir);
+    let staging = dir.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    let recording = staging.join("final.1.mp4");
+    std::fs::write(&recording, b"an unplaceable live recording").unwrap();
+    std::fs::write(staging.join("final.1.mp4.lease"), b"").unwrap();
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel();
+    let res = crate::runtime::tokio_rt().block_on(run_unified_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "v123+a456/bv*+ba/b",
+        Some("mp4"),
+        Some(7),
+        &mut abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(Some(7))),
+        "the VOD leg itself must succeed: {res:?}"
+    );
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"unified");
+    assert_eq!(
+        std::fs::read(&recording).unwrap(),
+        b"an unplaceable live recording",
+        "a non-live leg finishing over a live recording destroyed it: the \
+         row rerouted and the recording went with it"
+    );
+    assert!(recording.with_extension("mp4.lease").exists(), "lease lost");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

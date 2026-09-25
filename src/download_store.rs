@@ -38,10 +38,20 @@ impl DownloadStatus {
     }
 }
 
-pub(crate) const QUEUE_VERSION: u32 = 2;
+pub(crate) const QUEUE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredItem {
+    /// This row's manager id, which is also its staging key
+    /// (`staging_dir(item_id)`). Absent before v3: those rows are given a
+    /// fresh id on restore, exactly as before.
+    ///
+    /// Persisting it is what makes a retained recording reachable again
+    /// after a restart. Re-allocating instead meant a retry scanned a
+    /// different directory than the attempt that wrote the file, and a
+    /// later row handed the same number could delete it.
+    #[serde(default)]
+    pub(crate) id: Option<u64>,
     pub(crate) url: String,
     pub(crate) dest_dir: String,
     pub(crate) filename: String,

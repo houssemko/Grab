@@ -45,6 +45,24 @@ fn test_locks() -> (
     (q, l)
 }
 
+/// A minimal persisted row for `restore_existing` fixtures: no persisted
+/// id (so restore allocates, which is the pre-v3 path), no resume state,
+/// and no video source.
+fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus) -> StoredItem {
+    StoredItem {
+        id: None,
+        url: url.to_string(),
+        dest_dir: dest_dir.to_string(),
+        filename: filename.to_string(),
+        status,
+        progress: 0.0,
+        segments: None,
+        selected_files: None,
+        output_dir: None,
+        video_source: None,
+    }
+}
+
 fn test_queue_file(tag: &str) -> std::path::PathBuf {
     let p = std::env::temp_dir().join(format!(
         "grab-q-{:?}-{tag}.json",
@@ -426,6 +444,7 @@ fn overcap_queue_keeps_active_first() {
     let settings = test_settings();
     let mut items = vec![
         StoredItem {
+            id: None,
             url: "https://example.com/active.iso".to_string(),
             dest_dir: "/tmp/dl".to_string(),
             filename: "active.iso".to_string(),
@@ -437,6 +456,7 @@ fn overcap_queue_keeps_active_first() {
             video_source: None,
         },
         StoredItem {
+            id: None,
             url: "https://example.com/paused.iso".to_string(),
             dest_dir: "/tmp/dl".to_string(),
             filename: "paused.iso".to_string(),
@@ -450,6 +470,7 @@ fn overcap_queue_keeps_active_first() {
     ];
     for i in 0..1000 {
         items.push(StoredItem {
+            id: None,
             url: format!("https://example.com/f{i}.iso"),
             dest_dir: "/tmp/dl".to_string(),
             filename: format!("f{i}.iso"),
@@ -726,6 +747,152 @@ fn enqueue_video_restrict_filenames_folds_name() {
 }
 
 #[test]
+fn a_restored_row_keeps_its_id_so_its_staging_stays_reachable() {
+    // The id IS the staging key: `staging_dir(item_id)`. Restore used to
+    // call `alloc_id()`, handing every restored row a *fresh* number. A
+    // retry after a restart therefore scanned a different directory than
+    // the attempt that left an unplaceable recording in it -- and a later
+    // row handed the same number could `clean_staging` it away.
+    //
+    // The gap is what makes this observable. Restoring a contiguous queue
+    // re-allocates the same numbers in the same order, so the obvious
+    // version of this test passes against the broken code -- which is why
+    // the single-row restore test beside this one never caught it. Remove
+    // the middle row first and the survivors shift down by one.
+    //
+    // Rows are created through `restore_existing` in a Paused state, which
+    // spawns nothing: no tool scrubbing, no network, and nothing that
+    // needs the process-global environment other tests also depend on.
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("restore-id");
+    let dest = std::env::temp_dir().join("grab-restore-id");
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest = dest.to_string_lossy().into_owned();
+
+    let add_paused = |manager: &Rc<DownloadManager>, url: &str, name: &str| {
+        manager
+            .restore_existing(&stored_row(url, &dest, name, DownloadStatus::Paused))
+            .expect("row created")
+            .id()
+    };
+
+    let (first, middle, last) = {
+        let settings = test_settings();
+        let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+        let first = add_paused(&manager, "https://example.com/a.bin", "a.bin");
+        let middle = add_paused(&manager, "https://example.com/b.bin", "b.bin");
+        let last = add_paused(&manager, "https://example.com/c.bin", "c.bin");
+        // Remove the middle row so the survivors are no longer contiguous.
+        manager.remove(middle);
+        (first, middle, last)
+    };
+    assert!(
+        last > middle && middle > first,
+        "the fixture needs three increasing ids ({first}, {middle}, {last})"
+    );
+
+    // A fresh manager over the same queue file.
+    let settings = test_settings();
+    let manager2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    manager2.restore_queue();
+    for (id, url) in [
+        (first, "https://example.com/a.bin"),
+        (last, "https://example.com/c.bin"),
+    ] {
+        let row = (0..manager2.store().n_items())
+            .filter_map(|i| manager2.store().item(i).and_downcast::<DownloadItem>())
+            .find(|it| it.url() == url)
+            .unwrap_or_else(|| panic!("row for {url} vanished across the restart"));
+        assert_eq!(
+            row.id(),
+            id,
+            "the row came back as {} so its staging dir \
+             (<temp>/grab-video/{id}) is no longer the one its attempt wrote to",
+            row.id()
+        );
+    }
+
+    // A row created after the restore must not be handed a number a
+    // restored row still owns, or the two would share a staging directory.
+    let fresh = add_paused(&manager2, "https://example.com/d.bin", "d.bin");
+    assert!(
+        fresh != first && fresh != last,
+        "a new row was handed id {fresh}, which a restored row still owns, so \
+         both would share one staging directory"
+    );
+
+    let _ = std::fs::remove_dir_all(&dest);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
+fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
+    // A queue written before ids were persisted restores its rows with
+    // fresh ids. If the allocator then hands out a number that some other
+    // row's leftover staging directory still occupies, that row's
+    // `clean_staging` deletes a recording it never made -- the exact data
+    // loss #178 exists to prevent, just arriving via the upgrade.
+    //
+    // The leftovers are left alone on disk, deliberately: an unreachable
+    // recording is recoverable by hand, a deleted one is not.
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("upgrade-guard");
+    let dest = std::env::temp_dir().join("grab-upgrade-guard");
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).unwrap();
+    let dest = dest.to_string_lossy().into_owned();
+
+    // A leftover from "a previous session", holding something precious.
+    let leftover = crate::video::staging_dir(9_000);
+    std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("final.1.mp4"), b"someone's recording").unwrap();
+
+    // A pre-v3 queue: no persisted id, so restore allocates.
+    std::fs::write(
+        &qf,
+        serde_json::to_string_pretty(&StoredQueue {
+            version: 2,
+            items: vec![StoredItem {
+                id: None,
+                url: "https://example.com/legacy.bin".to_string(),
+                dest_dir: dest.clone(),
+                filename: "legacy.bin".to_string(),
+                status: DownloadStatus::Paused,
+                progress: 0.0,
+                segments: None,
+                selected_files: None,
+                output_dir: None,
+                video_source: None,
+            }],
+        })
+        .unwrap(),
+    )
+    .unwrap();
+
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    manager.restore_queue();
+    let item = (0..manager.store().n_items())
+        .filter_map(|i| manager.store().item(i).and_downcast::<DownloadItem>())
+        .find(|it| it.url() == "https://example.com/legacy.bin")
+        .expect("legacy row restored");
+    assert!(
+        item.id() > 9_000,
+        "the restored row took id {} which a leftover staging dir still owns",
+        item.id()
+    );
+    assert_eq!(
+        std::fs::read(leftover.join("final.1.mp4")).unwrap(),
+        b"someone's recording",
+        "the leftover was destroyed instead of merely left unreachable"
+    );
+    let _ = std::fs::remove_dir_all(&leftover);
+    let _ = std::fs::remove_dir_all(&dest);
+    let _ = std::fs::remove_file(&qf);
+}
+
+#[test]
 fn video_source_survives_restore_and_retry() {
     let (_q, _l) = test_locks();
     let qf = test_queue_file("video-restore");
@@ -782,6 +949,7 @@ fn mismatched_video_source_dropped_on_restore() {
     let queue = StoredQueue {
         version: QUEUE_VERSION,
         items: vec![StoredItem {
+            id: None,
             url: "https://example.com/f.iso".into(),
             dest_dir: "/tmp/dl".into(),
             filename: "f.iso".into(),
@@ -1225,7 +1393,14 @@ fn delete_download_trashes_torrent_files() {
 
     // Explicit delete trashes the real files (not kept silently) and
     // drops the row; the session entry was never created offline.
-    assert!(manager.delete_download(7).is_ok());
+    let dbg = manager.delete_download(7);
+    eprintln!(
+        "DEBUG delete={:?} user_data={:?} exists={}",
+        dbg.as_ref().err(),
+        glib::user_data_dir(),
+        dir.display()
+    );
+    assert!(dbg.is_ok());
     assert!(!file.exists());
     assert_eq!(store.n_items(), 0);
     // Undo the test's own Trash litter.
@@ -1587,14 +1762,12 @@ fn restore_keeps_exact_filename() {
     });
     manager.running.borrow_mut().insert(99, holder);
     let item = manager
-        .restore_existing(
+        .restore_existing(&stored_row(
             "https://example.com/ubuntu.iso",
             &dir_s,
             "ubuntu.iso",
             DownloadStatus::Downloading,
-            None,
-            None,
-        )
+        ))
         .unwrap();
     assert_eq!(item.filename(), "ubuntu.iso");
     assert_eq!(item.status(), DownloadStatus::Queued);
@@ -1613,6 +1786,7 @@ fn queue_roundtrip_and_mapping() {
         version: QUEUE_VERSION,
         items: vec![
             StoredItem {
+                id: None,
                 url: "https://example.com/a.iso".to_string(),
                 dest_dir: "/tmp/dl".to_string(),
                 filename: "a.iso".to_string(),
@@ -1624,6 +1798,7 @@ fn queue_roundtrip_and_mapping() {
                 video_source: None,
             },
             StoredItem {
+                id: None,
                 url: "https://example.com/b.iso".to_string(),
                 dest_dir: "/tmp/dl".to_string(),
                 filename: "b.iso".to_string(),
@@ -1745,27 +1920,23 @@ fn restore_rejects_bad_filenames() {
     for bad in ["/etc/passwd", "..", ".", "a/b", ""] {
         assert!(
             manager
-                .restore_existing(
+                .restore_existing(&stored_row(
                     "https://example.com/f.iso",
                     "/tmp/dl",
                     bad,
-                    DownloadStatus::Queued,
-                    None,
-                    None,
-                )
+                    DownloadStatus::Queued
+                ))
                 .is_err()
         );
     }
     assert!(
         manager
-            .restore_existing(
+            .restore_existing(&stored_row(
                 "https://example.com/f.iso",
                 "relative/dir",
                 "f.iso",
-                DownloadStatus::Queued,
-                None,
-                None,
-            )
+                DownloadStatus::Queued
+            ))
             .is_err()
     );
     assert_eq!(manager.store().n_items(), 0);
@@ -1778,6 +1949,7 @@ fn batch_restore_hundred_done() {
     let settings = test_settings();
     let items: Vec<StoredItem> = (0..100)
         .map(|i| StoredItem {
+            id: None,
             url: format!("https://example.com/f{i}.iso"),
             dest_dir: "/tmp/dl".to_string(),
             filename: format!("f{i}.iso"),
@@ -1990,6 +2162,7 @@ fn restore_preserves_intent() {
     ]
     .into_iter()
     .map(|(f, status)| StoredItem {
+        id: None,
         url: format!("https://example.com/{f}"),
         dest_dir: "/tmp/dl".to_string(),
         filename: f.to_string(),
@@ -2043,14 +2216,12 @@ fn restored_status_mapping() {
         (DownloadStatus::Downloading, DownloadStatus::Queued),
     ] {
         let item = manager
-            .restore_existing(
+            .restore_existing(&stored_row(
                 "https://example.com/m.iso",
                 "/tmp/dl",
                 "m.iso",
                 stored,
-                None,
-                None,
-            )
+            ))
             .unwrap();
         assert_eq!(item.status(), expected);
         manager.remove(item.id());
@@ -2709,6 +2880,7 @@ fn killed_segmented_resume_starts_over() {
         serde_json::to_string(&StoredQueue {
             version: QUEUE_VERSION,
             items: vec![StoredItem {
+                id: None,
                 url: format!("http://127.0.0.1:{port}/big.bin"),
                 dest_dir: dl.to_string_lossy().into_owned(),
                 filename: "big.bin".to_string(),
@@ -3036,14 +3208,12 @@ fn restart_with_smaller_file_keeps_partial() {
     // pre-written partial, and the restore path is synchronous, so no
     // race with the engine's first metadata read.
     let item = manager
-        .restore_existing(
+        .restore_existing(&stored_row(
             &url,
             &dest,
             "t.bin",
             DownloadStatus::Downloading,
-            None,
-            None,
-        )
+        ))
         .unwrap_or_else(|e| abort(&server, &e));
     let id = item.id();
     // Drain the engine's pump future on this thread (see MAIN_LOOP_LOCK).
@@ -3794,7 +3964,6 @@ fn proxy_argv_precedes_end_of_options() {
         playlist_item_id: None,
         quality: "best".into(),
         audio_only: false,
-        audio_quality: 5,
         dest: std::path::PathBuf::from("/tmp/dl/v.mp4"),
         speed_limit: None,
         keep_server_date: false,
@@ -4308,25 +4477,23 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
         "a plain row must not be given a gate to arbitrate"
     );
 
-    let item = manager
-        .restore_existing(
-            "https://example.com/v.mp4",
-            "/tmp/dl",
-            "v.mp4",
-            DownloadStatus::Queued,
-            None,
-            Some(crate::media_types::VideoSource::Page {
-                page_url: "https://example.com/v.mp4".to_string(),
-                media_url: None,
-                expires_at: None,
-                quality: "1080p".to_string(),
-                audio_only: false,
-                is_live: false,
-                video_format_id: None,
-                playlist_item_id: None,
-            }),
-        )
-        .expect("video row");
+    let mut row = stored_row(
+        "https://example.com/v.mp4",
+        "/tmp/dl",
+        "v.mp4",
+        DownloadStatus::Queued,
+    );
+    row.video_source = Some(crate::media_types::VideoSource::Page {
+        page_url: "https://example.com/v.mp4".to_string(),
+        media_url: None,
+        expires_at: None,
+        quality: "1080p".to_string(),
+        audio_only: false,
+        is_live: false,
+        video_format_id: None,
+        playlist_item_id: None,
+    });
+    let item = manager.restore_existing(&row).expect("video row");
     assert!(
         manager.gate_for(item.id()).is_some(),
         "a video row with no gate cannot arbitrate delivery, so a removal \

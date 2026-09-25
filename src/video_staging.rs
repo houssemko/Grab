@@ -20,6 +20,24 @@ pub fn staging_dir(item_id: u64) -> PathBuf {
     staging_root().join(item_id.to_string())
 }
 
+/// Highest numeric staging directory currently present, if any.
+///
+/// Staging keys are row ids, and a queue written before v3 carries none, so
+/// those rows are given a fresh id on restore. If the allocator handed out
+/// a number some *other* row's leftover directory still occupies, that
+/// row's `clean_staging` would delete a recording it never made. Seeding
+/// the allocator above every directory present closes that window without
+/// touching the directories themselves -- a leftover recording stays on
+/// disk, merely unreachable, rather than being destroyed.
+pub fn highest_staging_index() -> Option<u64> {
+    std::fs::read_dir(staging_root())
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter_map(|name| name.parse::<u64>().ok())
+        .max()
+}
+
 /// Create a staging dir and verify it really lives under Grab's staging
 /// root: `create_dir_all` follows symlinks, so a pre-planted link at the
 /// predicted path would otherwise redirect parts into attacker-chosen
@@ -225,6 +243,51 @@ pub(crate) fn dir_file_names(dir: &Path) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Reclaim partial remuxes left by attempts that died mid-ffmpeg.
+///
+/// A remux only becomes `final.<n>.<ext>` once ffmpeg has succeeded, so
+/// `final.<n>.<ext>.part` is by definition worthless: no completed capture
+/// is ever named that. Sweeping them bounds what a crash can leave behind
+/// without touching a single recording -- which is the distinction that
+/// makes bounded retention possible at all, since deleting a bare
+/// `final.<n>.<ext>` would throw away the user's only copy.
+///
+/// Best-effort: an unreadable dir sweeps nothing.
+pub fn sweep_partial_remuxes(staging: &Path) {
+    for name in dir_file_names(staging) {
+        if name.starts_with("final.") && name.ends_with(".part") {
+            let _ = std::fs::remove_file(staging.join(&name));
+        }
+    }
+}
+
+/// Remove a download leg's own staging scratch, preserving any completed
+/// live remux.
+///
+/// The live path writes `final.<n>.<ext>` into the same per-row staging
+/// directory and keeps it when it cannot place the recording. The non-live
+/// legs used to finish with a blanket `remove_dir_all`, so a retry that
+/// resolved through VOD or HLS instead of the live route destroyed the
+/// recording the live attempt had preserved -- the exact loss #178 exists
+/// to prevent, reached by a different route.
+///
+/// Only `final.*` entries are protected: those are the recordings and the
+/// leases marking claimed slots. Everything else in staging is scratch
+/// belonging to the attempt that is finishing now.
+///
+/// Best-effort throughout, and deliberately non-recursive: entries are
+/// unlinked, never walked, so a sweep can only ever remove what it can
+/// name. The directory itself goes only once it is empty.
+pub fn sweep_staging_preserving_recordings(staging: &Path) {
+    for name in dir_file_names(staging) {
+        if name.starts_with("final.") {
+            continue;
+        }
+        let _ = std::fs::remove_file(staging.join(&name));
+    }
+    let _ = std::fs::remove_dir(staging);
 }
 
 /// Whether `stem` already hosts Grab-namespaced part files or subtitle
