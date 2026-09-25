@@ -81,10 +81,7 @@ struct Reservations {
 /// would early-return (no parent or no stem), so a reservation is
 /// claimed exactly when a sweep could delete something.
 fn reservation_stem(dest: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
-    match (
-        dest.parent(),
-        dest.file_stem().and_then(|s| s.to_str()),
-    ) {
+    match (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) {
         (Some(dir), Some(stem)) => Some((dir.to_path_buf(), stem.to_string())),
         _ => None,
     }
