@@ -8278,7 +8278,10 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
     let pgid = child.id() as i32;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
-    let quiesced = await_group_quiescence(pgid, std::time::Duration::from_millis(300));
+    let quiesced = crate::runtime::tokio_rt().block_on(await_group_quiescence(
+        pgid,
+        std::time::Duration::from_millis(300),
+    ));
     assert!(
         !quiesced,
         "a live process group was reported as quiesced, so a reclaim would run \
