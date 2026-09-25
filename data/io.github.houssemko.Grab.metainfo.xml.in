@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.1" date="2026-09-25">
+      <description>
+        <p>Hotfix: restores the Flatpak bundle to releases. The release-time bundle check was rewritten to inspect the build's ostree repository instead of the bundle file itself, so this release ships both the tarball and the Flatpak bundle again.</p>
+      </description>
+    </release>
     <release version="4.4.0" date="2026-09-25">
       <description>
         <p>Video filenames no longer carry the video id (<em>Title [id].mp4</em> becomes <em>Title.mp4</em>); the id is stored in the file's comment metadata instead. Every download now embeds metadata tags, and the "Audio quality" preference is gone — audio-only downloads always use yt-dlp's default quality.</p>
