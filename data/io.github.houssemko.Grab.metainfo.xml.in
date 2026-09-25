@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.0" date="2026-09-25">
+      <description>
+        <p>Video filenames no longer carry the video id (<em>Title [id].mp4</em> becomes <em>Title.mp4</em>); the id is stored in the file's comment metadata instead. Every download now embeds metadata tags, and the "Audio quality" preference is gone — audio-only downloads always use yt-dlp's default quality.</p>
+        <p>Removing a video that is still downloading is now safe: the worker is stopped first and its temporary files are cleaned up only after it has exited, so a new download can no longer collide with the cleanup. Interrupted live recordings are kept rather than deleted, and retries no longer destroy them.</p>
+        <p>Stopping a live recording now says so: the row button reads Stop Recording and confirms the recording is kept. The tools install progress uses a proper loading indicator that no longer freezes or misaligns.</p>
+      </description>
+    </release>
     <release version="4.4.0-beta.1" date="2026-09-25">
       <description>
         <p>Beta: video filenames no longer carry the video id (<em>Title [id].mp4</em> becomes <em>Title.mp4</em>); the id is stored in the file's comment metadata instead. Every download now embeds metadata tags, and the "Audio quality" preference is gone — audio-only downloads always use yt-dlp's default quality.</p>
