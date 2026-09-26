@@ -171,9 +171,16 @@ pub(crate) fn plan_streams(
         && video_sel.is_none()
         && (audio_sel.is_none() || !single_adopted)
     {
-        let unknown = video.formats.iter().find(|f| {
-            f.format_type() == FormatType::Unknown
-                && matches!(
+        // Height-aware like the muxed adoption above: a bare "first file"
+        // pick is lowest first on extractors that list ascending, ignoring
+        // the requested quality entirely. Height-less files keep the old
+        // first-in-extractor-order pick. Only directly fetchable video
+        // containers qualify, same as above.
+        let mut sized: Vec<(StreamSel, u32)> = Vec::new();
+        let mut first_unsized: Option<StreamSel> = None;
+        for f in &video.formats {
+            if f.format_type() != FormatType::Unknown
+                || !matches!(
                     f.download_info.ext,
                     Extension::Mp4
                         | Extension::Webm
@@ -181,17 +188,31 @@ pub(crate) fn plan_streams(
                         | Extension::Flv
                         | Extension::Ts
                 )
-                && StreamSel::from_format(f).is_ok()
-        });
-        if let Some(m) = unknown.and_then(|m| StreamSel::from_format(m).ok()) {
+            {
+                continue;
+            }
+            let Ok(sel) = StreamSel::from_format(f) else {
+                continue;
+            };
+            if let Some(h) = f.video_resolution.height.filter(|&h| h > 0) {
+                sized.push((sel, h));
+            } else if first_unsized.is_none() {
+                first_unsized = Some(sel);
+            }
+        }
+        let adopted = pick_at_or_above(sized, quality_height(quality)).or(first_unsized);
+        if let Some(m) = adopted {
             audio_sel = Some(m);
+            // Covered by the HLS override below like the muxed adoption: a
+            // taller in-cap variant still wins over a short direct file.
+            single_adopted = true;
         }
     }
     // HLS fallback: nothing above is directly fetchable but manifest variants
     // exist. A resolved pin wins outright; the preset only runs when no direct
-    // audio survived, except when the adoption took a muxed file shorter than
-    // an in-cap variant — then the variant wins, and ties or over-cap
-    // variants keep the direct file.
+    // audio survived, except when the adoption took a muxed or unclassified
+    // file shorter than an in-cap variant — then the variant wins, and ties
+    // or over-cap variants keep the direct file.
     let hls_preset = select_hls_format(&video.formats, quality_height(quality));
     let mut hls_wins = false;
     if !audio_only_request
