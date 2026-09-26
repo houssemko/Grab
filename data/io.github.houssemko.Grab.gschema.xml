@@ -116,9 +116,9 @@
       <description>Newest first prefers AV1, then VP9, HEVC and H.264; most compatible prefers H.264 first for players without newer decoders.</description>
     </key>
     <key name="subtitle-language" type="s">
-      <default>'en'</default>
+      <default>'off'</default>
       <summary>Subtitle language</summary>
-      <description>Download subtitles in this language beside new video downloads, with automatic-caption fallback when the language is missing. 'off' disables subtitle downloads.</description>
+      <description>Download subtitles in this language with new video downloads when the video offers it, else English when offered. 'off' disables subtitle downloads.</description>
     </key>
     <key name="embed-subs" type="b">
       <default>false</default>

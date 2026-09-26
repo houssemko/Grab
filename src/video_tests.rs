@@ -32,7 +32,10 @@ use crate::video_progress::{
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
-use crate::video_runner::{remux_live_capture, run_hls_ytdlp, run_live_ytdlp, run_unified_ytdlp};
+use crate::video_runner::{
+    pick_subtitle_lang, remux_live_capture, resolve_subtitle_lang, run_hls_ytdlp, run_live_ytdlp,
+    run_unified_ytdlp,
+};
 use crate::video_spawn::{
     ProcessGroupGuard, await_group_quiescence, fetch_raw_dump_json, fetch_video_page, reap_child,
     ytdlp_command,
@@ -6400,24 +6403,26 @@ fn download_builders_use_machine_progress_and_ignore_config() {
 }
 // ── subtitle sidecars ────────────────────────────────────────────────
 #[test]
-fn hls_argv_takes_subtitles() {
+fn hls_argv_takes_subtitle_flags() {
+    // The resolved subtitle language rides on the media leg: subtitle fetch
+    // flags plus `--embed-subs` when the embed preference is on.
     let mut job = direct_test_job();
     job.quality = "best".into();
     job.subtitles = Some("ar".into());
+    job.embed_subs = true;
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
     let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    let sub = argv
-        .iter()
-        .position(|a| a == "--sub-langs")
-        .expect("--sub-langs");
-    assert_eq!(argv[sub + 1], "ar");
-    assert!(argv.contains(&"--write-auto-subs".to_string()));
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(sub < sep, "subtitle flags must precede the URL separator");
-    // Without a configured language the merge flags stay, subtitles go.
-    job.subtitles = None;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert_no_subtitle_tokens(&argv);
+    for t in SUBTITLE_TOKENS {
+        assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
+    }
+    assert!(argv.contains(&"--sub-langs".to_string()));
+    let i = argv.iter().position(|a| a == "--sub-langs").unwrap();
+    assert_eq!(argv[i + 1], "ar");
+    assert!(
+        argv.iter().any(|a| a == "--embed-subs"),
+        "--embed-subs missing: {argv:?}"
+    );
+    // Merge flags stay alongside the subtitle flags.
     assert!(argv.contains(&"--merge-output-format".to_string()));
 }
 
@@ -6528,10 +6533,11 @@ fn live_capture_argv_never_takes_subtitles() {
 
 #[test]
 fn unified_argv_embeds_subs_when_enabled() {
-    // Opt-in post-processing: `--embed-subs` muxes downloaded subtitle
-    // tracks into the finished file, ahead of the URL separator.
+    // yt-dlp's own embedder: `--embed-subs` rides on the media leg when the
+    // user opted in, alongside the subtitle fetch flags.
     let mut job = direct_test_job();
     job.embed_subs = true;
+    job.subtitles = Some("en".into());
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let argv = unified_download_argv(
         &job,
@@ -6541,34 +6547,31 @@ fn unified_argv_embeds_subs_when_enabled() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
     );
-    assert!(argv.contains(&"--embed-subs".to_string()));
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    let e = argv.iter().position(|a| a == "--embed-subs").unwrap();
-    assert!(e < sep, "embed flag must precede the URL separator");
-    // Default off: argv stays exactly as before.
-    job.embed_subs = false;
-    let argv = unified_download_argv(
-        &job,
-        "v123+a456/bv*+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
+    assert!(
+        argv.iter().any(|a| a == "--embed-subs"),
+        "--embed-subs missing: {argv:?}"
     );
-    assert!(!argv.iter().any(|a| a == "--embed-subs"));
+    for t in SUBTITLE_TOKENS {
+        assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
+    }
 }
 
 #[test]
 fn hls_argv_embeds_subs_when_enabled() {
+    // Same as the unified leg: `--embed-subs` on the media leg when enabled.
     let mut job = direct_test_job();
     job.quality = "best".into();
     job.embed_subs = true;
+    job.subtitles = Some("en".into());
     let dest = std::path::Path::new("/tmp/dl/v.mp4");
     let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(argv.contains(&"--embed-subs".to_string()));
-    job.embed_subs = false;
-    let argv = hls_download_argv(&job, "h1080", std::path::Path::new("/usr/bin/ffmpeg"), dest);
-    assert!(!argv.iter().any(|a| a == "--embed-subs"));
+    assert!(
+        argv.iter().any(|a| a == "--embed-subs"),
+        "--embed-subs missing: {argv:?}"
+    );
+    for t in SUBTITLE_TOKENS {
+        assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
+    }
 }
 
 #[test]
@@ -7166,11 +7169,10 @@ fn subtitle_language_index_value_round_trip() {
     assert_eq!(subtitle_language_value(1), "en");
     assert_eq!(subtitle_language_index("zh"), 17);
     assert_eq!(subtitle_language_value(17), "zh");
-    // Unknown settings fall back to English (the schema default); bad
-    // indexes fall back to English too.
-    assert_eq!(subtitle_language_index("xx"), 1);
-    assert_eq!(subtitle_language_index(""), 1);
-    assert_eq!(subtitle_language_value(99), "en");
+    // Unknown settings and bad indexes fall back to Off (the schema default).
+    assert_eq!(subtitle_language_index("xx"), 0);
+    assert_eq!(subtitle_language_index(""), 0);
+    assert_eq!(subtitle_language_value(99), "off");
     assert_eq!(
         subtitle_language_labels().len(),
         SUBTITLE_LANGUAGE_VALUES.len()
@@ -7208,6 +7210,163 @@ fn subtitle_lang_active_allowlist() {
     // patterns, so only exact allowlist hits pass).
     assert_eq!(subtitle_lang_active("en,fr"), None);
     assert_eq!(subtitle_lang_active("en.*"), None);
+}
+
+fn subtitle_available(langs: &[&str]) -> std::collections::HashSet<String> {
+    langs.iter().map(|l| l.to_string()).collect()
+}
+
+#[test]
+fn pick_subtitle_lang_prefers_exact_match() {
+    // The preferred language wins when the video offers it verbatim.
+    let avail = subtitle_available(&["en", "fr", "de"]);
+    assert_eq!(
+        pick_subtitle_lang(&avail, &["fr", "en"]),
+        Some("fr".to_string())
+    );
+}
+
+#[test]
+fn pick_subtitle_lang_falls_back_to_english() {
+    // Preferred language missing: English is the fallback when offered.
+    let avail = subtitle_available(&["en", "es"]);
+    assert_eq!(
+        pick_subtitle_lang(&avail, &["de", "en"]),
+        Some("en".to_string())
+    );
+}
+
+#[test]
+fn pick_subtitle_lang_accepts_region_variant() {
+    // `en` matches `en-us`: the concrete offered key is returned so
+    // `--sub-langs` matches exactly.
+    let avail = subtitle_available(&["en-us", "fr"]);
+    assert_eq!(
+        pick_subtitle_lang(&avail, &["en", "en"]),
+        Some("en-us".to_string())
+    );
+}
+
+#[test]
+fn pick_subtitle_lang_none_when_nothing_offered() {
+    // Neither the preference nor English is available: no subtitles.
+    let avail = subtitle_available(&["fr", "de"]);
+    assert_eq!(pick_subtitle_lang(&avail, &["ja", "en"]), None);
+    let empty = subtitle_available(&[]);
+    assert_eq!(pick_subtitle_lang(&empty, &["en", "en"]), None);
+}
+
+#[test]
+fn pick_subtitle_lang_rejects_prefix_collisions() {
+    // `en` must not match `eng` — only a `-`/`_` region separator counts.
+    let avail = subtitle_available(&["eng", "fr"]);
+    assert_eq!(pick_subtitle_lang(&avail, &["en", "en"]), None);
+}
+
+/// Fake yt-dlp for the subtitle language probe: prints the given info JSON on
+/// `--dump-json`, fails otherwise.
+fn fake_ytdlp_probe(dir: &std::path::Path, json: &str, fail: bool) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-probe");
+    let script = if fail {
+        "#!/bin/sh\nexit 1\n".to_string()
+    } else {
+        "#!/bin/sh\nfor a in \"$@\"; do\n    if [ \"$a\" = \"--dump-json\" ]; then\n        printf '%s' 'JSON'\n        exit 0\n    fi\ndone\nexit 1\n"
+            .replace("JSON", &json.replace('\'', "'\"'\"'"))
+    };
+    std::fs::write(&bin, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+fn probe_test_job(subtitles: Option<&str>) -> VideoJob {
+    let mut job = direct_test_job();
+    job.subtitles = subtitles.map(|s| s.to_string());
+    job
+}
+
+#[test]
+fn resolve_subtitle_lang_picks_preferred_when_offered() {
+    let dir = std::env::temp_dir().join(format!("grab-probe-pref-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_probe(
+        &dir,
+        r#"{"subtitles":{"fr":[{"url":"http://x/fr","ext":"vtt"}]},"automatic_captions":{"en":[{"url":"http://x/en","ext":"vtt"}]}}"#,
+        false,
+    );
+    let job = probe_test_job(Some("fr"));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res =
+        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    assert_eq!(res, Ok(Some("fr".to_string())));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_subtitle_lang_falls_back_to_english() {
+    // Preferred language not offered, but English is (via automatic
+    // captions): the English fallback wins.
+    let dir = std::env::temp_dir().join(format!("grab-probe-en-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_probe(
+        &dir,
+        r#"{"subtitles":{"fr":[{"url":"http://x/fr","ext":"vtt"}]},"automatic_captions":{"en":[{"url":"http://x/en","ext":"vtt"}]}}"#,
+        false,
+    );
+    let job = probe_test_job(Some("de"));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res =
+        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    assert_eq!(res, Ok(Some("en".to_string())));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_subtitle_lang_probe_failure_drops_subtitles() {
+    // A dead probe (network, HTTP 429) yields no subtitles rather than
+    // failing: the media download proceeds without subtitle flags.
+    let dir = std::env::temp_dir().join(format!("grab-probe-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_probe(&dir, "", true);
+    let job = probe_test_job(Some("en"));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res =
+        crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(&fake, &job, &mut abort_rx));
+    assert_eq!(res, Ok(None));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn resolve_subtitle_lang_no_preference_means_no_probe() {
+    // Subtitles off: resolves to None without spawning anything.
+    let job = probe_test_job(None);
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        std::path::Path::new("/nonexistent/yt-dlp"),
+        &job,
+        &mut abort_rx,
+    ));
+    assert_eq!(res, Ok(None));
+}
+
+#[test]
+fn resolve_subtitle_lang_spawn_failure_drops_subtitles() {
+    // The probe binary can't even start: the download must proceed without
+    // subtitles (`Ok(None)`), not stop as if aborted (`Err`).
+    let job = probe_test_job(Some("en"));
+    let (_abort_tx, mut abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(resolve_subtitle_lang(
+        std::path::Path::new("/nonexistent/yt-dlp"),
+        &job,
+        &mut abort_rx,
+    ));
+    assert_eq!(res, Ok(None));
 }
 
 #[test]
@@ -7254,24 +7413,34 @@ fn collect_sidecar_moves_and_ignores_missing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp for HLS that also drops an `en` sidecar beside the `-o`
-/// template (what the real binary does for `--write-subs`).
+/// Fake yt-dlp for HLS. Phase-aware like the real two-phase flow: the media leg
+/// writes bytes, the `--skip-download` subtitle leg drops an `en` sidecar
+/// beside the `-o` template (what the real binary does for `--write-subs`).
 fn fake_ytdlp_hls_subs(dir: &std::path::Path) -> std::path::PathBuf {
+    // Simulates yt-dlp for the HLS subtitle flow: the language probe
+    // (`--dump-json`) reports en/fr subtitles; the media leg writes the media
+    // file plus the `<stem>.hls.en.srt` sidecar that `--write-subs` produces.
     let bin = dir.join("fake-ytdlp-hls-subs");
     std::fs::write(
         &bin,
         r#"#!/bin/sh
 out=""
+dump=""
 prev=""
 for a in "$@"; do
     if [ "$prev" = "-o" ]; then out="$a"; fi
+    if [ "$a" = "--dump-json" ]; then dump="1"; fi
     prev="$a"
 done
+if [ -n "$dump" ]; then
+    printf '{"subtitles":{"en":[{"url":"http://x/en","ext":"vtt"}],"fr":[{"url":"http://x/fr","ext":"vtt"}]},"automatic_captions":{}}'
+    exit 0
+fi
 stem="$(basename "$out" | sed 's/%(ext)s/mp4/')"
+media="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$media"
 side="$(printf '%s' "$stem" | sed 's/\.mp4$//').en.srt"
 printf 'subbytes' > "$(dirname "$out")/$side"
-out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
-printf 'hlsbytes' > "$out"
 exit 0
 "#,
     )
@@ -7340,8 +7509,8 @@ fn hls_collects_sidecar_beside_finished_file() {
 
 #[test]
 fn hls_embed_skips_sidecar_collection() {
-    // Embed mode muxes the tracks into the file: no .srt may be left
-    // alongside it. Same fake as above, embed flag on.
+    // Embed mode lets yt-dlp mux the tracks itself (`--embed-subs`): the part
+    // sidecar it also wrote must be deleted outright, never collected.
     let dir = std::env::temp_dir().join(format!("grab-fakehls-embed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7374,29 +7543,106 @@ fn hls_embed_skips_sidecar_collection() {
         !dir.join("v.hls.en.srt").exists(),
         "part-namespaced sidecar must not be orphaned"
     );
+    assert!(
+        !dir.join("v.mp4.embedtmp").exists(),
+        "embed temp must be renamed away, not littered"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn subtitle_leg_failure_cannot_sink_media() {
+    // The 429 regression, end to end: the subtitle language probe fails like
+    // an HTTP 429. The download must still succeed with the media intact and
+    // no subtitles — the probe failure only logs, and the media leg runs
+    // without subtitle flags.
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-subfail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let bin = dir.join("fake-ytdlp-subfail");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+skip=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    if [ "$a" = "--skip-download" ]; then skip="1"; fi
+    prev="$a"
+done
+if [ -n "$skip" ]; then
+    echo "ERROR: [Video] 1: Unable to download subtitles: HTTP Error 429: Too Many Requests" >&2
+    exit 1
+fi
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    job.subtitles = Some("en".into());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &bin,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(
+        matches!(res, Ok(Some(_))),
+        "subtitle 429 must not fail the download: {res:?}"
+    );
+    assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
+    assert!(
+        !dir.join("v.en.srt").exists(),
+        "no subtitles were fetched, so no sidecar may appear"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Fake yt-dlp for the unified path: expands `%(ext)s`, prints template
-/// progress + a merge line + the after_move path, writes bytes and a sidecar.
+/// progress + a merge line + the after_move path. Phase-aware like the real
+/// two-phase flow: the media leg writes bytes, the `--skip-download` subtitle
+/// leg writes only the sidecar.
 fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp");
     std::fs::write(
         &bin,
         r#"#!/bin/sh
 out=""
+dump=""
 prev=""
 for a in "$@"; do
     if [ "$prev" = "-o" ]; then out="$a"; fi
+    if [ "$a" = "--dump-json" ]; then dump="1"; fi
     prev="$a"
 done
 echo "$@" >> "$(dirname "$out").argv.log"
 out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+stem="$(basename "$out" .mp4)"
+if [ -n "$dump" ]; then
+    printf '{"subtitles":{"en":[{"url":"http://x/en","ext":"vtt"}]},"automatic_captions":{}}'
+    exit 0
+fi
 echo "[Grab];downloading;7;7;7;1000;0"
 echo "[Merger] Merging formats"
 echo "$out"
 printf 'unified' > "$out"
-stem="$(basename "$out" .mp4)"
 printf 'subtitles' > "$(dirname "$out")/$stem.en.srt"
 exit 0
 "#,
@@ -7984,11 +8230,12 @@ fn discover_unified_output_prefers_after_move_and_excludes() {
 }
 
 #[test]
-fn unified_argv_takes_subtitles() {
-    // Full subtitle flags ride ahead of the `--` separator, with the
-    // merge flags, on one invocation.
+fn unified_argv_takes_subtitle_flags() {
+    // The resolved subtitle language rides on the media leg: fetch flags plus
+    // `--embed-subs` when the embed preference is on.
     let mut job = direct_test_job();
     job.subtitles = Some("en".into());
+    job.embed_subs = true;
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let argv = unified_download_argv(
         &job,
@@ -7998,32 +8245,16 @@ fn unified_argv_takes_subtitles() {
         std::path::Path::new("/usr/bin/ffmpeg"),
         out,
     );
-    let sub = argv
-        .iter()
-        .position(|a| a == "--sub-langs")
-        .expect("--sub-langs");
-    assert_eq!(argv[sub + 1], "en");
-    assert!(argv.contains(&"--write-subs".to_string()));
-    assert!(argv.contains(&"--write-auto-subs".to_string()));
-    let conv = argv
-        .iter()
-        .position(|a| a == "--convert-subs")
-        .expect("--convert-subs");
-    assert_eq!(argv[conv + 1], "srt");
-    let sep = argv.iter().position(|a| a == "--").expect("separator");
-    assert!(sub < sep && conv < sep, "{argv:?}");
-    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
-    // No language configured: no subtitle flags anywhere.
-    job.subtitles = None;
-    let argv = unified_download_argv(
-        &job,
-        "v123+a456/bv*+a456/bv*+ba/b",
-        true,
-        "mp4",
-        std::path::Path::new("/usr/bin/ffmpeg"),
-        out,
+    for t in SUBTITLE_TOKENS {
+        assert!(argv.iter().any(|a| a == *t), "{t} missing: {argv:?}");
+    }
+    assert!(
+        argv.iter().any(|a| a == "--embed-subs"),
+        "--embed-subs missing: {argv:?}"
     );
-    assert_no_subtitle_tokens(&argv);
+    let sep = argv.iter().position(|a| a == "--").expect("separator");
+    assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
+    assert!(sep < argv.len() - 1, "{argv:?}");
 }
 
 /// Fake yt-dlp emitting two format legs like a real merged download: video
