@@ -5368,6 +5368,67 @@ fn hls_stall_watchdog_spares_progressing_download() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn hls_stall_watchdog_spares_silent_merge() {
+    // Merge marker on stdout, then ~4s of silence on both streams against a
+    // 2s stall budget: yt-dlp captures ffmpeg's output instead of forwarding
+    // it, so a real merge looks exactly like this. The attempt must survive
+    // and finish normally instead of dying as `stalled`.
+    let dir = std::env::temp_dir().join(format!("grab-hls-silmerge-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_silent_merge(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(2),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp that emits a merge marker on stdout, then stays silent on both
+/// streams (like a real merge: ffmpeg's output is captured, not forwarded),
+/// then writes the output and exits 0.
+fn fake_ytdlp_hls_silent_merge(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-silmerge");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo '[Merger] Merging formats into "v.mp4"'
+sleep 4
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
 /// Fake yt-dlp for VOD HLS: logs argv, expands `%(ext)s`, writes bytes for discover.
 fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls");
