@@ -635,6 +635,152 @@ fn transferring_ignores_paused() {
     assert!(manager.has_transferring());
 }
 
+/// A bulk insert must refresh the UI once, not once per row. `changed()`
+/// walks the whole store several times over (its own queued recount,
+/// `finished_count`, then the window hook's `sync()` plus a status predicate
+/// or two), and every step is a GObject ref, downcast and property read per
+/// element — so a caller that enqueues N rows inside a batch used to pay
+/// that N times. Pins the contract any batch opener relies on: nothing
+/// refreshes until the batch closes, and the close refreshes exactly once.
+#[test]
+fn a_bulk_insert_refreshes_the_ui_once() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("batch-ui-coalesce");
+    let settings = test_settings();
+    // Occupy the only slot so the queued rows below spawn no real engine.
+    settings.set_int("max-concurrent", 1).unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let holder = tokio_rt().spawn(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    manager.running.borrow_mut().insert(99, holder);
+
+    let refreshes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen = std::rc::Rc::clone(&refreshes);
+    manager.set_on_change(move || seen.set(seen.get() + 1));
+
+    manager.begin_batch();
+    for i in 0..5 {
+        manager
+            .enqueue(
+                &format!("https://example.com/batched-{i}.bin"),
+                Some("/tmp/dl"),
+                Some(&format!("batched-{i}.bin")),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        manager.store().n_items(),
+        5,
+        "the rows themselves still land"
+    );
+    assert_eq!(
+        refreshes.get(),
+        0,
+        "no refresh while the batch is open: every one is a wasted store walk"
+    );
+
+    manager.end_batch();
+    assert_eq!(
+        refreshes.get(),
+        1,
+        "the batch closes with exactly one refresh"
+    );
+    // Deferring the recount must not lose it: the Queue button reads this.
+    assert_eq!(manager.queued_count(), 5);
+}
+
+/// The same coalescing must not swallow the refresh a restore depends on:
+/// `restore_queue` opens the batch itself and, unlike `end_batch`, never
+/// closes it, so it has to ask for the refresh explicitly.
+#[test]
+fn a_restore_refreshes_the_ui_once_rows_landed() {
+    let (_q, _l) = test_locks();
+    let qf = test_queue_file("restore-ui-coalesce");
+    let settings = test_settings();
+    settings.set_int("max-concurrent", 1).unwrap();
+    let items: Vec<StoredItem> = (0..5)
+        .map(|i| {
+            stored_row(
+                &format!("https://example.com/r{i}.bin"),
+                "/tmp/dl",
+                &format!("r{i}.bin"),
+                DownloadStatus::Queued,
+            )
+        })
+        .collect();
+    std::fs::write(
+        &qf,
+        serde_json::to_string(&StoredQueue {
+            version: QUEUE_VERSION,
+            items,
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let holder = tokio_rt().spawn(async {
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+    });
+    manager.running.borrow_mut().insert(99, holder);
+
+    let refreshes = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let seen = std::rc::Rc::clone(&refreshes);
+    manager.set_on_change(move || seen.set(seen.get() + 1));
+
+    manager.restore_queue();
+    assert_eq!(manager.store().n_items(), 5);
+    assert_eq!(
+        refreshes.get(),
+        1,
+        "restore must still reach the window hook, or the queue list stays empty"
+    );
+    assert_eq!(manager.queued_count(), 5);
+}
+
+/// The row pulse timer stops on `Done` and nowhere else, which is only sound
+/// because no command revives a finished row in place. This pins that
+/// property directly: `retry`/`resume` revive Failed/Cancelled and Paused by
+/// mutating the same item, so if any of them ever reached `Done` the stopped
+/// timer would freeze a restarted row's indeterminate bar.
+#[test]
+fn no_command_revives_a_finished_row_in_place() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("done-is-terminal");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let done = DownloadItem::new(
+        7,
+        "https://example.com/finished.bin",
+        "finished.bin",
+        "/tmp/dl",
+    );
+    done.set_status(DownloadStatus::Done);
+    manager.store().append(&done);
+
+    manager.retry(7);
+    assert_eq!(done.status(), DownloadStatus::Done, "retry must not revive");
+    manager.resume(7);
+    assert_eq!(
+        done.status(),
+        DownloadStatus::Done,
+        "resume must not revive"
+    );
+    manager.pause(7);
+    assert_eq!(done.status(), DownloadStatus::Done, "pause must not revive");
+    manager.park(7);
+    assert_eq!(done.status(), DownloadStatus::Done, "park must not revive");
+    assert_eq!(
+        manager.retry_failed(),
+        0,
+        "Retry Failed must skip done rows"
+    );
+    // Still the very same single item: reviving by re-insert would build a new
+    // widget, which the timer could safely outlive, so assert it did not.
+    assert_eq!(manager.store().n_items(), 1);
+    assert_eq!(done.status(), DownloadStatus::Done);
+}
+
 #[test]
 fn enqueue_video_spawns_and_fails_without_tools() {
     let (_q, _l) = test_locks();

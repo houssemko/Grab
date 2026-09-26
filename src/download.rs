@@ -299,7 +299,18 @@ impl DownloadManager {
         self.changed();
     }
 
+    /// Recount queued rows and refresh the UI. Deferred while a batch is
+    /// open, exactly like `persist_queue`: the recount and `finished_count`
+    /// walk the whole store, the window hook walks it again in `sync()` plus
+    /// once per status predicate, and every step is a GObject ref, a downcast
+    /// and a property read per element. Per row that adds up, so a 500-entry
+    /// import did it 500 times over. Every batch opener already ends with its
+    /// own refresh — `end_batch` here, `restore_queue` and the picker at the
+    /// close of their loops — so nothing is lost by waiting.
     fn changed(&self) {
+        if self.batch.get() > 0 {
+            return;
+        }
         self.queued.set(
             self.items()
                 .filter(|it| it.status() == DownloadStatus::Queued)
