@@ -597,10 +597,9 @@ pub fn show(
     fn refresh_video_tools(
         row: &adw::ActionRow,
         btn: &gtk4::Button,
-        spin: &gtk4::Spinner,
+        spin: &adw::Spinner,
         action: &std::rc::Rc<std::cell::Cell<ToolAction>>,
     ) {
-        spin.stop();
         spin.set_visible(false);
         paint_tools_state(row, btn, action, installed_tool_versions());
     }
@@ -824,7 +823,7 @@ pub fn show(
     let video_tools_btn = gtk4::Button::builder().valign(gtk4::Align::Center).build();
     video_tools_row.set_activatable_widget(Some(&video_tools_btn));
     video_tools_row.add_suffix(&video_tools_btn);
-    let video_tools_spin = gtk4::Spinner::new();
+    let video_tools_spin = adw::Spinner::new();
     video_tools_spin.set_visible(false);
     video_tools_row.add_suffix(&video_tools_spin);
     video_tools_group.add(&video_tools_row);
@@ -842,7 +841,6 @@ pub fn show(
         video_tools_row.set_subtitle(&gettext("Checking…"));
         video_tools_btn.set_sensitive(false);
         video_tools_spin.set_visible(true);
-        video_tools_spin.start();
         gtk4::glib::spawn_future_local(async move {
             let probed = gio::spawn_blocking(installed_tool_versions)
                 .await
@@ -851,7 +849,6 @@ pub fn show(
             if dialog_weak.upgrade().is_none() {
                 return;
             }
-            spin.stop();
             spin.set_visible(false);
             paint_tools_state(&row, &btn, &action, probed);
             btn.set_sensitive(true);
@@ -893,7 +890,6 @@ pub fn show(
                 let settings_c = settings_b.clone();
                 btn.set_sensitive(false);
                 spin.set_visible(true);
-                spin.start();
                 row.set_subtitle(&gettext("Checking for updates…"));
                 gtk4::glib::spawn_future_local(async move {
                     // The update probe cannot go through the proxy: a proxied check
@@ -906,7 +902,6 @@ pub fn show(
                         if dialog_b.upgrade().is_none() {
                             return;
                         }
-                        spin_b.stop();
                         spin_b.set_visible(false);
                         row_b.set_subtitle(&gettext(
                             "Update checks are skipped while a proxy is configured",
@@ -926,7 +921,6 @@ pub fn show(
                     if dialog_b.upgrade().is_none() {
                         return;
                     }
-                    spin_b.stop();
                     spin_b.set_visible(false);
                     match (current, tag) {
                         (Some(installed), Some(tag))

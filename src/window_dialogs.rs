@@ -355,8 +355,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     let video_status = adw::ActionRow::builder()
         .title(gettext("Looking up media…"))
         .build();
-    let video_spinner = gtk4::Spinner::new();
-    video_spinner.start();
+    let video_spinner = adw::Spinner::new();
     video_status.add_suffix(&video_spinner);
     video_status.set_visible(false);
     video_group.add(&video_status);
