@@ -619,7 +619,7 @@ pub(crate) fn ytdlp_identity_args(
     // YouTube force-enables SABR-only streaming for the `web` player client
     // (yt-dlp#12482): its URL-less formats fail the whole extraction. `web`
     // only enters yt-dlp's default rotation when a JS runtime is available
-    // (e.g. the Flatpak's deno), so exclude it everywhere. Scoped to the
+    // (e.g. node or deno on PATH), so exclude it everywhere. Scoped to the
     // youtube extractor: a no-op for other sites.
     args.push("--extractor-args".to_string());
     args.push("youtube:player_client=-web".to_string());

@@ -70,6 +70,17 @@ Or manually from the [latest release](https://github.com/houssemko/Grab/releases
 flatpak install --user Grab.flatpak
 ```
 
+### Cookies from a browser in a custom location (Flatpak)
+
+The sandbox can only read the standard profile locations. If your browser
+keeps its profile elsewhere, grant read access with:
+
+```bash
+flatpak override --user --filesystem=~/.config/my-browser:ro io.github.houssemko.Grab
+```
+
+Undo with `flatpak override --user --reset io.github.houssemko.Grab`.
+
 ## Notes for packagers
 
 Flatpak-only.
