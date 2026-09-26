@@ -1129,7 +1129,7 @@ pub(crate) async fn run_hls_ytdlp(
         let remaining = timeout.saturating_sub(last_progress.lock().unwrap().elapsed());
         tokio::select! {
             biased;
-            _ = abort => {
+            _ = &mut abort => {
                 reap_child(&mut child, &mut group).await;
                 progress.abort();
                 logs.abort();
