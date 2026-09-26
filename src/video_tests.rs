@@ -3175,13 +3175,16 @@ fn fetch_video_page_parses_dump_json() {
 
 #[test]
 fn identity_args_order_and_trim() {
-    // Player-client workaround, cookies, trimmed UA, then `--` + page, identical every spawn.
+    // Player-client workaround, runtime pin, cookies, trimmed UA, then `--` + page, identical every spawn.
     let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![
             "--extractor-args".to_string(),
             "youtube:player_client=-web".to_string(),
+            "--no-js-runtimes".to_string(),
+            "--js-runtimes".to_string(),
+            "quickjs".to_string(),
             "--user-agent".to_string(),
             "Grab/1".to_string(),
             "--".to_string(),
@@ -3195,6 +3198,9 @@ fn identity_args_order_and_trim() {
         vec![
             "--extractor-args".to_string(),
             "youtube:player_client=-web".to_string(),
+            "--no-js-runtimes".to_string(),
+            "--js-runtimes".to_string(),
+            "quickjs".to_string(),
             "--".to_string(),
             "https://x.com/u/status/1".to_string(),
         ]
