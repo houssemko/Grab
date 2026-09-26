@@ -5596,7 +5596,8 @@ fn picker_label_sanitizes_remote_codec() {
 
 #[test]
 fn plan_unknown_adoption_is_first_match() {
-    // Unknown fallback takes the first fetchable container in extractor order, not the tallest.
+    // Height-less unknown files keep the old first-in-extractor-order pick;
+    // only files with a known height go through the height-aware selection.
     let video = test_video(serde_json::json!([
         serde_json::json!({
             "format": "low",
@@ -5619,6 +5620,93 @@ fn plan_unknown_adoption_is_first_match() {
     let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "low");
+}
+
+#[test]
+fn plan_unknown_adoption_picks_tallest() {
+    // Regression: some extractors list direct files ascending beside taller
+    // manifest variants; the old first-match pick took the lowest file and
+    // suppressed the manifest path entirely, so one run downloaded 240p
+    // and the next — without the direct files — 720p.
+    let direct = |id: &str, h: u32| {
+        serde_json::json!({
+            "format": id,
+            "format_id": id,
+            "protocol": "https",
+            "ext": "mp4",
+            "height": h,
+            "url": format!("https://cdn.example/{id}.mp4"),
+            "http_headers": {},
+        })
+    };
+    let video = test_video(serde_json::json!([
+        direct("240p", 240),
+        direct("480p", 480),
+        direct("720p", 720),
+        test_format_full(
+            "hls-240",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(240),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "hls-480",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(480),
+            None,
+            "m3u8_native",
+            false
+        ),
+        test_format_full(
+            "hls-720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]));
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    // Tallest direct file wins; the equal-height variant does not override it.
+    assert_eq!(plan.audio_sel.expect("adopted").format_id, "720p");
+    assert!(plan.hls_sel.is_none());
+}
+
+#[test]
+fn plan_unknown_short_direct_loses_to_taller_hls() {
+    // A short direct file no longer pins the download when a taller in-cap
+    // manifest variant exists: the HLS override covers the unclassified
+    // adoption like the muxed one.
+    let video = test_video(serde_json::json!([
+        serde_json::json!({
+            "format": "240p",
+            "format_id": "240p",
+            "protocol": "https",
+            "ext": "mp4",
+            "height": 240,
+            "url": "https://cdn.example/240p.mp4",
+            "http_headers": {},
+        }),
+        test_format_full(
+            "hls-720",
+            "avc1.64001f",
+            "mp4a.40.2",
+            Some(720),
+            None,
+            "m3u8_native",
+            false
+        ),
+    ]));
+    let plan = plan_streams(&video, "best", false, None, true, 1);
+    assert!(plan.video_sel.is_none());
+    assert!(plan.audio_sel.is_none());
+    assert_eq!(plan.hls_sel.expect("hls wins").height, Some(720));
 }
 
 #[test]
