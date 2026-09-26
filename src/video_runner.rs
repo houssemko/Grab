@@ -70,7 +70,7 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // Stall timeout: a full-length merge on a slow CPU dwarfs any network timeout, so allow five minutes of silence — but a progressing download never trips it.
+    // Stall timeout: a full-length merge on a slow CPU dwarfs any network timeout, so allow five minutes of silence, but a progressing download never trips it.
     let timeout = Duration::from_secs(300);
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
@@ -417,6 +417,11 @@ pub(crate) async fn run_unified_ytdlp(
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
+/// Time since yt-dlp last wrote a stdout line: the stall watchdog's clock.
+fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::time::Duration {
+    last_progress.lock().unwrap().elapsed()
+}
+
 /// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line. `timeout` is a stall budget, not a wall clock: any stdout line resets it, so only silence kills the attempt.
 #[allow(clippy::too_many_arguments)]
 async fn run_ytdlp_attempt(
@@ -434,7 +439,7 @@ async fn run_ytdlp_attempt(
     apply_proxy_env(&mut cmd, proxy);
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
-    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout — only silence does.
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does.
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
     let progress = tokio::spawn(async move {
@@ -497,7 +502,7 @@ async fn run_ytdlp_attempt(
     });
     let status = loop {
         // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed.
-        let remaining = timeout.saturating_sub(last_progress.lock().unwrap().elapsed());
+        let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
             _ = &mut *abort => {
@@ -518,7 +523,7 @@ async fn run_ytdlp_attempt(
                     logs.abort();
                     return Err(VideoError::runtime(&e));
                 }
-                Err(_) if last_progress.lock().unwrap().elapsed() >= timeout => {
+                Err(_) if stall_elapsed(&last_progress) >= timeout => {
                     reap_child(&mut child, &mut group).await;
                     progress.abort();
                     logs.abort();
@@ -1048,7 +1053,7 @@ pub(crate) async fn run_hls_ytdlp(
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
-    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout — only silence does.
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does.
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
     let progress = tokio::spawn(async move {
@@ -1126,7 +1131,7 @@ pub(crate) async fn run_hls_ytdlp(
     // wait runs only until the stall deadline; a progress line pushes the
     // deadline out, so a progressing download is never killed.
     let status = loop {
-        let remaining = timeout.saturating_sub(last_progress.lock().unwrap().elapsed());
+        let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
             _ = &mut abort => {
@@ -1148,7 +1153,7 @@ pub(crate) async fn run_hls_ytdlp(
                     logs.abort();
                     return Err(VideoError::runtime(&e));
                 }
-                Err(_) if last_progress.lock().unwrap().elapsed() >= timeout => {
+                Err(_) if stall_elapsed(&last_progress) >= timeout => {
                     reap_child(&mut child, &mut group).await;
                     progress.abort();
                     logs.abort();
