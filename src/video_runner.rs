@@ -815,14 +815,11 @@ pub(crate) async fn resolve_subtitle_lang(
         }
         res = tokio::time::timeout(SUBTITLE_PROBE_TIMEOUT, child.wait()) => res,
     };
-    let status = match status {
-        Ok(Ok(s)) if s.success() => s,
-        _ => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            tracing::warn!("subtitle probe failed; downloading without subtitles");
-            return Ok(None);
-        }
+    if !matches!(status, Ok(Ok(s)) if s.success()) {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        tracing::warn!("subtitle probe failed; downloading without subtitles");
+        return Ok(None);
     };
     let mut out_bytes = Vec::new();
     if let Some(ref mut pipe) = stdout {
