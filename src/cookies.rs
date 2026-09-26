@@ -77,7 +77,7 @@ pub(crate) fn jar_from_export(text: &str) -> (Arc<reqwest::cookie::Jar>, usize) 
 /// Dump one profile's cookies through yt-dlp to a temp file; caller deletes it.
 async fn export_cookies(
     youtube_bin: &Path,
-    spec: &str,
+    cookies_browser: &str,
     page_url: &str,
     timeout: Duration,
 ) -> Option<String> {
@@ -111,13 +111,16 @@ async fn export_cookies(
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.arg("--ignore-config")
         .arg("--no-progress")
-        .arg("--cookies-from-browser")
-        .arg(spec)
         .arg("--cookies")
         .arg(&path)
-        .arg("--skip-download")
-        .arg("--")
-        .arg(page_url);
+        .arg("--skip-download");
+    // Same identity argv as every other yt-dlp spawn (player-client
+    // workaround, cookies, `--` URL guard): one helper so flags can't drift.
+    cmd.args(crate::video_tools::ytdlp_identity_args(
+        cookies_browser,
+        None,
+        page_url,
+    ));
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -165,9 +168,16 @@ pub(crate) async fn jar_for_browser(
     {
         return Some(cached.jar.clone());
     }
-    // Same spec the download spawns use, so exports authenticate as the same profile.
-    let spec = crate::video_tools::cookies_browser_spec(cookies_browser)?;
-    let text = export_cookies(youtube_bin, &spec, page_url, Duration::from_secs(120)).await?;
+    // Validated here (not inside the exporter) so an unknown browser still
+    // fails closed instead of exporting with no --cookies-from-browser.
+    crate::video_tools::cookies_browser_spec(cookies_browser)?;
+    let text = export_cookies(
+        youtube_bin,
+        cookies_browser,
+        page_url,
+        Duration::from_secs(120),
+    )
+    .await?;
     let (jar, count) = jar_from_export(&text);
     tracing::debug!(cookies = count, "exported browser cookies");
     crate::runtime::lock_recover(jar_cache()).insert(
