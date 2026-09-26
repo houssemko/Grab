@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.6" date="2026-09-26">
+      <description>
+        <ul>
+          <li>Unknown-container downloads now adopt the tallest in-cap file instead of the first in extractor order, so Best no longer lands on a low resolution when a site lists direct files with no codec info.</li>
+          <li>The stall watchdog is now exempt during the merge phase, since yt-dlp captures ffmpeg's output and a successful merge is silent on both streams.</li>
+          <li>YouTube downloads using cookies now install QuickJS as yt-dlp's JS runtime on first use, restoring the full format list for authenticated player clients.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.5" date="2026-09-26">
       <description>
         <ul>
