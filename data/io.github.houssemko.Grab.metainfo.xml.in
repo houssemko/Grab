@@ -46,6 +46,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.2" date="2026-09-26">
+      <description>
+        <p>Restores the secrets permission in the Flatpak manifests: the yt-dlp subprocess needs Secret Service over D-Bus to decrypt Chromium-based browser cookies, and without it cookie probing failed. The browser-access row no longer re-checks itself while visible — flatpak overrides only apply at sandbox startup, so Preferences now shows a hint to restart Grab after running the command instead. The media-tool install rows swap their spinner and status icon through a stack, and the restart hint row is no longer activatable.</p>
+      </description>
+    </release>
     <release version="4.4.4-beta.1" date="2026-09-26">
       <description>
         <p>The Flatpak no longer bundles Deno or requests the secrets permission, and grants no browser-profile access by default. Preferences now shows the exact read-only flatpak override command for the selected browser when its profile is unreachable in the sandbox, re-checking while visible so the row dismisses itself once the override lands. Also adds a Flathub submission manifest variant.</p>
