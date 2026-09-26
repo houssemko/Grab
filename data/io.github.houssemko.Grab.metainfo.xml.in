@@ -48,7 +48,7 @@
   <releases>
     <release version="4.4.4-beta.2" date="2026-09-26">
       <description>
-        <p>Restores the secrets permission in the Flatpak manifests: the yt-dlp subprocess needs Secret Service over D-Bus to decrypt Chromium-based browser cookies, and without it cookie probing failed. The browser-access row no longer re-checks itself while visible — flatpak overrides only apply at sandbox startup, so Preferences now shows a hint to restart Grab after running the command instead. The media-tool install rows swap their spinner and status icon through a stack, and the restart hint row is no longer activatable.</p>
+        <p>Restores the secrets permission in the Flatpak manifests: the yt-dlp subprocess needs Secret Service over D-Bus to decrypt Chromium-based browser cookies, and without it cookie probing failed. The browser-access row no longer re-checks itself while visible — flatpak overrides only apply at sandbox startup, so Preferences now shows a hint to restart Grab after running the command instead. The media-tool install rows swap their spinner and status icon through a stack, and the restart hint row is no longer activatable. Also fixes live recordings failing at finalize: the remux now tells ffmpeg the container format explicitly instead of letting it guess from the .part filename.</p>
       </description>
     </release>
     <release version="4.4.4-beta.1" date="2026-09-26">
