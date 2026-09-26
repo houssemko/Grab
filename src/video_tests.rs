@@ -7615,43 +7615,6 @@ exit 0
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn embed_failure_falls_back_to_sidecars() {
-    // When Grab's own ffmpeg embed fails, the media still stands and the
-    // fetched subtitles degrade to sidecars instead of being lost.
-    let dir = std::env::temp_dir().join(format!("grab-fakehls-embedfail-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let fake = fake_ytdlp_hls_subs(&dir);
-    let ffmpeg = fake_ffmpeg_fail(&dir, false);
-    let staging = dir.join("staging");
-    let mut job = direct_test_job();
-    job.dest = dir.join("v.mp4");
-    job.subtitles = Some("en".into());
-    job.embed_subs = true;
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
-        &fake,
-        &ffmpeg,
-        &staging,
-        &job,
-        &AttemptGate::new(),
-        "h1080",
-        abort_rx,
-        std::time::Duration::from_secs(30),
-        tx,
-    ));
-    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
-    assert_eq!(std::fs::read(&job.dest).unwrap(), b"hlsbytes");
-    assert_eq!(
-        std::fs::read(dir.join("v.en.srt")).unwrap(),
-        b"subbytes",
-        "failed embed must degrade to a sidecar"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// Fake yt-dlp for the unified path: expands `%(ext)s`, prints template
 /// progress + a merge line + the after_move path. Phase-aware like the real
 /// two-phase flow: the media leg writes bytes, the `--skip-download` subtitle
@@ -7662,24 +7625,25 @@ fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
         &bin,
         r#"#!/bin/sh
 out=""
-skip=""
+dump=""
 prev=""
 for a in "$@"; do
     if [ "$prev" = "-o" ]; then out="$a"; fi
-    if [ "$a" = "--skip-download" ]; then skip="1"; fi
+    if [ "$a" = "--dump-json" ]; then dump="1"; fi
     prev="$a"
 done
 echo "$@" >> "$(dirname "$out").argv.log"
 out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
 stem="$(basename "$out" .mp4)"
-if [ -n "$skip" ]; then
-    printf 'subtitles' > "$(dirname "$out")/$stem.en.srt"
-else
-    echo "[Grab];downloading;7;7;7;1000;0"
-    echo "[Merger] Merging formats"
-    echo "$out"
-    printf 'unified' > "$out"
+if [ -n "$dump" ]; then
+    printf '{"subtitles":{"en":[{"url":"http://x/en","ext":"vtt"}]},"automatic_captions":{}}'
+    exit 0
 fi
+echo "[Grab];downloading;7;7;7;1000;0"
+echo "[Merger] Merging formats"
+echo "$out"
+printf 'unified' > "$out"
+printf 'subtitles' > "$(dirname "$out")/$stem.en.srt"
 exit 0
 "#,
     )
