@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.8" date="2026-09-26">
+      <description>
+        <ul>
+          <li>The tarball install prompt now covers quickjs alongside yt-dlp and ffmpeg: no distro packages it, so its row installs Grab's pinned binary with one click instead of a terminal command.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.7" date="2026-09-26">
       <description>
         <ul>
