@@ -455,20 +455,19 @@ mod tests {
         // (`4.4.4-beta.2` outranks `4.4.4-beta.1`); without them the older
         // beta wins the tie and the test below fails.
         let stable = suffix.is_empty();
-        let pre = if stable {
-            Vec::new()
-        } else {
-            suffix
-                .split('.')
-                .map(|id| {
-                    if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
-                        PreId::Num(id.parse().unwrap_or(u64::MAX))
-                    } else {
-                        PreId::Str(id.to_owned())
-                    }
-                })
-                .collect()
-        };
+        // `stable` already outranks any prerelease at the tuple level, and a
+        // stable-vs-stable comparison never consults the identifiers, so the
+        // empty suffix keeps its single empty identifier with no effect.
+        let pre = suffix
+            .split('.')
+            .map(|id| {
+                if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+                    PreId::Num(id.parse().unwrap_or(u64::MAX))
+                } else {
+                    PreId::Str(id.to_owned())
+                }
+            })
+            .collect();
         (
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
