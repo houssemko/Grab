@@ -607,10 +607,8 @@ async fn probe_ranges(
     let value = resp
         .headers()
         .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    parse_content_range(&value)
+        .and_then(|v| v.to_str().ok());
+    parse_content_range(value.unwrap_or_default())
         .filter(|(s, _, _)| *s == 0)
         .map(|(_, _, t)| t)
         .ok_or_else(|| gettext("Bad Content-Range"))
@@ -704,10 +702,8 @@ pub(crate) async fn fetch_piece(
         let cr = resp
             .headers()
             .get(reqwest::header::CONTENT_RANGE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        match parse_content_range(&cr) {
+            .and_then(|v| v.to_str().ok());
+        match parse_content_range(cr.unwrap_or_default()) {
             Some((s, e, t)) if s == start && e == end && t == total => {}
             Some((_, _, t)) if t != total => {
                 return Err(Changed(gettext("File changed on server")));
