@@ -55,6 +55,31 @@ fn mark_rate_row(live: &adw::EntryRow) {
     live.connect_changed(mark);
 }
 
+/// Flatpak-only row under "Cookies from Browser": the manifest grants no
+/// browser profile access, so when the picked browser's profile is unreachable
+/// in the sandbox, show the `flatpak override` command as a copyable action
+/// row (the HIG pattern from `install_help::command_row` — no raw command
+/// dump). Takes `&gio::Settings` because `connect_changed` hands the signal a
+/// `&gio::Settings`, and deref coercion cannot go back up to `AppSettings`.
+fn sync_cookies_override_row(row: &adw::ActionRow, settings: &gio::Settings) {
+    let value = settings.string(crate::settings::key::COOKIES_BROWSER);
+    let command = if crate::video_tools::in_flatpak()
+        && value != "none"
+        && crate::video_tools::browser_profile_dir(&value).is_none()
+    {
+        crate::video_tools::browser_override_command(&value)
+    } else {
+        None
+    };
+    match command {
+        Some(cmd) => {
+            row.set_subtitle(&cmd);
+            row.set_visible(true);
+        }
+        None => row.set_visible(false),
+    }
+}
+
 /// Whether proxy mode selects manual setup; takes raw value for signal payload and getter.
 fn is_manual_proxy(mode: &str) -> bool {
     mode == crate::download::PROXY_MODE_MANUAL
@@ -646,6 +671,18 @@ pub fn show(
         crate::video::cookies_browser_value,
     );
     video_auth_group.add(&browser_row);
+    let cookies_override_row =
+        crate::install_help::command_row(&video_auth_group, &gettext("Grant browser access"), "");
+    cookies_override_row.set_visible(false);
+    sync_cookies_override_row(&cookies_override_row, settings);
+    {
+        let row = cookies_override_row.downgrade();
+        settings.connect_changed(Some(crate::settings::key::COOKIES_BROWSER), move |s, _| {
+            if let Some(row) = row.upgrade() {
+                sync_cookies_override_row(&row, s);
+            }
+        });
+    }
     let video_post_group = adw::PreferencesGroup::builder()
         .title(gettext("Post-processing"))
         .description(gettext("Applied while finishing downloads"))

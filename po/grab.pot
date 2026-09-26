@@ -631,6 +631,10 @@ msgstr ""
 msgid "Reads this browser's profile directly"
 msgstr ""
 
+#: src/preferences.rs:675
+msgid "Grant browser access"
+msgstr ""
+
 #: src/preferences.rs:777
 msgid "Live"
 msgstr ""
