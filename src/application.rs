@@ -430,19 +430,26 @@ mod tests {
         out
     }
 
-    /// Version tuple for comparison (numeric parts, patch-suffix last).
-    fn version_key(v: &str) -> (u32, u32, u32, bool) {
-        let core = v.split(['-', '+']).next().unwrap_or(v);
+    /// Version tuple for comparison (numeric parts, stable flag, suffix last).
+    fn version_key(v: &str) -> (u32, u32, u32, bool, String) {
+        let (core, suffix) = match v.split_once(['-', '+']) {
+            Some((c, s)) => (c, s),
+            None => (v, ""),
+        };
         let mut parts = core.split('.').map(|p| p.parse().unwrap_or(0));
         // A stable release outranks its own pre-releases: without the flag,
         // `4.4.0` and `4.4.0-beta.1` tie and `max_by_key` keeps the beta,
         // so beta history alongside a stable entry would fail the test below.
-        let stable = !v.contains(['-', '+']);
+        // The suffix breaks ties between pre-releases of the same core
+        // (`4.4.4-beta.2` outranks `4.4.4-beta.1`); without it the older
+        // beta wins the tie and the test below fails.
+        let stable = suffix.is_empty();
         (
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
             stable,
+            suffix.to_owned(),
         )
     }
 
