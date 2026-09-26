@@ -46,6 +46,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.3" date="2026-09-26">
+      <description>
+        <ul>
+          <li>Fixes downloads landing on the lowest quality after picking a higher one: formats that carry a video height are no longer eligible as the audio track, so the HLS quality preset is reached instead of being suppressed by a misclassified direct file.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.2" date="2026-09-26">
       <description>
         <ul>
