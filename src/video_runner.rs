@@ -70,7 +70,7 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // Stall timeout: a full-length merge on a slow CPU dwarfs any network timeout, so allow five minutes of silence — but a progressing download never trips it.
+    // Stall timeout: a full-length merge on a slow CPU dwarfs any network timeout, so allow five minutes of silence, but a progressing download never trips it.
     let timeout = Duration::from_secs(300);
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
@@ -439,7 +439,7 @@ async fn run_ytdlp_attempt(
     apply_proxy_env(&mut cmd, proxy);
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
-    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout — only silence does.
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does.
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
     let progress = tokio::spawn(async move {
@@ -1053,7 +1053,7 @@ pub(crate) async fn run_hls_ytdlp(
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
-    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout — only silence does.
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does.
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
     let progress = tokio::spawn(async move {
