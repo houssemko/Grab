@@ -430,8 +430,19 @@ mod tests {
         out
     }
 
-    /// Version tuple for comparison (numeric parts, stable flag, suffix last).
-    fn version_key(v: &str) -> (u32, u32, u32, bool, String) {
+    /// One dot-separated prerelease identifier, ordered per semver: numeric
+    /// identifiers compare by value and sort below alphanumeric ones, so
+    /// `beta.10` outranks `beta.2` (a whole-string comparison gets this
+    /// wrong: `'1' < '2'`).
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum PreId {
+        Num(u64),
+        Str(String),
+    }
+
+    /// Version tuple for comparison (numeric parts, stable flag, prerelease
+    /// identifiers last).
+    fn version_key(v: &str) -> (u32, u32, u32, bool, Vec<PreId>) {
         let (core, suffix) = match v.split_once(['-', '+']) {
             Some((c, s)) => (c, s),
             None => (v, ""),
@@ -440,16 +451,30 @@ mod tests {
         // A stable release outranks its own pre-releases: without the flag,
         // `4.4.0` and `4.4.0-beta.1` tie and `max_by_key` keeps the beta,
         // so beta history alongside a stable entry would fail the test below.
-        // The suffix breaks ties between pre-releases of the same core
-        // (`4.4.4-beta.2` outranks `4.4.4-beta.1`); without it the older
+        // The identifiers break ties between pre-releases of the same core
+        // (`4.4.4-beta.2` outranks `4.4.4-beta.1`); without them the older
         // beta wins the tie and the test below fails.
         let stable = suffix.is_empty();
+        let pre = if stable {
+            Vec::new()
+        } else {
+            suffix
+                .split('.')
+                .map(|id| {
+                    if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+                        PreId::Num(id.parse().unwrap_or(u64::MAX))
+                    } else {
+                        PreId::Str(id.to_owned())
+                    }
+                })
+                .collect()
+        };
         (
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
             parts.next().unwrap_or(0),
             stable,
-            suffix.to_owned(),
+            pre,
         )
     }
 
@@ -476,5 +501,18 @@ mod tests {
             versions.first().map(String::as_str),
             Some(env!("CARGO_PKG_VERSION"))
         );
+    }
+
+    /// Prerelease identifiers compare per semver: numeric ones by value, and
+    /// below alphanumeric ones. A whole-string suffix comparison orders
+    /// `beta.10` below `beta.2` (`'1' < '2'`).
+    #[test]
+    fn version_key_orders_prerelease_identifiers_numerically() {
+        assert!(version_key("4.4.4-beta.10") > version_key("4.4.4-beta.2"));
+        assert!(version_key("4.4.4-beta.2") > version_key("4.4.4-beta.1"));
+        assert!(version_key("0.2.1-alpha.13") > version_key("0.2.1-alpha.5"));
+        assert!(version_key("4.4.4") > version_key("4.4.4-beta.99"));
+        assert!(version_key("4.4.4-beta.1") > version_key("4.4.3"));
+        assert!(version_key("4.4.4-beta.1") < version_key("4.4.4-beta.1.1"));
     }
 }
