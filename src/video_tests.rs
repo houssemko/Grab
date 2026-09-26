@@ -53,8 +53,8 @@ use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
     ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, is_youtube_url,
-    parse_yt_dlp_version, quickjs_download_url, toolchain_dir_in, user_lib_dir,
-    ytdlp_identity_args, ytdlp_update_available,
+    parse_yt_dlp_version, quickjs_download_url, quickjs_expected_sha256, toolchain_dir_in,
+    user_lib_dir, ytdlp_identity_args, ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -2764,6 +2764,22 @@ fn quickjs_download_url_matches_pinned_release_and_arch() {
         !url.ends_with(".zip"),
         "qjs ships as a bare binary, not an archive: {url}"
     );
+}
+
+#[test]
+fn quickjs_expected_sha256_mirrors_download_url() {
+    // The integrity pin must exist exactly where a download URL exists.
+    assert_eq!(
+        quickjs_expected_sha256().is_some(),
+        quickjs_download_url().is_some()
+    );
+    if let Some(hash) = quickjs_expected_sha256() {
+        assert_eq!(hash.len(), 64, "SHA-256 must be 64 hex chars");
+        assert!(
+            hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "non-hex char in pinned hash"
+        );
+    }
 }
 
 #[test]
