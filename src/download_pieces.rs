@@ -1,33 +1,22 @@
-//! Segmented-piece math: connection counts, piece splits and the
-//! display-cell downsample. Leaf module (file_names only): the
-//! engine and row widgets consume these directly.
+//! Segmented-piece math: connection counts, piece splits and display-cell downsample.
 
 use crate::file_names::piece_len;
 
-/// A file is split only when it holds at least this much per connection
-/// (aria2-style: connections x MIN_SEGMENT), keeping small downloads on the
-/// cheaper single-stream path.
+/// Split only with at least this much per connection; small downloads stay single-stream.
 const MIN_SEGMENT: u64 = 4 * 1024 * 1024;
 
-/// Largest server-claimed size eligible for splitting. A lying Content-Range
-/// would otherwise size a bitmap and sparse file to absurdity; above this,
-/// downloads stay single-stream (which preallocates nothing).
+/// Largest server-claimed size eligible for splitting; above stays single-stream (preallocates nothing).
 pub(crate) const MAX_SEGMENTED_TOTAL: u64 = 1 << 40;
 
-/// Block-map cells the piece bitmap downsamples to for display. Native
-/// piece counts vary (up to 4096); the widget aggregates to this width so
-/// every row renders the same compact strip.
+/// Display cells the bitmap downsamples to, so every row renders the same compact strip.
 pub(crate) const BLOCK_CELLS: usize = 256;
 
-/// How many connections a download may use: at least 2 to bother splitting,
-/// at most 16, and never more than one per MIN_SEGMENT of file.
+/// Connection count: 2..=16, never more than one per MIN_SEGMENT.
 pub(crate) fn split_count(total: u64, connections: usize) -> usize {
     (connections.max(1) as u64).min(total / MIN_SEGMENT).min(16) as usize
 }
 
-/// Downsample a piece bitmap to `n` display cells: cell `i` covers
-/// `bits[i*len/n..(i+1)*len/n)` and reads done when at least half its
-/// pieces are. Empty in, empty out.
+/// Downsample a bitmap to `n` cells (half-done reads done); empty in, empty out.
 pub(crate) fn aggregate(bits: &[bool], n: usize) -> Vec<bool> {
     if bits.is_empty() || n == 0 {
         return Vec::new();
@@ -42,9 +31,7 @@ pub(crate) fn aggregate(bits: &[bool], n: usize) -> Vec<bool> {
         .collect()
 }
 
-/// Split `total` bytes into `piece_len` `(start, end)` pieces (inclusive
-/// ends). Empty when the file is too small — or too big to trust — to
-/// split: caller uses single-stream.
+/// Split `total` into `(start, end)` pieces; empty when too small or too big to trust (caller goes single-stream).
 pub(crate) fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
     if total > MAX_SEGMENTED_TOTAL || split_count(total, connections) < 2 || total == 0 {
         return Vec::new();
@@ -59,10 +46,7 @@ pub(crate) fn plan_pieces(total: u64, connections: usize) -> Vec<(u64, u64)> {
     }
     pieces
 }
-/// Resume bitmap for one segmented download, persisted in the queue file
-/// (same JSON shape) so restarts resume segmented instead of starting over.
-/// Piece bitmap: `done[i]` covers
-/// `[i * piece_len(total), min((i+1) * piece_len(total), total))`.
+/// Resume bitmap persisted in the queue file; `done[i]` covers `[i*piece_len(total), min((i+1)*piece_len(total), total))`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SegmentState {
     pub(crate) total: u64,
@@ -96,16 +80,13 @@ impl SegmentState {
         out
     }
 
-    /// Contiguous completed prefix, in bytes (never past `total`: the tail
-    /// piece is usually short, so an uncapped count would overshoot).
+    /// Completed prefix in bytes, capped at `total`.
     pub(crate) fn prefix_len(&self) -> u64 {
         (self.done.iter().take_while(|b| **b).count() as u64 * piece_len(self.total))
             .min(self.total)
     }
 
-    /// Forget every piece from the first gap on, keeping the bitmap
-    /// consistent with a file truncated to the completed prefix. Used
-    /// wherever the file is shrunk while the bitmap is kept.
+    /// Forget pieces from the first gap on, matching a file truncated to the completed prefix.
     pub(crate) fn forget_beyond_prefix(&mut self) {
         let mut gap = false;
         for slot in self.done.iter_mut() {

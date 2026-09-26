@@ -1,11 +1,6 @@
-//! File-name primitives: sanitize, split, dedupe, derive from URL,
-//! atomic rename, piece sizing, byte formatting. Leaf module (std +
-//! url crate only) breaking the `download` import fan-out: the HTTP
-//! engine, the torrent intake and the video pipeline share these.
+//! File-name primitives: sanitize, split, dedupe, derive, atomic rename, piece sizing, byte formatting.
 
-/// Split a filename into stem and extension (extension keeps its dot).
-/// `rfind`, not `split`: only the last dot counts, and a leading dot
-/// (`".profile"`) is a stem, not an extension. Pure.
+/// Split stem and extension (last dot only; leading dot is stem). Pure.
 fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
     match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], Some(&name[i..])),
@@ -13,9 +8,7 @@ fn split_stem_ext(name: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Cap a filename to filesystem limits (NAME_MAX is 255 bytes on
-/// ext4/tmpfs), keeping the extension. Truncates the stem on a char
-/// boundary; reserves room for the ` (n)` dedupe suffix.
+/// Cap filename to filesystem limits, keeping extension; reserves room for the ` (n)` suffix.
 pub(crate) fn shorten_filename(name: &str) -> String {
     const MAX_FILENAME_BYTES: usize = 240;
     if name.len() <= MAX_FILENAME_BYTES {
@@ -30,17 +23,8 @@ pub(crate) fn shorten_filename(name: &str) -> String {
     }
 }
 
-/// Fold a filename to plain ASCII, mirroring yt-dlp's `--restrict-filenames`
-/// (`sanitize_filename(restricted=True)`) with a simpler documented fold:
-///
-/// - accented Latin letters map to their base letter (`é` → `e`, `ß` → `ss`,
-///   `æ` → `ae`); every other non-ASCII character becomes `_`
-/// - `"` and control characters are dropped outright (as in yt-dlp)
-/// - runs of `_` collapse to one; leading/trailing `_` are stripped
-///
-/// The split keeps the extension: stem and extension are folded separately,
-/// so `Café & Croissants.mp4` becomes `Cafe_Croissants.mp4`. A stem that
-/// folds to nothing falls back to `"file"`, so the result is never empty.
+/// Fold to ASCII like yt-dlp `--restrict-filenames` (accents to base, other non-ASCII to `_`, quotes/controls dropped, `_` collapsed).
+/// Extension kept; empty stem falls back to `"file"`.
 pub(crate) fn restrict_filename_ascii(name: &str) -> String {
     let (stem, ext) = split_stem_ext(name);
     let stem = fold_ascii_part(stem);
@@ -57,9 +41,7 @@ pub(crate) fn restrict_filename_ascii(name: &str) -> String {
 
 /// Fold one filename part (stem or extension) to ASCII.
 fn fold_ascii_part(part: &str) -> String {
-    /// Base-letter fold for the accented Latin ranges yt-dlp maps through
-    /// its own accent table; anything unlisted here is not representable
-    /// in ASCII and becomes `_` in the caller.
+    /// Base-letter fold for accented Latin; unlisted becomes `_` in caller.
     fn fold_accent(c: char) -> Option<&'static str> {
         match c {
             'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' | 'ǎ' => Some("a"),
@@ -110,7 +92,6 @@ fn fold_ascii_part(part: &str) -> String {
         } else if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
             out.push(c);
         } else if c == '"' || c.is_control() {
-            // Dropped outright, as in yt-dlp's restricted mode.
         } else {
             out.push('_');
         }
@@ -131,9 +112,7 @@ fn fold_ascii_part(part: &str) -> String {
     collapsed.trim_matches('_').to_string()
 }
 
-/// Append ` (n)` before the extension until `taken` returns false.
-///
-/// Example: `dedupe_filename("f.iso", |n| n == "f.iso")` returns `"f (1).iso"`.
+/// Append ` (n)` before extension until `taken` is false, e.g. `f.iso` taken returns `f (1).iso`.
 pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
     if !taken(filename) {
         return filename.to_string();
@@ -153,17 +132,14 @@ pub fn dedupe_filename(filename: &str, taken: impl Fn(&str) -> bool) -> String {
         }
         n += 1;
     }
-    // Absurd collision count: return the next candidate anyway (a later
-    // write visibly fails) rather than stat-ing the disk forever.
+    // Absurd collisions: return next candidate anyway rather than stat-ing forever.
     match ext {
         Some(e) => format!("{stem} ({n}).{e}"),
         None => format!("{filename} ({n})"),
     }
 }
 
-/// File stem of a finished-name candidate (`Clip.mp4` → `Clip`,
-/// extensionless `README` → `README`); `""` when there is none, which
-/// never reserves (see `stem_reserved_in`).
+/// File stem of a finished-name candidate; `""` when none (never reserves).
 pub(crate) fn name_stem(name: &str) -> &str {
     std::path::Path::new(name)
         .file_stem()
@@ -172,9 +148,7 @@ pub(crate) fn name_stem(name: &str) -> &str {
 }
 
 pub(crate) fn sane_filename(s: &str) -> bool {
-    /// Explicit bidi controls (marks, embeddings/overrides, isolates).
-    /// No std helper exists, so match the assigned ranges with escapes
-    /// (never literal glyphs: they are invisible in source).
+    /// Explicit bidi controls (escapes, never literal glyphs: invisible in source).
     fn is_bidi_control(c: char) -> bool {
         matches!(c, '\u{200E}' | '\u{200F}' | '\u{61C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
     }
@@ -183,14 +157,11 @@ pub(crate) fn sane_filename(s: &str) -> bool {
         && !s.contains('\0')
         && s != "."
         && s != ".."
-        // Control/bidi-override characters deceive in listings and
-        // notification text (FIND-03/04); servers love to send them.
+        // Reject controls/bidi overrides (deceive listings and notifications; servers send them).
         && !s.chars().any(|c| c.is_control() || is_bidi_control(c))
 }
 
-/// Best-effort filename from a URL path, falling back to `index.html`.
-/// Decode `%XX` escapes (RFC 5987 `filename*=`); leaves everything else
-/// (including `+`) untouched. No new dependency for ten lines.
+/// Best-effort filename from URL path (decodes `%XX`, leaves `+`); falls back to `index.html`.
 pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -221,7 +192,6 @@ pub fn filename_from_url(url_str: &str) -> String {
             u.path_segments()
                 .and_then(|mut segs| segs.rfind(|s| !s.is_empty()).map(|s| s.to_string()))
         })
-        // Browsers decode %XX escapes: %20 is a space, not six chars.
         .map(|s| percent_decode(&s))
         .filter(|s| sane_filename(s))
         .unwrap_or_else(|| "index.html".to_string())
@@ -242,11 +212,7 @@ pub(crate) fn fmt_bytes(n: u64) -> String {
     }
 }
 
-/// On-disk size for the finished detail. Files report their length;
-/// folders (multi-file torrents) sum their contents — a directory's own
-/// metadata length is just its entry size, not the download total.
-/// Symlinked dirs are not descended (no cycle risk). `None` when the
-/// path can't be read at all.
+/// On-disk size: files report length, folders sum contents (no symlink descent); `None` when unreadable.
 pub(crate) fn path_size(path: &std::path::Path) -> Option<u64> {
     let meta = std::fs::metadata(path).ok()?;
     if meta.is_file() {
@@ -275,51 +241,34 @@ pub(crate) fn path_size(path: &std::path::Path) -> Option<u64> {
     Some(total)
 }
 
-/// Smallest piece size: everything at or under ~4 GB splits into 1 MB
-/// pieces, so one slow connection only ever delays the tail by ~1 MB.
+/// Smallest piece: <=~4GB splits into 1MB pieces so one slow connection delays only the tail.
 pub(crate) const PIECE_MIN: u64 = 1024 * 1024;
-/// Largest piece size: bounds per-request overhead on huge files without
-/// starving the work-stealing queue (still thousands of pieces).
+/// Largest piece: bounds per-request overhead without starving work-stealing.
 pub(crate) const PIECE_MAX: u64 = 16 * 1024 * 1024;
 /// Pieces per download to aim for; beyond this the piece size grows.
 const PIECE_TARGET_COUNT: u64 = 4096;
 
-/// Byte range each segmented piece covers. Pure function of the total, so
-/// persisted bitmaps stay valid across restarts: DO NOT change the formula
-/// without a queue migration (restore drops mismatched bitmaps to a safe
-/// single-stream resume instead of corrupting).
+/// Piece byte range; pure function of total so bitmaps survive restarts. Do not change without a queue migration.
 pub(crate) fn piece_len(total: u64) -> u64 {
     total
         .div_ceil(PIECE_TARGET_COUNT)
         .clamp(PIECE_MIN, PIECE_MAX)
 }
 
-/// Rename without clobbering: `std::fs::rename` silently replaces the
-/// destination. Prefers `renameat2(RENAME_NOREPLACE)` (atomic on any
-/// filesystem, FAT included); falls back to claiming `new` with a hard
-/// link, to a plain rename only where hard links are unsupported, and to
-/// a copy where source and destination live on different filesystems
-/// (staging is on tmpfs, downloads usually are not).
+/// Rename without clobbering: `renameat2(RENAME_NOREPLACE)`, else hard-link claim, else rename, else `create_new` copy cross-device.
 pub(crate) fn rename_noreplace(
     old: &std::path::Path,
     new: &std::path::Path,
 ) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     match rename_noreplace_sys(old, new) {
-        // Ancient kernels (< 3.15) lack renameat2: use the portable path.
-        // ENOSYS is 38 in the Linux UAPI (asm-generic and x86 alike).
+        // Ancient kernels (< 3.15) lack renameat2 (ENOSYS 38): use the portable path.
         Err(e) if e.raw_os_error() == Some(38) => {}
-        // Cross-device: no rename variant can span filesystems (EXDEV
-        // 18); copy through a `create_new` claim instead.
+        // Cross-device (EXDEV 18): copy through a `create_new` claim.
         Err(e) if e.raw_os_error() == Some(18) => return copy_noreplace(old, new),
         r => return r,
     }
-    // Claim `new` atomically via the link: an `exists()` pre-check followed
-    // by a plain rename is a TOCTOU — a rival rename can slip in between
-    // and get clobbered. Retry the link on transient errors; fall back to
-    // plain rename only where hard links cannot work at all (Linux UAPI
-    // numbers: EPERM 1, EOPNOTSUPP 95, ENOSYS 38), and to a copy across
-    // filesystems (EXDEV 18).
+    // Claim `new` via link: `exists()` + rename is a TOCTOU; the errno arms below pick the fallback.
     loop {
         match std::fs::hard_link(old, new) {
             Ok(()) => return std::fs::remove_file(old),
@@ -336,12 +285,7 @@ pub(crate) fn rename_noreplace(
     }
 }
 
-/// Copy `old` to `new` without replacing an existing `new`, then remove
-/// `old`. Cross-device fallback for [`rename_noreplace`]: neither rename
-/// nor link can span filesystems, so bytes are copied through a
-/// `create_new` handle — the atomic claim, no TOCTOU — and the source is
-/// unlinked only after the copy lands. A failed copy removes the partial
-/// destination, which only this call could have created.
+/// Copy without replacing (cross-device fallback): `create_new` claim, unlink source after landing; failed copy removes partial dest.
 fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
     let mut src = std::fs::File::open(old)?;
     let permissions = src.metadata().map(|m| m.permissions()).ok();
@@ -361,8 +305,7 @@ fn copy_noreplace(old: &std::path::Path, new: &std::path::Path) -> std::io::Resu
     std::fs::remove_file(old)
 }
 
-/// `renameat2(olddirfd, old, newdirfd, new, RENAME_NOREPLACE)` without a
-/// libc dependency: one syscall, three stable constants.
+/// `renameat2` without libc: one syscall, three stable constants.
 #[cfg(target_os = "linux")]
 fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt as _;
@@ -377,8 +320,7 @@ fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io
     }
     const AT_FDCWD: std::os::raw::c_int = -100;
     const RENAME_NOREPLACE: std::os::raw::c_uint = 1; // renameat2(2)
-    // Queue/dedupe names never contain NUL (sane_filename), but fail
-    // visibly instead of truncating if one ever slips through.
+    // Names never contain NUL; fail visibly instead of truncating if one slips through.
     let cvt = |p: &std::path::Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
@@ -401,19 +343,13 @@ fn rename_noreplace_sys(old: &std::path::Path, new: &std::path::Path) -> std::io
     }
 }
 
-/// Whether a row name is just the page URL derived at intake:
-/// dialog-less rows skip the picker, so their names are URL stems
-/// ("watch"). Matches the derived stem modulo intake-dedupe ` (N)`
-/// suffixes. Dialog-seeded and typed names never match (unless
-/// perversely identical to the URL stem). Pure for tests.
+/// Whether a row name is the URL-derived intake name (modulo ` (N)` suffixes). Pure for tests.
 pub(crate) fn is_url_derived_name(current: &str, page_url: &str) -> bool {
     let derived = filename_from_url(page_url);
     current == derived || strip_dedupe_suffix(current) == derived
 }
 
-/// Intake-dedupe suffix stripped: `watch (12)` → `watch`,
-/// `Clip (3).mp4` → `Clip.mp4`. ASCII-boundary operations only, so
-/// non-ASCII titles are never split mid-codepoint. Pure for tests.
+/// Strip intake-dedupe suffix (`watch (12)` → `watch`); ASCII-boundary ops only, never splits non-ASCII mid-codepoint. Pure.
 pub(crate) fn strip_dedupe_suffix(name: &str) -> String {
     let (stem, ext) = match name.rfind('.') {
         Some(i) if i > 0 => (&name[..i], Some(&name[i..])),

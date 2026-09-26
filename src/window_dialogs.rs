@@ -1,7 +1,6 @@
-//! Add-dialog flow: the new-download dialog, video probe steps,
-//! playlist display and submit paths. UI module (gtk/adw + all
-//! leaves + video/download engines): the window builder opens it,
-//! the playlist picker reuses the count label.
+//! Add-dialog flow: the new-download dialog, video probe steps, playlist
+//! display and submit paths. UI module (gtk/adw + leaves + engines): the
+//! window builder opens it, the playlist picker reuses the count label.
 
 use crate::download::DownloadManager;
 use crate::window_rows::{default_name_for, error_label, selection_action_bar};
@@ -13,8 +12,7 @@ use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// Present a dialog on the active window when there is one, standalone
-/// otherwise (e.g. action fired while hidden).
+/// Present on the active window when there is one, standalone otherwise.
 fn present_dialog(dialog: &adw::Dialog) {
     let win = gio::Application::default()
         .and_downcast::<adw::Application>()
@@ -22,11 +20,9 @@ fn present_dialog(dialog: &adw::Dialog) {
     dialog.present(win.as_ref());
 }
 
-/// Widgets of the New Download dialog's video step, living on the
-/// details navigation page. Managed as one unit: exactly one state
-/// visible at a time (resolving spinner, preview, missing-tools prompt,
-/// or load error). The group header itself carries the video identity
-/// (title + page URL).
+/// Widgets of the New Download dialog's video step (details page), managed as
+/// one unit: exactly one state visible at a time. The group header itself
+/// carries the video identity (title + page URL).
 struct VideoStep {
     status: adw::ActionRow,
     group: adw::PreferencesGroup,
@@ -38,15 +34,10 @@ struct VideoStep {
     error: adw::ActionRow,
 }
 
-/// Queue one probed video from the Add dialog and close it: exact
-/// format picks pin the variant (its height as the fallback),
-/// Automatic falls back to the global preference, audio-only drops
-/// the pin. Shared by the listed video-page branch and the
-/// unlisted-link branch (short links like dai.ly probe video-shaped
-/// too): both queue the canonical page, never the typed link — the
-/// typed link may redirect to an HTML page the plain engine would
-/// save as a file. Intake errors surface on the details page with
-/// the Add button re-enabled.
+/// Queue one probed video from the Add dialog and close it. Shared by the
+/// listed-video and unlisted-link branches: both queue the canonical page, never
+/// the typed link (which may redirect to an HTML page the plain engine would save
+/// as a file); intake errors surface on the details page with Add re-enabled.
 #[allow(clippy::too_many_arguments)]
 fn submit_probed_single(
     manager: &Rc<DownloadManager>,
@@ -59,8 +50,7 @@ fn submit_probed_single(
 ) {
     let typed = step.name.text().trim().to_string();
     let audio_only = step.audio.is_active();
-    // Default name from the video title and id; the intake
-    // sanitizes it and falls back to the URL stem.
+    // Default name from the video title and id; the intake sanitizes it.
     let settings = manager.settings();
     let auto = typed
         .is_empty()
@@ -70,14 +60,9 @@ fn submit_probed_single(
     } else {
         Some(typed.as_str())
     };
-    // Exact picks pin the format and carry its height
-    // as the fallback, so a dropped pin still
-    // degrades to the chosen height. Audio-only rows
-    // drop the pin (nothing to pin a track to).
-    // The Automatic row (no pin: pre-resolve, or pages
-    // listing nothing pinnable) falls back to the
-    // global preference. The combo rows and the info
-    // formats share one order.
+    // Exact picks pin the format with its height as fallback, so a dropped pin still
+    // degrades to the chosen height; audio-only rows drop the pin, and Automatic (no
+    // pin) falls back to the global preference. Combo rows and formats share one order.
     let selected = step.quality.selected() as usize;
     let format_id = formats.borrow().get(selected).cloned().flatten();
     let format_id = if audio_only { None } else { format_id };
@@ -114,9 +99,8 @@ fn submit_probed_single(
     }
 }
 
-/// Dispatch a fresh preview to its submit path: singles queue with
-/// their pinned format, collections open the item picker. The
-/// freshness gate above the call site stays put.
+/// Dispatch a fresh preview to its submit path: singles queue with their pinned
+/// format, collections open the item picker. The caller's freshness gate stays.
 #[allow(clippy::too_many_arguments)]
 fn submit_probe(
     manager: &Rc<DownloadManager>,
@@ -133,9 +117,8 @@ fn submit_probe(
             submit_probed_single(manager, dest, dialog, step, formats, lookup_add, &v);
         }
         crate::video::ProbeResult::Playlist(pl) => {
-            // Collections queue through the item picker: one row per
-            // chosen entry, each re-resolving its own page at download
-            // time.
+            // Collections queue through the item picker: one row per chosen
+            // entry, each re-resolving its own page at download time.
             push_playlist_items_page(
                 nav,
                 manager.clone(),
@@ -148,8 +131,7 @@ fn submit_probe(
     }
 }
 
-/// Report a failed plain-queue fallback on the details page: drop the
-/// stale probe, log, show the error, re-enable Add.
+/// Report a failed plain-queue fallback on the details page: drop the stale probe, log, show the error, re-enable Add.
 fn fallback_plain_failed(
     info: &Rc<RefCell<Option<crate::video::ProbeResult>>>,
     step: &Rc<VideoStep>,
@@ -167,10 +149,8 @@ fn fallback_plain_failed(
     set_lookup_add(lookup_add, true);
 }
 
-/// Queue a probed link as a plain file and close the dialog: the
-/// fallback when extraction finds no playable media (or fails) on an
-/// unlisted page. Returns false when even the plain intake rejects the
-/// URL, so the caller can show the error instead.
+/// Queue a probed link as a plain file and close the dialog: the fallback when
+/// extraction finds no playable media on an unlisted page. `Err` when plain intake rejects the URL.
 fn queue_plain(
     manager: &Rc<DownloadManager>,
     dest: &Rc<RefCell<String>>,
@@ -187,9 +167,8 @@ fn queue_plain(
     Ok(())
 }
 
-/// Desensitize the details-page Add button while a lookup resolves.
-/// No-op until the button exists (see `lookup_add`); every terminal
-/// lookup state re-enables it.
+/// Desensitize the details-page Add button while a lookup resolves. No-op until
+/// the button exists (see `lookup_add`); every terminal state re-enables it.
 fn set_lookup_add(cell: &Rc<RefCell<Option<gtk4::Button>>>, enabled: bool) {
     if let Some(button) = cell.borrow().as_ref() {
         button.set_sensitive(enabled);
@@ -245,11 +224,9 @@ pub(crate) fn playlist_count_label(kind: crate::media_types::PlaylistKind, count
     template.replace("{}", &count.to_string())
 }
 
-/// Playlist probe state: the group header carries the collection
-/// identity (title + item count). The name row and format picker stay
-/// hidden — renames and format pins don't apply across items — while
-/// the audio switch stays visible and seeds the picker for every
-/// queued item.
+/// Playlist probe state: the group header carries the collection identity (title +
+/// item count). The name row and format picker stay hidden (renames and pins don't
+/// apply across items); the audio switch stays visible and seeds every queued item.
 fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     hide_video_step(v);
     v.group
@@ -271,8 +248,8 @@ fn show_video_playlist(v: &VideoStep, pl: &crate::media_types::PlaylistInfo) {
     v.audio.set_visible(true);
 }
 
-/// The add dialog's "Torrent file" row: pick a .torrent, offer the
-/// per-file switches for multi-file torrents, queue singles directly.
+/// The add dialog's "Torrent file" row: pick a .torrent, offer the per-file
+/// switches for multi-file torrents, queue singles directly.
 fn wire_torrent_picker(
     torrent_btn: &gtk4::Button,
     manager: Rc<DownloadManager>,
@@ -342,9 +319,9 @@ fn wire_torrent_picker(
     });
 }
 
-/// New-download dialog, optionally pre-filled (drag-and-drop / Open With
-/// hands a URL in; the normal lookup flow then takes over, including
-/// video-page detection, so drops never bypass the media pipeline).
+/// New-download dialog, optionally pre-filled (drag-and-drop / Open With hands a
+/// URL in; the normal lookup flow then takes over, so drops never bypass the
+/// media pipeline).
 pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) {
     let dialog = adw::Dialog::builder()
         .title(gettext("New Download"))
@@ -400,11 +377,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     video_name.set_visible(false);
     video_revert_btn.set_visible(false);
     video_group.add(&video_name);
-    // Format picker, filled per video on resolve: exact pinnable
-    // formats, tallest first (the preference preselects the closest
-    // row). Starts with a single Automatic row — global preference,
-    // no pin — until the first lookup lands, and returns to it when a
-    // page lists nothing pinnable.
+    // Format picker, filled per video on resolve: exact pinnable formats,
+    // tallest first (the preference preselects the closest row). Starts with
+    // and returns to a single Automatic row — global preference, no pin.
     let video_quality = adw::ComboRow::builder()
         .title(gettext("Media format"))
         .subtitle(gettext("Uses your preferred quality"))
@@ -451,14 +426,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         tools: video_tools,
         error: video_error,
     });
-    // Dialog-local choices: quality is initialized from Preferences
-    // (not bound); audio-only is always off by design — no global
-    // preference exists. A queued row keeps the choices made here.
-    // The format picker opens on the preference-preselected row; exact
-    // picks are per lookup, so nothing persists here.
+    // Dialog-local choices: quality is initialized from Preferences (not
+    // bound); audio-only is always off by design — no global preference
+    // exists. Exact picks are per lookup, so nothing persists here.
     step.quality.set_selected(0);
-    // Audio-only is per-download only: always default off (no global
-    // preference exists), and the quality row is moot while it is on.
+    // Audio-only is per-download only (see above); the quality row is moot while on.
     step.audio.set_active(false);
     {
         let q = step.quality.clone();
@@ -530,22 +502,20 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         });
     }
 
-    // Video resolve machinery: debounced metadata lookup that never blocks
-    // the main loop. `video_generation` drops stale completions when the user
-    // keeps typing; every async touch re-checks the dialog is still open.
+    // Video resolve machinery: debounced metadata lookup that never blocks the
+    // main loop. `video_generation` drops stale completions while the user keeps
+    // typing; every async touch re-checks the dialog is still open.
     let video_generation = Rc::new(Cell::new(0u64));
     let video_last_ok = Rc::new(RefCell::new(String::new()));
     let video_info = Rc::new(RefCell::new(None::<crate::video::ProbeResult>));
-    // Index-aligned with the format combo rows: exact format ids, or
-    // a single `None` for the Automatic row. Reset on every resolve.
+    // Index-aligned with the format combo rows: exact format ids, or a
+    // single `None` for the Automatic row. Reset on every resolve.
     let format_ids: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
-    // Set while the submit path re-arms the apply tick (touching the entry
-    // text): the changed handler below must ignore that synthetic edit, or
-    // every failed Enter-submit would drop the preview and re-resolve.
+    // Set while the submit path re-arms the apply tick: the changed handler must
+    // ignore that synthetic edit, or every failed Enter-submit would re-resolve.
     let video_quiet = Rc::new(Cell::new(false));
-    // The details-page Add button, desensitized while a lookup is in
-    // flight: submit already refuses early adds with a message, but a
-    // dead button says so upfront. Populated once the button exists.
+    // The details-page Add button, desensitized while a lookup is in flight (a
+    // dead button says so upfront). Populated once the button exists.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
     let kick_video = {
         let generation = video_generation.clone();
@@ -595,17 +565,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                     return;
                 }
                 let url = url_b.text().trim().to_string();
-                // Unlisted links probe only on explicit kicks (submit,
-                // retry) — never while typing, where every prefix would
-                // spawn a doomed extraction. Non-HTTP schemes never
-                // probe: magnets and friends belong to their own flows.
+                // Unlisted links probe only on explicit kicks (submit, retry), never while
+                // typing. Non-HTTP schemes never probe: magnets have their own flows.
                 let probing = probe_unlisted
                     && !crate::video::is_video_page(&url)
                     && crate::video::is_http_url(&url);
                 if url.is_empty() || (!crate::video::is_video_page(&url) && !probing) {
-                    // A stale probe result for another URL must not
-                    // linger: without this, navigating back with a fresh
-                    // typed URL would show the old preview as ready.
+                    // A stale probe for another URL must not linger: navigating back
+                    // with a fresh typed URL would show the old preview.
                     if !crate::video::preview_fresh(
                         &info_b.borrow(),
                         last_b.borrow().as_str(),
@@ -666,11 +633,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
-                        // Probed links fall back to today's outcome (queue
-                        // the file directly) only when extraction says
-                        // unsupported — transient failures keep the error
-                        // row with retry instead of mistyping the row as
-                        // plain forever.
+                        // Probed links fall back to today's outcome (queue the file directly)
+                        // only when extraction says unsupported; transient failures keep
+                        // the error row with retry.
                         if !crate::video::is_video_page(&url)
                             && e.to_string().to_lowercase().contains("unsupported url")
                         {
@@ -688,12 +653,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                 }
                             }
                         }
-                        // Drive serves videos and plain files behind the
-                        // same share URLs, but yt-dlp's Drive extractor is
-                        // playback-API-only: PDFs, docs and zips fail it
-                        // with HTTP 400 instead of formats. Those fall
-                        // back to a direct export download (the server
-                        // filename wins via Content-Disposition);
+                        // Drive serves videos and plain files behind the same share URLs, but
+                        // yt-dlp's Drive extractor is playback-API-only: PDFs, docs and zips
+                        // fail it with HTTP 400. Those fall back to a direct export download;
                         // anything else keeps the error row with retry.
                         if let Some(direct) = crate::video::drive_direct_url(&url)
                             && {
@@ -729,8 +691,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         if dialog_b.upgrade().is_none() || generation_b.get() != my {
                             return;
                         }
-                        // Resolved but nothing playable, and not a listed
-                        // video page: same plain fallback as above.
+                        // Resolved but nothing playable, and not a listed video
+                        // page: same plain fallback as above.
                         if !probe.fetchable() && !crate::video::is_video_page(&url) {
                             match queue_plain(&manager_b, &dest_b, &dialog_b, &file_b, &url) {
                                 Ok(()) => return,
@@ -748,10 +710,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         }
                         match probe {
                             crate::video::ProbeResult::Single(v) => {
-                                // Group header carries the identity (title + page);
-                                // rows below carry the choices. Both sinks parse
-                                // Pango markup, so escape: page URLs carry `&`
-                                // query separators and titles carry anything.
+                                // Group header carries the identity (title + page); rows
+                                // below carry the choices. Both sinks parse Pango markup:
+                                // URLs carry `&`, titles anything.
                                 let desc =
                                     match v.duration_string.as_deref().filter(|s| !s.is_empty()) {
                                         Some(d) => format!(
@@ -765,9 +726,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                     .group
                                     .set_title(glib::markup_escape_text(&v.title).as_str());
                                 step_b.group.set_description(Some(&desc));
-                                // Seed the file name once: an explicit page-1 name
-                                // wins, else the title default. Never clobbers an
-                                // edit already made here.
+                                // Seed the file name once: an explicit page-1 name wins,
+                                // else the title default. Never clobbers an edit here.
                                 if step_b.name.text().trim().is_empty() {
                                     let typed = file_b.text().trim().to_string();
                                     let base = if typed.is_empty() {
@@ -782,13 +742,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                                     step_b.name.set_text(&base);
                                 }
                                 *last_b.borrow_mut() = url;
-                                // Rebuild the format picker from this resolve:
-                                // exact pinnable formats, tallest first, with the
-                                // preference preselecting the closest row — or a
-                                // single Automatic row (global preference, no pin)
-                                // when the page lists nothing pinnable. Selection
-                                // resets — a pin from another video must never
-                                // carry over.
+                                // Rebuild the format picker from this resolve (tallest first,
+                                // preference preselects the closest row) or a single Automatic
+                                // row when nothing is pinnable. Selection resets — a pin must
+                                // never carry over.
                                 let mut labels = Vec::new();
                                 let mut ids: Vec<Option<String>> = Vec::new();
                                 for opt in &v.formats {
@@ -852,20 +809,17 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 return;
             }
             let text = row.text().trim().to_string();
-            // The direct-only file row hides in video mode (the details
-            // page has its own name row); a non-empty entry is not lost —
-            // the resolve seeds the video name from it. A probed preview
-            // counts as video mode while its canonical URL still matches.
+            // The direct-only file row hides in video mode (the details page has its own
+            // name row); a non-empty entry is not lost — the resolve seeds the video name
+            // from it. A probed preview counts as video mode while its canonical URL matches.
             let fresh = info2
                 .borrow()
                 .as_ref()
                 .is_some_and(|p| p.page_url() == text);
             file_row2.set_visible(!(crate::video::is_video_page(&text) || fresh));
-            // Sync skeleton: leaving video-land (or editing a resolved URL)
-            // hides the stale step at once; the debounced kick refills
-            // it. `fresh` is deliberately the stricter canonical compare
-            // (not the round-trip key the kick uses): a mismatch is
-            // always safe to hide, and typing only fires on edit.
+            // Sync skeleton: leaving video-land (or editing a resolved URL) hides the stale
+            // step at once; the debounced kick refills it. `fresh` is deliberately the
+            // stricter canonical compare: a mismatch is always safe to hide.
             if !crate::video::is_video_page(&text) || !fresh {
                 hide_video_step(&step2);
                 if !fresh {
@@ -890,9 +844,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let kick = kick_video.clone();
         let dialog_weak = dialog.downgrade();
         let btn = video_install_btn.clone();
-        // Outside Flatpak there is no bundled binary and host packages
-        // can't be installed from here: guide through self-install
-        // instead of the automatic download.
+        // Outside Flatpak there is no bundled binary and host packages can't
+        // be installed from here: guide through self-install instead.
         if !crate::video_tools::in_flatpak() {
             btn.set_label(&gettext("How to Install"));
             btn.set_tooltip_text(Some(&gettext("Show terminal install instructions")));
@@ -903,9 +856,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 crate::install_help::show(&btn, move || kick_b(true));
                 return;
             }
-            // Flatpak: staged auto-install under the shared progress
-            // popover anchored at the button (HIG: feedback lives with its
-            // control; stages stand in for percentages that don't exist).
+            // Flatpak: staged auto-install under the shared progress popover anchored at
+            // the button (HIG: feedback lives with its control; stages stand in for the
+            // percentages that don't exist).
             let (step_b, kick_b) = (step2.clone(), kick.clone());
             let (dialog_err, dialog_ok) = (dialog_weak.clone(), dialog_weak.clone());
             crate::install_progress::run(
@@ -942,10 +895,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             }
         });
     }
-    // Toggling the mode re-seeds an untouched name: the resolve-time
-    // seed ran under the other mode, so without this the row keeps a
-    // video-container name for an audio download (or vice versa). An edited name
-    // is never clobbered.
+    // Toggling the mode re-seeds an untouched name: the resolve-time seed ran under
+    // the other mode, so without this the row keeps a video-container name for an
+    // audio download (or vice versa). An edited name is never clobbered.
     {
         let (name, audio, info) = (step.name.clone(), step.audio.clone(), video_info.clone());
         let settings = manager.settings().clone();
@@ -988,16 +940,14 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     toolbar.add_top_bar(&hb);
     toolbar.set_content(Some(&page));
 
-    // Details page: the video step lives here behind an explicit Continue,
-    // so the final Add is unreachable without a resolved preview. The back
-    // button is provided by the navigation view.
+    // Details page: the video step lives here behind an explicit Continue, so the final
+    // Add is unreachable without a resolved preview. The back button is the nav view's.
     let video_page = adw::PreferencesPage::new();
     video_page.add(&step.group);
     let video_toolbar = adw::ToolbarView::new();
     let video_hb = adw::HeaderBar::new();
-    // No WM title buttons either end: close paths are the nav back
-    // button and Esc, like the sibling dialog headers (which keep an
-    // explicit Cancel instead).
+    // No WM title buttons either end: close paths are the nav back button and Esc, like
+    // the sibling dialog headers (which keep an explicit Cancel instead).
     video_hb.set_show_start_title_buttons(false);
     video_hb.set_show_end_title_buttons(false);
     let final_add_btn = gtk4::Button::builder()
@@ -1008,8 +958,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     video_hb.pack_end(&final_add_btn);
     video_toolbar.add_top_bar(&video_hb);
     video_toolbar.set_content(Some(&video_page));
-    // Wire the lookup gate: the kick above desensitizes this button while
-    // resolving and re-enables it at every terminal state.
+    // The kick above drives this button's sensitivity (see `lookup_add`).
     lookup_add.replace(Some(final_add_btn.clone()));
 
     let entry_nav_page = adw::NavigationPage::builder()
@@ -1030,10 +979,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     dialog.set_default_widget(Some(&add_btn));
 
     crate::ui_util::close_on_click(&cancel_btn, &dialog);
-    // One submit path for the Add button and URL apply: video pages go
-    // through the Page intake (a matching preview is required so the row
-    // stores the resolved page, not a stale URL), everything else keeps
-    // the direct enqueue.
+    // One submit path for the Add button and URL apply: video pages go through the Page
+    // intake (a matching preview is required so the row stores the resolved page, not a
+    // stale URL); everything else keeps the direct enqueue.
     let submit = {
         let m = manager.clone();
         let dd = dest_dir.clone();
@@ -1056,10 +1004,9 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 error_label.set_visible(true);
                 url_row.add_css_class("error");
                 if rearm_apply {
-                    // ponytail: libadwaita hides its apply tick before
-                    // emitting `apply`; touch the text while focused to
-                    // re-arm it. Quiet: the video changed handler must not
-                    // treat this as a user edit.
+                    // libadwaita hides its apply tick before emitting `apply`; touch
+                    // the text while focused to re-arm it. Quiet so the video changed
+                    // handler doesn't treat this as a user edit.
                     quiet.set(true);
                     let current = url_row.text().to_string();
                     url_row.grab_focus();
@@ -1075,19 +1022,17 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
             };
             let url = url_row.text().trim().to_string();
             if crate::video::is_video_page(&url) {
-                // Structural guarantee: the final Add lives on the details
-                // page, so from the entry page a video URL only ever
-                // advances (and starts resolving) — it can never queue
-                // without its preview.
+                // Structural guarantee: the final Add lives on the details page, so from
+                // the entry page a video URL only advances — it can never queue without
+                // its preview.
                 if nav2.visible_page_tag().as_deref() != Some("video") {
                     nav2.push(&video_nav_page2);
                     step2.name.grab_focus();
                     kick(false);
                     return;
                 }
-                // Same freshness gate as the kick skip above: the stored
-                // page URL is canonicalized, so only the round-trip key
-                // (which text was resolved) decides.
+                // Same freshness gate as the kick skip above: the stored page URL is
+                // canonicalized, so only the round-trip key (which text was resolved) decides.
                 let ready =
                     if crate::video::preview_fresh(&info.borrow(), last_ok.borrow().as_str(), &url)
                     {
@@ -1118,13 +1063,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 }
                 return;
             }
-            // Unlisted http(s) links get one probe for a video path, unless
-            // they are obviously direct files (extension sniff — the
-            // plain engine downloads those better anyway, with no probe
-            // delay): the details page resolves, and a fresh preview
-            // queues like a listed video page (canonical page, never the
-            // typed link). Anything else skips straight to the plain
-            // intake below.
+            // Unlisted http(s) links get one probe for a video path, unless they are obviously
+            // direct files (the plain engine downloads those better, with no probe delay). A
+            // fresh preview queues like a listed video page (canonical page, never the typed
+            // link); anything else skips straight to the plain intake below.
             if crate::video::is_http_url(&url) && !crate::video::is_direct_file_url(&url) {
                 if nav2.visible_page_tag().as_deref() != Some("video") {
                     nav2.push(&video_nav_page2);
@@ -1143,12 +1085,10 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                         &gettext("Still looking up the media — wait for the preview, then add."),
                     );
                 } else {
-                    // Fresh preview on a link that probed video-shaped
-                    // (e.g. a dai.ly short link): queue it like a listed
-                    // video page. Without this the press fell through to
-                    // a bare return and the dialog just sat there.
-                    // preview_fresh implies info is Single or Playlist
-                    // (the enum's only variants), so this is exhaustive.
+                    // Fresh preview on a link that probed video-shaped (e.g. a dai.ly short
+                    // link): queue it like a listed video page — without this the press fell
+                    // through to a bare return. preview_fresh implies Single or Playlist, so
+                    // this is exhaustive.
                     match info.borrow().clone() {
                         Some(crate::video::ProbeResult::Single(v)) => {
                             submit_probed_single(
@@ -1215,9 +1155,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let s = submit.clone();
         step.name.connect_apply(move |_| s(false));
     }
-    // Contextual verb: the entry button continues to details for video
-    // links and ambiguous http(s) links (probed), and queues obvious
-    // direct files plus anything else straight away.
+    // Contextual verb: the entry button continues to details for video and ambiguous http(s)
+    // links (probed), and queues obvious direct files plus anything else straight away.
     {
         let b = add_btn.clone();
         let ur = url_row.clone();
@@ -1235,10 +1174,8 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
 
     present_dialog(&dialog);
 
-    // Dropped/opened URLs land here pre-filled: setting the text fires
-    // the same changed → debounce → lookup chain as typing, so video
-    // pages resolve through the media pipeline (the clipboard read
-    // below stands down on non-empty fields by itself).
+    // Dropped/opened URLs land here pre-filled: setting the text fires the same changed →
+    // debounce → lookup chain as typing, so video pages resolve through the media pipeline.
     if let Some(url) = initial_url.map(str::trim).filter(|u| !u.is_empty())
         && let Ok(normalized) = crate::download::normalize_url(url)
     {
@@ -1249,7 +1186,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // download with no tab stops (same pattern as the rename dialog).
     url_row.grab_focus();
 
-    // ponytail: single clipboard read per dialog open; no watch, no polling.
+    // single clipboard read per dialog open; no watch, no polling.
     {
         let url_row = url_row.clone();
         let dialog_weak = dialog.downgrade();
@@ -1283,11 +1220,9 @@ pub(crate) fn fmt_item_duration(secs: i64) -> String {
     }
 }
 
-/// Wire a picker's selection bar to its checkboxes: the confirm action
-/// counts the live selection (`count_label` builds its text — the msgids
-/// differ per picker), Select All/None flip every box, and the count
-/// renders once up front. With nothing selected the action reads "… 0 …"
-/// and clicking it shows the error label.
+/// Wire a picker's selection bar to its checkboxes: the confirm action counts the live
+/// selection (`count_label` builds its text — msgids differ per picker) and Select All/None
+/// flip every box. With nothing selected the action shows the error label.
 fn wire_selection_bar(
     checks: &[gtk4::CheckButton],
     select_all_btn: &gtk4::Button,
@@ -1327,16 +1262,13 @@ fn wire_selection_bar(
 }
 
 /// Item picker for probed playlists, stories and highlights, mirroring
-/// [`show_torrent_files_dialog`]: one checkbox per entry, all checked
-/// by default (HIG selection: checkboxes pick items, switches flip
-/// settings). Each chosen item becomes its own queue row through the Page
-/// intake, so formats resolve per item at download time — the probe
-/// only listed them. Quality follows the global preference (no pin:
-/// pins don't survive across items); the audio-only choice from the
-/// New Download dialog applies to every queued row.
-/// The picker is a page in the New Download navigation stack (tag
-/// "playlist"), not a standalone dialog: one window, one close path,
-/// and the navigation header's Back button.
+/// [`show_torrent_files_dialog`]: one checkbox per entry, all checked by default
+/// (HIG selection). Each chosen item becomes its own queue row through the Page
+/// intake, so formats resolve per item at download time; quality follows the
+/// global preference (pins don't survive across items) and the dialog's audio-only
+/// choice applies to every row. It is a page in the New Download navigation stack
+/// (tag "playlist"), not a standalone dialog: one window, one close path, the
+/// navigation header's Back button.
 fn push_playlist_items_page(
     nav: &adw::NavigationView,
     manager: Rc<DownloadManager>,
@@ -1345,8 +1277,8 @@ fn push_playlist_items_page(
     playlist: crate::media_types::PlaylistInfo,
     audio_only: bool,
 ) {
-    // Same guard as the video page: don't stack a second picker while
-    // one is already visible.
+    // Same guard as the video page: don't stack a second picker while one is
+    // already visible.
     if nav.visible_page_tag().as_deref() == Some("playlist") {
         return;
     }
@@ -1388,10 +1320,8 @@ fn push_playlist_items_page(
     }
     let error_label = error_label(&group);
 
-    // Scrolled: big playlists must not size the dialog off-screen, but
-    // propagate the natural height (capped) so the dialog grows and
-    // shrinks with the item count instead of keeping the previous
-    // page's size and scrolling a short list.
+    // Scrolled: big playlists must not size the dialog off-screen, but the capped natural
+    // height lets it grow and shrink with the item count instead of keeping the last size.
     let scrolled = gtk4::ScrolledWindow::builder()
         .child(&page)
         .vexpand(true)
@@ -1401,10 +1331,8 @@ fn push_playlist_items_page(
 
     let toolbar = adw::ToolbarView::new();
     let hb = adw::HeaderBar::new();
-    // No WM title buttons either end and no explicit Cancel: the
-    // navigation header's Back button (and Esc) close the picker, like
-    // the Media Details page. The selection's action lives in the
-    // bottom action bar, per HIG selection mode.
+    // No WM title buttons either end and no explicit Cancel, like the Media Details page: the
+    // nav header's Back button (and Esc) close the picker, selection actions live per HIG.
     hb.set_show_start_title_buttons(false);
     hb.set_show_end_title_buttons(false);
     toolbar.add_top_bar(&hb);
@@ -1417,9 +1345,7 @@ fn push_playlist_items_page(
         .child(&toolbar)
         .build();
 
-    // The action counts the live selection; with nothing selected it
-    // reads "Queue 0 items" and clicking it shows the error label,
-    // mirroring the torrent picker.
+    // The action counts the live selection (see `wire_selection_bar`).
     wire_selection_bar(&checks, &select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Queue {} item", "_Queue {} items", n as u32).replace("{}", &n.to_string())
     });
@@ -1440,12 +1366,10 @@ fn push_playlist_items_page(
             }
             // One persist for the whole import, not one per row.
             manager.begin_batch();
-            // Story segments are addressable as their own pages: queue
-            // those, so each row re-resolves its own segment instead of
-            // the tray (tray + format ids downloads the first segment
-            // once per row). Attempted unconditionally: highlights and
-            // non-story URLs return None here and keep the tray with the
-            // persisted entry id as fallback.
+            // Story segments are addressable as their own pages: queue those so each row
+            // re-resolves its own segment instead of the tray (tray + format ids would
+            // download the first segment once per row). Attempted unconditionally:
+            // highlights and non-story URLs return None and keep the tray.
             let mut failed: Option<String> = None;
             for (i, item) in &chosen {
                 let page_url = crate::video_probe::story_segment_url(&playlist.page_url, &item.id)
@@ -1463,21 +1387,17 @@ fn push_playlist_items_page(
                         // Live streams queued from a playlist take the VOD
                         // path; the worker re-resolves each item page anyway.
                         is_live: false,
-                        // Remember the picked entry as fallback: story rows
-                        // normally carry segment pages (see
-                        // `story_segment_url`) and never need it, but
-                        // highlights — and anything unparseable at pick
-                        // time — re-resolve the tray, so the worker
-                        // selects the picked entry out of it by this id.
+                        // Remember the picked entry as fallback: story rows normally carry
+                        // segment pages and never need it, but highlights — and anything
+                        // unparseable at pick time — re-resolve the tray by this id.
                         playlist_item_id: Some(item.id.clone()),
                     },
                 ) {
                     failed = Some(e);
                     break;
                 }
-                // Rows already queued stay queued on a partial failure:
-                // uncheck them so a retry only submits the remainder
-                // instead of duplicating them (dedupe is by filename).
+                // Rows already queued stay queued on a partial failure: uncheck them so a
+                // retry submits only the remainder (dedupe is by filename).
                 checks[*i].set_active(false);
             }
             manager.end_batch();
@@ -1486,17 +1406,16 @@ fn push_playlist_items_page(
                 error_label.set_visible(true);
                 return;
             }
-            // Complete success closes the whole New Download dialog; a
-            // partial failure stays on the picker so the remaining rows
-            // can be retried (their checkboxes were unchecked above).
+            // Complete success closes the whole New Download dialog; a partial failure stays
+            // on the picker so the remaining rows (unchecked above) can be retried.
             if let Some(p) = parent_weak.upgrade() {
                 p.close();
             }
         });
     }
 
-    // Enter queues the selection while the picker is up; the dialog's
-    // previous default widget is restored when the page is popped.
+    // Enter queues the selection while the picker is up; the dialog's previous
+    // default widget is restored when the page is popped.
     if let Some(p) = parent.upgrade() {
         let prev_default = p.default_widget();
         p.set_default_widget(Some(&add_btn));
@@ -1512,9 +1431,8 @@ fn push_playlist_items_page(
 
     nav.push(&picker_page);
 }
-/// Multi-file .torrent intake: one switch per file, all on by default.
-/// The selection feeds rqbit's `only_files` at add time (no live setter),
-/// so it must be chosen here, before the row exists.
+/// Multi-file .torrent intake: one switch per file, all on by default. The selection
+/// feeds rqbit's `only_files` at add time (no live setter), so it must be chosen here.
 pub fn show_torrent_files_dialog(
     manager: Rc<DownloadManager>,
     dest_dir: Rc<RefCell<String>>,
@@ -1537,9 +1455,8 @@ pub fn show_torrent_files_dialog(
         .build();
     page.add(&group);
 
-    // HIG selection, not settings: a switch means "a setting is on",
-    // a checkbox means "this item is picked". Clicking a row toggles
-    // its checkbox.
+    // HIG selection, not settings: a switch means "a setting is on", a checkbox
+    // means "this item is picked". Clicking a row toggles its checkbox.
     let mut checks = Vec::new();
     for e in &entries {
         let check = gtk4::CheckButton::builder().active(true).build();
@@ -1579,8 +1496,7 @@ pub fn show_torrent_files_dialog(
     dialog.set_child(Some(&toolbar));
     dialog.set_default_widget(Some(&add_btn));
 
-    // The action counts the live selection; with nothing selected it
-    // reads "Add 0 files" and clicking it shows the error label.
+    // Same as the playlist picker: the action counts the live selection.
     wire_selection_bar(&checks, &select_all_btn, &select_none_btn, &add_btn, |n| {
         ngettext("_Add {} file", "_Add {} files", n as u32).replace("{}", &n.to_string())
     });
@@ -1631,7 +1547,7 @@ pub fn show_torrent_files_dialog(
         });
     }
 
-    // No gtk Window parent exists here (invoked from an adw::Dialog):
-    // present standalone like the no-window fallback above.
+    // No gtk Window parent exists here (invoked from an adw::Dialog): present
+    // standalone like the no-window fallback above.
     dialog.present(None::<&gtk4::Window>);
 }

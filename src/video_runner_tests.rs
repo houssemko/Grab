@@ -1,37 +1,23 @@
-//! Tests for the live-capture runner's private cleanup policy.
-//!
-//! Reaches items `crate::video`'s facade cannot: the sweep helper and
-//! the exit/staging enums are private to `video_runner`, so their
-//! retention contract is only observable from in here.
+//! Tests for the live-capture runner's private cleanup policy: the sweep helper
+//! and exit/staging enums are private to `video_runner`, so their retention
+//! contract is only observable from in here.
 
 use super::*;
 
-/// `Exit::RenameFailed` is the one exit where the recorded media is the
-/// user's only copy of a finished capture: the row just fails, nothing
-/// re-records, and the rename could not place the remux.
-///
-/// Pinned directly because the end-to-end fixture that reaches this exit
-/// has to destroy the destination directory in order to fail the rename,
-/// which takes the raw shell with it. This drives the same `matches!` the
-/// runner uses, so adding `RenameFailed` to the drop set fails here.
-///
-/// Also pins the non-recursive staging sweep, which is what makes a
-/// completed remux durable: an earlier attempt's temp is the only copy of
-/// a capture that could not be placed, so no exit may take it out with the
-/// directory.
+/// `Exit::RenameFailed` keeps the user's only copy: nothing re-records, nothing is
+/// swept except `.ytdl` state. Also pins the non-recursive staging sweep, which is
+/// what keeps an earlier attempt's unplaceable remux durable.
 #[test]
 fn rename_failed_exit_keeps_media_and_staging_but_sweeps_state() {
     let dir = std::env::temp_dir().join(format!("grab-sweep-rename-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging).unwrap();
-    // Both dest-side media shapes: yt-dlp renames `.part` to the plain
-    // path on a clean exit and leaves the shell when killed.
+    // Both dest-side shapes: clean exit renames `.part` away, kill leaves the shell.
     let out = dir.join("v.live.mp4");
     let part = dir.join("v.live.mp4.part");
     let state = dir.join("v.live.mp4.ytdl");
     let final_tmp = staging.join("final.1.mp4");
-    // A sibling from an earlier attempt on this row.
     let sibling = staging.join("final.9.mp4");
     std::fs::write(&out, b"finalized").unwrap();
     std::fs::write(&part, b"shell").unwrap();
@@ -140,12 +126,9 @@ fn a_sweep_removes_only_its_own_temp() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The scratch sweep must not begin until the recorder has been reaped.
-/// Sweeping first could delete a file the recorder is still writing.
-///
-/// A real `Child` cannot demonstrate this: both orders leave the same end
-/// state whenever the reap is quick, and there is no hook in between. So
-/// the sequence is driven here by controlled futures instead.
+/// Sweep must follow reap: sweeping first could delete a file the recorder still writes.
+/// A real `Child` can't show this (both orders look the same when reap is quick), so
+/// the sequence is driven by controlled futures instead.
 #[test]
 fn the_sweep_follows_the_reap() {
     let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -165,10 +148,8 @@ fn the_sweep_follows_the_reap() {
     );
 }
 
-/// The non-vacuity guard for the ordering: a reap that never completes
-/// must stall the sweep indefinitely. Any implementation that ran the two
-/// concurrently, or swept first, would reclaim scratch out from under a
-/// recorder that is demonstrably still running.
+/// Non-vacuity guard: a stalled reap must stall the sweep, or scratch is reclaimed
+/// under a still-running recorder.
 #[test]
 fn a_stalled_reap_blocks_the_sweep() {
     let swept = std::rc::Rc::new(std::cell::Cell::new(false));
@@ -179,8 +160,7 @@ fn a_stalled_reap_blocks_the_sweep() {
                 std::future::pending::<()>(),
                 move || async move { sweep_flag.set(true); },
             ) => {}
-            // Nothing can satisfy the reap arm, so this is the only way
-            // out: give the sequence a real window to misbehave.
+            // Nothing can satisfy the reap arm: give the sequence a real window to misbehave.
             _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
         }
     });

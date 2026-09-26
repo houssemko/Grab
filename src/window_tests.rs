@@ -5,11 +5,8 @@ use crate::window_rows::{StopCopy, should_pulse, stop_copy};
 
 #[test]
 fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
-    // The stop button is the one control whose meaning inverts: stopping
-    // a normal download throws it away, stopping a live capture keeps the
-    // recording. Shipped, both read "Cancel" (tooltip) and pressing it
-    // gave no feedback at all, so a live user could not tell their
-    // recording was safe.
+    // Stop inverts by row: normal downloads discard, live captures keep the recording.
+    // Shipped both as "Cancel" with no feedback, so live users couldn't tell it was safe.
     assert_eq!(
         stop_copy(false),
         StopCopy::Cancel,
@@ -33,8 +30,7 @@ fn should_pulse_covers_row_states() {
     // Live captures pulse for the whole capture regardless of fraction.
     assert!(should_pulse(Downloading, true, 0.0));
     assert!(should_pulse(Downloading, true, 0.9));
-    // Anything not actively downloading stays frozen: queued, paused,
-    // and terminal rows must not animate.
+    // Non-downloading rows never animate: queued, paused, and terminal.
     assert!(!should_pulse(Queued, false, 0.0));
     assert!(!should_pulse(Paused, false, 0.0));
     assert!(!should_pulse(Paused, true, 0.0));

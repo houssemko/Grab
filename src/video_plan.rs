@@ -1,7 +1,5 @@
-//! Stream planning: which video/audio/HLS streams an attempt
-//! fetches, in priority order. Leaf module (video_types +
-//! video_quality + yt_dlp model): the runner consumes the plan,
-//! tests cover the pickers directly.
+//! Stream planning: which video/audio/HLS streams an attempt fetches, in
+//! priority order. Leaf module (video_types + video_quality + yt_dlp model).
 
 use crate::video_quality::{quality_height, selector_for_quality};
 use crate::video_tools::VideoError;
@@ -9,10 +7,8 @@ use crate::video_types::{HlsSel, codec_preference, filesize_of};
 use yt_dlp::model::format::{Extension, Format, FormatType, Protocol};
 use yt_dlp::model::{DrmStatus, Video};
 
-/// Smallest height at or above the cap, else the tallest; `None`
-/// takes the tallest. Shared by the muxed and HLS pickers over
-/// pre-filtered (height, value) pairs — fetchability filtering stays
-/// with the callers. Pure.
+/// Smallest height at or above the cap, else the tallest; `None` takes the
+/// tallest. Fetchability filtering stays with the callers. Pure.
 fn pick_at_or_above<T: Clone>(mut cands: Vec<(T, u32)>, want: Option<u32>) -> Option<T> {
     cands.sort_by_key(|(_, h)| *h);
     match want {
@@ -25,13 +21,9 @@ fn pick_at_or_above<T: Clone>(mut cands: Vec<(T, u32)>, want: Option<u32>) -> Op
     }
 }
 
-/// Best muxed (audio+video) file for a height cap: smallest height at
-/// or above the cap, else the tallest available. Same semantics as
-/// [`select_hls_format`]. Only directly fetchable files qualify, so a
-/// DRM or link-less entry can never shadow a playable one — and the
-/// quality cap survives: callers used to take the crate's
-/// `best_audio_video_format`, which is first-in-extractor-order (lowest
-/// first on x.com) regardless of the requested height.
+/// Best muxed (audio+video) file for a height cap, same semantics as
+/// [`select_hls_format`]. Only directly fetchable files qualify, so a DRM or
+/// link-less entry can never shadow a playable one.
 fn select_muxed_format(formats: &[Format], want: Option<u32>) -> Option<StreamSel> {
     let cands: Vec<(StreamSel, u32)> = formats
         .iter()
@@ -57,9 +49,9 @@ fn format_height(formats: &[Format], id: &str) -> Option<u32> {
 /// cap, else the tallest available. Mirrors the crate's
 /// closest-at-or-above preset semantics.
 pub(crate) fn select_hls_format(formats: &[Format], want: Option<u32>) -> Option<HlsSel> {
-    // Extractor order is arbitrary: the shared picker sorts ascending
-    // so the capped match is genuinely the smallest height at or above
-    // it. Height-less variants sort as 0, matching the old inline order.
+    // Extractor order is arbitrary: sorting ascending makes the capped match
+    // genuinely the smallest height at or above it. Height-less variants
+    // sort as 0, matching the old inline order.
     let cands: Vec<(HlsSel, u32)> = formats
         .iter()
         .filter_map(HlsSel::from_format)
@@ -100,22 +92,14 @@ pub(crate) struct StreamPlan {
 
 /// Resolve which streams an attempt fetches, in priority order:
 ///
-/// 1. A dialog-pinned HLS id resolves first. [`find_usable_format`]
-///    only accepts plain HTTPS, so without this the pin would be
-///    dropped and then shadowed by the muxed adoption below (x.com
-///    VODs: direct mp4s are muxed, so the combo lists HLS only).
+/// 1. A dialog-pinned HLS id resolves first — [`find_usable_format`] takes
+///    only plain HTTPS, so without this the pin would be dropped and then
+///    shadowed by the muxed adoption below (x.com VODs).
 /// 2. Direct splits: pinned HTTPS id, else the quality preset.
-/// 3. Single-part adoption for a still-missing side: muxed files (at
-///    the requested height, not first-in-extractor-order), then
-///    Unclassified video containers (TikTok-style sparse extractors).
-///    Gated on the missing side — not on audio absence — because those
-///    pages also list a separate audio track, which used to skip both
-///    fallbacks and keep only the music. Skipped once a pinned HLS
-///    resolved, and when the request already holds both splits.
-/// 4. The HLS preset stays a last resort for rows with no direct audio
-///    (a muxed adoption above takes precedence when it found a file),
-///    except when the preset is taller yet within the cap: Best match
-///    means best across transports, not best direct file.
+/// 3. Single-part adoption for a still-missing side, skipped once a pinned
+///    HLS resolved or the request already holds both splits.
+/// 4. The HLS preset is the last resort, except when the preset is taller
+///    yet within the cap: Best match means best across transports.
 pub(crate) fn plan_streams(
     video: &Video,
     quality: &str,
@@ -125,9 +109,8 @@ pub(crate) fn plan_streams(
     item_id: u64,
 ) -> StreamPlan {
     use yt_dlp::VideoSelection as _;
-    // Pins and presets resolve for audio-only rows too: with no direct
-    // audio they feed the HLS extract path (or live capture) instead of
-    // failing the row as unavailable.
+    // Pins and presets resolve for audio-only rows too: with no direct audio
+    // they feed the HLS extract path instead of failing the row.
     let pinned_hls: Option<HlsSel> =
         video_format_id.and_then(|id| find_hls_format(&video.formats, id));
     let mut video_sel: Option<StreamSel> = if audio_only_request {
@@ -160,18 +143,13 @@ pub(crate) fn plan_streams(
     };
     let mut audio_sel: Option<StreamSel> =
         select_audio_original_first(&video.formats).and_then(|f| StreamSel::from_format(f).ok());
-    // Muxed-only sources (one file, both tracks — archive.org, file
-    // lockers): adopt the file directly instead of failing on the missing
-    // split counterpart. A downloaded track beats a failed row; the
-    // manifest records the effective single-part mode so retries agree.
-    // Unclassified last resort (TikTok-style sparse extractors): both
-    // codec fields missing leaves media typed Unknown — invisible to
-    // every selector above. Only video-container extensions qualify,
-    // so storyboards and manifests can never adopt here.
+    // Muxed-only sources (one file, both tracks): adopt it rather than fail on
+    // the missing split. Unclassified video containers are the last resort
+    // (TikTok-style sparse extractors) — only video extensions qualify, so
+    // storyboards and manifests can never adopt here.
     let mut single_adopted = false;
-    // Pre-adoption audio: restored if the HLS override below fires, so
-    // a shadowed adoption never leaks its single-part mode into the
-    // HLS path.
+    // Pre-adoption audio: restored if the HLS override below fires, so a
+    // shadowed adoption never leaks its single-part mode into the HLS path.
     let pre_audio_sel = audio_sel.clone();
     if pinned_hls.is_none()
         && (audio_sel.is_none() || video_sel.is_none())
@@ -209,15 +187,11 @@ pub(crate) fn plan_streams(
             audio_sel = Some(m);
         }
     }
-    // HLS fallback (x.com VODs, live replays): nothing above is
-    // directly fetchable, but manifest variants exist. A resolved pin
-    // wins outright; otherwise the preset only runs when no direct
-    // audio survived (a muxed adoption above takes precedence).
-    // Best-overall override: when the adoption took a muxed file
-    // shorter than an in-cap HLS variant (x.com direct files top out
-    // below the tallest variant), the variant wins — Best match must
-    // mean best across transports, not best direct file. Ties and
-    // over-cap variants keep the direct file.
+    // HLS fallback: nothing above is directly fetchable but manifest variants
+    // exist. A resolved pin wins outright; the preset only runs when no direct
+    // audio survived, except when the adoption took a muxed file shorter than
+    // an in-cap variant — then the variant wins, and ties or over-cap
+    // variants keep the direct file.
     let hls_preset = select_hls_format(&video.formats, quality_height(quality));
     let mut hls_wins = false;
     if !audio_only_request
@@ -266,9 +240,8 @@ pub(crate) struct StreamSel {
 }
 
 impl StreamSel {
-    /// Build from an extractor format, accepting only what the pipeline
-    /// can actually fetch: plain-HTTPS, DRM-free streams with a URL.
-    /// Anything else (HLS manifests, encrypted formats) is a clean
+    /// Build from an extractor format, accepting only what the pipeline can
+    /// fetch: plain-HTTPS, DRM-free, with a URL. Anything else is a clean
     /// unavailable error — never playlist bytes merged as media, never
     /// encrypted garbage saved as a finished file.
     pub(crate) fn from_format(f: &Format) -> Result<Self, VideoError> {
@@ -298,19 +271,12 @@ impl StreamSel {
 
 /// Best direct audio track, original language first.
 ///
-/// YouTube ships auto-dubbed audio as separate tracks (verified live:
-/// dub tracks carry the dub `language`, "dubbed" in `format_note`, and
-/// `language_preference` -1; the original carries 10). The crate's
-/// `select_audio_format(Best, …)` ranks quality → bitrate → sample rate
-/// → channels with no language awareness, so a higher-bitrate dub beats
-/// the original. Rank `language_preference` (untagged → 0) above that
-/// same order instead — matching upstream yt-dlp, whose default format
-/// leads with `lang`. Extractors that don't tag score every track 0,
-/// tying straight through to today's bitrate ranking unchanged. Only
-/// directly fetchable tracks qualify (same gate as
-/// [`StreamSel::from_format`]), so HLS/DRM audio still degrades to
-/// absent and the HLS preset in [`plan_streams`] takes over. Pure for
-/// tests.
+/// YouTube ships auto-dubbed audio as separate tracks, and the crate's
+/// `select_audio_format(Best, …)` has no language awareness, so a
+/// higher-bitrate dub beats the original. Ranking `language_preference`
+/// above the same quality/bitrate/rate/channel order — as upstream yt-dlp
+/// does — keeps untagged extractors tying straight through unchanged.
+/// Pure for tests.
 pub(crate) fn select_audio_original_first(formats: &[Format]) -> Option<&Format> {
     formats
         .iter()
@@ -326,12 +292,10 @@ pub(crate) fn select_audio_original_first(formats: &[Format]) -> Option<&Format>
         })
 }
 
-/// Audio rank key in yt-dlp `lang`-first order (language, quality,
-/// bitrate, sample rate, channels). Missing fields score neutral, so
-/// untagged tracks fall back to bitrate instead of failing. The
-/// comparator keeps `total_cmp` on the float lanes: NaN can never
-/// appear (serde_json rejects non-finite numbers), but the ordering
-/// stays total regardless. Pure.
+/// Audio rank key in yt-dlp `lang`-first order (language, quality, bitrate,
+/// sample rate, channels). Missing fields score neutral, so untagged tracks
+/// fall back to bitrate. The comparator keeps `total_cmp` on the float lanes
+/// so the ordering stays total even though NaN cannot appear. Pure.
 fn audio_rank_key(f: &Format) -> (i64, f64, f64, i64, i64) {
     (
         f.language_preference.unwrap_or(0),

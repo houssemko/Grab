@@ -1,7 +1,5 @@
-//! Row widgets: list-row construction, refresh ticks, pulse
-//! gating and the small builders around them. UI module (gtk/adw +
-//! leaves): the window builder consumes `build_row`; dialogs use
-//! the labels; tests pin `should_pulse` directly.
+//! Row widgets: list-row construction, refresh ticks, pulse gating and the
+//! shared builders. UI leaf module (gtk/adw).
 
 use crate::download::{DownloadManager, RemovedSnapshot};
 use crate::download_pieces::{BLOCK_CELLS, aggregate};
@@ -25,8 +23,7 @@ fn icon_button(icon: &str, tooltip: &str) -> gtk4::Button {
     b
 }
 
-/// Default file name for a probed video under the current preferences:
-/// title default with the remux target and audio mode applied. The
+/// Default file name for a probed video under the current preferences; the
 /// intake sanitizes it and falls back to the URL stem.
 pub(crate) fn default_name_for(
     settings: &crate::settings::AppSettings,
@@ -37,14 +34,12 @@ pub(crate) fn default_name_for(
     crate::video::default_video_filename(title, audio_only, remux.as_deref())
 }
 
-/// ngettext with the "{n}" count slot filled: the msgids keep "{n}"
-/// so translators can reposition the count, filled here for display.
+/// ngettext with the "{n}" slot filled so translators can reposition it.
 pub(crate) fn ngettext_count(singular: &str, plural: &str, n: usize) -> String {
     ngettext(singular, plural, n as u32).replace("{n}", &n.to_string())
 }
 
-/// Hidden error caption for a preferences group: callers set its text
-/// and show it on failure. One builder so all dialogs stay identical.
+/// Hidden error caption for a preferences group, shown on failure.
 pub(crate) fn error_label(group: &adw::PreferencesGroup) -> gtk4::Label {
     let label = gtk4::Label::builder()
         .label("")
@@ -56,11 +51,8 @@ pub(crate) fn error_label(group: &adw::PreferencesGroup) -> gtk4::Label {
     label
 }
 
-/// HIG selection-mode action bar shared by the pickers: Select All /
-/// Select None start-packed, the confirm action end-packed as
-/// suggested. Returns the bar and its three buttons for the caller to
-/// wire and attach to its toolbar. One builder so both dialogs stay
-/// identical.
+/// HIG selection-mode action bar shared by the pickers: returns the bar and
+/// its three buttons for the caller to wire.
 pub(crate) fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Button, gtk4::Button)
 {
     let action_bar = gtk4::ActionBar::new();
@@ -78,9 +70,7 @@ pub(crate) fn selection_action_bar() -> (gtk4::ActionBar, gtk4::Button, gtk4::Bu
     (action_bar, select_all_btn, select_none_btn, add_btn)
 }
 
-/// Open `path` with the system's default application for its file type —
-/// the same as double-clicking the file in the file manager. Used for
-/// double-click/Enter on a finished download row.
+/// Open `path` with the system's default application for its file type.
 fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
     let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
     let t = toasts.clone();
@@ -97,8 +87,7 @@ fn open_with_default_app(path: &std::path::Path, toasts: &adw::ToastOverlay) {
 }
 
 /// Launch `path` with its default handler (`reveal` shows the containing
-/// folder with the file selected instead). For a directory the default
-/// handler is the file manager.
+/// folder with the file selected instead).
 pub fn launch_path(path: &std::path::Path, toasts: &adw::ToastOverlay, reveal: bool) {
     let launcher = gtk4::FileLauncher::new(Some(&gio::File::for_path(path)));
     let t = toasts.clone();
@@ -142,20 +131,15 @@ struct RowWidgets {
     expanded: Rc<Cell<bool>>,
 }
 
-/// Whether deferring `item` could hand its slot to someone: another row is
-/// waiting queued. With nothing waiting the button would just stop and
-/// immediately restart the same download. O(1) off the cached count, so
-/// progress ticks can call it freely.
+/// Whether deferring `item` could hand its slot to another queued row —
+/// with nobody waiting the button would just restart the same download.
 fn another_queued(manager: &DownloadManager, item: &crate::download::DownloadItem) -> bool {
     let n = manager.queued_count();
     n > 1 || (n == 1 && item.status() != DownloadStatus::Queued)
 }
 
-/// Whether a row's bar is indeterminate: active with no fraction to
-/// fill (live captures never report a total; resolving rows sit at
-/// zero), so the wall-clock tick advances it instead of progress
-/// notifies. Pure for tests — the only pulse logic allowed outside
-/// build_row's tick.
+/// Whether a row's bar is indeterminate (active with no fraction to fill).
+/// Pure for tests — the only pulse logic allowed in build_row's tick.
 pub(crate) fn should_pulse(status: DownloadStatus, is_live: bool, progress: f64) -> bool {
     status == DownloadStatus::Downloading && (is_live || progress <= 0.0)
 }
@@ -169,17 +153,11 @@ pub(crate) enum StopCopy {
     StopRecording,
 }
 
-/// The stop button is the one control whose meaning inverts — cancelling
-/// a normal download discards it, stopping a live capture keeps the
-/// recording — so the copy has to follow the row's state rather than
-/// staying "Cancel" for both.
-///
-/// The decision is pure and testable; the wording is not here on purpose.
-/// `xgettext` only extracts *literal* `gettext("…")` arguments, so
-/// returning strings from this function and translating them at the call
-/// site would put every label permanently out of reach of translators.
-/// The enum keeps the logic testable while the UI keeps the literals at
-/// the translation boundary.
+/// Which of the two meanings the row's stop button currently carries:
+/// cancelling discards the bytes, stopping a live capture keeps the recording,
+/// so the copy follows the row's state. Pure and testable, but the wording
+/// stays here: `xgettext` only extracts literal `gettext("…")` arguments, so
+/// returning strings would put every label out of reach of translators.
 pub(crate) fn stop_copy(is_live: bool) -> StopCopy {
     if is_live {
         StopCopy::StopRecording
@@ -188,9 +166,8 @@ pub(crate) fn stop_copy(is_live: bool) -> StopCopy {
     }
 }
 
-/// Set a row button's icon, tooltip, and screen-reader label from one
-/// verb: the three always agree for state-toggle buttons, so binding
-/// them keeps the accessible name from drifting off the visual one.
+/// Set a row button's icon, tooltip, and screen-reader label from one verb so
+/// the accessible name can't drift off the visual one.
 fn set_toggle_verb(btn: &gtk4::Button, icon: &str, tip: &str) {
     btn.set_icon_name(icon);
     btn.set_tooltip_text(Some(tip));
@@ -205,12 +182,9 @@ fn refresh_row(
 ) {
     let frac = item.progress().clamp(0.0, 1.0);
     let active = item.status() == DownloadStatus::Downloading;
-    // Unbounded work has no fraction to fill with: live captures never
-    // report a total, and any row whose total is still unknown sits at
-    // zero. HIG prescribes indeterminate activity there instead of a
-    // frozen empty bar — advanced solely by the per-row wall-clock tick
-    // in build_row, never here: progress ticks arrive ~20/sec during
-    // transfer and would otherwise double the animation cadence.
+    // No fraction to fill: live captures and unknown totals sit at zero, so
+    // HIG wants indeterminate activity — advanced only by build_row's
+    // wall-clock tick, never here (progress ticks arrive ~20/sec).
     if !should_pulse(item.status(), is_live, frac) {
         w.progress.set_fraction(frac);
     }
@@ -221,14 +195,12 @@ fn refresh_row(
         item.status(),
         DownloadStatus::Queued | DownloadStatus::Downloading | DownloadStatus::Paused
     );
-    // Live captures can't pause or defer mid-flight (resuming a moved-on
-    // stream is meaningless): the toggle and queue buttons hide, and Stop
+    // Live captures can't pause or defer mid-flight: the buttons hide and Stop
     // keeps what's recorded instead of discarding it.
     let live_capturing = active && is_live;
     w.toggle_btn.set_visible(running && !live_capturing);
     w.stop_btn.set_visible(running);
-    // Header capitalization for the tooltip, sentence case for the
-    // accessible name — an a11y label is a spoken phrase, not a caption.
+    // Header caps for the tooltip, sentence case for the spoken a11y name.
     let (stop_tip, stop_a11y) = match stop_copy(live_capturing) {
         StopCopy::Cancel => (gettext("Cancel"), gettext("Cancel")),
         StopCopy::StopRecording => (gettext("Stop Recording"), gettext("Stop recording")),
@@ -236,8 +208,7 @@ fn refresh_row(
     w.stop_btn.set_tooltip_text(Some(&stop_tip));
     w.stop_btn
         .update_property(&[gtk4::accessible::Property::Label(&stop_a11y)]);
-    // Deferring only makes sense while holding a slot that someone else
-    // is waiting for; queued rows are already waiting.
+    // Deferring only helps while another row waits for the slot.
     w.queue_btn.set_visible(
         defer_available
             && !live_capturing
@@ -246,8 +217,7 @@ fn refresh_row(
                 DownloadStatus::Downloading | DownloadStatus::Paused
             ),
     );
-    // Failed rows otherwise strand: bulk retry lives in the menu/banner,
-    // but a single failure deserves its own button.
+    // Single failures get their own button; bulk retry lives in the menu.
     w.retry_btn.set_visible(matches!(
         item.status(),
         DownloadStatus::Failed | DownloadStatus::Cancelled
@@ -263,8 +233,7 @@ fn refresh_row(
     };
     set_toggle_verb(&w.toggle_btn, icon, &tip);
 
-    // Block map: only while pieces are still landing. Other states
-    // collapse it so finished rows stay compact.
+    // Block map only while pieces are landing; other states collapse it.
     let expandable = matches!(
         item.status(),
         DownloadStatus::Downloading | DownloadStatus::Paused
@@ -279,10 +248,8 @@ fn refresh_row(
     }
 }
 
-/// Weak refs to one row's refreshable widgets. Named fields instead of
-/// a positional tuple: every element has the same type, so a tuple
-/// silently accepts a swapped pair and the mistake only shows up as a
-/// wrong widget at refresh time.
+/// Weak refs to one row's refreshable widgets. Named over a positional tuple,
+/// which would silently accept a swapped pair of identical types.
 #[derive(Clone)]
 struct RowWeaks {
     detail: glib::WeakRef<gtk4::Widget>,
@@ -300,17 +267,15 @@ struct RowWeaks {
     name: glib::WeakRef<gtk4::Widget>,
 }
 
-/// Strongly-held row widgets for one refresh tick: the two text labels
-/// plus the refresh bundle.
+/// Strongly-held row widgets for one refresh tick.
 struct LiveRow {
     status: gtk4::Label,
     name: gtk4::Label,
     widgets: RowWidgets,
 }
 
-/// Upgrade a row's weak refs to strong typed widgets. `None` when
-/// widgets are gone (row destroyed — normal, silent) or mistyped (UI
-/// drift — warns here, never panics, per the no-panic-rows rule).
+/// Upgrade a row's weak refs to strong typed widgets. `None` when widgets are
+/// gone (row destroyed) or mistyped (warns here, never panics).
 fn upgrade_row(weaks: &RowWeaks, expanded: &Rc<Cell<bool>>) -> Option<LiveRow> {
     let RowWeaks {
         detail: w_detail,
@@ -468,10 +433,9 @@ pub(crate) fn build_row(
     let progress = gtk4::ProgressBar::new();
     progress.set_show_text(false);
 
-    // Block map: per-piece completion strip under the progress bar,
-    // revealed by clicking the row. A DrawingArea (not hundreds of
-    // widgets) keeps thousands of pieces cheap; the textual percent in
-    // `detail` stays the screen-reader path.
+    // Per-piece completion strip under the progress bar, revealed by clicking
+    // the row; a DrawingArea (not hundreds of widgets) keeps thousands of
+    // pieces cheap and `detail` stays the screen-reader path.
     let id = item.id();
     let expanded = Rc::new(Cell::new(false));
     let blocks = gtk4::DrawingArea::new();
@@ -506,9 +470,8 @@ pub(crate) fn build_row(
     }
     let map_revealer = gtk4::Revealer::new();
     map_revealer.set_transition_type(gtk4::RevealerTransitionType::SlideDown);
-    // HIG separation: a horizontal separator between the progress bar and
-    // the blocks, 6px from each (related elements). Inside the revealer
-    // so nothing shows while collapsed.
+    // HIG separation: a horizontal separator 6px from each neighbour, inside
+    // the revealer so nothing shows while collapsed.
     let map_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
     map_box.set_margin_top(6);
     map_box.append(&gtk4::Separator::new(gtk4::Orientation::Horizontal));
@@ -523,8 +486,8 @@ pub(crate) fn build_row(
     let row = gtk4::ListBoxRow::new();
     row.set_child(Some(&outer));
 
-    // Right-click menu (rename only): a per-row action group keeps the
-    // global menu untouched.
+    // Right-click menu (rename only): a per-row action group keeps the global
+    // menu untouched.
     let rename_menu = gio::Menu::new();
     rename_menu.append(Some(&gettext("Rename…")), Some("row.rename"));
     let pop = gtk4::PopoverMenu::from_model(Some(&rename_menu));
@@ -543,12 +506,9 @@ pub(crate) fn build_row(
         row.insert_action_group("row", Some(&actions));
     }
 
-    // Click the row body: single-click reveals the block map on live
-    // rows, double-click opens a finished download. Clicks landing on a
-    // button belong to the button: walk up from the pick target and
-    // ignore those. Only live rows expand (finished ones have no map),
-    // and only with map data to show (resolving or chunk-less rows
-    // ignore the click).
+    // Click the row body: single-click reveals the block map on live rows,
+    // double-click opens a finished download. Clicks landing on a button
+    // belong to the button: walk up from the pick target and ignore those.
     {
         let click = gtk4::GestureClick::new();
         let m = Rc::clone(manager);
@@ -578,9 +538,8 @@ pub(crate) fn build_row(
             let Some(it) = m.find(id) else {
                 return;
             };
-            // Double-click (or double-tap) a finished row opens the
-            // downloaded file. Only the second press opens: triple-clicks
-            // and beyond do nothing.
+            // Double-click (or double-tap) a finished row opens the file;
+            // only the second press opens, so triple-clicks do nothing.
             if n_press == 2 && it.status() == DownloadStatus::Done {
                 open_with_default_app(&it.display_path(), &t);
                 return;
@@ -589,10 +548,9 @@ pub(crate) fn build_row(
                 it.status(),
                 DownloadStatus::Downloading | DownloadStatus::Paused
             );
-            // No map without data: resolving rows and chunk-less videos
-            // have nothing to reveal, so the click does nothing. The
-            // toggle stays on the first press so a double-click never
-            // flips the map twice.
+            // No map without data: resolving and chunk-less rows ignore the
+            // click, and the toggle stays on the first press so a
+            // double-click never flips the map twice.
             if n_press == 1 && live && !m.piece_bitmap(id).is_empty() {
                 exp.set(!exp.get());
                 rev.set_reveal_child(exp.get());
@@ -602,11 +560,10 @@ pub(crate) fn build_row(
         row.add_controller(click);
     }
 
-    // Enter on a focused finished row opens the downloaded file, the
-    // keyboard counterpart of double-click; F2 renames the focused row,
-    // the keyboard counterpart of the right-click menu. The row itself
-    // must hold focus (not a button inside it) so activating a button
-    // never opens the file or pops the rename dialog as a side effect.
+    // Enter on a focused finished row opens the file (double-click's keyboard
+    // counterpart), F2 renames (the right-click menu's). The row itself must
+    // hold focus — not a button inside it — so activating a button never opens
+    // the file or pops the rename dialog as a side effect.
     {
         let key = gtk4::EventControllerKey::new();
         let m = Rc::clone(manager);
@@ -696,12 +653,10 @@ pub(crate) fn build_row(
         another_queued(manager, item),
         manager.is_live_video(item.id()),
     );
-    // Indeterminate activity runs on wall-clock, not progress ticks.
-    // Resolving ("Resolving media…") emits no property changes, so a
-    // pulse driven by refresh_row alone freezes on one frame — the
-    // reported hang. This tick advances only indeterminate bars
-    // (active with no fraction, or live) and dies with the row; real
-    // fractions keep rendering from progress notifies as before.
+    // Indeterminate activity runs on wall-clock, not progress ticks:
+    // resolving ("Resolving media…") emits no property changes, so a pulse
+    // driven by refresh_row alone freezes on one frame — the reported hang.
+    // This tick advances only indeterminate bars and dies with the row.
     {
         let bar = progress.downgrade();
         let weak_item = item.downgrade();
@@ -733,20 +688,14 @@ pub(crate) fn build_row(
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
         stop_btn.connect_clicked(move |_| {
-            // Read the live flag first: `cancel` may change the row's
-            // state, and the toast is about the state the user clicked
-            // in, not the one they were left in.
+            // Read the live flag first: the toast is about the state the user
+            // clicked in, not the one `cancel` leaves them in.
             let copy = stop_copy(m.is_live_video(id));
             m.cancel(id);
-            // The HIG says not to rely on a tooltip for essential
-            // information — it is unavailable on touch. Whether the
-            // recording survives is essential, and this is the one
-            // control whose meaning inverts, so it gets a real channel.
-            //
-            // Progress, not completion: at click time the remux has not
-            // run and can still fail (a capture stopped before any bytes
-            // records nothing and the row goes Failed), so promising a
-            // finished save would be a promise the code cannot keep.
+            // Essential info gets a real channel: tooltips are unavailable on
+            // touch, and this is the one control whose meaning inverts.
+            // Progress, not completion: the remux can still fail, so promising
+            // a finished save would be a promise the code cannot keep.
             if copy == StopCopy::StopRecording {
                 t.add_toast(adw::Toast::new(&gettext("Saving recording…")));
             }
@@ -760,8 +709,8 @@ pub(crate) fn build_row(
         let m = Rc::clone(manager);
         let t = Rc::clone(toasts);
         queue_btn.connect_clicked(move |_| {
-            // Re-check: the button only refreshes on this row's own ticks,
-            // so the last waiter may have left since it was shown.
+            // Re-check: only this row's own ticks refresh the button, so the
+            // last waiter may have left since it was shown.
             let Some(it) = m.find(id) else {
                 return;
             };
@@ -822,8 +771,7 @@ pub(crate) fn build_row(
     }
     row
 }
-/// Rename a completed or queued row. The manager enforces what can be
-/// renamed; failures (mid-transfer, torrent, bad name) show inline.
+/// Rename a completed or queued row; the manager enforces what can be renamed.
 fn show_rename_dialog(
     manager: Rc<DownloadManager>,
     id: u64,

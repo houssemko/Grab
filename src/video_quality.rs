@@ -1,34 +1,18 @@
-//! Quality ladder: stored values, height caps, picker labels and
-//! filename defaults. Leaf module (media types + yt_dlp selector +
-//! gettext): preferences, dialog and planner consume these through
-//! the `video` facade.
+//! Quality ladder: stored values, height caps, picker labels and filename
+//! defaults. Leaf module (media types + yt_dlp selector + gettext).
 
 use crate::video_types::VideoFormatOption;
 use gettextrs::gettext;
 use yt_dlp::model::selector::VideoQuality;
 
-/// Default file name for a resolved video when the user left the name
-/// blank: the title and the container the worker will produce.
+/// Default file name for a resolved video: the title and the container the
+/// worker will produce.
 ///
-/// This deliberately **diverges from yt-dlp's default output template**
-/// (`%(title)s [%(id)s].%(ext)s`), which Grab used to emulate. The id is
-/// metadata, and a folder listing is the wrong place for it. It now rides
-/// in the file's `comment` tag — `--embed-metadata` writes the source
-/// `webpage_url` there, and that URL carries the id — so the information
-/// still survives for anything reading tags, without cluttering the one
-/// part of a download users see most.
-///
-/// Grab keeps passing yt-dlp a literal `-o` path, so the name is built
-/// here at naming time rather than expanded by yt-dlp: the pipeline
-/// (dedupe, rename claims, resume) needs the final name up front. The
-/// intake sanitizes it further.
-///
-/// The extension is the remux target when the row is a video download
-/// with remux enabled: without it the worker remuxes to mkv and claims
-/// matroska bytes under an mp4 name. Audio-only ignores remux (no video
-/// leg exists) and always takes m4a. The target is lowercased here so
-/// the contract holds no matter the caller (all current callers pass
-/// the allowlisted lowercase already).
+/// Deliberately diverges from yt-dlp's `%(title)s [%(id)s].%(ext)s`: the id
+/// rides in the file's `comment` tag instead, and Grab builds the name here
+/// (not via `-o`) because dedupe, rename claims and resume all need the final
+/// name up front. The extension is the remux target, lowercased here so the
+/// contract holds whatever the caller passes; audio-only ignores remux.
 pub fn default_video_filename(title: &str, audio_only: bool, remux_ext: Option<&str>) -> String {
     let ext = if audio_only {
         "m4a"
@@ -38,9 +22,9 @@ pub fn default_video_filename(title: &str, audio_only: bool, remux_ext: Option<&
     format!("{title}.{ext}")
 }
 
-/// Translated ComboRow labels, index-aligned with [`VIDEO_QUALITY_VALUES`](crate::media_types::VIDEO_QUALITY_VALUES).
-/// Shared by Preferences and the New Download dialog so both combos stay
-/// in the same order.
+/// Combo row labels, index-aligned with
+/// [`VIDEO_QUALITY_VALUES`](crate::media_types::VIDEO_QUALITY_VALUES) and
+/// shared by Preferences and the New Download dialog.
 pub fn quality_labels() -> Vec<String> {
     vec![
         gettext("Best"),
@@ -52,12 +36,9 @@ pub fn quality_labels() -> Vec<String> {
     ]
 }
 
-/// Nearest stored quality bucket for an exact format height, so a
-/// dropped dialog pin degrades to the picked height instead of the
-/// global preference. Exact hits return themselves; anything between
-/// buckets rounds to the closest, ties up; heights outside every
-/// bucket clamp to the tallest/shortest. Every result is a recognized
-/// [`VIDEO_QUALITY_VALUES`](crate::media_types::VIDEO_QUALITY_VALUES) entry (never "best").
+/// Nearest stored quality bucket for an exact format height, so a dropped
+/// dialog pin degrades to the picked height instead of the global preference.
+/// Ties go up, out-of-range heights clamp. Never returns "best".
 pub fn quality_for_height(height: u32) -> &'static str {
     QUALITY_HEIGHTS
         .iter()
@@ -68,9 +49,8 @@ pub fn quality_for_height(height: u32) -> &'static str {
 }
 
 /// Default combo selection for a fresh resolve: index into `formats`
-/// (tallest first) closest to the preference. `"best"` and empty
-/// listings resolve to row 0; ties go taller, then earlier. Pure for
-/// tests.
+/// (tallest first) closest to the preference. `"best"` and empty listings
+/// resolve to row 0; ties go taller, then earlier.
 pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> usize {
     let want = match quality_height(quality) {
         None => return 0,
@@ -85,9 +65,8 @@ pub fn default_quality_index(formats: &[VideoFormatOption], quality: &str) -> us
 }
 
 /// Canonical quality ladder: stored value to height cap (`None` = Best,
-/// tallest available). Single source for the height cap and the
-/// extractor selector — unknown values fall back to 1080p in both by
-/// design (same fallback as the combo mapping). Pure.
+/// tallest available). Single source for the height cap and the extractor
+/// selector — unknown values fall back to 1080p in both by design.
 const QUALITY_HEIGHTS: &[(&str, Option<u32>)] = &[
     ("best", None),
     ("2160p", Some(2160)),
@@ -97,9 +76,8 @@ const QUALITY_HEIGHTS: &[(&str, Option<u32>)] = &[
     ("480p", Some(480)),
 ];
 
-/// Stored quality value to a height cap: `None` (Best) takes the
-/// tallest variant available. Unknown values fall back to 1080p (same
-/// fallback as the combo mapping and the extractor selector).
+/// Stored quality value to a height cap: `None` (Best) takes the tallest
+/// variant available. Unknown values fall back to 1080p.
 pub(crate) fn quality_height(value: &str) -> Option<u32> {
     QUALITY_HEIGHTS
         .iter()
@@ -108,8 +86,7 @@ pub(crate) fn quality_height(value: &str) -> Option<u32> {
         .unwrap_or(Some(1080))
 }
 
-/// Map a stored quality value to the extractor selector. Unknown values
-/// fall back to 1080p (same fallback as the combo mapping).
+/// Map a stored quality value to the extractor selector.
 pub fn selector_for_quality(value: &str) -> VideoQuality {
     match quality_height(value) {
         None => VideoQuality::Best,

@@ -231,8 +231,7 @@ fn torrent_net_plan_http_proxy_stays_direct() {
 
 #[test]
 fn stub_name_neutralizes_traversal() {
-    // Uplink attachment names are attacker-controlled: stems collapse
-    // to the final component, unsafe ones fall back to "torrent".
+    // Attacker-controlled stems collapse to the final component; unsafe ones fall back to "torrent".
     assert_eq!(stub_name_for_file("../../evil.torrent"), "evil");
     assert_eq!(stub_name_for_file("subdir/name.torrent"), "name");
     assert_eq!(stub_name_for_file("..."), "torrent");
@@ -240,8 +239,7 @@ fn stub_name_neutralizes_traversal() {
 
 #[test]
 fn output_folder_for_gates_hostile_names() {
-    // Multi-file folder names come from torrent metadata: traversal or
-    // absolute names fall back to the info-hash hex, never escape dest.
+    // Folder names come from torrent metadata: traversal/absolute fall back to info-hash hex.
     let dest = std::path::Path::new("/tmp/dl");
     assert_eq!(
         output_folder_for(dest, Some("../evil".into()), true, "abc123"),
@@ -318,8 +316,7 @@ fn info_hash_for_url_resolves_magnets() {
 
 #[test]
 fn sweep_session_orphans_without_session_is_noop() {
-    // No engine started in tests: the sweep must return without touching
-    // anything (in particular, without creating a session as a side effect).
+    // No engine in tests: must return without creating a session as a side effect.
     let keep = std::collections::HashSet::new();
     crate::runtime::tokio_rt().block_on(sweep_session_orphans(&keep));
     assert!(session_handle().is_none());
@@ -327,9 +324,7 @@ fn sweep_session_orphans_without_session_is_noop() {
 
 #[test]
 fn bps_maps_limits() {
-    // Both the download and upload caps share this conversion: empty and
-    // zero mean unlimited, and values beyond u32 stay unlimited instead of
-    // truncating into a tiny cap.
+    // Empty and zero mean unlimited; values beyond u32 stay unlimited instead of truncating.
     assert_eq!(bps(None), None);
     assert_eq!(bps(Some(0)), None);
     assert_eq!(bps(Some(500_000)), NonZeroU32::new(500_000));
@@ -354,11 +349,9 @@ fn seed_limits_hit_matrix() {
 
 #[test]
 fn file_list_keeps_raw_path_beside_display_path() {
-    // Synthetic two-file torrent: one short name, one past the 120-char
-    // display cap. The display form must truncate; the raw path must not.
+    // One short name, one past the 120-char display cap: display truncates, raw must not.
     let long = "x".repeat(200);
-    // Info-dict keys sorted (files < name < piece length < pieces), as in
-    // the other synthetic torrents in this file.
+    // Info-dict keys sorted, as in the other synthetic torrents in this file.
     let mut b = b"d8:announce7:x-local4:infod5:filesl".to_vec();
     b.extend_from_slice(b"d6:lengthi2e4:pathl8:keep.isoee");
     b.extend_from_slice(format!("d6:lengthi3e4:pathl{}:{}ee", long.len(), long).as_bytes());
@@ -381,9 +374,8 @@ fn file_list_keeps_raw_path_beside_display_path() {
 
 #[test]
 fn raw_path_collapses_distinct_invalid_utf8() {
-    // `raw_path` is a lossy UTF-8 decode, not the raw bytes: two files
-    // whose names differ only in invalid UTF-8 collapse to one string.
-    // This pins the known limitation documented on `TorrentFileEntry`.
+    // `raw_path` is lossy UTF-8, not raw bytes: names differing only in invalid
+    // UTF-8 collapse. Pins the known limitation documented on `TorrentFileEntry`.
     let mut b = b"d8:announce7:x-local4:infod5:filesl".to_vec();
     b.extend_from_slice(b"d6:lengthi2e4:pathl2:");
     b.extend_from_slice(b"a\xff");
@@ -405,8 +397,7 @@ fn deletion_target_uses_raw_path_not_display() {
         display_path: format!("{}…", "x".repeat(120)),
         length: 3,
     };
-    // The target is the raw on-disk name: joining the truncated display
-    // path would address a file that does not exist.
+    // Target is the raw on-disk name: the truncated display path addresses nothing.
     assert_eq!(
         deletion_target(folder, 1, &std::collections::HashSet::new(), &entry),
         Some(folder.join(&long))
@@ -457,8 +448,7 @@ fn read_torrent_bytes_enforces_single_bounded_open() {
 
 #[test]
 fn read_archive_bytes_rejects_unresolvable_urls() {
-    // Not a pseudo-URL, a relative torrent: path, and an absolute path
-    // outside the archive dir: all unresolvable without touching disk.
+    // Not a pseudo-URL, relative, or absolute path outside the archive dir: unresolvable.
     assert_eq!(read_archive_bytes("magnet:?xt=urn:btih:abc"), None);
     assert_eq!(read_archive_bytes("torrent:relative.torrent"), None);
     assert_eq!(read_archive_bytes("torrent:/tmp/evil.torrent"), None);

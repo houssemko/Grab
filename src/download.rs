@@ -21,9 +21,7 @@ use crate::download_fetch::{
 /// now; the re-exports keep the in-tree `crate::download::X` paths working.
 pub use crate::download_intake::normalize_url;
 /// Facade: network options + proxy/client plumbing lives in
-/// [`download_net`](crate::download_net) now; the re-exports keep the
-/// in-tree `crate::download::X` paths working. (Names used only inside
-/// this module or its tests stay imported below without re-export.)
+/// [`download_net`](crate::download_net); re-exports keep `crate::download::X` working.
 use crate::download_net::http_client_for;
 pub use crate::download_net::{
     DownloadOptions, PROXY_MODE_MANUAL, proxy_mode_index, proxy_mode_labels, proxy_mode_value,
@@ -34,8 +32,7 @@ use crate::download_pieces::SegmentState;
 /// now (no re-exports: the engine consumes it here, tests import it directly).
 use crate::download_pieces::{BLOCK_CELLS, MAX_SEGMENTED_TOTAL};
 /// Facade: rate parsing/pacing + progress text lives in
-/// [`download_rate`](crate::download_rate) now (no re-exports: the
-/// engine consumes it here, tests import it directly).
+/// [`download_rate`](crate::download_rate); the engine consumes it here, tests import it directly.
 use crate::download_rate::{fmt_eta, format_amounts, parse_rate, publish_rate_limit};
 /// Facade: the row object lives in [`download_row`](crate::download_row) now;
 /// this re-export keeps every `crate::download::X` path working.
@@ -49,26 +46,14 @@ use crate::video::AttemptGate;
 
 /// A removal whose worker is still tearing down.
 struct PendingDiscard {
-    /// Aborts the *worker* directly. Aborting the finalizer instead would
-    /// drop this handle, and dropping a `JoinHandle` detaches the task
-    /// rather than aborting it -- leaving yt-dlp unsupervised.
+    /// Aborts the *worker*: aborting the finalizer would drop this handle and detach the task instead of stopping it.
     worker_abort: tokio::task::AbortHandle,
     finalizer: tokio::task::JoinHandle<()>,
 }
 
-/// Destinations with a discard in flight.
-///
-/// The finalizer's sweep is stem-wide (`clean_dest_parts` deletes
-/// `<stem>.<kind>.*`), so the reservation must be stem-wide too: an
-/// exact-path key lets a new row claim the same stem under a different
-/// extension and meet the old sweep. The key mirrors the sweeper's --
-/// parent dir plus `file_stem` -- so a reservation covers exactly what
-/// the sweep would delete, no more.
-///
-/// Counts, not a set: the same destination can be reserved twice (remove,
-/// Undo, remove again before the first finalizer lands), and the second
-/// teardown's release must not reopen the window while the first is
-/// still in flight.
+/// Destinations with a discard in flight. Stem-wide: the finalizer sweeps
+/// `<stem>.<kind>.*`, so reservations key on parent dir + file stem too.
+/// Counts, not a set: stacked remove/Undo cycles need one release per teardown.
 #[derive(Debug, Default)]
 struct Reservations {
     /// Exact destination paths with a discard in flight, by active count.
@@ -77,9 +62,7 @@ struct Reservations {
     stems: std::collections::HashMap<(std::path::PathBuf, String), usize>,
 }
 
-/// The key `clean_dest_parts` sweeps by. `None` exactly when the sweeper
-/// would early-return (no parent or no stem), so a reservation is
-/// claimed exactly when a sweep could delete something.
+/// Sweep key for `clean_dest_parts`; `None` exactly when the sweeper early-returns.
 fn reservation_stem(dest: &std::path::Path) -> Option<(std::path::PathBuf, String)> {
     match (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) {
         (Some(dir), Some(stem)) => Some((dir.to_path_buf(), stem.to_string())),
@@ -131,30 +114,18 @@ fn pending_resolve_detail(audio_only: bool) -> String {
 }
 
 pub struct DownloadManager {
-    // Borrow discipline: RefCells are never held across `set_*` property
-    // notifies or `changed()` — GTK notifies re-enter through updater
-    // closures that take shared borrows, so any borrow_mut added inside
-    // a notify-reachable path panics at runtime with no compile-time
-    // guard. Keep borrows scoped to the smallest statement.
+    // Borrow discipline: never hold RefCells across `set_*` notifies or `changed()`; GTK re-enters and panics. Keep borrows scoped.
     store: gio::ListStore,
     settings: crate::settings::AppSettings,
     running: RefCell<HashMap<u64, tokio::task::JoinHandle<()>>>,
     next_id: Cell<u64>,
     on_change: RefCell<Option<Box<dyn Fn()>>>,
     batch: Cell<u32>,
-    /// Server-advertised names waiting for their download to finish. The
-    /// move happens at Finished so the engine never writes through a
-    /// renamed path mid-transfer (stale size reads, split files).
+    /// Server-advertised names, applied at Finished so the engine never writes through a renamed path mid-transfer.
     pending_names: RefCell<HashMap<u64, String>>,
-    /// Cached count of queued rows; backs the per-row Queue button without
-    /// scanning the store on every progress tick. Refreshed in changed(),
-    /// which follows every status transition (progress-only updates change
-    /// no statuses, so they need no recount).
+    /// Cached queued-row count backing the per-row Queue button; refreshed in changed().
     queued: Cell<usize>,
-    /// Spawn generation per row, bumped on every engine start. A pump
-    /// future whose generation is stale (defer or a quick pause-resume
-    /// started a newer engine first) must not touch progress, status,
-    /// notifications, or the new engine's handle.
+    /// Spawn generation per row. A stale pump future must not touch progress, status, notifications, or the new engine's handle.
     epoch: RefCell<HashMap<u64, u64>>,
     /// Resume bitmaps for segmented downloads (session-only, main thread).
     segment_state: RefCell<HashMap<u64, SegmentState>>,
@@ -167,62 +138,31 @@ pub struct DownloadManager {
     /// Video-page source by row (in-memory only, like the maps above):
     /// persisted on [`StoredItem`] and re-staged on restore.
     video_sources: RefCell<HashMap<u64, crate::media_types::VideoSource>>,
-    /// Abort senders for running resolver workers, by row. Signalled (then
-    /// dropped) from pause/park/cancel paths so the worker stops its
-    /// extractor streams promptly; the pump tail also drops them.
+    /// Abort senders for resolver workers, by row. Signalled from pause/park/cancel so extractor streams stop promptly.
     video_abort: RefCell<HashMap<u64, tokio::sync::oneshot::Sender<crate::video::StopIntent>>>,
-    /// Delivery decision per video attempt, by row. Created when the
-    /// attempt is spawned so the manager and the worker arbitrate on one
-    /// object; see `attempt_gate`.
+    /// Delivery decision per video attempt, by row. Manager and worker arbitrate on this one object.
     gates: RefCell<HashMap<u64, std::sync::Arc<AttemptGate>>>,
-    /// Destinations with a discard in flight, by exact path and by the
-    /// stem-wide key the finalizer's sweep uses. Consulted by intake
-    /// *and* `unremove`: the filesystem-derived `stem_reserved_in`
-    /// check cannot see the window between a worker deleting its shell and
-    /// recreating it, and `unremove` bypasses intake entirely.
+    /// Destinations with a discard in flight (exact path + stem key). Consulted by intake *and* `unremove`, which bypasses intake.
     reservations: std::sync::Arc<std::sync::Mutex<Reservations>>,
-    /// Queue wakeups from worker threads. The discard finalizer runs on
-    /// the tokio runtime (the manager is `!Send`), so after it releases a
-    /// destination reservation it sends here; the main-thread loop in
-    /// `new()` re-runs `start_next()` so a row parked by `unremove()`
-    /// starts instead of waiting for an unrelated trigger.
+    /// Queue wakeups from worker threads: the discard finalizer sends here after releasing a reservation; `new()` re-runs `start_next()`.
     wake_tx: tokio::sync::mpsc::UnboundedSender<()>,
-    /// Handle of the `wake_tx` receiver task. Kept so `Drop` can abort it:
-    /// a `spawn_future_local` task outliving its manager would be reaped
-    /// by a later test's main-loop iteration on a different thread,
-    /// tripping glib's thread guard (libtest runs each test on its own
-    /// thread).
+    /// Handle of the `wake_tx` receiver task. Kept so `Drop` can abort it (a task reaped on another thread trips glib's thread guard).
     wake_task: Cell<Option<glib::JoinHandle<()>>>,
-    /// Finalizers reclaiming a removed row's scratch, by row. Each
-    /// retains the worker's abort handle beside the finalizer: the
-    /// finalizer *owns* the worker handle, so aborting the finalizer
-    /// would drop it and detach the worker rather than stopping it --
-    /// leaving yt-dlp running with no supervisor, which is what #180
-    /// fixed. Shutdown stops the workers through these handles, then
-    /// awaits the finalizers so their cleanup still runs.
+    /// Finalizers reclaiming a removed row's scratch, by row. Each keeps the worker abort handle: aborting the finalizer would detach the worker, leaving yt-dlp unsupervised (#180).
     discards: RefCell<HashMap<u64, PendingDiscard>>,
-    /// Rows currently capturing a live stream. Pause/cancel/park only
-    /// signal these (no task abort, no status preset): the worker
-    /// finalizes the partial and its message drives the row to Done.
-    /// Set per attempt in `spawn_video`; dropped on terminal messages.
+    /// Rows currently capturing a live stream. Pause/cancel/park only signal these; the worker finalizes and its message drives the row.
     live_rows: RefCell<std::collections::HashSet<u64>>,
     /// Set by shutdown(): stale engine futures must not re-persist or
     /// re-mark rows once the authoritative shutdown persist has run.
     draining: Cell<bool>,
 }
 
-/// What a stop means for the worker and the bytes it has written.
-///
-/// Distinct from the `StopIntent` the worker receives: this is the
-/// manager's policy decision, that is the instruction it sends.
+/// What a stop means for the worker and the bytes it has written (manager policy; distinct from the worker's `StopIntent`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stop {
-    /// Keep what is recorded. The worker is only signalled, so it runs its
-    /// finalizer, adopts the partial and delivers it -- the semantics
-    /// behind Stop, pause, cancel and cancel-all.
+    /// Keep what is recorded: signal the worker so it finalizes and delivers the partial.
     Preserve,
-    /// Throw it away. Only row removal does this: the row is gone, so a
-    /// file the worker went on to deliver would have no row to belong to.
+    /// Throw it away: only row removal does this, so no delivered file outlives its row.
     Discard,
 }
 
@@ -236,14 +176,11 @@ pub(crate) struct RemovedSnapshot {
     pub detail: String,
     pub output_dir: String,
     pub segments: Option<SegmentState>,
-    /// Staged video source, so Undo on a video row restores the Page
-    /// marker instead of demoting it to a plain download.
+    /// Staged video source, so Undo on a video row keeps the Page marker instead of demoting it.
     pub video_source: Option<crate::media_types::VideoSource>,
 }
 
-/// One validated queue entry awaiting the restore apply phase.
-/// Defined at module level: `restore_queue` collects these first so a
-/// mid-loop validation failure can never leave half-spawned engines.
+/// One validated queue entry awaiting the restore apply phase (module level so a mid-loop failure never leaves half-spawned engines).
 struct PendingRestore {
     item: StoredItem,
     output_dir: Option<String>,
@@ -252,11 +189,10 @@ struct PendingRestore {
 
 impl Drop for DownloadManager {
     fn drop(&mut self) {
-        // Destroy the discard-wakeup task now. A `spawn_future_local` task
-        // is only reaped when the main loop next polls it, so without this
-        // a stale task would outlive the manager and be dispatched by a
-        // later test's main-loop iteration running on a different thread,
-        // tripping glib's thread guard.
+        // Destroy the discard-wakeup task now: a `spawn_future_local` task is
+        // only reaped when the main loop next polls it, so a stale one would be
+        // dispatched by a later test's main-loop iteration running on another
+        // thread, tripping glib's thread guard.
         if let Some(handle) = self.wake_task.take() {
             handle.abort();
         }
@@ -291,17 +227,13 @@ impl DownloadManager {
             live_rows: RefCell::new(std::collections::HashSet::new()),
             draining: Cell::new(false),
         });
-        // Queue wakeups from worker threads (see `wake_tx`): a discard
-        // finalizer releasing a destination reservation is the main
-        // producer. Weak ref: the loop must not keep the manager alive.
+        // Queue wakeups from worker threads (see `wake_tx`). Weak ref: the loop must not keep the manager alive.
         {
             let weak = Rc::downgrade(&this);
             let handle = glib::spawn_future_local(async move {
                 while wake_rx.recv().await.is_some() {
                     if let Some(m) = weak.upgrade() {
-                        // Shutdown awaits discard finalizers, and each one
-                        // sends a wakeup on its way out: never start rows
-                        // while tearing down.
+                        // Never start rows while tearing down: shutdown awaits discard finalizers, each of which sends a wakeup.
                         if !m.draining.get() {
                             m.start_next();
                         }
@@ -310,24 +242,11 @@ impl DownloadManager {
                     }
                 }
             });
-            // The task must die with the manager: a stale local task reaped
-            // on another thread trips glib's thread guard (see `Drop`).
+            // The task must die with the manager (see `Drop`): a stale local task reaped on another thread trips glib's thread guard.
             this.wake_task.set(Some(handle));
         }
-        // Live preferences: raising the download limit must wake queued
-        // rows now (nothing else re-runs start_next until the next
-        // insert/finish event); lowering it parks the newest running rows
-        // back to queued. Speed edits republish the shared engine cap.
-        // Weak ref: the settings object would otherwise keep the
-        // manager alive forever.
-        //
-        // Owner-thread guard: engine futures are bound to the thread that
-        // spawned them, so queue actions must only run where the manager
-        // was created. Invariant: in production every settings write
-        // originates on the main thread (preferences UI, dconf dispatch),
-        // so this never skips there; foreign-thread writes only happen
-        // through the test suite's shared memory backend, where reacting
-        // would spawn engines on the wrong thread.
+        // Live preferences: raising the limit wakes queued rows now; lowering it parks the newest running rows. Weak ref: settings must not keep the manager alive.
+        // Owner-thread guard: queue actions run only where the manager was created (production writes are main-thread; foreign-thread writes only via the test backend).
         let owner = std::thread::current().id();
         let weak = Rc::downgrade(&this);
         this.settings
@@ -368,11 +287,7 @@ impl DownloadManager {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
     }
 
-    /// Delay queue persists across bulk inserts (playlist picker,
-    /// worker expansion): each `enqueue` otherwise rewrites + fsyncs the
-    /// whole queue file, turning a 500-item expansion into 500 full
-    /// rewrites. Nesting-safe counter:
-    /// pairs of `begin_batch` / `end_batch` may overlap.
+    /// Delay queue persists across bulk inserts (playlist picker, worker expansion). Nesting-safe counter.
     pub fn begin_batch(&self) {
         self.batch.set(self.batch.get() + 1);
     }
@@ -401,23 +316,16 @@ impl DownloadManager {
         id
     }
 
-    /// Reuse a restored row's persisted id where possible, else allocate.
-    ///
-    /// The id is the staging key, so handing a restored row a fresh number
-    /// would point it at a different `<temp>/grab-video/<id>/` than the one
-    /// its last attempt wrote to -- and would let a later row be allocated
-    /// that same number and delete the retained recording.
+    /// Reuse a restored row's persisted id where possible, else allocate. The id is the staging key, so a fresh number would point at the wrong `<temp>/grab-video/<id>/` and risk colliding with a later row.
     fn claim_id(&self, stored: Option<u64>) -> u64 {
         let Some(id) = stored else {
             return self.alloc_id();
         };
-        // Already owned in this session: a hand-edited or duplicated queue
-        // must never make two rows share one staging directory.
+        // Already owned in this session: a hand-edited/duplicated queue must never share one staging directory.
         if self.find(id).is_some() || self.epoch.borrow().contains_key(&id) {
             return self.alloc_id();
         }
-        // Keep the allocator ahead of every id adopted, so a new row can
-        // never be handed a number a restored row still owns.
+        // Keep the allocator ahead of every adopted id so a new row never reuses a restored row's number.
         if id >= self.next_id.get() {
             self.next_id.set(id + 1);
         }
@@ -434,9 +342,7 @@ impl DownloadManager {
         self.items().find(|it| it.id() == id)
     }
 
-    /// Every row in the list store, in list order. The store scan it
-    /// replaces was copy-pasted across the manager; a named helper keeps
-    /// the call sites about their filter instead of the iteration.
+    /// Every row in the list store, in list order.
     fn items(&self) -> impl Iterator<Item = DownloadItem> + '_ {
         let store = &self.store;
         (0..store.n_items()).filter_map(|i| store.item(i).and_downcast::<DownloadItem>())
@@ -467,9 +373,7 @@ impl DownloadManager {
         self.gates.borrow().get(&id).cloned()
     }
 
-    /// Whether `dest` has a row removal still tearing down. Matches the
-    /// exact path and the stem-wide sweep key, so a different extension
-    /// on the same stem counts as reserved too.
+    /// Whether `dest` has a row removal still tearing down (exact path and stem-wide sweep key).
     pub(crate) fn dest_reserved(&self, dest: &std::path::Path) -> bool {
         self.reservations
             .lock()
@@ -489,18 +393,14 @@ impl DownloadManager {
         }
     }
 
-    /// Whether the row is currently capturing a live stream (stop-and-keep
-    /// applies: pausing/cancelling finalizes instead of discarding).
+    /// Whether the row is currently capturing a live stream (stop-and-keep applies).
     pub fn is_live_video(&self, id: u64) -> bool {
         self.live_rows.borrow().contains(&id)
     }
 
-    /// Explicit absolute dest, else the effective download dir. Shared by
-    /// enqueue and the torrent collision check so both agree on the folder.
+    /// Explicit absolute dest, else the effective download dir.
     fn resolve_dir(&self, dest_dir: Option<&str>) -> String {
-        // An explicit destination must be absolute: a relative dir would
-        // resolve against the launcher CWD (and fail the sandbox). Restore
-        // already rejects these; live input gets the same gate.
+        // Explicit destinations must be absolute (relative dirs would resolve against the launcher CWD and fail the sandbox).
         dest_dir
             .filter(|s| !s.is_empty() && std::path::Path::new(s).is_absolute())
             .map(|s| s.to_string())
@@ -524,25 +424,18 @@ impl DownloadManager {
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
                 if crate::torrent::is_magnet(&url) {
-                    // The real name arrives with metadata; the info-hash stub
-                    // labels the row until SuggestName renames it.
+                    // Real name arrives with metadata; the info-hash stub labels the row until SuggestName renames it.
                     crate::torrent::stub_name(&url).unwrap_or_else(|| filename_from_url(&url))
                 } else {
                     filename_from_url(&url)
                 }
             });
         let name = shorten_filename(&name);
-        // Torrents record engine subfolders as output_dir, so the taken
-        // check covers those too: a magnet stub must never equal a recorded
-        // file-torrent folder (or vice versa).
+        // Torrents record engine subfolders as output_dir, so the taken check covers those too.
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
-                // No part-namespace gate here: plain rows never reach
-                // `clean_dest_parts` (remove() only sweeps video rows),
-                // so their stems need no reservation. The exact destination
-                // still does: a discard tearing down that path owns it
-                // until its finalizer releases it.
+                // Plain rows never reach `clean_dest_parts`, so only the exact destination needs a reservation.
                 || self.dest_reserved(&p)
                 || self.items()
                     .any(|it| {
@@ -552,10 +445,7 @@ impl DownloadManager {
         });
         let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
         if crate::torrent::is_magnet(&url) {
-            // Magnets carry no archive to recompute the output folder
-            // from at delete time, so record their subfolder now: the
-            // engine is spawned with this folder as its destination.
-            // The deduped stub above is filesystem-safe by construction.
+            // Magnets carry no archive to recompute the output folder from later, so record their subfolder now.
             item.set_output_dir(
                 std::path::Path::new(&dir)
                     .join(&name)
@@ -585,19 +475,14 @@ impl DownloadManager {
         }
         let stub = crate::torrent::stub_name_for_file(file_name);
         let item = self.enqueue(&pseudo, dest_dir, Some(&stub))?;
-        // The engine writes with overwrite:true, so a pre-existing
-        // dest/<torrent-name> would be clobbered: record a deduped
-        // subfolder the engine then uses as-is (delete/reveal follow the
-        // recorded dir, and restore re-attaches it).
+        // The engine writes with overwrite:true, so record a deduped subfolder the engine then uses as-is.
         if let Some((base, _)) = crate::torrent::intake_plan(&bytes) {
             let dir = self.resolve_dir(dest_dir);
             if std::path::Path::new(&dir).join(&base).exists() {
                 let name = dedupe_filename(&base, |n| {
                     let p = std::path::Path::new(&dir).join(n);
                     p.exists()
-                        // Subfolder claims need no part-namespace gate (see
-                        // plain `enqueue` above): only video-row finished
-                        // names reserve stems.
+                        // Only video-row finished names reserve stems (see plain `enqueue`).
                         || self.items()
                             .any(|it| it.output_dir() == p.to_string_lossy())
                 });
@@ -612,34 +497,21 @@ impl DownloadManager {
         Ok(item)
     }
 
-    /// Final filename policy, shared by intake naming and late
-    /// server/container name suggestions: shorten, then the opt-in
-    /// ASCII fold. Dedupe stays at the call sites — it needs the
-    /// destination context. Folding here (not just at intake) keeps
-    /// the "restrict to ASCII" guarantee for names adopted after
-    /// intake, e.g. `Content-Disposition` or container-truth renames.
+    /// Final filename policy, shared by intake naming and late server/container suggestions: shorten, then the opt-in ASCII fold. Dedupe stays at the call sites.
     fn finalize_filename(&self, name: &str) -> String {
         let name = shorten_filename(name);
         if self.settings.restrict_filenames() {
-            // Opt-in ASCII-only filenames. yt-dlp's --restrict-filenames only
-            // sanitizes its own output-template fields, but Grab passes yt-dlp
-            // literal output paths, so the flag would be a no-op here: fold
-            // where Grab actually names the file, before dedupe reserves it.
+            // Opt-in ASCII fold where Grab actually names the file (yt-dlp's flag is a no-op on literal output paths).
             restrict_filename_ascii(&name)
         } else {
             name
         }
     }
 
-    /// Enqueue a video page: dialog-routed (listed domains) or probe-
-    /// proven (unlisted pages with extractable media). No domain gate
-    /// here — the dialog owns routing, and misuse fails loudly at
-    /// resolve instead of silently saving HTML.
-    ///
-    /// [`crate::media_types::VideoSource::Page`] staged before insert, so the
-    /// persist inside [`DownloadManager::insert`] already carries it and
-    /// [`DownloadManager::start_next`] parks the row for the resolver
-    /// worker instead of feeding the page to the HTTP engine.
+    /// Enqueue a video page: dialog-routed or probe-proven. The source is staged
+    /// before insert, so the persist inside [`DownloadManager::insert`] already
+    /// carries it and [`DownloadManager::start_next`] parks the row for the
+    /// resolver worker instead of feeding the page to the HTTP engine.
     ///
     /// # Errors
     /// Returns a display-ready message when the URL or filename is invalid.
@@ -658,17 +530,13 @@ impl DownloadManager {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| filename_from_url(&url)),
         );
-        // One readdir per intake: the reservation probe below must not
-        // stat the download dir once per dedupe candidate.
+        // One readdir per intake.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
         let name = dedupe_filename(&name, |n| {
             let p = std::path::Path::new(&dir).join(n);
             p.exists()
                 || crate::video_staging::stem_reserved_in(&existing, name_stem(n))
-                // A discard still tearing down owns this destination: the
-                // finalizer's stem-wide sweep would delete a new row's
-                // parts, and part files on disk cannot show the
-                // pre-recreation window.
+                // Stem-wide reservation (see `is_name_taken`): a discard in flight owns this destination.
                 || self.dest_reserved(&p)
                 || self.items()
                     .any(|it| {
@@ -694,17 +562,7 @@ impl DownloadManager {
         Ok(self.insert(item))
     }
 
-    /// Queue one row per playlist entry when a row resolves
-    /// collection-shaped with no picked entry (dialog-less rows
-    /// never see the picker). Stories address their segments directly;
-    /// other entries keep their listed pages; unusable and
-    /// self-referential entries skip, so highlights (whose items point
-    /// back at the probed collection) expand to nothing. Returns
-    /// (added, reported total). One persist for the whole import.
-    /// Retrying a Done carrier re-expands (dedupe keeps it safe but
-    /// duplicated); the video source stays so the row remains
-    /// retryable. Choices
-    /// inherit the carrier row (quality preset, audio mode).
+    /// Queue one row per playlist entry for collection-shaped resolves with no picked entry. Returns (added, reported total). One persist for the whole import.
     fn expand_playlist_rows(
         self: &Rc<Self>,
         id: u64,
@@ -728,10 +586,7 @@ impl DownloadManager {
             else {
                 continue;
             };
-            // Live streams queued from a playlist take the VOD path;
-            // each child re-resolves its own page anyway (same posture
-            // as the picker). Names stay URL-derived: the post-fetch
-            // rename titles them once metadata resolves.
+            // Live streams queued from a playlist take the VOD path; each child re-resolves its own page.
             if self
                 .enqueue_video(
                     &url,
@@ -751,22 +606,12 @@ impl DownloadManager {
             }
         }
         self.end_batch();
-        // Reported total, not attempted: a truncated or leniently-parsed
-        // list is honest about its tail ("500 of 600").
+        // Reported total, not attempted ("500 of 600").
         (added, pl.total)
     }
 
-    /// Re-queue one persisted entry, preserving its intent (paused/failed stay).
-    /// A validated piece bitmap resumes segmented instead of restarting.
-    /// Names restore verbatim (renaming would break resume identity and
-    /// recorded folders): a foreign part-namespaced file landing while
-    /// the app is closed is the accepted residual — live claims reserve
-    /// stems, restored ones predate the reservation.
-    /// The video-page source (if any) is staged *before* insert so
-    /// [`DownloadManager::start_next`] parks the row instead of spawning
-    /// the HTTP engine on the watch page. A source whose page URL doesn't
-    /// match the row is dropped (hand-edited queue file), same trust
-    /// posture as the torrent folder check.
+    /// Re-queue one persisted entry, preserving its intent (paused/failed stay). Names restore verbatim to keep resume identity.
+    /// The video-page source is staged *before* insert (see `enqueue_video`).
     ///
     /// # Errors
     /// Returns a display-ready message when the stored entry is invalid.
@@ -856,17 +701,14 @@ impl DownloadManager {
         if let Some(folder) = output_dir {
             item.set_output_dir(folder);
         }
-        // Size off the final path: the engine measured the pre-rename one.
-        // Folders (multi-file torrents) sum their contents — a dir's own
-        // metadata length is just its entry size.
+        // Size off the final path: the engine measured the pre-rename one. Folders sum contents.
         let size = path_size(&item.file_path()).unwrap_or(0);
         item.set_detail(if size > 0 {
             gettext("Finished • {size}").replace("{size}", &fmt_bytes(size))
         } else {
             gettext("Finished")
         });
-        // Restored duplicates collapse too: queue files written before
-        // dedup may hold several Done rows per URL; the last one wins.
+        // Restored duplicates collapse too: the last Done row per URL wins.
         self.drop_finished_duplicates(&url, item.id());
         self.insert(item);
     }
@@ -899,19 +741,14 @@ impl DownloadManager {
     }
 
     fn start_next(self: &Rc<Self>) {
-        // Completed discard finalizers linger by design (shutdown awaits
-        // them): prune them here so the registry does not grow by one entry
-        // per removed row for the life of the session.
+        // Prune finished discard finalizers so the registry doesn't grow per removed row.
         self.discards
             .borrow_mut()
             .retain(|_, pending| !pending.finalizer.is_finished());
         while self.running.borrow().len() < self.max_concurrent() {
             let next = self
                 .items()
-                // A discard still tearing down owns its destination: starting
-                // a row (restored or fresh) into the finalizer's stem-wide
-                // sweep would collide with it. The row stays Queued until
-                // the reservation clears (see `unremove`).
+                // A discard still tearing down owns its destination: the row stays Queued until the reservation clears.
                 .find(|it| {
                     it.status() == DownloadStatus::Queued && !self.dest_reserved(&it.file_path())
                 });
@@ -924,15 +761,13 @@ impl DownloadManager {
 
     fn spawn(self: &Rc<Self>, item: DownloadItem) {
         let opts = DownloadOptions::from_settings(&self.settings);
-        // Re-stash per attempt: a stale Last-Modified from a previous run
-        // must never apply when the new run's server sends none.
+        // Re-stash per attempt: a stale Last-Modified must never apply when the new run's server sends none.
         self.server_mtime.borrow_mut().remove(&item.id());
         let dest = item.file_path();
         if let Some(parent) = dest.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // Fail fast on junk; the running engine follows the live value,
-        // so later edits apply without re-queueing.
+        // Fail fast on junk; later edits apply without re-queueing.
         let limit = opts.limit_rate.trim();
         if !limit.is_empty() && limit != "0" && parse_rate(limit).is_none() {
             item.set_status(DownloadStatus::Failed);
@@ -967,15 +802,10 @@ impl DownloadManager {
         }
         let connections = (opts.connections.max(1) as usize).min(16);
         let timeout = Duration::from_secs(30);
-        // A saved bitmap means this item wrote non-contiguous pieces: only a
-        // segmented resume is correct (single-stream appends at EOF).
+        // A saved bitmap means non-contiguous pieces: only a segmented resume is correct.
         let mode = match self.segment_state.borrow().get(&item.id()).cloned() {
             Some(st) => {
-                // The bitmap is only valid if the file still holds at least
-                // the completed prefix (and nothing beyond the total): the
-                // user may have deleted, truncated, or replaced the partial
-                // file while paused. A stale bitmap would skip pieces that
-                // are no longer on disk, so drop it and start over instead.
+                // Drop the bitmap if the file no longer holds the completed prefix (deleted/truncated/replaced while paused).
                 let len = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
                 if len < st.prefix_len() || len > st.total {
                     self.segment_state.borrow_mut().remove(&item.id());
@@ -996,8 +826,7 @@ impl DownloadManager {
         let generation = self.epoch.borrow().get(&item.id()).cloned().unwrap_or(0) + 1;
         self.epoch.borrow_mut().insert(item.id(), generation);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        // Invalid manual proxy fails the row loudly here: silently
-        // routing direct would leak around an explicit user demand.
+        // Invalid manual proxy fails the row loudly: never silently route direct around an explicit user demand.
         let proxy = match opts.proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
@@ -1019,11 +848,7 @@ impl DownloadManager {
         let handle = tokio_rt().spawn(run_download(ctx, connections, mode));
         self.running.borrow_mut().insert(item.id(), handle);
         item.set_status(DownloadStatus::Downloading);
-        // Every attempt starts indeterminate: retries and resumes may
-        // carry a stale fraction, which would otherwise freeze as a
-        // determinate bar through the whole connecting phase (the row
-        // pulses while progress is zero; the engine publishes real
-        // fractions on its first tick).
+        // Attempts start indeterminate: clear any stale fraction so the row pulses through the connecting phase.
         item.set_progress(0.0);
         let host = url::Url::parse(&item.url())
             .ok()
@@ -1040,13 +865,7 @@ impl DownloadManager {
         self.pump(item, item_id, generation, rx);
     }
 
-    /// Whether a finished-name candidate is taken: a file on disk, a
-    /// reserved part/sidecar stem, or a live row already holding it.
-    /// Shared by the Finished claim loop and the DEST_EXISTS requeue so
-    /// both agree on what "taken" means. `existing` is the intake-time
-    /// snapshot (one readdir per call, not per candidate). Video engines
-    /// never suggest today, but this is a generic finished-name claim:
-    /// the reservation stays uniform across all of them.
+    /// Whether a finished-name candidate is taken (file on disk, reserved stem, or live row holding it). Shared by the Finished claim loop and the DEST_EXISTS requeue.
     fn is_name_taken(&self, dir: &str, existing: &[String], n: &str) -> bool {
         std::path::Path::new(dir).join(n).exists()
             || crate::video_staging::stem_reserved_in(existing, name_stem(n))
@@ -1058,9 +877,7 @@ impl DownloadManager {
                 .any(|it| it.dest_dir() == dir && it.filename() == n)
     }
 
-    /// Drain one engine's message channel into its row. Shared by the HTTP
-    /// and torrent engines: every arm below is engine-generic, so arms the
-    /// other engine never sends simply never fire.
+    /// Drain one engine's message channel into its row. Shared by the HTTP and torrent engines.
     fn pump(
         self: &Rc<Self>,
         item: DownloadItem,
@@ -1069,17 +886,11 @@ impl DownloadManager {
         mut rx: tokio::sync::mpsc::UnboundedReceiver<EngineMsg>,
     ) {
         let this = Rc::clone(self);
-        // Speed baseline: deltas from here, not totals from zero. Resumes
-        // seed `downloaded` with pre-existing bytes, which lifetime-average
-        // math would otherwise report as fantasy GB/s on the first updates.
+        // Speed baseline: resumes seed `downloaded` with pre-existing bytes, which lifetime-average math would report as fantasy GB/s.
         let mut base: Option<(u64, Instant)> = None;
-        // Set on Finished/Failed. If the channel closes first, the engine
-        // task died without reporting (panic): fail the row instead of
-        // stranding it as "Downloading" forever.
+        // Set on Finished/Failed. If the channel closes first the engine died without reporting: fail the row instead of stranding it.
         let mut done = false;
-        // The row URL never changes and its file filter is fixed at
-        // intake: hoist both out of the per-tick path (no String alloc,
-        // Vec clone or map lock on every progress message).
+        // Row URL and file filter are fixed at intake: hoist both out of the per-tick path.
         let url = item.url().to_string();
         let sel_suffix = match crate::torrent::get_selection(&url) {
             Some(sel) => format!(" • {} files", sel.len()),
@@ -1087,9 +898,7 @@ impl DownloadManager {
         };
         glib::spawn_future_local(async move {
             while let Some(msg) = rx.recv().await {
-                // Superseded by a newer spawn for this row: its progress
-                // reports would drag the bar backwards, and its tail would
-                // fail the row or steal the new engine's handle.
+                // Stale spawn: its reports would drag the bar backwards and its tail would fail the row or steal the new engine's handle.
                 if !this.is_current(id, generation) {
                     break;
                 }
@@ -1114,8 +923,7 @@ impl DownloadManager {
                         let bps = downloaded.saturating_sub(d0) as f64
                             / Instant::now().duration_since(tb).as_secs_f64().max(0.001);
                         let speed = format!("{}/s", fmt_bytes(bps as u64));
-                        // Torrent upload counters (HTTP rows send zeros, so
-                        // their labels stay exactly as before).
+                        // Torrent upload counters (HTTP rows send zeros, so their labels stay unchanged).
                         let up_suffix = if uploaded > 0 || upload_bps > 0 {
                             let ratio = total.filter(|&t| t > 0).map_or_else(String::new, |t| {
                                 format!(" · ratio {:.1}", uploaded as f64 / t as f64)
@@ -1127,8 +935,7 @@ impl DownloadManager {
                         } else {
                             String::new()
                         };
-                        // Torrent rows with a file filter show the count
-                        // (hoisted above: fixed for the row's lifetime).
+                        // Torrent rows with a file filter show the count (hoisted above: fixed for the row's lifetime).
                         match total {
                             Some(t) if t > 0 => {
                                 let frac = (downloaded as f64 / t as f64).clamp(0.0, 1.0);
@@ -1163,16 +970,10 @@ impl DownloadManager {
                         if item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
-                            // A pause keeps its pending name: resumed
-                            // single-stream attempts never re-suggest.
+                            // A pause keeps its pending name: resumed single-stream attempts never re-suggest.
                             let pending = this.pending_names.borrow_mut().remove(&id);
                             if let Some(name) = pending {
-                                // Re-apply the final name policy here: the
-                                // stash points already finalize, but adoption
-                                // is the last gate before dedupe/rename, so a
-                                // future sender cannot slip an unpoliced name
-                                // through this path. Idempotent on already
-                                // finalized names.
+                                // Re-apply the final name policy: adoption is the last gate before dedupe/rename. Idempotent on finalized names.
                                 let name = this.finalize_filename(&name);
                                 let current = item.filename().to_string();
                                 let dir = item.dest_dir().to_string();
@@ -1180,9 +981,7 @@ impl DownloadManager {
                                     std::path::Path::new(&dir),
                                 );
                                 let taken = |n: &str| this.is_name_taken(&dir, &existing, n);
-                                // Claim-then-move so a file appearing between the
-                                // dedupe check and the rename is never clobbered:
-                                // retry with a fresh deduped name instead.
+                                // Claim-then-move so a file appearing between dedupe and rename is never clobbered.
                                 let old_path = item.file_path();
                                 let mut final_name = dedupe_filename(&name, taken);
                                 let mut moved = !old_path.exists();
@@ -1209,14 +1008,9 @@ impl DownloadManager {
                                     item.set_filename(final_name);
                                 }
                             }
-                            // Size off the final path: the engine measured the
-                            // pre-rename one. Folders (multi-file torrents)
-                            // sum their contents — a dir's own metadata
-                            // length is just its entry size.
+                            // Size off the final path (see `insert_history`): the engine measured the pre-rename one.
                             let size = path_size(&item.file_path()).unwrap_or(size);
-                            // Server file date, when asked: best-effort (a
-                            // read-only handle suffices; failure keeps the
-                            // download-time mtime, never fails the row).
+                            // Server file date, when asked: best-effort, never fails the row.
                             let mtime = this.server_mtime.borrow_mut().remove(&id);
                             if this.settings.keep_server_date()
                                 && let Some(t) = mtime
@@ -1231,18 +1025,11 @@ impl DownloadManager {
                             } else {
                                 gettext("Finished")
                             });
-                            // One finished record per URL (Parabolic parity):
-                            // an older Done row for this URL leaves now, so
-                            // re-downloads replace instead of stacking.
+                            // One finished record per URL (Parabolic parity): re-downloads replace instead of stacking.
                             this.drop_finished_duplicates(&url, id);
                             this.segment_state.borrow_mut().remove(&id);
                             this.torrent_pieces.borrow_mut().remove(&id);
-                            // Filtered torrents: drop the untoggled files
-                            // (0-byte placeholders and shared-piece bytes)
-                            // now that every selected byte is on disk.
-                            // Skipped while seeding: serving still reads
-                            // those spans, and deleting them would corrupt
-                            // shared pieces for peers.
+                            // Filtered torrents: drop untoggled files now that every selected byte is on disk. Skipped while seeding (serving still reads those spans).
                             if crate::torrent::is_torrent(&url)
                                 && !this.settings.torrent_seed_finished()
                             {
@@ -1250,9 +1037,7 @@ impl DownloadManager {
                                 if folder.is_dir() {
                                     crate::torrent::cleanup_unselected(&folder, &url);
                                 }
-                                // The intake filter is spent: keeping it
-                                // would pin the index list (and confuse a
-                                // re-add) for a row that is done.
+                                // The intake filter is spent: keeping it would pin the index list for a done row.
                                 crate::torrent::drop_selection(&url);
                             }
                             this.notify_finished(&item, Ok(()));
@@ -1261,22 +1046,14 @@ impl DownloadManager {
                         break;
                     }
                     EngineMsg::ExpandPlaylist(pl) => {
-                        // Pause/cancel during resolve must not enqueue:
-                        // the carrier stays put and nothing new appears.
-                        // (Pause doesn't bump epoch, so no staleness
-                        // guard saves us — check first.)
+                        // Pause/cancel during resolve must not enqueue: the carrier stays put and nothing new appears.
                         if item.status() == DownloadStatus::Cancelled
                             || item.status() == DownloadStatus::Paused
                         {
                             done = true;
                             break;
                         }
-                        // Worker-side playlist expansion, on the main
-                        // thread where queueing is legal: one row per
-                        // usable entry, then retire the carrier Done. No
-                        // history record and no notification: the new
-                        // rows are the feedback. Nothing usable expands
-                        // to today's collection error instead.
+                        // Playlist expansion runs on the main thread where queueing is legal; the new rows are the feedback.
                         let (added, total) = this.expand_playlist_rows(id, &item, &pl);
                         if added == 0 {
                             let e = crate::video_probe::playlist_resolve_error(None);
@@ -1304,9 +1081,7 @@ impl DownloadManager {
                             item.set_progress(1.0);
                             this.pending_names.borrow_mut().remove(&id);
                             this.server_mtime.borrow_mut().remove(&id);
-                            // Like Finished: an older Done carrier for
-                            // the URL leaves so re-expansions replace
-                            // instead of stacking.
+                            // Like Finished: an older Done carrier for the URL leaves so re-expansions replace instead of stacking.
                             this.drop_finished_duplicates(&url, id);
                         }
                         done = true;
@@ -1320,11 +1095,7 @@ impl DownloadManager {
                             && item.status() != DownloadStatus::Cancelled
                             && item.status() != DownloadStatus::Paused
                         {
-                            // A foreign file appeared at our path after
-                            // dedupe: pick a fresh free name and requeue
-                            // instead of failing. Fresh short of absurd
-                            // collision counts (dedupe caps at 9999), so
-                            // this terminates.
+                            // A foreign file appeared at our path after dedupe: pick a fresh free name and requeue.
                             let dir = item.dest_dir().to_string();
                             let current = item.filename().to_string();
                             let existing =
@@ -1352,10 +1123,7 @@ impl DownloadManager {
                         break;
                     }
                     EngineMsg::FailedVersion(e) => {
-                        // The bytes on the server changed mid-download: any
-                        // resume bitmap describes a dead file version, so
-                        // drop it. The next attempt (or Retry) starts fresh
-                        // and re-probes instead of failing forever.
+                        // Server bytes changed mid-download: the resume bitmap describes a dead version, so drop it and re-probe fresh.
                         this.segment_state.borrow_mut().remove(&id);
                         this.pending_names.borrow_mut().remove(&id);
                         if item.status() != DownloadStatus::Cancelled
@@ -1389,18 +1157,12 @@ impl DownloadManager {
                     EngineMsg::TruncatePrefix => {
                         if let Some(st) = this.segment_state.borrow_mut().get_mut(&id) {
                             truncate_to_prefix(&item.file_path(), st);
-                            // The file just lost everything past the prefix;
-                            // the bitmap must forget it too, or a later resume
-                            // would skip pieces that are no longer on disk.
+                            // The file lost everything past the prefix; the bitmap must forget it too or a later resume skips missing pieces.
                             st.forget_beyond_prefix();
                         }
                     }
                     EngineMsg::FallbackSingle { ack } => {
-                        // Server throttled parallel connections: shrink to the
-                        // completed prefix and forget the bitmap, all here on
-                        // the main thread so no spawn can observe a half-done
-                        // transition. The engine waits for this ack before it
-                        // appends single-stream at EOF.
+                        // Server throttled parallel connections: shrink to the completed prefix and forget the bitmap on the main thread. The engine waits for this ack before appending at EOF.
                         if let Some(st) = this.segment_state.borrow().get(&id) {
                             truncate_to_prefix(&item.file_path(), st);
                         }
@@ -1408,10 +1170,9 @@ impl DownloadManager {
                         ack.send(()).await.ok();
                     }
                     EngineMsg::SuggestName(name) => {
-                        // Stash the server-advertised name for adoption at
-                        // Finished. Moving mid-transfer would desync the
-                        // engine (stale size reads, split files), so only
-                        // fresh single-stream attempts suggest at all.
+                        // Stash the server-advertised name for adoption at Finished:
+                        // moving mid-transfer desyncs the engine (stale size reads,
+                        // split files), so only fresh single-stream attempts suggest.
                         if item.status() != DownloadStatus::Downloading {
                             continue;
                         }
@@ -1419,15 +1180,7 @@ impl DownloadManager {
                         if name == current || !sane_filename(&name) {
                             continue;
                         }
-                        // Container truth from video engines: same stem,
-                        // truer extension (a native webm merge under an
-                        // mp4 intake name). The finished-name adoption
-                        // below dedupes it; the Chromium rules underneath
-                        // stay for server-advertised names. Gated on
-                        // video rows so plain-engine behavior is
-                        // bit-identical; the extension guard keeps a
-                        // future sender from stripping names through
-                        // this path.
+                        // Container truth from video engines: same stem, truer extension. Gated on video rows so plain-engine behavior stays bit-identical.
                         let is_video_row = matches!(
                             this.video_source(id),
                             Some(crate::media_types::VideoSource::Page { .. })
@@ -1437,22 +1190,12 @@ impl DownloadManager {
                             && name_stem(&name) == name_stem(&current)
                             && name != current
                         {
-                            // Same shortening the Chromium path applies:
-                            // the stem is unchanged from an already-short
-                            // intake, so this is symmetry, not truncation.
-                            // Routed through the shared final policy so the
-                            // opt-in ASCII fold covers container-truth names.
+                            // Routed through the shared final policy so the opt-in ASCII fold covers container-truth names.
                             let name = this.finalize_filename(&name);
                             this.pending_names.borrow_mut().insert(id, name);
                             continue;
                         }
-                        // Chromium parity: the server-advertised name wins
-                        // over the URL-derived one. Adopt when the current
-                        // name is a placeholder/extensionless, or when the
-                        // server name has an extension and is shorter (long
-                        // tracked/tokenized URL names lose to the real file).
-                        // A generic extensionless server name never clobbers
-                        // a good URL-derived name.
+                        // Chromium parity: adopt when current is a placeholder/extensionless, or the server name is shorter with an extension.
                         let placeholder = current == "index.html" || !current.contains('.');
                         if !placeholder && !(name.contains('.') && name.len() < current.len()) {
                             continue;
@@ -1464,25 +1207,18 @@ impl DownloadManager {
                         this.pending_names.borrow_mut().insert(id, name);
                     }
                     EngineMsg::LastModified(t) => {
-                        // Latest attempt wins; applied at Finished when the
-                        // keep-server-date setting is on.
+                        // Latest attempt wins; applied at Finished when keep-server-date is on.
                         this.server_mtime.borrow_mut().insert(id, t);
                     }
                     EngineMsg::LiveDetected => {
-                        // Downloading only: a stop/pause during resolve
-                        // must not leave a stale live_rows member behind
-                        // (it would skip staging cleanup on remove and
-                        // take live signal paths). Once per attempt,
-                        // idempotent insert; paused rows re-detect on
-                        // resume.
+                        // Downloading only: a stop/pause during resolve must not leave a stale live_rows member (it would skip staging cleanup and take live signal paths).
                         if item.status() == DownloadStatus::Downloading {
                             this.live_rows.borrow_mut().insert(id);
                         }
                     }
                 }
             }
-            // Superseded pump future: touch nothing, especially not the
-            // new engine's handle in `running`.
+            // Superseded pump future: touch nothing, especially not the new engine's handle in `running`.
             if !this.is_current(id, generation) {
                 return;
             }
@@ -1503,14 +1239,10 @@ impl DownloadManager {
         });
     }
 
-    /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract
-    /// (epoch bump, running slot, Downloading status, shared pump) so pause,
-    /// cancel, retry, persist and the stale-pump guard keep working unchanged.
+    /// Spawn the torrent engine for a magnet row. Mirrors `spawn`'s contract so pause/cancel/retry and the stale-pump guard keep working.
     fn spawn_torrent(self: &Rc<Self>, item: DownloadItem, magnet: String) {
         let dir = std::path::PathBuf::from(item.dest_dir().to_string());
-        // Magnets recorded their subfolder at enqueue (no archive exists
-        // to recompute it from later); archived torrents recompute theirs
-        // from metadata, so plain dest stays correct for them.
+        // Magnets recorded their subfolder at enqueue; archived torrents recompute theirs from metadata.
         let recorded = item.output_dir().to_string();
         let dest = if recorded.is_empty() {
             dir.clone()
@@ -1524,9 +1256,7 @@ impl DownloadManager {
         let download_bps = parse_rate(settings.speed_limit().trim());
         let upload_bps = parse_rate(settings.torrent_upload_limit().trim());
         let trackers: Option<Vec<String>> = None;
-        // A malformed blocklist URL fails loudly like the manual proxy:
-        // silently torrenting without the blocklist would betray the
-        // user's intent.
+        // A malformed blocklist URL fails loudly: silently torrenting without it would betray the user's intent.
         let blocklist_url =
             match crate::torrent::blocklist_url_of(&settings.torrent_blocklist_url()) {
                 Ok(url) => url,
@@ -1537,8 +1267,7 @@ impl DownloadManager {
                     return;
                 }
             };
-        // Invalid manual proxy fails loudly like every other engine: no
-        // silent direct torrent while the user asked for a tunnel.
+        // Invalid manual proxy fails loudly: no silent direct torrent while the user asked for a tunnel.
         let proxy = match DownloadOptions::from_settings(settings).proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
@@ -1548,10 +1277,7 @@ impl DownloadManager {
                 return;
             }
         };
-        // SOCKS5 takes over TCP peers + HTTP trackers (DHT, LSD, listener
-        // and UDP trackers go dark alongside); anything else stays direct.
-        // No listen port (rqbit default: no listener), so UPnP port
-        // forwarding has nothing to forward: hardcoded off.
+        // SOCKS5 takes over TCP peers + HTTP trackers; no listen port, so UPnP has nothing to forward: hardcoded off.
         let net = crate::torrent::plan_torrent_net(
             settings.torrent_dht(),
             settings.torrent_lsd(),
@@ -1579,8 +1305,7 @@ impl DownloadManager {
             crate::torrent::TorrentSource::Magnet(magnet)
         };
         let only_files = crate::torrent::get_selection(&item.url().to_string());
-        // Intake-recorded collision subfolders (file torrents only) are
-        // already final; magnets use their recorded dir by construction.
+        // Intake-recorded collision subfolders (file torrents) are already final; magnets use their recorded dir.
         let dest_is_final = !recorded.is_empty() && is_file;
         let handle = tokio_rt().spawn(crate::torrent::run_torrent(crate::torrent::TorrentJob {
             id,
@@ -1605,8 +1330,7 @@ impl DownloadManager {
         }));
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
-        // Attempts start indeterminate (see spawn): stale fractions must
-        // not freeze as determinate bars through "Starting torrent…".
+        // Attempts start indeterminate (see spawn): clear stale fractions through "Starting torrent…".
         item.set_progress(0.0);
         item.set_detail(gettext("Starting torrent…"));
         self.changed();
@@ -1614,10 +1338,7 @@ impl DownloadManager {
     }
 }
 
-/// Video-page spawn inputs: everything `spawn_video` needs from the
-/// row's [`crate::media_types::VideoSource::Page`]. Bundled into one struct so the growing
-/// field list doesn't trip clippy's too-many-arguments lint at the
-/// call boundary.
+/// Video-page spawn inputs, bundled so the field list doesn't trip clippy's too-many-arguments lint.
 struct SpawnVideoParams {
     item: DownloadItem,
     page_url: String,
@@ -1629,12 +1350,7 @@ struct SpawnVideoParams {
 }
 
 impl DownloadManager {
-    /// Spawn the resolver worker for a video-page row. Mirrors `spawn`'s
-    /// contract (epoch bump, running slot, Downloading status, shared pump)
-    /// so pause, cancel, retry, persist and the stale-pump guard keep
-    /// working unchanged. The worker speaks [`EngineMsg`] like every other
-    /// engine; its abort sender lets pause/cancel stop the extractor
-    /// streams promptly instead of only dropping the Grab-side task.
+    /// Spawn the resolver worker for a video-page row. Mirrors `spawn`'s contract; its abort sender lets pause/cancel stop extractor streams promptly.
     fn spawn_video(self: &Rc<Self>, params: SpawnVideoParams) {
         let SpawnVideoParams {
             item,
@@ -1656,17 +1372,14 @@ impl DownloadManager {
             .expect("spawn just created the attempt gate");
         // Overwrite any stale sender: its task is dead or guarded stale.
         self.video_abort.borrow_mut().insert(id, abort_tx);
-        // Live rows finalize in the worker on stop: track them so
-        // pause/cancel/park signal without aborting or presetting.
+        // Live rows finalize in the worker on stop: track them so pause/cancel/park signal without aborting or presetting.
         if is_live {
             self.live_rows.borrow_mut().insert(id);
         } else {
             self.live_rows.borrow_mut().remove(&id);
         }
         let opts = DownloadOptions::from_settings(&self.settings);
-        // Invalid manual proxy fails the row loudly here, before any
-        // network happens: silently routing direct would leak around an
-        // explicit user demand.
+        // Invalid manual proxy fails the row loudly before any network: never silently route direct.
         let proxy = match opts.proxy_config() {
             Ok(proxy) => proxy,
             Err(e) => {
@@ -1683,8 +1396,7 @@ impl DownloadManager {
             quality,
             audio_only,
             dest: item.file_path(),
-            // Shared throttle: parsed once here; empty/0/invalid means
-            // unlimited (the preferences row flags junk live).
+            // Shared throttle, parsed once here; empty/0/invalid means unlimited (the preferences row flags junk live).
             speed_limit: parse_rate(opts.limit_rate.as_str()),
             keep_server_date: self.settings.keep_server_date(),
             video_format_id,
@@ -1692,8 +1404,7 @@ impl DownloadManager {
             live_from_start: self.settings.live_from_start(),
             newest_codecs: self.settings.video_codec_newest(),
             cookies_browser: self.settings.cookies_browser(),
-            // Audio-only rows never subtitle (no video leg exists), so
-            // resolve to `None` here rather than gating at every use.
+            // Audio-only rows never subtitle or remux (no video leg exists): resolve to `None` here rather than gating at every use.
             subtitles: if audio_only {
                 None
             } else {
@@ -1702,11 +1413,7 @@ impl DownloadManager {
             embed_subs: self.settings.embed_subs(),
             sponsorblock_remove: self.settings.sponsorblock_remove(),
             sponsorblock_mark: self.settings.sponsorblock_mark(),
-            // Audio-only rows never remux (no video leg exists), so
-            // resolve to `None` here rather than gating at every use.
-            // Note the enqueue→spawn gap: the row name took the remux
-            // pref at dialog time, this flag at spawn time — a pref
-            // change on a queued row can disagree on the extension.
+            // Note the enqueue→spawn gap: a pref change on a queued row can disagree with the dialog-time row name on the extension.
             remux_video: if audio_only {
                 None
             } else {
@@ -1721,13 +1428,10 @@ impl DownloadManager {
                 Ok(crate::video::VideoOutcome::Finished(size)) => {
                     tx.send(EngineMsg::Finished { size }).ok();
                 }
-                // Aborted: the pauser/canceller already set the row status,
-                // so send nothing and let the pump tail no-op.
+                // Aborted: the pauser/canceller already set the row status, so send nothing and let the pump tail no-op.
                 Ok(crate::video::VideoOutcome::Aborted) => {}
                 Ok(crate::video::VideoOutcome::Expand(pl)) => {
-                    // Handed to the pump: queueing rows needs the
-                    // manager, which the worker task must never touch
-                    // (Rc is main-thread only).
+                    // Handed to the pump: queueing needs the manager, which the worker task must never touch (Rc is main-thread only).
                     tx.send(EngineMsg::ExpandPlaylist(pl)).ok();
                 }
                 Err(e) => {
@@ -1738,13 +1442,8 @@ impl DownloadManager {
         });
         self.running.borrow_mut().insert(id, handle);
         item.set_status(DownloadStatus::Downloading);
-        // A parked, paused or failed row keeps its fraction: the new
-        // attempt is a resume, so label it as one instead of
-        // "Resolving media…".
+        // A parked/paused/failed row keeps its fraction: the new attempt is a resume. Attempts start indeterminate (see spawn).
         let resuming = item.progress() > 0.0;
-        // Attempts start indeterminate (see spawn): a retried row may
-        // carry its old fraction, which would otherwise sit frozen
-        // through the whole "Resolving media…" phase.
         item.set_progress(0.0);
         item.set_detail(if resuming {
             gettext("Resuming download…")
@@ -1788,8 +1487,7 @@ impl DownloadManager {
 
     /// Pause a running download, freeing its slot for the next queued item.
     pub fn pause(self: &Rc<Self>, id: u64) {
-        // Live captures finalize in the worker (see `stop_engine`); the
-        // pump tail frees the slot on completion.
+        // Live captures finalize in the worker; the pump tail frees the slot on completion.
         if !self.stop_engine(id) {
             return;
         }
@@ -1823,10 +1521,7 @@ impl DownloadManager {
         }
     }
 
-    /// Rename a download: the list label plus the file on disk when it is
-    /// already fetched. Only completed rows (a real file to move) and
-    /// queued rows (nothing on disk yet) qualify: mid-transfer the engine
-    /// owns the path, and torrent rows map to session outputs, not files.
+    /// Rename a download: the list label plus the file on disk when already fetched. Only completed and queued rows qualify: mid-transfer the engine owns the path, and torrent rows map to session outputs.
     ///
     /// # Errors
     /// Returns a display-ready message when the row cannot be renamed.
@@ -1870,9 +1565,7 @@ impl DownloadManager {
         Ok(())
     }
 
-    /// Send a downloading/paused row to the back of the queue, keeping its
-    /// progress and partial file. The freed slot goes to the longest-waiting
-    /// queued row.
+    /// Send a downloading/paused row to the back of the queue, keeping progress and partial file.
     pub fn defer(self: &Rc<Self>, id: u64) {
         let Some(item) = self.find(id) else {
             return;
@@ -1890,26 +1583,14 @@ impl DownloadManager {
         self.start_next();
     }
 
-    /// Signal a running resolver worker to stop its extractor streams. The
-    /// Grab task abort follows (or already ran): whichever wins, the
-    /// attempt is over and a later resume replays from the sidecar.
-    /// Signal the worker for `id` to stop, with the intent that decides
-    /// what stopping means. The worker applies it: only the worker knows
-    /// whether it is capturing live, including a dialog-less row that
-    /// discovered it mid-resolve.
+    /// Signal the worker for `id` to stop, with the intent that decides what stopping means. Only the worker knows whether it is capturing live.
     fn stop_video_worker(&self, id: u64, intent: crate::video::StopIntent) {
         if let Some(stop) = self.video_abort.borrow_mut().remove(&id) {
             let _ = stop.send(intent);
         }
     }
 
-    /// Stop the engine for `id` without touching the row: signal the
-    /// worker, then abort its task and free the slot. Live rows only get
-    /// signalled, never task-aborted: the worker finalizes the capture
-    /// itself and its Finished message drives the row, so aborting or
-    /// presetting would drop the recording or strand it. Returns whether
-    /// the engine was actually stopped (false for live rows, whose caller
-    /// must also leave status and slots alone).
+    /// Stop the engine for `id` without touching the row. Live rows only get signalled (the worker finalizes and its Finished drives the row); returns whether the engine was actually stopped.
     fn stop_engine(&self, id: u64) -> bool {
         self.stop_video_worker(id, crate::video::StopIntent::Preserve);
         if self.live_rows.borrow().contains(&id) {
@@ -1922,13 +1603,9 @@ impl DownloadManager {
         true
     }
 
-    /// Stop the engine for `id`, keeping file, bitmap and progress, and
-    /// mark it queued. Unlike pause the row yields its slot; unlike cancel
-    /// nothing is deleted and progress is kept. Live rows only signal:
-    /// the worker finalizes and its message completes the row.
+    /// Stop the engine for `id`, keeping file, bitmap and progress, and mark it queued. Live rows only signal (see `stop_engine`).
     fn park(&self, id: u64) {
-        // Live rows only signal: the worker finalizes and its message
-        // completes the row (see `stop_engine`).
+        // Live rows only signal: the worker finalizes and its message completes the row.
         if !self.stop_engine(id) {
             return;
         }
@@ -1955,9 +1632,7 @@ impl DownloadManager {
         }
     }
 
-    /// Park running rows past the shrunk limit, lowest ids (earliest
-    /// enqueued) keep their slots. Id order approximates start order;
-    /// parked rows keep progress and resume later either way.
+    /// Park running rows past the shrunk limit; lowest ids keep their slots.
     fn preempt_excess(&self) {
         let max = self.max_concurrent();
         let mut ids: Vec<u64> = self.running.borrow().keys().cloned().collect();
@@ -1980,32 +1655,11 @@ impl DownloadManager {
         self.start_next();
     }
 
-    /// Reclaim a removed video row's scratch, but only once its worker
-    /// has actually stopped.
-    ///
-    /// This is why removal cannot sweep inline. A worker mid-teardown can
-    /// recreate what a sweep removed -- yt-dlp rewrites its state file on
-    /// the way out, and a finalize path can still be mid-rename -- so
-    /// unlinking first just loses the race. Awaiting the task is sound
-    /// because the worker drops its process-group guards before it
-    /// returns, and a killed process cannot write again. Sweeping both
-    /// destinations once the task has returned closes that window without
-    /// needing a tombstone.
-    ///
-    /// Claiming the gate first is what makes deferring safe: a worker
-    /// that has not reached its rename yet finds the row gone and delivers
-    /// nothing. Only a worker this finalizer actually awaited may have
-    /// committed and placed a file the row no longer owns, so only that
-    /// path removes `dest` -- the one sanctioned exception to never
-    /// deleting a finished file. With no worker in flight no orphan is
-    /// possible, so that path sweeps scratch only and never touches `dest`.
+    /// Reclaim a removed video row's scratch, but only once its worker has actually stopped. Removal cannot sweep inline: a worker mid-teardown can recreate what a sweep removed, so unlinking first just loses the race. Claiming the gate first makes deferring safe: only a worker this finalizer awaited may have committed an orphan `dest` file.
     fn finish_discard(&self, id: u64, dest: std::path::PathBuf, gate: std::sync::Arc<AttemptGate>) {
         let _ = gate.discard();
         let staging = crate::video::staging_dir(id);
-        // The tracked task runs on the tokio runtime, where `self` (Rc,
-        // !Send) cannot go: carry the reservation set as an `Arc` clone and
-        // release through it directly once the sweep is done. The queue
-        // wakeup travels the same way, through the `Send` channel.
+        // `self` (Rc, !Send) cannot go to the tokio runtime: carry reservations as an `Arc` clone and wake the queue through the `Send` channel.
         let reservations = std::sync::Arc::clone(&self.reservations);
         let wake_tx = self.wake_tx.clone();
         match self.running.borrow_mut().remove(&id) {
@@ -2016,10 +1670,7 @@ impl DownloadManager {
                     crate::video::clean_staging(&staging);
                     crate::video::clean_dest_parts(&dest);
                     if gate.was_delivered() {
-                        // The commit won the race, so this file is the
-                        // attempt's own orphan and the row is gone. The one
-                        // sanctioned exception to never deleting a finished
-                        // file.
+                        // The commit won the race, so this file is the attempt's own orphan and the row is gone: the one sanctioned exception to never deleting a finished file.
                         let _ = std::fs::remove_file(&dest);
                     }
                     if let Ok(mut r) = reservations.lock() {
@@ -2030,10 +1681,7 @@ impl DownloadManager {
                     // instead of waiting for an unrelated `start_next()`.
                     wake_tx.send(()).ok();
                 });
-                // Retain the worker's abort beside the finalizer: shutdown
-                // stops the worker through it, because aborting the
-                // finalizer would drop the worker handle it owns and detach
-                // the worker instead of stopping it.
+                // Retain the worker's abort beside the finalizer: aborting the finalizer would detach the worker instead of stopping it.
                 self.discards.borrow_mut().insert(
                     id,
                     PendingDiscard {
@@ -2042,45 +1690,29 @@ impl DownloadManager {
                     },
                 );
             }
-            // No task to wait for, so nothing can be writing -- and no
-            // orphan is possible either. Sweep the scratch, never the
-            // finished file: with no worker in flight it belongs to the
-            // user (a settled row) or was never delivered at all.
+            // No task to wait for: sweep the scratch, never the finished file (no orphan is possible without a worker in flight).
             None => {
                 crate::video::clean_staging(&staging);
                 crate::video::clean_dest_parts(&dest);
                 self.release_dest(&dest);
-                // Same wakeup as the async finalizer above; already on the
-                // main thread, so it travels the channel like any other.
+                // Same wakeup as the async finalizer above; already on the main thread.
                 self.wake_tx.send(()).ok();
             }
         }
     }
 
     fn cancel_inner(&self, id: u64, keep_partial: bool, stop: Stop) {
-        // Live rows keep what's recorded (Stop, not Cancel): signal the
-        // worker and skip the task abort plus the Cancelled preset, so its
-        // Finished still lands. Removal is the one caller that discards,
-        // because the row is gone and a delivered file would have no row to
-        // belong to.
+        // Live rows keep what's recorded (Stop, not Cancel): signal the worker and skip the abort plus the Cancelled preset, so its Finished still lands. Removal is the one caller that discards.
         let live = self.live_rows.borrow().contains(&id);
-        // Only a *video* worker can be told to discard. A plain HTTP or
-        // torrent row has no `video_abort` sender, so a Discard-only path
-        // would leave its engine writing after the row is gone and leak the
-        // concurrency slot when the pump tail never runs to clear it.
+        // Only a *video* worker can be told to discard: plain rows have no `video_abort` sender, so a Discard-only path would leak the engine and its slot.
         let video = self.video_sources.borrow().contains_key(&id);
         match stop {
             Stop::Discard if video => {
                 self.stop_video_worker(id, crate::video::StopIntent::Discard);
-                // The pump tail normally clears this, but it early-returns
-                // on the epoch entry `remove` drops -- so without this the
-                // marker outlives the row and a later row reusing the id
-                // would take the live signal-only paths.
+                // The pump tail early-returns once `remove` drops the epoch entry, so clear the marker here or a later row reusing the id takes live paths.
                 self.live_rows.borrow_mut().remove(&id);
             }
-            // Preserve and non-video Discard stop the engine the same way:
-            // signal the worker, then abort its task unless a live capture
-            // is finalizing itself (see `stop_engine`).
+            // Preserve and non-video Discard stop the engine the same way (see `stop_engine`).
             _ => {
                 self.stop_engine(id);
             }
@@ -2089,20 +1721,15 @@ impl DownloadManager {
         let had_segments = self.segment_state.borrow_mut().remove(&id).is_some();
         self.torrent_pieces.borrow_mut().remove(&id);
         if let Some(item) = self.find(id) {
-            // Segmented partials have holes: without the bitmap they can
-            // never be appended to, so cancel drops the file — unless the
-            // row may come back via Undo, which restores the bitmap.
+            // Segmented partials have holes: without the bitmap cancel drops the file — unless the row may come back via Undo.
             if had_segments && !keep_partial {
                 let _ = std::fs::remove_file(item.file_path());
             }
-            // Unfinished torrent rows drop their session entry but keep
-            // partial files, so cancel/retry and remove/Undo resume instead
-            // of restarting (explicit delete discards the files instead).
+            // Unfinished torrent rows drop their session entry but keep partial files, so cancel/retry and remove/Undo resume.
             if crate::torrent::is_torrent(&item.url()) && item.status() != DownloadStatus::Done {
                 crate::torrent::forget_download(id);
             }
-            // A removed row's status is moot, and a live one must keep
-            // Downloading so its Finished still lands.
+            // A removed row's status is moot, and a live one must keep Downloading so its Finished still lands.
             if stop == Stop::Preserve && !live {
                 item.set_status(DownloadStatus::Cancelled);
                 item.set_detail(item.status().label());
@@ -2115,8 +1742,7 @@ impl DownloadManager {
         if let Some(item) = self.find(id) {
             match item.status() {
                 DownloadStatus::Failed | DownloadStatus::Cancelled => {
-                    // A kept segment bitmap resumes where it left off, so
-                    // leave the progress bar there instead of flashing 0%.
+                    // A kept segment bitmap resumes where it left off, so leave the progress bar there.
                     if !self.segment_state.borrow().contains_key(&id) {
                         item.set_progress(0.0);
                     }
@@ -2131,34 +1757,18 @@ impl DownloadManager {
         }
     }
 
-    /// Cancel and drop a row; restore with [`DownloadManager::unremove`].
-    /// The partial file is kept so Undo can resume segmented rows instead
-    /// of restarting them (plain cancel still discards it).
+    /// Cancel and drop a row; restore with [`DownloadManager::unremove`]. The partial file is kept so Undo can resume.
     pub fn remove(self: &Rc<Self>, id: u64) {
         self.cancel_inner(id, true, Stop::Discard);
         self.epoch.borrow_mut().remove(&id);
-        // Video rows keep split parts beside the finished file
-        // (`<stem>.<kind>.<ext>`, yt-dlp defaults) plus the staging
-        // sidecar: drop both with the row. Pause/cancel keep them for
-        // resume; remove and delete never resume (an Undo'd row
-        // re-extracts fresh URLs and restarts), so orphaned parts would
-        // otherwise sit in Downloads until deleted by hand.
-        //
-        // Video rows defer the sweep to `finish_discard`, which waits for
-        // the worker: sweeping now would race a teardown that recreates the
-        // files, and a finalize path that is still inside its rename would
-        // deliver a file for a row that no longer exists.
+        // Video rows defer the sweep to `finish_discard`, which waits for the worker: a finalize path still inside its rename would otherwise deliver a file for a row that no longer exists.
         if self.video_sources.borrow().contains_key(&id) {
             let dest = self.find(id).map(|i| i.file_path()).unwrap_or_default();
             // Reserve first: between here and the finalizer's sweep a new
             // row (or Undo) must not claim this destination, or the
             // stem-wide sweep would delete the new row's files.
             self.reserve_dest(&dest);
-            // Spawned attempts always have a gate (Task 2 inserts it
-            // before spawning); a row that never spawned has none, and no
-            // worker can be inside a rename for it, so a fresh gate —
-            // claimed by `finish_discard` like any other — keeps the
-            // reclaim path uniform without arbitrating against anyone.
+            // Spawned attempts always have a gate; a never-spawned row gets a fresh one so the reclaim path stays uniform.
             let gate = self
                 .gate_for(id)
                 .unwrap_or_else(crate::video::AttemptGate::new);
@@ -2176,16 +1786,12 @@ impl DownloadManager {
         self.start_next();
     }
 
-    /// Segment bitmap snapshot for Undo: clone before [`DownloadManager::remove`]
-    /// drops the row's live bitmap so [`DownloadManager::unremove`] can resume it.
+    /// Segment bitmap snapshot for Undo: cloned before [`DownloadManager::remove`] drops the row's live bitmap.
     pub fn segments_of(&self, id: u64) -> Option<SegmentState> {
         self.segment_state.borrow().get(&id).cloned()
     }
 
-    /// Re-insert a previously removed download (Undo). Restores the prior
-    /// status except `Downloading`, which restarts as `Queued`. A restored
-    /// segment bitmap resumes instead of restarting; a stale one (partial
-    /// file gone) is dropped by the spawn-time file checks.
+    /// Re-insert a previously removed download (Undo). Restored `Downloading` restarts as `Queued`; a restored bitmap resumes, a stale one is dropped at spawn.
     pub fn unremove(self: &Rc<Self>, snap: RemovedSnapshot) -> DownloadItem {
         let item = DownloadItem::new(self.alloc_id(), &snap.url, &snap.filename, &snap.dest_dir);
         item.set_progress(snap.progress.clamp(0.0, 1.0));
@@ -2198,23 +1804,13 @@ impl DownloadManager {
         if let Some(st) = snap.segments {
             self.segment_state.borrow_mut().insert(item.id(), st);
         }
-        // Re-stage before insert: the persist inside `insert` already
-        // carries it and `start_next` dispatches on it.
+        // Re-stage before insert (see `enqueue_video`): the persist carries it and `start_next` dispatches on it.
         if let Some(src) = snap.video_source {
             self.video_sources.borrow_mut().insert(item.id(), src);
         }
-        // Undo bypasses intake dedupe, so it must consult the reservation
-        // itself: a discard still tearing down owns this destination, and
-        // starting now would collide with its stem-wide sweep. Only rows
-        // that would actually start divert here (`Downloading` already
-        // mapped to `Queued` above): `Done`/`Failed`/other snapshots never
-        // start on their own, so narrowing keeps them byte-identical to the
-        // unreserved path.
-        //
-        // Reservation released: the finalizer wakes the queue through
-        // `wake_tx`, so the row starts on the next main-loop iteration
-        // once the destination is free, instead of waiting for an
-        // unrelated `start_next` trigger.
+        // Undo bypasses intake dedupe, so consult the reservation: a discard still
+        // tearing down owns this destination, and the finalizer's `wake_tx` wakeup
+        // starts the row once the destination is free.
         if item.status() == DownloadStatus::Queued && self.dest_reserved(&item.file_path()) {
             item.set_status(DownloadStatus::Queued);
             self.store.append(&item);
@@ -2226,9 +1822,7 @@ impl DownloadManager {
         item
     }
 
-    /// Engine's real output folder for a torrent row: recorded at enqueue
-    /// (magnets), else recomputed from the archived .torrent, else the
-    /// row's own path as a last resort.
+    /// Engine's real output folder for a torrent row: recorded at enqueue, else recomputed from the archive, else the row's own path.
     fn torrent_folder(item: &DownloadItem) -> std::path::PathBuf {
         let recorded = item.output_dir().to_string();
         if !recorded.is_empty() {
@@ -2238,10 +1832,7 @@ impl DownloadManager {
         crate::torrent::torrent_output_dir(&dest, &item.url()).unwrap_or_else(|| item.file_path())
     }
 
-    /// Per-piece completion for the block map, native resolution:
-    /// segmented HTTP bitmap, torrent session haves, or a prefix fill
-    /// from byte progress for plain single-stream rows. Empty when the
-    /// row is unknown or nothing is known yet.
+    /// Per-piece completion for the block map: segmented bitmap, torrent haves, or a prefix fill from byte progress. Empty when nothing is known.
     pub fn piece_bitmap(&self, id: u64) -> Vec<bool> {
         if let Some(st) = self.segment_state.borrow().get(&id) {
             return st.done.clone();
@@ -2265,13 +1856,7 @@ impl DownloadManager {
     /// Returns a display-ready message when trashing fails.
     pub fn delete_download(self: &Rc<Self>, id: u64) -> Result<(), String> {
         let item = self.find(id).ok_or_else(|| gettext("Download not found"))?;
-        // Torrent rows (any status): drop the session entry and the
-        // archive, drop the row, then Trash the real files. Multi-file
-        // torrents live in dest/<torrent-name>/ rather than the stub path
-        // (never written), so trash the folder recorded at enqueue
-        // (magnets) or recomputed from the archived .torrent; a missing
-        // path is fine when metadata never resolved. Matches the HTTP
-        // delete contract (Trash, recoverable).
+        // Torrent rows: drop the session entry and archive, drop the row, then Trash the real files (they live in the recorded/recomputed folder, never the stub path).
         if crate::torrent::is_torrent(&item.url()) {
             let path = Self::torrent_folder(&item);
             crate::torrent::forget_download(id);
@@ -2290,12 +1875,7 @@ impl DownloadManager {
             Err(e) if e.kind::<gio::IOErrorEnum>() == Some(gio::IOErrorEnum::NotFound) => {}
             Err(e) => return Err(format!("Could not move {} to Trash: {e}", item.filename())),
         }
-        // Collected subtitle sidecars travel with the video: trash every
-        // `<stem>.<lang>.srt` this row could own. The language pref is
-        // global rather than per-row, so every offered code is a
-        // candidate; failures only warn (the row delete must not fail
-        // over a sidecar). Plain rows never wrote sidecars — gate on the
-        // staged video source like remove()'s part cleanup does.
+        // Collected subtitle sidecars travel with the video: trash every `<stem>.<lang>.srt`. Plain rows never wrote sidecars — gate on the staged source like remove().
         if self.video_sources.borrow().contains_key(&id) {
             for lang in crate::video_prefs::subtitle_content_languages() {
                 let sidecar = crate::video_staging::sidecar_path_for(&item.file_path(), lang);
@@ -2316,9 +1896,7 @@ impl DownloadManager {
 
     /// Cancel every queued, downloading or paused item.
     pub fn cancel_all(self: &Rc<Self>) {
-        // One persist/sync at the end, and no per-row start_next: cancel()
-        // would briefly spawn the next queued row only to cancel it right
-        // after, leaving stray engine tasks and UI futures behind.
+        // One persist at the end and no per-row start_next: cancel() would briefly spawn the next queued row only to cancel it right after.
         self.for_matching(
             |s| {
                 matches!(
@@ -2347,9 +1925,7 @@ impl DownloadManager {
         n
     }
 
-    /// Drop every finished row (files stay on disk). Still-seeding
-    /// torrents leave the session first: clearing the record must not
-    /// leave invisible uploading running. Returns the cleared count.
+    /// Drop every finished row (files stay on disk). Still-seeding torrents leave the session first. Returns the cleared count.
     pub fn clear_finished(self: &Rc<Self>) -> usize {
         let before = self.store.n_items();
         self.for_matching(
@@ -2358,9 +1934,7 @@ impl DownloadManager {
         );
         let n = (before - self.store.n_items()) as usize;
         if n > 0 {
-            // Same hygiene as a restart: archives and staged selections
-            // no remaining row references go now (cleared rows have no
-            // Undo path holding them, unlike `remove`).
+            // Same hygiene as a restart: drop archives and selections no remaining row references.
             let referenced: std::collections::HashSet<String> = self
                 .items()
                 .map(|it| it.url().to_string())
@@ -2381,10 +1955,7 @@ impl DownloadManager {
             .count()
     }
 
-    /// Snapshots of every finished row, in list order, for Clear
-    /// Finished's Undo. Done rows hold no engines, bitmaps or partials,
-    /// so the snapshot is just the record [`DownloadManager::unremove`]
-    /// needs to re-insert it.
+    /// Snapshots of every finished row, in list order, for Clear Finished's Undo.
     pub fn finished_snapshots(&self) -> Vec<RemovedSnapshot> {
         self.items()
             .filter(|it| it.status() == DownloadStatus::Done)
@@ -2402,12 +1973,7 @@ impl DownloadManager {
             .collect()
     }
 
-    /// Drop finished rows for `url` other than `keep_id`: one finished
-    /// record per URL (Parabolic parity). Only Done rows — active,
-    /// paused, failed and cancelled rows are user intent and never
-    /// touched. Unnormalizable URLs skip quietly (rows are validated
-    /// at intake, so this is unreachable in practice). Store-only;
-    /// callers persist.
+    /// Drop finished rows for `url` other than `keep_id`: one finished record per URL (Parabolic parity). Store-only; callers persist.
     pub(crate) fn drop_finished_duplicates(&self, url: &str, keep_id: u64) {
         let Ok(key) = normalize_url(url) else {
             return;
@@ -2426,11 +1992,7 @@ impl DownloadManager {
         }
     }
 
-    /// Drop one finished row: a lingering torrent session leaves first
-    /// (see `clear_finished`), staged sources and epochs release, and
-    /// the row leaves the store. Files stay on disk. Done rows hold no
-    /// engines, bitmaps or partials, so unlike `remove` there is nothing
-    /// to cancel, snapshot or clean.
+    /// Drop one finished row: files stay on disk. Unlike `remove` there is nothing to cancel, snapshot or clean.
     fn drop_finished_row(&self, id: u64) {
         if let Some(item) = self.find(id)
             && crate::torrent::is_torrent(&item.url())
@@ -2486,9 +2048,7 @@ impl DownloadManager {
             .count()
     }
 
-    /// Whether anything is actually transferring (queued or downloading).
-    /// Paused items don't count: closing over only-paused downloads quits
-    /// instead of hiding to a "background" notification.
+    /// Whether anything is actually transferring (queued or downloading). Paused items don't count.
     pub fn has_transferring(&self) -> bool {
         self.any_status(|s| matches!(s, DownloadStatus::Queued | DownloadStatus::Downloading))
     }
@@ -2498,9 +2058,7 @@ impl DownloadManager {
         self.any_status(|s| matches!(s, DownloadStatus::Failed | DownloadStatus::Cancelled))
     }
 
-    /// Whether any item genuinely failed. User-cancelled rows need no
-    /// error banner: cancelling was deliberate, and Retry Failed in the
-    /// menu still resurrects them via `has_failed`.
+    /// Whether any item genuinely failed. User-cancelled rows need no error banner (Retry Failed still resurrects them via `has_failed`).
     pub fn has_errored(&self) -> bool {
         self.any_status(|s| matches!(s, DownloadStatus::Failed))
     }
@@ -2510,9 +2068,7 @@ impl DownloadManager {
     }
 
     fn queue_file() -> std::path::PathBuf {
-        // Test seam only (debug builds run the suite against temp files):
-        // release builds always use the real location, so a crafted
-        // launcher environment can never redirect queue state.
+        // Test seam only: release builds always use the real location, so a crafted launcher environment can never redirect queue state.
         if cfg!(debug_assertions)
             && let Some(p) = std::env::var_os("GRAB_QUEUE_FILE")
         {
@@ -2524,8 +2080,7 @@ impl DownloadManager {
         dir.join("queue.json")
     }
 
-    /// Move a broken queue file aside (`queue.json.bak`) so its bytes
-    /// survive for inspection and the next persist starts fresh.
+    /// Move a broken queue file aside (`queue.json.bak`) so the next persist starts fresh.
     fn quarantine_queue() {
         let bak = Self::queue_file().with_extension("json.bak");
         if let Err(e) = std::fs::rename(Self::queue_file(), &bak) {
@@ -2543,9 +2098,7 @@ impl DownloadManager {
             if it.status() != DownloadStatus::Cancelled {
                 let segments = self.segment_state.borrow().get(&it.id()).cloned();
                 let selected_files = crate::torrent::get_selection(&it.url().to_string());
-                // Empty means "no folder tracked": omit it so old files
-                // stay clean and old app versions keep reading new ones.
-                // Same for the video source: only Page rows write it.
+                // Empty means "no folder tracked": omit it so old files stay clean and old app versions keep reading new ones.
                 let output_dir = it.output_dir().to_string();
                 let output_dir = (!output_dir.is_empty()).then_some(output_dir);
                 let video_source = self
@@ -2600,15 +2153,9 @@ impl DownloadManager {
         }
     }
 
-    /// Validate one persisted queue entry for restore: trust-checked
-    /// output dir, URL, filename, absolute dest, well-shaped bitmap.
-    /// Invalid entries warn-skip (never strand engines); valid ones
-    /// collect for the apply phase. Pure part of `restore_queue` —
-    /// validation must never insert or spawn (see its two-phase note).
+    /// Validate one persisted queue entry for restore. Invalid entries warn-skip; valid ones collect for the apply phase. Pure: never inserts or spawns.
     fn validate_stored_item(item: StoredItem) -> Option<PendingRestore> {
-        // The recorded engine folder is only trusted when it sits
-        // directly inside the row's own dest; otherwise it stays
-        // unknown and delete falls back to the recomputed path.
+        // The recorded engine folder is only trusted when it sits directly inside the row's own dest.
         let output_dir = item.output_dir.clone().filter(|dir| {
             let folder = std::path::PathBuf::from(dir);
             folder.is_absolute()
@@ -2616,8 +2163,7 @@ impl DownloadManager {
                     .parent()
                     .is_some_and(|p| p == std::path::Path::new(&item.dest_dir))
         });
-        // Mirror restore_existing's cheap validations now, so the
-        // apply phase below cannot fail (and strand engines) partway.
+        // Mirror restore_existing's cheap validations now, so the apply phase below cannot fail partway and strand engines.
         if normalize_url(&item.url).is_err() {
             tracing::warn!("skipping queue entry with bad URL");
             return None;
@@ -2636,9 +2182,7 @@ impl DownloadManager {
             );
             return None;
         }
-        // A stored bitmap resumes segmented; anything
-        // misshapen is dropped (single-stream fallback stays
-        // correct via the spawn-time file checks).
+        // A stored bitmap resumes segmented; misshapen ones are dropped (single-stream fallback stays correct).
         let segments = match &item.segments {
             Some(s)
                 if s.total > 0
@@ -2656,13 +2200,9 @@ impl DownloadManager {
         })
     }
 
-    /// Load the persisted queue (cap: 1000 items / 10 MB), then resume.
-    /// Unusable files are moved to `queue.json.bak` (not deleted), so a
-    /// single bad write can never silently wipe the whole queue.
+    /// Load the persisted queue (cap: 1000 items / 10 MB), then resume. Unusable files move to `queue.json.bak`, never deleted.
     pub fn restore_queue(self: &Rc<Self>) {
-        // Before allocating anything: a queue written before ids were
-        // persisted restores its rows with fresh ids, and those must not
-        // collide with a staging directory some other row still occupies.
+        // Pre-persisted-id queues restore with fresh ids, which must not collide with a staging dir another row still occupies.
         if let Some(highest) = crate::video::highest_staging_index()
             && highest >= self.next_id.get()
         {
@@ -2692,8 +2232,7 @@ impl DownloadManager {
                 Self::quarantine_queue();
                 return;
             }
-            // Over-cap queues keep every resumable item first, then the
-            // newest history: active rows are user intent, Done rows are not.
+            // Over-cap queues keep every resumable item first, then the newest history.
             let mut items = queue.items;
             if items.len() > MAX_QUEUE_ITEMS {
                 tracing::warn!(
@@ -2711,10 +2250,7 @@ impl DownloadManager {
                     .collect();
             }
             self.batch.set(self.batch.get() + 1);
-            // Two phases: every insert below can spawn an engine via
-            // start_next, so collect all restore decisions first and only
-            // then apply them — a mid-loop validation failure can no longer
-            // leave half-spawned engines behind.
+            // Two phases: collect all restore decisions first, then apply — a mid-loop failure can no longer leave half-spawned engines.
             let mut pending = Vec::with_capacity(items.len());
             for item in items {
                 if let Some(p) = Self::validate_stored_item(item) {
@@ -2733,13 +2269,7 @@ impl DownloadManager {
                         );
                     }
                     status => {
-                        // Re-stage the intake file selection BEFORE
-                        // restore_existing: the live map is in-memory only,
-                        // and insert → start_next → spawn_torrent reads it
-                        // synchronously. Staging after the insert is too
-                        // late — session adoption would see None against the
-                        // persisted filter and fail the row on the
-                        // only_files mismatch arm.
+                        // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
                         if let Some(sel) = p.item.selected_files.clone()
                             && let Ok(url) = normalize_url(&p.item.url)
                         {
@@ -2761,25 +2291,16 @@ impl DownloadManager {
                 }
             }
             self.batch.set(self.batch.get().saturating_sub(1));
-            // Drop archived .torrent files no row references anymore
-            // (removed rows keep theirs until now; explicit deletes drop
-            // theirs at once, Finished engines drop theirs on completion).
+            // Drop archives and staged selections no row references anymore; sweep session orphans whose rows vanished in a crash.
             let referenced: std::collections::HashSet<String> = self
                 .items()
                 .map(|it| it.url().to_string())
                 .filter(|u| crate::torrent::is_torrent_url(u))
                 .collect();
             crate::torrent::sweep_archives(&referenced);
-            // Same for staged file selections: rows that are gone need no
-            // filter on a future re-add (which stages fresh at intake).
+            // Same for staged file selections (a future re-add stages fresh at intake).
             crate::torrent::prune_selections(&referenced);
-            // Session persistence re-adds every remembered torrent when the
-            // engine is created — including entries whose rows vanished in
-            // a crash between row removal and the session delete. Sweep
-            // those orphans now that the queue is restored: the keep-set
-            // is every live torrent row's info-hash (Done rows finished and
-            // already left the session).
-            // No session yet: the sweep would no-op, so skip the store walk.
+            // No session yet: the sweep below would no-op, so skip the store walk.
             if crate::torrent::session_handle().is_some() {
                 let keep: std::collections::HashSet<String> = self
                     .items()
@@ -2801,11 +2322,7 @@ impl DownloadManager {
     pub fn shutdown(&self) {
         self.draining.set(true);
         let handles: Vec<_> = self.running.borrow_mut().drain().map(|(_, h)| h).collect();
-        // Discard workers first, through their retained abort handles:
-        // each finalizer owns its worker's JoinHandle, so aborting the
-        // finalizer would drop that handle and detach the worker instead
-        // of stopping it. The finalizers are then awaited (not aborted)
-        // so their cleanup still runs.
+        // Discard workers first through their retained abort handles: aborting a finalizer would detach its worker instead of stopping it. Finalizers are awaited (not aborted) so cleanup still runs.
         let finals: Vec<PendingDiscard> =
             self.discards.borrow_mut().drain().map(|(_, p)| p).collect();
         for handle in handles.iter() {
@@ -2814,8 +2331,7 @@ impl DownloadManager {
         for pending in &finals {
             pending.worker_abort.abort();
         }
-        // Engine tasks touch only the tokio runtime (never the main thread),
-        // so joining them here is prompt and deadlock-free.
+        // Engine tasks touch only the tokio runtime, so joining them here is prompt and deadlock-free.
         tokio_rt().block_on(async {
             for handle in handles {
                 let _ = handle.await;
@@ -2833,9 +2349,7 @@ impl DownloadManager {
                 st.forget_beyond_prefix();
             }
         }
-        // Persist BEFORE returning: the bitmaps are what let the next launch
-        // resume segmented instead of restarting. Pump tails exit silently
-        // once draining is set, so this is the only persist that matters.
+        // Persist BEFORE returning: pump tails exit silently once draining is set, so this is the only persist that matters.
         self.persist_queue();
     }
 }

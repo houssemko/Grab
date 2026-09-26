@@ -4,12 +4,7 @@ use gtk4::gio;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-/// Two-way sync between a ComboRow index and a GSettings string: the row
-/// shows the stored value, external edits reselect it (weak ref, so
-/// closed dialogs don't leak), user picks write back. `get` reads the
-/// current value for the initial selection; `index_of`/`value_of` are
-/// the combo's mapping fns. A plain GSettings bind can't do this (index
-/// vs string need the mapping in both directions).
+/// Two-way ComboRow <-> GSettings sync via index/value mapping (plain bind can't map index vs string).
 fn bind_combo_row(
     row: &adw::ComboRow,
     settings: &crate::settings::AppSettings,
@@ -35,10 +30,7 @@ fn bind_combo_row(
     });
 }
 
-/// Flag junk rate text immediately instead of failing rows at spawn
-/// time: empty and `0` mean unlimited, anything else must parse. The red
-/// border alone isn't perceivable without color, so an error icon with a
-/// tooltip (announced by screen readers) marks invalid input too.
+/// Flag bad rate text immediately (empty/`0` = unlimited); error icon + tooltip keeps it perceivable without color.
 fn mark_rate_row(live: &adw::EntryRow) {
     let icon = gtk4::Image::from_icon_name("dialog-error-symbolic");
     icon.set_tooltip_text(Some(&gettext(
@@ -63,9 +55,7 @@ fn mark_rate_row(live: &adw::EntryRow) {
     live.connect_changed(mark);
 }
 
-/// Whether the proxy mode string selects manual setup (its rows only
-/// exist in manual mode). Takes the raw value so both the GSettings
-/// signal payload and the typed getter feed it.
+/// Whether proxy mode selects manual setup; takes raw value for signal payload and getter.
 fn is_manual_proxy(mode: &str) -> bool {
     mode == crate::download::PROXY_MODE_MANUAL
 }
@@ -78,9 +68,7 @@ pub fn show(
         .title(gettext("Preferences"))
         .build();
 
-    // Power-user knobs live on their own page so the main pages stay
-    // approachable. Every advanced row keeps its safe default, so users
-    // who never open this page still get the optimal behavior.
+    // Advanced page keeps main pages approachable; every advanced row keeps its safe default.
     let advanced_page = adw::PreferencesPage::builder()
         .title(gettext("Advanced"))
         .icon_name("applications-engineering-symbolic")
@@ -226,7 +214,6 @@ pub fn show(
     settings
         .bind(crate::settings::key::SPEED_LIMIT, &limit, "text")
         .build();
-    // Flag junk immediately instead of failing rows at spawn time.
     mark_rate_row(&limit);
     net_group.add(&limit);
 
@@ -291,8 +278,7 @@ pub fn show(
         .bind(crate::settings::key::PROXY_PORT, &proxy_port, "value")
         .build();
     proxy_group.add(&proxy_port);
-    // The manual rows only exist in manual mode; the group hides
-    // otherwise so System/Direct stay one clean row.
+    // Manual rows exist only in manual mode; group hides otherwise.
     fn sync_proxy_group(group: &gtk4::glib::WeakRef<adw::PreferencesGroup>, manual: bool) {
         if let Some(group) = group.upgrade() {
             group.set_visible(manual);
@@ -458,7 +444,6 @@ pub fn show(
             "text",
         )
         .build();
-    // Flag junk immediately instead of failing rows at spawn time.
     mark_rate_row(&upload_limit);
     torrent_net_group.add(&upload_limit);
     let blocklist = adw::EntryRow::builder()
@@ -475,10 +460,6 @@ pub fn show(
             "text",
         )
         .build();
-    // Flag junk immediately instead of failing rows at spawn time. The
-    // red border alone isn't perceivable without color, so an error
-    // icon with a tooltip (announced by screen readers) marks invalid
-    // input too.
     {
         let icon = gtk4::Image::from_icon_name("dialog-error-symbolic");
         icon.set_tooltip_text(Some(&gettext("Invalid URL")));
@@ -502,9 +483,7 @@ pub fn show(
     torrent_net_group.add(&blocklist);
     torrent_page.add(&torrent_net_group);
 
-    // Video pages resolve through the yt-dlp support tools; this page
-    // holds the defaults new video downloads start from, plus tool setup.
-    // Runs `binary --version` and reports `None` when it fails.
+    // Video pages resolve via yt-dlp tools; this page holds defaults plus tool setup.
     fn tool_version(binary: &std::path::Path, version_arg: &str) -> Option<String> {
         let out = std::process::Command::new(binary)
             .arg(version_arg)
@@ -534,9 +513,8 @@ pub fn show(
         }
         Some(first)
     }
-    /// Installed tool versions for the tools row: `(yt-dlp, ffmpeg)`.
-    /// `None` when the tools are missing; falls back to the binary path
-    /// when `--version` fails.
+    /// Installed tool versions for the tools row: `(yt-dlp, ffmpeg)`; `None` when
+    /// the tools are missing, falling back to the binary path if `--version` fails.
     fn installed_tool_versions() -> Option<(String, String)> {
         crate::video::resolve_libraries().ok().map(|libs| {
             let yt = tool_version(&libs.youtube, "--version")
@@ -547,11 +525,10 @@ pub fn show(
             (yt, ff)
         })
     }
-    /// What the tools-row button does: Install when tools are missing,
-    /// Check to probe GitHub for a newer yt-dlp, Update once one is
-    /// known. The check-then-act shape keeps a permanent Update button
-    /// off fresh installs while leaving on-demand updates one click
-    /// away (yt-dlp's pace makes them genuinely useful).
+    /// What the tools-row button does: Install when tools are missing, Check to
+    /// probe GitHub for a newer yt-dlp, Update once one is known. The
+    /// check-then-act shape keeps a permanent Update button off fresh installs
+    /// while leaving on-demand updates one click away.
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ToolAction {
         Install,
@@ -852,9 +829,7 @@ pub fn show(
                 return;
             }
             if action.get() == ToolAction::Check {
-                // One user-initiated probe: compare the installed yt-dlp
-                // against the latest GitHub tag, then morph into Update
-                // only when something newer exists.
+                // One user-initiated probe; see `ToolAction` for the Check→Update shape.
                 let (row_b, btn_b, spin_b) = (row.clone(), btn.clone(), spin.clone());
                 let dialog_b = dialog_weak.clone();
                 let action_b = action.clone();
@@ -864,9 +839,8 @@ pub fn show(
                 spin.start();
                 row.set_subtitle(&gettext("Checking for updates…"));
                 gtk4::glib::spawn_future_local(async move {
-                    // The update probe cannot go through the proxy, so a
-                    // proxied check would leak the machine IP to GitHub:
-                    // skip loudly instead of checking direct.
+                    // The update probe cannot go through the proxy: a proxied check
+                    // would leak the machine IP to GitHub, so skip loudly.
                     let proxied = crate::download::DownloadOptions::from_settings(&settings_c)
                         .proxy_config()
                         .map(|p| p.is_some())
@@ -965,9 +939,8 @@ pub fn show(
     video_page.add(&video_auth_group);
     video_page.add(&video_tools_group);
     dialog.add(&video_page);
-    // In-page group order: the General/Network/Media/Torrent taxonomy,
-    // with each family's related groups adjacent (Media keeps
-    // Post-processing and Live; Torrent keeps Sharing).
+    // In-page group order: the General/Network/Media/Torrent taxonomy, keeping
+    // each family's related groups adjacent.
     advanced_page.add(&advanced_general_group);
     advanced_page.add(&advanced_media_group);
     advanced_page.add(&video_post_group);

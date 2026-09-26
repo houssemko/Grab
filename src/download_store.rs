@@ -1,7 +1,4 @@
-//! Queue persistence model: row status, the serde queue file
-//! (versioned, backward compatible) and its stored items. Leaf
-//! module (gettext + download_pieces bitmap + media types): the
-//! manager persists/restores through the `download` facade.
+//! Queue persistence: row status, versioned queue file and stored items.
 
 use crate::download_pieces::SegmentState;
 use gettextrs::gettext;
@@ -25,8 +22,7 @@ pub enum DownloadStatus {
 impl DownloadStatus {
     /// Short human-readable label for the status, for list rows and toasts.
     pub fn label(self) -> String {
-        // gettext() wraps each literal here (not at the call sites) so
-        // xgettext can statically extract every status msgid.
+        // gettext() here (not call sites) so xgettext extracts every msgid.
         match self {
             DownloadStatus::Queued => gettext("Queued"),
             DownloadStatus::Downloading => gettext("Downloading"),
@@ -42,14 +38,7 @@ pub(crate) const QUEUE_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StoredItem {
-    /// This row's manager id, which is also its staging key
-    /// (`staging_dir(item_id)`). Absent before v3: those rows are given a
-    /// fresh id on restore, exactly as before.
-    ///
-    /// Persisting it is what makes a retained recording reachable again
-    /// after a restart. Re-allocating instead meant a retry scanned a
-    /// different directory than the attempt that wrote the file, and a
-    /// later row handed the same number could delete it.
+    /// Manager id, also staging key; absent before v3 (fresh id on restore). Persisted so retained recordings stay reachable after restart.
     #[serde(default)]
     pub(crate) id: Option<u64>,
     pub(crate) url: String,
@@ -58,23 +47,16 @@ pub(crate) struct StoredItem {
     pub(crate) status: DownloadStatus,
     #[serde(default)]
     pub(crate) progress: f64,
-    /// Completed 1 MB pieces for segmented resume across restarts (v2+).
-    /// Absent on v1 files and for items that need no resume.
+    /// Completed pieces for segmented resume (v2+); absent on v1 or when unneeded.
     #[serde(default)]
     pub(crate) segments: Option<SegmentState>,
-    /// Intake file selection for multi-file torrents (v2+). The live map
-    /// is in-memory only, so the selection is persisted here and
-    /// re-staged on restore — otherwise a restart drops the filter and
-    /// the resume downloads every file.
+    /// Multi-file torrent selection (v2+); re-staged on restore or resume would download everything.
     #[serde(default)]
     pub(crate) selected_files: Option<Vec<usize>>,
-    /// Recorded engine output folder for torrents (v2+). Absent on old
-    /// files and for items that need no folder tracking.
+    /// Recorded engine output folder for torrents (v2+).
     #[serde(default)]
     pub(crate) output_dir: Option<String>,
-    /// Video-page source for yt-dlp items: only `Some(Page)` is ever
-    /// written (plain downloads omit it, so old files stay clean and old
-    /// app versions keep reading new ones).
+    /// Video-page source; only `Some(Page)` written so old files/versions stay compatible.
     #[serde(default)]
     pub(crate) video_source: Option<crate::media_types::VideoSource>,
 }

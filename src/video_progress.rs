@@ -1,21 +1,16 @@
-//! Progress-line parsing: the `[Grab];` template model, merge/leg
-//! detectors and pump helpers. Leaf module (no crate deps): the
-//! runner consumes these, tests pin the line shapes directly.
+//! Progress-line parsing: the `[Grab];` template model, merge/leg detectors
+//! and pump helpers. Leaf module (no crate deps).
 
-/// Progress reports are throttled to this many bytes between row updates:
-/// per-chunk reports would churn the UI for no visible gain, but the bar
-/// must still feel live on slow links (HIG: indeterminate-or-smooth,
-/// never a frozen bar).
+/// Progress reports are throttled to this many bytes between row updates, so
+/// the bar stays live on slow links without churning the UI.
 pub(crate) const PROGRESS_GRANULARITY: u64 = 16384;
 
-/// One parsed template line: absolute byte counts (never percents), so
-/// callers accumulate instead of re-deriving. `total` already folds the
-/// estimate fallback; `None` means unknown (live/unsized), not zero.
-/// `speed`/`eta` are parsed and pinned by tests but not consumed — the
-/// pump recomputes both from ticks — so they stay (they document the
-/// line shape and cost nothing). `finished` marks a leg boundary:
-/// yt-dlp prints one `status=finished` line per completed format, and
-/// `downloaded_bytes` resets for the next leg.
+/// One parsed template line: absolute byte counts (never percents), so callers
+/// accumulate instead of re-deriving. `total` folds the estimate fallback;
+/// `None` means unknown (live/unsized), not zero. `speed`/`eta` are parsed but
+/// not consumed (the pump recomputes both from ticks) — they document the line
+/// shape. `finished` marks a leg boundary: yt-dlp prints one per completed
+/// format and `downloaded_bytes` resets for the next leg.
 #[derive(Debug, PartialEq)]
 pub(crate) struct YtProgress {
     pub downloaded: Option<u64>,
@@ -68,15 +63,10 @@ pub(crate) fn parse_ytdlp_after_move(line: &str) -> Option<&str> {
         .then_some(trimmed)
 }
 
-/// Whether a fresh total starts a new format leg (video→audio)
-/// rather than HLS/DASH estimate wobble. Totals are re-estimated per
-/// fragment while bytes climb monotonically, so wobble moves the total
-/// alone; a new leg moves the total substantially (either direction —
-/// the audio leg is usually much smaller, but need not be) AND resets
-/// downloaded back near zero (legs download sequentially, so bytes are
-/// high when the second leg starts). Unknown bytes count as reset: a
-/// leg's first lines may carry no count yet. The first known total
-/// always (re)inits. Pure for tests.
+/// Whether a fresh total starts a new format leg (video→audio) rather than
+/// HLS/DASH estimate wobble. Wobble moves the total alone; a new leg moves it
+/// substantially *and* resets downloaded back near zero (legs are sequential).
+/// Unknown bytes count as reset. The first known total always (re)inits.
 pub(crate) fn leg_changed(
     max_total: Option<u64>,
     max_dl: u64,
@@ -110,11 +100,9 @@ pub(crate) fn piece_marks(piece_len: u64, marked: &mut u64, downloaded: u64) -> 
     out
 }
 
-/// Trace yt-dlp's selected-format line (`[info] … Downloading N
-/// format(s): …`) as it streams past: on success it names what
-/// actually downloaded (audit our pick against yt-dlp's sort and
-/// id aliasing); on failure the tail below still carries the error.
-/// `pending` carries a line split across 4 KiB reads.
+/// Trace yt-dlp's selected-format line as it streams past, to audit our pick
+/// against yt-dlp's own sort and id aliasing. `pending` carries a line split
+/// across 4 KiB reads.
 pub(crate) fn trace_format_lines(pending: &mut String, chunk: &[u8]) {
     pending.push_str(&String::from_utf8_lossy(chunk));
     while let Some(pos) = pending.find('\n') {

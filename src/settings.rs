@@ -1,7 +1,4 @@
-//! Typed access to the GSettings schema: one method per key, so a
-//! renamed key fails at compile time instead of silently reading a default.
-//! [`AppSettings`] derefs to [`gio::Settings`], so `bind()` and signal
-//! connections keep working; use the [`key`] constants for those.
+//! Typed GSettings access: one method per key, so renames fail at compile time.
 
 use gtk4::gio;
 use gtk4::prelude::SettingsExt as _;
@@ -121,13 +118,11 @@ impl AppSettings {
     pub fn video_codec_newest(&self) -> bool {
         self.video_codec_priority() == crate::video::CODEC_PRIORITY_NEWEST
     }
-    /// Stored subtitle language code; `"off"` when disabled. Resolved
-    /// to `Option` at spawn time via [`crate::video_prefs::subtitle_lang_active`].
+    /// Stored subtitle code (`"off"` disabled); resolved to `Option` at spawn time.
     pub fn subtitle_language(&self) -> String {
         self.0.string(key::SUBTITLE_LANGUAGE).to_string()
     }
-    /// Mux downloaded subtitles into the finished file (`--embed-subs`).
-    /// Opt-in; a no-op when subtitle downloads are off.
+    /// Mux subtitles into the file; opt-in, no-op when subs off.
     pub fn embed_subs(&self) -> bool {
         self.0.boolean(key::EMBED_SUBS)
     }
@@ -146,13 +141,11 @@ impl AppSettings {
     pub fn remux_video(&self) -> String {
         self.0.string(key::REMUX_VIDEO).to_string()
     }
-    /// Write chapter markers into the finished file (`--embed-chapters`).
-    /// Opt-in; live rows never take it (no post-processing leg exists).
+    /// Write chapters into the file; opt-in, live rows never take it.
     pub fn embed_chapters(&self) -> bool {
         self.0.boolean(key::EMBED_CHAPTERS)
     }
-    /// Record live streams from the beginning (`--live-from-start`).
-    /// Opt-in; only live rows take it (VOD legs have no live edge).
+    /// Record live from start; opt-in, live rows only.
     pub fn live_from_start(&self) -> bool {
         self.0.boolean(key::LIVE_FROM_START)
     }

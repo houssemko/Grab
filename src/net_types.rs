@@ -1,10 +1,6 @@
-//! Proxy identity shared by every engine: the resolved proxy travels
-//! from settings into HTTP interceptors, yt-dlp spawns and the torrent
-//! session. Leaf module (reqwest types only): the resolve/pooling impls
-//! stay in `download.rs`, which is the only place that builds these.
+//! Proxy identity shared by every engine: resolved proxy for HTTP, yt-dlp spawns and torrent session.
 
-/// Proxy resolved for one attempt: reqwest interceptors for the direct
-/// engine, plus the CLI form for yt-dlp spawns.
+/// Proxy for one attempt: reqwest interceptors plus CLI form for yt-dlp spawns.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedProxy {
     pub(crate) proxies: Vec<reqwest::Proxy>,
@@ -16,13 +12,7 @@ pub(crate) struct ResolvedProxy {
 }
 
 impl ResolvedProxy {
-    /// SOCKS5 URL for the torrent engine: librqbit's `proxy_url` demands
-    /// exactly the `socks5://` scheme, so the remote-resolving `socks5h://`
-    /// form normalizes down. Peer addresses arrive as IPs (trackers, PEX —
-    /// DHT is off under proxy), so no hostname resolution happens on the
-    /// peer path at all. HTTP(S) proxies yield `None`: the engine has no
-    /// HTTP-CONNECT peer path, so those torrents stay direct instead of
-    /// failing.
+    /// SOCKS5 URL for torrents: `socks5h://` normalizes to `socks5://` (librqbit demands it); peers arrive as IPs so nothing leaks, HTTP(S) yields `None` (no CONNECT path, stays direct).
     pub fn torrent_socks_url(&self) -> Option<String> {
         let rest = self
             .cli_url
