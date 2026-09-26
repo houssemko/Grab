@@ -70,7 +70,7 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // Attempt timeout: a full-length merge on a slow CPU dwarfs any network timeout, so bound the whole attempt at five minutes.
+    // Stall timeout: a full-length merge on a slow CPU dwarfs any network timeout, so allow five minutes of silence — but a progressing download never trips it.
     let timeout = Duration::from_secs(300);
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
@@ -417,7 +417,7 @@ pub(crate) async fn run_unified_ytdlp(
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
-/// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line.
+/// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line. `timeout` is a stall budget, not a wall clock: any stdout line resets it, so only silence kills the attempt.
 #[allow(clippy::too_many_arguments)]
 async fn run_ytdlp_attempt(
     youtube_bin: &Path,
@@ -434,6 +434,9 @@ async fn run_ytdlp_attempt(
     apply_proxy_env(&mut cmd, proxy);
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout — only silence does.
+    let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let last_progress_p = last_progress.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         // `downloaded_bytes` resets per leg, so bank each leg's max on its `finished` line and report the running sum; the caller caps against its metadata total.
@@ -441,6 +444,7 @@ async fn run_ytdlp_attempt(
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
+            *last_progress_p.lock().unwrap() = std::time::Instant::now();
             if !merged && is_ytdlp_merge_line(&line) {
                 merged = true;
                 if let Some(cb) = on_merge.as_ref() {
@@ -491,33 +495,39 @@ async fn run_ytdlp_attempt(
         }
         String::from_utf8_lossy(&tail).into_owned()
     });
-    let status = tokio::select! {
-        biased;
-        _ = &mut *abort => {
-            reap_child(&mut child, &mut group).await;
-            progress.abort();
-            logs.abort();
-            return Ok((None, None));
+    let status = loop {
+        // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed.
+        let remaining = timeout.saturating_sub(last_progress.lock().unwrap().elapsed());
+        tokio::select! {
+            biased;
+            _ = &mut *abort => {
+                reap_child(&mut child, &mut group).await;
+                progress.abort();
+                logs.abort();
+                return Ok((None, None));
+            }
+            waited = tokio::time::timeout(remaining, child.wait()) => match waited {
+                Ok(Ok(status)) => {
+                    // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
+                    group.disarm();
+                    break status;
+                }
+                Ok(Err(e)) => {
+                    reap_child(&mut child, &mut group).await;
+                    progress.abort();
+                    logs.abort();
+                    return Err(VideoError::runtime(&e));
+                }
+                Err(_) if last_progress.lock().unwrap().elapsed() >= timeout => {
+                    reap_child(&mut child, &mut group).await;
+                    progress.abort();
+                    logs.abort();
+                    return Err(VideoError::part_failed("stalled"));
+                }
+                // Progress landed mid-wait: loop back and re-arm with the fresh deadline.
+                Err(_) => {}
+            },
         }
-        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
-            Ok(Ok(status)) => {
-                // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
-                group.disarm();
-                status
-            }
-            Ok(Err(e)) => {
-                reap_child(&mut child, &mut group).await;
-                progress.abort();
-                logs.abort();
-                return Err(VideoError::runtime(&e));
-            }
-            Err(_) => {
-                reap_child(&mut child, &mut group).await;
-                progress.abort();
-                logs.abort();
-                return Err(VideoError::part_failed("timed out"));
-            }
-        },
     };
     let after_move = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();
@@ -1038,6 +1048,9 @@ pub(crate) async fn run_hls_ytdlp(
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout — only silence does.
+    let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let last_progress_p = last_progress.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
@@ -1048,6 +1061,7 @@ pub(crate) async fn run_hls_ytdlp(
         let mut after_move = None::<String>;
         let mut merged = false;
         while let Ok(Some(line)) = lines.next_line().await {
+            *last_progress_p.lock().unwrap() = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) && !merged {
                 merged = true;
                 tx_p.send(EngineMsg::Phase(gettext("Merging…"))).ok();
@@ -1108,34 +1122,42 @@ pub(crate) async fn run_hls_ytdlp(
         (max_dl, max_total, after_move)
     });
     let logs = drain_stderr_to_tail(stderr);
-    let status = tokio::select! {
-        biased;
-        _ = abort => {
-            reap_child(&mut child, &mut group).await;
-            progress.abort();
-            logs.abort();
-            sweep_staging_preserving_recordings(staging);
-            return Ok(None);
+    // Stall watchdog, not a wall clock: `timeout` is the silence budget. Each
+    // wait runs only until the stall deadline; a progress line pushes the
+    // deadline out, so a progressing download is never killed.
+    let status = loop {
+        let remaining = timeout.saturating_sub(last_progress.lock().unwrap().elapsed());
+        tokio::select! {
+            biased;
+            _ = abort => {
+                reap_child(&mut child, &mut group).await;
+                progress.abort();
+                logs.abort();
+                sweep_staging_preserving_recordings(staging);
+                return Ok(None);
+            }
+            waited = tokio::time::timeout(remaining, child.wait()) => match waited {
+                Ok(Ok(status)) => {
+                    // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
+                    group.disarm();
+                    break status;
+                }
+                Ok(Err(e)) => {
+                    reap_child(&mut child, &mut group).await;
+                    progress.abort();
+                    logs.abort();
+                    return Err(VideoError::runtime(&e));
+                }
+                Err(_) if last_progress.lock().unwrap().elapsed() >= timeout => {
+                    reap_child(&mut child, &mut group).await;
+                    progress.abort();
+                    logs.abort();
+                    return Err(VideoError::part_failed("stalled"));
+                }
+                // Progress landed mid-wait: loop back and re-arm with the fresh deadline.
+                Err(_) => {}
+            },
         }
-        waited = tokio::time::timeout(timeout, child.wait()) => match waited {
-            Ok(Ok(status)) => {
-                // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
-                group.disarm();
-                status
-            }
-            Ok(Err(e)) => {
-                reap_child(&mut child, &mut group).await;
-                progress.abort();
-                logs.abort();
-                return Err(VideoError::runtime(&e));
-            }
-            Err(_) => {
-                reap_child(&mut child, &mut group).await;
-                progress.abort();
-                logs.abort();
-                return Err(VideoError::part_failed("timed out"));
-            }
-        },
     };
     let (mut _downloaded, _total, after_move) = progress.await.unwrap_or_default();
     let log_tail = logs.await.unwrap_or_default();

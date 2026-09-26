@@ -5152,6 +5152,121 @@ fn hls_map_survives_estimate_wobble() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Fake yt-dlp that prints one progress line then goes silent: the stall
+/// watchdog must kill it instead of parking the row until a wall clock.
+fn fake_ytdlp_hls_goes_silent(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-silent");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+echo '[Grab];downloading;1000000;2000000;2000000;NA;NA'
+sleep 30
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Fake yt-dlp that keeps talking: steady progress lines must keep resetting
+/// the stall watchdog, so a slow-but-progressing download is never killed.
+fn fake_ytdlp_hls_keeps_talking(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-talking");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+i=0
+while [ $i -lt 10 ]; do
+    echo '[Grab];downloading;1000000;2000000;2000000;NA;NA'
+    i=$((i+1))
+    sleep 0.5
+done
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_stall_watchdog_kills_silent_download() {
+    // One progress line, then silence: the 2s stall budget must fail the
+    // attempt with "stalled", not wait out a wall clock.
+    let dir = std::env::temp_dir().join(format!("grab-hls-stall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_goes_silent(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(2),
+        tx,
+    ));
+    let err = res.expect_err("silent yt-dlp should stall out");
+    assert!(
+        err.to_string().contains("stalled"),
+        "expected a stall failure, got {err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hls_stall_watchdog_spares_progressing_download() {
+    // A line every 0.5s against a 2s stall budget: the attempt must survive
+    // ~5s of "downloading" and finish normally.
+    let dir = std::env::temp_dir().join(format!("grab-hls-talking-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_keeps_talking(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(2),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Fake yt-dlp for VOD HLS: logs argv, expands `%(ext)s`, writes bytes for discover.
 fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls");
