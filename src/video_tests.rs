@@ -50,7 +50,8 @@ use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
     ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, parse_yt_dlp_version,
-    toolchain_dir_in, user_lib_dir, ytdlp_identity_args, ytdlp_update_available,
+    quickjs_download_url, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
+    ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -2716,6 +2717,60 @@ fn extract_ffmpeg_toolchain_errors_without_ffmpeg() {
     make_tool_zip(&archive, &[("ffprobe", b"fake-ffprobe")]);
     assert!(extract_ffmpeg_toolchain(&archive, &dir).is_err());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ── quickjs provisioning (default JS runtime) ──────────────────────────
+
+#[test]
+fn quickjs_download_url_matches_pinned_release_and_arch() {
+    let url = quickjs_download_url().expect("test arch is supported");
+    let arch = std::env::consts::ARCH;
+    assert!(
+        url.starts_with("https://github.com/quickjs-ng/quickjs/releases/download/"),
+        "unexpected url: {url}"
+    );
+    assert!(
+        url.ends_with(&format!("qjs-linux-{arch}")),
+        "unexpected url: {url}"
+    );
+    assert!(
+        !url.ends_with(".zip"),
+        "qjs ships as a bare binary, not an archive: {url}"
+    );
+}
+
+#[test]
+fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
+    let args = ytdlp_identity_args("firefox", None, "https://www.youtube.com/watch?v=abc");
+    let pos = args
+        .iter()
+        .position(|a| a == "--no-js-runtimes")
+        .expect("pins js runtimes");
+    assert_eq!(args[pos + 1], "--js-runtimes");
+    assert_eq!(args[pos + 2], "quickjs");
+    // The pin must precede `--`: the page URL stays behind the separator.
+    let sep = args
+        .iter()
+        .position(|a| a == "--")
+        .expect("has -- separator");
+    assert!(pos < sep, "runtime pin must precede `--`");
+}
+
+#[test]
+fn ytdlp_identity_args_pins_quickjs_beyond_youtube_cookies() {
+    // quickjs-ng is the default runtime, not a YouTube+cookies special case:
+    // anonymous YouTube and other sites get the same pin.
+    for (browser, url) in [
+        ("none", "https://www.youtube.com/watch?v=abc"),
+        ("", "https://www.youtube.com/watch?v=abc"),
+        ("firefox", "https://vimeo.com/123"),
+    ] {
+        let args = ytdlp_identity_args(browser, None, url);
+        assert!(
+            args.iter().any(|a| a == "--no-js-runtimes"),
+            "js pin for browser={browser} url={url}"
+        );
+    }
 }
 
 // ── stream planning (selection gating) ───────────────────────────────

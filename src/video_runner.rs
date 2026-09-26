@@ -62,6 +62,9 @@ pub async fn run_video_download(
     let staging = ensure_staging_dir(&staging)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
+    // quickjs-ng is yt-dlp's default JS runtime; make sure it's installed
+    // before any spawn that may need to solve JS challenges.
+    crate::video_tools::ensure_quickjs().await?;
     tracing::info!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),

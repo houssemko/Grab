@@ -267,6 +267,112 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     }
 }
 
+/// Pinned quickjs-ng release: Grab's default JS runtime for yt-dlp. Every spawn
+/// pins it explicitly so a system runtime (e.g. deno, which yt-dlp prefers and
+/// enables by default) can never shadow it. quickjs-ng ships tiny (~2.5MB)
+/// official linux x86_64 and aarch64 binaries; the deno alternative is ~40x
+/// larger. Pinned for reproducibility; bump deliberately.
+pub(crate) const QUICKJS_VERSION: &str = "v0.17.0";
+
+/// Download URL for the pinned quickjs-ng release, mapped from the build arch
+/// to its asset names. The asset is the `qjs` binary itself, not an archive.
+/// `None` on architectures quickjs-ng doesn't ship.
+pub(crate) fn quickjs_download_url() -> Option<String> {
+    let arch = std::env::consts::ARCH;
+    if arch != "x86_64" && arch != "aarch64" {
+        return None;
+    }
+    Some(format!(
+        "https://github.com/quickjs-ng/quickjs/releases/download/{QUICKJS_VERSION}/qjs-linux-{arch}"
+    ))
+}
+
+/// Locate a `qjs` binary: user lib dir first (Grab-installed), then `/app/bin`,
+/// then PATH for a system copy. `None` when no JS runtime is on hand.
+pub(crate) fn find_quickjs() -> Option<PathBuf> {
+    find_in_dirs("qjs", &tool_search_dirs())
+}
+
+/// Install quickjs into the user library dir. Split from yt-dlp/ffmpeg so the
+/// UI can stage it separately; await off the GTK thread like the other
+/// installers.
+pub async fn install_quickjs() -> Result<PathBuf, VideoError> {
+    let dir = user_lib_dir();
+    let handle = crate::runtime::tokio_rt().spawn(async move { install_quickjs_binary(dir).await });
+    match handle.await {
+        Ok(res) => res,
+        Err(e) => Err(VideoError::runtime(&e)),
+    }
+}
+
+async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
+    let url = quickjs_download_url()
+        .ok_or_else(|| VideoError::install("quickjs has no release for this architecture"))?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(VideoError::install)?;
+    // Download straight to `qjs.part`: a failed download must never leave a
+    // half-written `qjs` behind for `find_quickjs` to mistake as installed.
+    let dest = dir.join("qjs");
+    let part = dir.join("qjs.part");
+    match fetch_quickjs(&url, &part, &dest).await {
+        Ok(()) => Ok(dest),
+        Err(e) => {
+            std::fs::remove_file(&part).ok();
+            Err(e)
+        }
+    }
+}
+
+/// Fetch the `qjs` binary, mark it executable, and move it into place.
+async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
+    download_to_file(url, part)
+        .await
+        .map_err(VideoError::install)?;
+    use std::os::unix::fs::PermissionsExt as _;
+    tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755))
+        .await
+        .map_err(|e| {
+            VideoError::install(format!("couldn't mark {} executable: {e}", part.display()))
+        })?;
+    tokio::fs::rename(part, dest)
+        .await
+        .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
+}
+
+async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
+    let response = response
+        .error_for_status()
+        .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("couldn't read {url}: {e}"))?;
+    tokio::fs::write(dest, &bytes)
+        .await
+        .map_err(|e| format!("couldn't write {}: {e}", dest.display()))
+}
+
+/// Ensure Grab's quickjs is on hand, installing it on first use. Concurrent
+/// callers serialize on a single install and re-check after waiting. No-op on
+/// architectures quickjs-ng doesn't ship: yt-dlp then falls back to its own
+/// runtime discovery.
+pub(crate) async fn ensure_quickjs() -> Result<(), VideoError> {
+    if find_quickjs().is_some() || quickjs_download_url().is_none() {
+        return Ok(());
+    }
+    static INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
+    let _guard = lock.lock().await;
+    if find_quickjs().is_some() {
+        return Ok(());
+    }
+    install_quickjs().await.map(|_| ())
+}
+
 /// Download one boul2gom/ffmpeg-builds archive and extract `ffmpeg` + `ffprobe`
 /// into `dir`; returns the ffmpeg path. Await off the GTK thread.
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
@@ -663,9 +769,10 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(ytdlp_browser.to_string())
 }
 
-/// Shared trailing argv for every yt-dlp spawn: player-client workaround, cookies,
-/// user agent, then the page URL behind `--`. One helper so these flags cannot
-/// drift between spawns (or let a hostile URL parse as a flag).
+/// Shared trailing argv for every yt-dlp spawn: player-client workaround, JS
+/// runtime pin for YouTube+cookies, cookies, user agent, then the page URL
+/// behind `--`. One helper so these flags cannot drift between spawns (or let
+/// a hostile URL parse as a flag).
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     user_agent: Option<&str>,
@@ -675,10 +782,20 @@ pub(crate) fn ytdlp_identity_args(
     // YouTube force-enables SABR-only streaming for the `web` player client
     // (yt-dlp#12482): its URL-less formats fail the whole extraction. `web`
     // only enters yt-dlp's default rotation when a JS runtime is available
-    // (e.g. node or deno on PATH), so exclude it everywhere. Scoped to the
+    // (e.g. quickjs on PATH), so exclude it everywhere. Scoped to the
     // youtube extractor: a no-op for other sites.
     args.push("--extractor-args".to_string());
     args.push("youtube:player_client=-web".to_string());
+    // quickjs-ng is Grab's default JS runtime: pin it on every spawn so a
+    // system runtime can never shadow it. Only deno is enabled by default and
+    // yt-dlp prefers it, so the pin must also disable the other runtimes.
+    // Skipped where quickjs-ng ships no release; yt-dlp then keeps its own
+    // runtime discovery.
+    if quickjs_download_url().is_some() {
+        args.push("--no-js-runtimes".to_string());
+        args.push("--js-runtimes".to_string());
+        args.push("quickjs".to_string());
+    }
     if let Some(spec) = cookies_browser_spec(cookies_browser) {
         args.push(format!("--cookies-from-browser={spec}"));
     }
@@ -771,6 +888,13 @@ pub(crate) async fn tool_display_version(
         .is_some_and(|n| n.to_string_lossy().starts_with("yt-dlp"))
     {
         return Some(format!("yt-dlp {line}"));
+    }
+    if binary
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy() == "qjs")
+    {
+        // `qjs --version` prints just "0.17.0".
+        return Some(format!("quickjs {line}"));
     }
     Some(line)
 }

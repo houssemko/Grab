@@ -161,6 +161,9 @@ pub async fn fetch_video_infos(
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
+        // quickjs-ng is yt-dlp's default JS runtime; make sure it's installed
+        // before any spawn that may need to solve JS challenges.
+        crate::video_tools::ensure_quickjs().await?;
         let out = staging_root();
         ensure_staging_dir(&out)?;
         let mut value = match tokio::time::timeout(
@@ -202,11 +205,22 @@ pub async fn fetch_video_infos(
 }
 
 /// yt-dlp spawn with null stdin, piped outputs, and its own process group (so timeouts kill the whole tree).
+/// The user lib dir heads PATH so yt-dlp's challenge solver finds Grab-installed
+/// `qjs`; a system `qjs` elsewhere on PATH still works when Grab never installed one.
 pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    let lib_dir = crate::video_tools::user_lib_dir();
+    let path = std::env::var_os("PATH").map(|p| {
+        let mut paths = vec![lib_dir];
+        paths.extend(std::env::split_paths(&p));
+        std::env::join_paths(paths).unwrap_or(p)
+    });
+    if let Some(path) = path {
+        cmd.env("PATH", path);
+    }
     #[cfg(unix)]
     {
         cmd.process_group(0);

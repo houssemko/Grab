@@ -154,6 +154,7 @@ pub fn run(
     let active: Rc<RefCell<Option<gtk4::ProgressBar>>> = Rc::new(RefCell::new(None));
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
     let ff = ToolRow::new("ffmpeg", &gettext("ffmpeg install progress"), &active);
+    let js = ToolRow::new("quickjs", &gettext("quickjs install progress"), &active);
 
     let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     rows.set_margin_top(18);
@@ -162,6 +163,7 @@ pub fn run(
     rows.set_margin_end(18);
     rows.append(&yt.widget());
     rows.append(&ff.widget());
+    rows.append(&js.widget());
     let pop = gtk4::Popover::new();
     pop.set_child(Some(&rows));
     pop.set_parent(&btn);
@@ -209,6 +211,22 @@ pub fn run(
         };
         let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
         ff.set_installed(version);
+
+        // quickjs-ng is yt-dlp's default JS runtime in Grab; installed up front
+        // so every spawn uses it instead of whatever the system provides.
+        js.set_downloading();
+        let js_path = match crate::video::install_quickjs().await {
+            Ok(path) => path,
+            Err(e) => {
+                let message = e.to_string();
+                js.set_failed(&message);
+                RUNNING.with(|r| r.set(false));
+                on_error(message);
+                return;
+            }
+        };
+        let version = crate::video_tools::tool_display_version(js_path, "--version").await;
+        js.set_installed(version);
 
         // Linger on checkmarks so completion registers, then close.
         glib::timeout_future(Duration::from_millis(1200)).await;
