@@ -1027,7 +1027,7 @@ pub(crate) async fn run_hls_ytdlp(
     job: &VideoJob,
     gate: &std::sync::Arc<AttemptGate>,
     hls_format_id: &str,
-    abort: oneshot::Receiver<StopIntent>,
+    mut abort: oneshot::Receiver<StopIntent>,
     timeout: Duration,
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
