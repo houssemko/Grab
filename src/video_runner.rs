@@ -519,8 +519,9 @@ async fn run_ytdlp_attempt(
         String::from_utf8_lossy(&tail).into_owned()
     });
     let status = loop {
-        // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed. Once merging, `await_child` drops the deadline entirely.
-        let merging = merging.load(std::sync::atomic::Ordering::SeqCst);
+        // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed. Once merging, `await_child` drops the deadline entirely. The snapshot only
+        // sizes this wait; the kill decision re-reads the live flag.
+        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
         let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
@@ -530,7 +531,7 @@ async fn run_ytdlp_attempt(
                 logs.abort();
                 return Ok((None, None));
             }
-            waited = await_child(&mut child, merging, remaining) => match waited {
+            waited = await_child(&mut child, merging_snapshot, remaining) => match waited {
                 Ok(Ok(status)) => {
                     // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                     group.disarm();
@@ -542,13 +543,20 @@ async fn run_ytdlp_attempt(
                     logs.abort();
                     return Err(VideoError::runtime(&e));
                 }
-                Err(_) if stall_elapsed(&last_progress) >= timeout => {
+                // The merge marker can land while `await_child` is parked on a
+                // pre-merge snapshot: re-read the live flag before killing, or a
+                // silent merge dies exactly one budget after its marker line.
+                Err(_)
+                    if stall_elapsed(&last_progress) >= timeout
+                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
                     reap_child(&mut child, &mut group).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
                 }
-                // Progress landed mid-wait: loop back and re-arm with the fresh deadline.
+                // Progress landed mid-wait, or the merge started while parked:
+                // loop back and re-arm (the next wait is unbounded once merging).
                 Err(_) => {}
             },
         }
@@ -1153,9 +1161,10 @@ pub(crate) async fn run_hls_ytdlp(
     // Stall watchdog, not a wall clock: `timeout` is the silence budget. Each
     // wait runs only until the stall deadline; a progress line pushes the
     // deadline out, so a progressing download is never killed. Once merging,
-    // `await_child` drops the deadline entirely.
+    // `await_child` drops the deadline entirely. The snapshot only sizes
+    // each wait; the kill decision re-reads the live flag.
     let status = loop {
-        let merging = merging.load(std::sync::atomic::Ordering::SeqCst);
+        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
         let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
@@ -1166,7 +1175,7 @@ pub(crate) async fn run_hls_ytdlp(
                 sweep_staging_preserving_recordings(staging);
                 return Ok(None);
             }
-            waited = await_child(&mut child, merging, remaining) => match waited {
+            waited = await_child(&mut child, merging_snapshot, remaining) => match waited {
                 Ok(Ok(status)) => {
                     // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                     group.disarm();
@@ -1178,13 +1187,20 @@ pub(crate) async fn run_hls_ytdlp(
                     logs.abort();
                     return Err(VideoError::runtime(&e));
                 }
-                Err(_) if stall_elapsed(&last_progress) >= timeout => {
+                // The merge marker can land while `await_child` is parked on a
+                // pre-merge snapshot: re-read the live flag before killing, or a
+                // silent merge dies exactly one budget after its marker line.
+                Err(_)
+                    if stall_elapsed(&last_progress) >= timeout
+                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
                     reap_child(&mut child, &mut group).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
                 }
-                // Progress landed mid-wait: loop back and re-arm with the fresh deadline.
+                // Progress landed mid-wait, or the merge started while parked:
+                // loop back and re-arm (the next wait is unbounded once merging).
                 Err(_) => {}
             },
         }
