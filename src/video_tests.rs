@@ -332,6 +332,32 @@ fn audio_skips_hls_and_drm_tracks() {
 }
 
 #[test]
+fn audio_skips_video_sized_unknown_codec_formats() {
+    // Extractor shape seen in the wild: direct MP4s report no video codec
+    // (the crate classifies acodec-set/vcodec-unknown as audio) while
+    // carrying a height. A height means a video stream, so they must never
+    // win the audio leg — otherwise the bogus track suppresses the HLS
+    // preset and the download falls back to the lowest-quality direct file.
+    let bogus = test_audio(serde_json::json!({
+        "format_id": "240p",
+        "acodec": "mp4a.40.2",
+        "vcodec": null,
+        "height": 240,
+        "ext": "mp4",
+    }));
+    let real = test_audio(serde_json::json!({"format_id": "140"}));
+    // Bogus last: max_by keeps the last maximal element on ties, so without
+    // the height filter this selects "240p".
+    let formats = vec![real, bogus.clone()];
+    assert_eq!(
+        select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
+        Some("140")
+    );
+    // Alone, the bogus format degrades to None for the HLS preset.
+    assert_eq!(select_audio_original_first(&[bogus]), None);
+}
+
+#[test]
 fn classify_reddit_video() {
     assert!(is_video_page(
         "https://www.reddit.com/r/pics/comments/abc/test/"
