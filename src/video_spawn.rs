@@ -161,9 +161,9 @@ pub async fn fetch_video_infos(
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let (yt_version, _ff_version) = ensure_tool_versions(&libs).await?;
         tracing::info!(yt_dlp = %yt_version, url_host = %page_host(&url), "resolving video page");
-        // quickjs-ng is yt-dlp's default JS runtime; make sure it's installed
-        // before any spawn that may need to solve JS challenges.
-        crate::video_tools::ensure_quickjs().await?;
+        // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
+        // installed before a YouTube spawn that may need to solve JS challenges.
+        crate::video_tools::ensure_quickjs(&url).await?;
         let out = staging_root();
         ensure_staging_dir(&out)?;
         let mut value = match tokio::time::timeout(

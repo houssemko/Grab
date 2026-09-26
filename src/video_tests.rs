@@ -49,9 +49,9 @@ use crate::video_tools::VideoError;
 use crate::video_tools::{
     COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
     browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
-    ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, parse_yt_dlp_version,
-    quickjs_download_url, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
-    ytdlp_update_available,
+    ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, is_youtube_url,
+    parse_yt_dlp_version, quickjs_download_url, toolchain_dir_in, user_lib_dir,
+    ytdlp_identity_args, ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -2757,19 +2757,41 @@ fn ytdlp_identity_args_pins_quickjs_for_youtube_with_cookies() {
 }
 
 #[test]
-fn ytdlp_identity_args_pins_quickjs_beyond_youtube_cookies() {
-    // quickjs-ng is the default runtime, not a YouTube+cookies special case:
-    // anonymous YouTube and other sites get the same pin.
+fn ytdlp_identity_args_skips_quickjs_pin_off_youtube() {
+    // The runtime pin is YouTube-only: other sites keep yt-dlp's own runtime
+    // discovery, so a system runtime is never disabled there.
     for (browser, url) in [
-        ("none", "https://www.youtube.com/watch?v=abc"),
-        ("", "https://www.youtube.com/watch?v=abc"),
-        ("firefox", "https://vimeo.com/123"),
+        ("none", "https://vimeo.com/123"),
+        ("firefox", "https://x.com/u/status/1"),
+        ("none", "https://www.fakeyoutube.com/watch?v=abc"),
     ] {
         let args = ytdlp_identity_args(browser, None, url);
         assert!(
-            args.iter().any(|a| a == "--no-js-runtimes"),
-            "js pin for browser={browser} url={url}"
+            !args.iter().any(|a| a == "--no-js-runtimes"),
+            "no js pin for browser={browser} url={url}"
         );
+    }
+}
+
+#[test]
+fn is_youtube_url_matches_youtube_hosts() {
+    for url in [
+        "https://www.youtube.com/watch?v=abc",
+        "https://m.youtube.com/watch?v=abc",
+        "https://youtu.be/abc",
+        "https://www.youtube-nocookie.com/embed/abc",
+        "HTTPS://YOUTUBE.COM/watch?v=abc",
+    ] {
+        assert!(is_youtube_url(url), "youtube: {url}");
+    }
+    for url in [
+        "https://vimeo.com/123",
+        "https://www.fakeyoutube.com/watch?v=abc",
+        "https://youtube.com.evil.example/x",
+        "not a url",
+        "",
+    ] {
+        assert!(!is_youtube_url(url), "not youtube: {url}");
     }
 }
 
@@ -3175,16 +3197,13 @@ fn fetch_video_page_parses_dump_json() {
 
 #[test]
 fn identity_args_order_and_trim() {
-    // Player-client workaround, runtime pin, cookies, trimmed UA, then `--` + page, identical every spawn.
+    // Player-client workaround, cookies, trimmed UA, then `--` + page, identical every spawn.
     let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
         vec![
             "--extractor-args".to_string(),
             "youtube:player_client=-web".to_string(),
-            "--no-js-runtimes".to_string(),
-            "--js-runtimes".to_string(),
-            "quickjs".to_string(),
             "--user-agent".to_string(),
             "Grab/1".to_string(),
             "--".to_string(),
@@ -3198,9 +3217,6 @@ fn identity_args_order_and_trim() {
         vec![
             "--extractor-args".to_string(),
             "youtube:player_client=-web".to_string(),
-            "--no-js-runtimes".to_string(),
-            "--js-runtimes".to_string(),
-            "quickjs".to_string(),
             "--".to_string(),
             "https://x.com/u/status/1".to_string(),
         ]

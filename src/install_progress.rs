@@ -212,8 +212,8 @@ pub fn run(
         let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
         ff.set_installed(version);
 
-        // quickjs-ng is yt-dlp's default JS runtime in Grab; installed up front
-        // so every spawn uses it instead of whatever the system provides.
+        // quickjs-ng is the JS runtime Grab pins for YouTube; installed up
+        // front so YouTube spawns never wait on a lazy install.
         js.set_downloading();
         let js_path = match crate::video::install_quickjs().await {
             Ok(path) => path,

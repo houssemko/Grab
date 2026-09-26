@@ -267,12 +267,29 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Pinned quickjs-ng release: Grab's default JS runtime for yt-dlp. Every spawn
-/// pins it explicitly so a system runtime (e.g. deno, which yt-dlp prefers and
-/// enables by default) can never shadow it. quickjs-ng ships tiny (~2.5MB)
-/// official linux x86_64 and aarch64 binaries; the deno alternative is ~40x
-/// larger. Pinned for reproducibility; bump deliberately.
+/// Pinned quickjs-ng release: Grab's JS runtime for YouTube. Pinned on YouTube
+/// spawns so a system runtime (e.g. deno, which yt-dlp prefers and enables by
+/// default) can never shadow it there. quickjs-ng ships tiny (~2.5MB) official
+/// linux x86_64 and aarch64 binaries; the deno alternative is ~40x larger.
+/// Pinned for reproducibility; bump deliberately.
 pub(crate) const QUICKJS_VERSION: &str = "v0.17.0";
+
+/// Whether a page URL is YouTube: the only site where Grab pins quickjs-ng as
+/// yt-dlp's JS runtime (its authenticated player clients need a JS runtime to
+/// yield any formats). Everywhere else yt-dlp keeps its own runtime discovery,
+/// so a system runtime there is never shadowed or disabled.
+pub(crate) fn is_youtube_url(page_url: &str) -> bool {
+    let host = url::Url::parse(page_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default();
+    host == "youtube.com"
+        || host.ends_with(".youtube.com")
+        || host == "youtu.be"
+        || host.ends_with(".youtu.be")
+        || host == "youtube-nocookie.com"
+        || host.ends_with(".youtube-nocookie.com")
+}
 
 /// Download URL for the pinned quickjs-ng release, mapped from the build arch
 /// to its asset names. The asset is the `qjs` binary itself, not an archive.
@@ -356,12 +373,13 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
         .map_err(|e| format!("couldn't write {}: {e}", dest.display()))
 }
 
-/// Ensure Grab's quickjs is on hand, installing it on first use. Concurrent
-/// callers serialize on a single install and re-check after waiting. No-op on
+/// Ensure Grab's quickjs is on hand for a YouTube page URL, installing it on
+/// first use. Concurrent callers serialize on a single install and re-check
+/// after waiting. No-op off YouTube (nothing else needs it) and on
 /// architectures quickjs-ng doesn't ship: yt-dlp then falls back to its own
 /// runtime discovery.
-pub(crate) async fn ensure_quickjs() -> Result<(), VideoError> {
-    if find_quickjs().is_some() || quickjs_download_url().is_none() {
+pub(crate) async fn ensure_quickjs(page_url: &str) -> Result<(), VideoError> {
+    if !is_youtube_url(page_url) || find_quickjs().is_some() || quickjs_download_url().is_none() {
         return Ok(());
     }
     static INSTALL_LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -770,7 +788,7 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
 }
 
 /// Shared trailing argv for every yt-dlp spawn: player-client workaround, JS
-/// runtime pin for YouTube+cookies, cookies, user agent, then the page URL
+/// runtime pin for YouTube, cookies, user agent, then the page URL
 /// behind `--`. One helper so these flags cannot drift between spawns (or let
 /// a hostile URL parse as a flag).
 pub(crate) fn ytdlp_identity_args(
@@ -786,12 +804,14 @@ pub(crate) fn ytdlp_identity_args(
     // youtube extractor: a no-op for other sites.
     args.push("--extractor-args".to_string());
     args.push("youtube:player_client=-web".to_string());
-    // quickjs-ng is Grab's default JS runtime: pin it on every spawn so a
-    // system runtime can never shadow it. Only deno is enabled by default and
-    // yt-dlp prefers it, so the pin must also disable the other runtimes.
+    // quickjs-ng is Grab's JS runtime for YouTube: pin it so a system runtime
+    // (e.g. deno, which yt-dlp prefers and enables by default) can never
+    // shadow it where the player-client challenges need it. Only deno is
+    // enabled by default, so the pin must also disable the other runtimes.
+    // Scoped to YouTube: other sites keep yt-dlp's own runtime discovery.
     // Skipped where quickjs-ng ships no release; yt-dlp then keeps its own
     // runtime discovery.
-    if quickjs_download_url().is_some() {
+    if is_youtube_url(page_url) && quickjs_download_url().is_some() {
         args.push("--no-js-runtimes".to_string());
         args.push("--js-runtimes".to_string());
         args.push("quickjs".to_string());
