@@ -688,7 +688,8 @@ pub fn show(
     // Overrides apply at sandbox startup: a running app can never observe the
     // grant, so no live re-check — the companion row says to restart instead.
     let cookies_restart_row = adw::ActionRow::builder()
-        .title(gettext("Restart Grab after running the command."))
+        .title(gettext("Restart Grab after running the command"))
+        .activatable(false)
         .build();
     cookies_restart_row.set_visible(false);
     video_auth_group.add(&cookies_restart_row);

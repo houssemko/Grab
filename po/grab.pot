@@ -636,7 +636,7 @@ msgid "Grant browser access"
 msgstr ""
 
 #: src/preferences.rs:691
-msgid "Restart Grab after running the command."
+msgid "Restart Grab after running the command"
 msgstr ""
 
 #: src/preferences.rs:777
