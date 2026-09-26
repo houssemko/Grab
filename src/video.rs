@@ -39,7 +39,9 @@ pub use crate::video_staging::{
     clean_dest_parts, clean_staging, highest_staging_index, staging_dir, staging_root,
 };
 /// Facade: tool provisioning lives in [`video_tools`](crate::video_tools) now.
-pub use crate::video_tools::{install_ffmpeg, install_ytdlp, latest_ytdlp_tag, resolve_libraries};
+pub use crate::video_tools::{
+    install_ffmpeg, install_quickjs, install_ytdlp, latest_ytdlp_tag, resolve_libraries,
+};
 /// Facade: probe identity lives in [`video_types`](crate::video_types) now.
 pub use crate::video_types::{ProbeResult, VideoInfo, VideoOutcome, is_video_page, preview_fresh};
 

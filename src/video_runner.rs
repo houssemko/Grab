@@ -62,6 +62,9 @@ pub async fn run_video_download(
     let staging = ensure_staging_dir(&staging)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
+    // quickjs-ng is the JS runtime Grab pins for YouTube; make sure it's
+    // installed before a YouTube spawn that may need to solve JS challenges.
+    crate::video_tools::ensure_quickjs(&job.page_url).await?;
     tracing::info!(
         item_id = job.item_id,
         host = %page_host(&job.page_url),
