@@ -275,6 +275,8 @@ pub(crate) fn live_capture_argv(job: &VideoJob, hls_format_id: &str, out: &Path)
 
 /// ffmpeg argv remuxing a stopped live capture into the finished file (stream-copy + faststart). Pure.
 /// `page_url` is stamped into `comment`: the live leg never gets `--embed-metadata`, so this is its only provenance.
+/// `dest` is the `.part` remux target: ffmpeg can't guess a container from that name, so `-f`
+/// is pinned from the real extension underneath it.
 pub(crate) fn live_remux_argv(
     ts_path: &Path,
     dest: &Path,
@@ -310,12 +312,35 @@ pub(crate) fn live_remux_argv(
         argv.extend(["-metadata".to_string(), format!("comment={page_url}")]);
     }
     argv.extend([
+        "-f".to_string(),
+        remux_muxer(dest).to_string(),
         "-movflags".to_string(),
         "+faststart".to_string(),
         "--".to_string(),
         dest.to_string_lossy().into_owned(),
     ]);
     argv
+}
+
+/// ffmpeg muxer for a live remux target. The target wears the `.part` crash-debris suffix,
+/// which maps to no container, so the real extension is read from underneath it. Anything
+/// unrecognized falls back to mp4: live captures are mp4/m4a by construction. Pure.
+fn remux_muxer(dest: &Path) -> &'static str {
+    let under = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.strip_suffix(".part").unwrap_or(n))
+        .unwrap_or("");
+    let ext = under.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        // No m4a muxer in ffmpeg: the mp4 muxer writes it.
+        "mp4" | "m4a" => "mp4",
+        "webm" => "webm",
+        "mkv" => "matroska",
+        "flv" => "flv",
+        "ogg" => "ogg",
+        _ => "mp4",
+    }
 }
 
 /// Whether a no-output from-start attempt retries once from the live edge (never discards partials, never overrides Stop). Pure.
