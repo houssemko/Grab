@@ -627,7 +627,7 @@ impl DownloadManager {
             }) => (quality, audio_only),
             _ => return (0, pl.total),
         };
-        let dest_dir = self.resolve_dir(Some(item.dest_dir()));
+        let dest_dir = self.resolve_dir(Some(&item.dest_dir()));
         let _batch = self.batch_guard();
         // One readdir for the whole expansion instead of one per entry.
         let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
