@@ -12,6 +12,25 @@ use libadwaita as adw;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+/// Owns the add dialog's in-flight lookup marker (`video_inflight`) for one
+/// resolve kick. Every exit path of the kick future — early return or landed
+/// result — drops the guard, clearing the marker only when this kick's
+/// generation is still current, so a stale generation never clears a newer
+/// kick's marker.
+struct InflightGuard {
+    inflight: Rc<RefCell<Option<String>>>,
+    generation: Rc<Cell<u64>>,
+    my: u64,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.generation.get() == self.my {
+            self.inflight.take();
+        }
+    }
+}
+
 /// Present on the active window when there is one, standalone otherwise.
 fn present_dialog(dialog: &adw::Dialog) {
     let win = gio::Application::default()
@@ -513,6 +532,11 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
     // Set while the submit path re-arms the apply tick: the changed handler must
     // ignore that synthetic edit, or every failed Enter-submit would re-resolve.
     let video_quiet = Rc::new(Cell::new(false));
+    // URL a resolve is currently running for, if any. The submit path kicks
+    // while the debounced keystroke lookup may still be in flight; without
+    // this both spawn yt-dlp and the loser's result is discarded by the
+    // generation guard anyway.
+    let video_inflight: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     // The details-page Add button, desensitized while a lookup is in flight (a
     // dead button says so upfront). Populated once the button exists.
     let lookup_add: Rc<RefCell<Option<gtk4::Button>>> = Rc::new(RefCell::new(None));
@@ -529,9 +553,19 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
         let lookup_add_kick = lookup_add.clone();
         let manager_kick = manager.clone();
         let dest_kick = dest_dir.clone();
+        let inflight = video_inflight.clone();
         Rc::new(move |probe_unlisted: bool| {
+            // Twin suppression: a resolve for this exact URL is already
+            // running (Enter while the debounced lookup is still in flight is
+            // the usual trigger). The twin's result would lose the generation
+            // race anyway — don't spawn a second yt-dlp.
+            let url = url_row2.text().trim().to_string();
+            if inflight.borrow().as_deref() == Some(url.as_str()) {
+                return;
+            }
             let my = generation.get() + 1;
             generation.set(my);
+            inflight.replace(Some(url));
             let (
                 generation_b,
                 last_b,
@@ -545,6 +579,7 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 lookup_add_b,
                 manager_b,
                 dest_b,
+                inflight_b,
             ) = (
                 generation.clone(),
                 last_ok.clone(),
@@ -558,8 +593,16 @@ pub fn show_add_dialog(manager: Rc<DownloadManager>, initial_url: Option<&str>) 
                 lookup_add_kick.clone(),
                 manager_kick.clone(),
                 dest_kick.clone(),
+                inflight.clone(),
             );
             glib::spawn_future_local(async move {
+                // Owns the in-flight marker: every exit below clears it for
+                // this generation (a stale generation leaves a newer marker).
+                let _guard = InflightGuard {
+                    inflight: inflight_b,
+                    generation: generation_b.clone(),
+                    my,
+                };
                 if dialog_b.upgrade().is_none() {
                     return;
                 }
@@ -1552,4 +1595,34 @@ pub fn show_torrent_files_dialog(
     // No gtk Window parent exists here (invoked from an adw::Dialog): present
     // standalone like the no-window fallback above.
     dialog.present(None::<&gtk4::Window>);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inflight_guard_clears_only_for_current_generation() {
+        let inflight: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let generation = Rc::new(Cell::new(1u64));
+
+        // The owning generation clears the marker on drop.
+        inflight.replace(Some("https://youtu.be/x".to_string()));
+        drop(InflightGuard {
+            inflight: inflight.clone(),
+            generation: generation.clone(),
+            my: 1,
+        });
+        assert!(inflight.borrow().is_none());
+
+        // A stale generation leaves a newer kick's marker alone.
+        inflight.replace(Some("https://youtu.be/y".to_string()));
+        generation.set(2);
+        drop(InflightGuard {
+            inflight: inflight.clone(),
+            generation: generation.clone(),
+            my: 1,
+        });
+        assert_eq!(inflight.borrow().as_deref(), Some("https://youtu.be/y"));
+    }
 }
