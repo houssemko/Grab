@@ -27,8 +27,8 @@ use crate::video_probe::{
     retarget_story_items, sanitize_video_json, story_segment_url, story_tray_url,
 };
 use crate::video_progress::{
-    is_format_selection_line, is_ytdlp_merge_line, leg_changed, parse_ytdlp_after_move,
-    parse_ytdlp_template, piece_marks, trace_format_lines,
+    grid_needs_rebuild, is_format_selection_line, is_ytdlp_merge_line, leg_changed,
+    parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
 };
 use crate::video_quality::selector_for_quality;
 use crate::video_quality::{default_quality_index, default_video_filename, quality_for_height};
@@ -1925,6 +1925,21 @@ fn ytdlp_template_parses_absolute_counts() {
     assert_eq!(p.downloaded, Some(805306368));
     assert_eq!(p.total, Some(1610612736));
     assert_eq!(p.eta, Some(768));
+}
+
+#[test]
+fn grid_needs_rebuild_on_any_growth() {
+    // Any refined-up total rebuilds: a stale smaller grid would read full
+    // while the bar still shows partial. Zero/unknown never rebuilds, and
+    // flat or downward wobble keeps the grid (the bar's total is a sticky
+    // max, so marks and bar stay consistent there).
+    assert!(grid_needs_rebuild(None, 640_000_000));
+    assert!(grid_needs_rebuild(Some(640_000_000), 1_100_000_000));
+    assert!(grid_needs_rebuild(Some(640_000_000), 640_000_001));
+    assert!(!grid_needs_rebuild(Some(640_000_000), 640_000_000));
+    assert!(!grid_needs_rebuild(Some(1_100_000_000), 640_000_000));
+    assert!(!grid_needs_rebuild(Some(640_000_000), 0));
+    assert!(!grid_needs_rebuild(None, 0));
 }
 
 #[test]
@@ -5147,6 +5162,92 @@ fn hls_map_survives_estimate_wobble() {
     assert!(
         (0.35..0.6).contains(&frac),
         "map fraction {frac} ({} marks), expected ~0.46",
+        marked.len()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fake yt-dlp modeling an HLS estimate that refines UP by less than 2x:
+/// the grid is built for 640 MB, the download reaches 639.7 MB (grid nearly
+/// full), then the total is refined to 1.1 GB. The grid must rebuild instead
+/// of staying flood-lit at ~100% while the bar shows ~56%.
+fn fake_ytdlp_hls_upward_wobble(dir: &std::path::Path) -> std::path::PathBuf {
+    let bin = dir.join("fake-ytdlp-hls-upwobble");
+    std::fs::write(
+        &bin,
+        r#"#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do
+    if [ "$prev" = "-o" ]; then out="$a"; fi
+    prev="$a"
+done
+echo '[Grab];downloading;1000000;640000000;640000000;NA;NA'
+echo '[Grab];downloading;639700000;640000000;640000000;NA;NA'
+echo '[Grab];downloading;639700000;1100000000;1100000000;NA;NA'
+out="$(printf '%s' "$out" | sed 's/%(ext)s/mp4/')"
+printf 'hlsbytes' > "$out"
+printf '%s\n' "$out"
+exit 0
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+#[test]
+fn hls_map_rebuilds_on_upward_wobble() {
+    // Flood-lit regression: a refined-up total under 2x must rebuild the grid;
+    // the map must track the bar (~58%) instead of reading full at ~56%.
+    use crate::engine_msg::EngineMsg;
+    let dir = std::env::temp_dir().join(format!("grab-fakehls-upwobble-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = fake_ytdlp_hls_upward_wobble(&dir);
+    let staging = dir.join("staging");
+    let mut job = direct_test_job();
+    job.dest = dir.join("v.mp4");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
+    let res = crate::runtime::tokio_rt().block_on(run_hls_ytdlp(
+        &fake,
+        std::path::Path::new("/usr/bin/ffmpeg"),
+        &staging,
+        &job,
+        &AttemptGate::new(),
+        "h1080",
+        abort_rx,
+        std::time::Duration::from_secs(30),
+        tx,
+    ));
+    assert!(matches!(res, Ok(Some(_))), "got {res:?}");
+    let mut inits = Vec::new();
+    let mut marked = std::collections::HashSet::new();
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            EngineMsg::SegmentsInit { total } => {
+                inits.push(total);
+                marked.clear();
+            }
+            EngineMsg::PieceDone(idx) => {
+                marked.insert(idx);
+            }
+            _ => {}
+        }
+    }
+    // The 640 MB -> 1.1 GB refinement must rebuild the grid.
+    assert_eq!(inits, vec![640_000_000u64, 1_100_000_000u64], "{inits:?}");
+    // 639.7 MB of 1.1 GB: marked cells over the live grid, never ~full.
+    let cells = 1_100_000_000u64.div_ceil(crate::file_names::piece_len(1_100_000_000)) as f64;
+    let frac = marked.len() as f64 / cells;
+    assert!(
+        (0.5..0.65).contains(&frac),
+        "map fraction {frac} ({} marks), expected ~0.58",
         marked.len()
     );
     let _ = std::fs::remove_dir_all(&dir);
