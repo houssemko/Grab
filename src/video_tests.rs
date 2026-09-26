@@ -348,7 +348,7 @@ fn audio_skips_video_sized_unknown_codec_formats() {
     let real = test_audio(serde_json::json!({"format_id": "140"}));
     // Bogus last: max_by keeps the last maximal element on ties, so without
     // the height filter this selects "240p".
-    let formats = vec![real, bogus];
+    let formats = vec![real, bogus.clone()];
     assert_eq!(
         select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
         Some("140")
