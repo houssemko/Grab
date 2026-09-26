@@ -659,40 +659,37 @@ fn a_bulk_insert_refreshes_the_ui_once() {
     let seen = std::rc::Rc::clone(&refreshes);
     manager.set_on_change(move || seen.set(seen.get() + 1));
 
-    manager.begin_batch();
-    for i in 0..5 {
-        manager
-            .enqueue(
-                &format!("https://example.com/batched-{i}.bin"),
-                Some("/tmp/dl"),
-                Some(&format!("batched-{i}.bin")),
-            )
-            .unwrap();
-    }
-    assert_eq!(
-        manager.store().n_items(),
-        5,
-        "the rows themselves still land"
-    );
-    assert_eq!(
-        refreshes.get(),
-        0,
-        "no refresh while the batch is open: every one is a wasted store walk"
-    );
+    {
+        let _batch = manager.batch_guard();
+        for i in 0..5 {
+            manager
+                .enqueue(
+                    &format!("https://example.com/batched-{i}.bin"),
+                    Some("/tmp/dl"),
+                    Some(&format!("batched-{i}.bin")),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            manager.store().n_items(),
+            5,
+            "the rows themselves still land"
+        );
+        assert_eq!(
+            refreshes.get(),
+            0,
+            "no refresh while the batch is open: every one is a wasted store walk"
+        );
+    } // Guard drops: the batch closes with exactly one refresh.
 
-    manager.end_batch();
-    assert_eq!(
-        refreshes.get(),
-        1,
-        "the batch closes with exactly one refresh"
-    );
+    assert_eq!(refreshes.get(), 1, "the close refreshes exactly once");
     // Deferring the recount must not lose it: the Queue button reads this.
     assert_eq!(manager.queued_count(), 5);
 }
 
 /// The same coalescing must not swallow the refresh a restore depends on:
-/// `restore_queue` opens the batch itself and, unlike `end_batch`, never
-/// closes it, so it has to ask for the refresh explicitly.
+/// `restore_queue` opens the batch itself, so the guard's close has to carry
+/// the refresh — otherwise the restored queue list stays empty.
 #[test]
 fn a_restore_refreshes_the_ui_once_rows_landed() {
     let (_q, _l) = test_locks();
@@ -779,6 +776,34 @@ fn no_command_revives_a_finished_row_in_place() {
     // widget, which the timer could safely outlive, so assert it did not.
     assert_eq!(manager.store().n_items(), 1);
     assert_eq!(done.status(), DownloadStatus::Done);
+}
+
+/// `cancel` with Preserve used to stamp `Cancelled` on any non-live row,
+/// including finished ones — the invariant rested on the stop button being
+/// hidden for Done rows. A finished row is terminal, so the stamp now skips it
+/// structurally: `retry` revives Failed/Cancelled rows in place, and reviving
+/// a Done row with a stopped pulse timer would freeze its indeterminate bar.
+#[test]
+fn cancel_preserve_leaves_a_finished_row_done() {
+    let (_q, _l) = test_locks();
+    let _qf = test_queue_file("cancel-keeps-done");
+    let settings = test_settings();
+    let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);
+    let done = DownloadItem::new(
+        7,
+        "https://example.com/finished.bin",
+        "finished.bin",
+        "/tmp/dl",
+    );
+    done.set_status(DownloadStatus::Done);
+    manager.store().append(&done);
+
+    manager.cancel(7);
+    assert_eq!(
+        done.status(),
+        DownloadStatus::Done,
+        "cancel must not clobber a finished row"
+    );
 }
 
 #[test]

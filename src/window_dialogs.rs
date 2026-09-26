@@ -1364,7 +1364,10 @@ fn push_playlist_items_page(
                 return;
             }
             // One persist for the whole import, not one per row.
-            manager.begin_batch();
+            let _batch = manager.batch_guard();
+            // One readdir for the whole import instead of one per row.
+            let dir = manager.resolve_dir(Some(&dest_dir.borrow()));
+            let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
             // Story segments are addressable as their own pages: queue those so each row
             // re-resolves its own segment instead of the tray (tray + format ids would
             // download the first segment once per row). Attempted unconditionally:
@@ -1375,9 +1378,9 @@ fn push_playlist_items_page(
                     .unwrap_or_else(|| item.page_url.clone());
                 let settings = manager.settings();
                 let name = default_name_for(settings, &item.title, audio_only);
-                if let Err(e) = manager.enqueue_video(
+                if let Err(e) = manager.enqueue_video_staged(
                     &page_url,
-                    Some(&dest_dir.borrow()),
+                    &dir,
                     Some(&name),
                     crate::media_types::VideoChoices {
                         quality: manager.settings().video_quality(),
@@ -1391,6 +1394,7 @@ fn push_playlist_items_page(
                         // unparseable at pick time — re-resolve the tray by this id.
                         playlist_item_id: Some(item.id.clone()),
                     },
+                    &existing,
                 ) {
                     failed = Some(e);
                     break;
@@ -1399,7 +1403,6 @@ fn push_playlist_items_page(
                 // retry submits only the remainder (dedupe is by filename).
                 checks[*i].set_active(false);
             }
-            manager.end_batch();
             if let Some(e) = failed {
                 error_label.set_text(&e);
                 error_label.set_visible(true);

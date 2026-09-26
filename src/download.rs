@@ -199,6 +199,21 @@ impl Drop for DownloadManager {
     }
 }
 
+/// RAII batch guard: bulk inserts open one with [`DownloadManager::batch_guard`]
+/// and dropping it closes the batch (persist the queue, refresh the UI, kick the
+/// scheduler) exactly once. An early return between open and close can no longer
+/// leave the UI frozen behind a raised batch counter. Nesting-safe.
+#[must_use = "dropping the guard immediately closes the batch"]
+pub struct BatchGuard {
+    manager: std::rc::Rc<DownloadManager>,
+}
+
+impl Drop for BatchGuard {
+    fn drop(&mut self) {
+        self.manager.close_batch();
+    }
+}
+
 /// Queue + engine owner: persists the queue, spawns downloads, notifies the UI.
 impl DownloadManager {
     /// Create a manager over `store`; call [`DownloadManager::restore_queue`] once.
@@ -287,16 +302,25 @@ impl DownloadManager {
         *self.on_change.borrow_mut() = Some(Box::new(cb));
     }
 
-    /// Delay queue persists across bulk inserts (playlist picker, worker expansion). Nesting-safe counter.
-    pub fn begin_batch(&self) {
+    /// Open a bulk-intake batch (playlist picker, worker expansion, queue restore).
+    /// The returned guard closes it on drop: persist the queue, refresh the UI
+    /// and kick the scheduler exactly once. Nesting-safe counter.
+    pub fn batch_guard(self: &Rc<Self>) -> BatchGuard {
         self.batch.set(self.batch.get() + 1);
+        BatchGuard {
+            manager: Rc::clone(self),
+        }
     }
 
-    /// Persist once after a `begin_batch` block and refresh the UI.
-    pub fn end_batch(self: &Rc<Self>) {
+    /// Close one batch level. Only the outermost close kicks the scheduler: the
+    /// per-insert kick is deferred while a batch is open (see `insert`).
+    fn close_batch(self: &Rc<Self>) {
         self.batch.set(self.batch.get().saturating_sub(1));
         self.persist_queue();
         self.changed();
+        if self.batch.get() == 0 {
+            self.start_next();
+        }
     }
 
     /// Recount queued rows and refresh the UI. Deferred while a batch is
@@ -305,8 +329,8 @@ impl DownloadManager {
     /// once per status predicate, and every step is a GObject ref, a downcast
     /// and a property read per element. Per row that adds up, so a 500-entry
     /// import did it 500 times over. Every batch opener already ends with its
-    /// own refresh — `end_batch` here, `restore_queue` and the picker at the
-    /// close of their loops — so nothing is lost by waiting.
+    /// own refresh — the [`BatchGuard`] close here, `restore_queue` and the picker
+    /// at the close of their loops — so nothing is lost by waiting.
     fn changed(&self) {
         if self.batch.get() > 0 {
             return;
@@ -410,7 +434,7 @@ impl DownloadManager {
     }
 
     /// Explicit absolute dest, else the effective download dir.
-    fn resolve_dir(&self, dest_dir: Option<&str>) -> String {
+    pub(crate) fn resolve_dir(&self, dest_dir: Option<&str>) -> String {
         // Explicit destinations must be absolute (relative dirs would resolve against the launcher CWD and fail the sandbox).
         dest_dir
             .filter(|s| !s.is_empty() && std::path::Path::new(s).is_absolute())
@@ -533,20 +557,35 @@ impl DownloadManager {
         filename: Option<&str>,
         choices: crate::media_types::VideoChoices,
     ) -> Result<DownloadItem, String> {
-        let url = normalize_url(page_url)?;
+        // One readdir per intake.
         let dir = self.resolve_dir(dest_dir);
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
+        self.enqueue_video_staged(page_url, &dir, filename, choices, &existing)
+    }
+
+    /// [`DownloadManager::enqueue_video`] with a precomputed directory listing,
+    /// for bulk imports that would otherwise readdir once per row. The snapshot
+    /// stays correct as rows land: the per-row dedupe also consults the live
+    /// store and the stem reservation map.
+    pub(crate) fn enqueue_video_staged(
+        self: &Rc<Self>,
+        page_url: &str,
+        dir: &str,
+        filename: Option<&str>,
+        choices: crate::media_types::VideoChoices,
+        existing: &[String],
+    ) -> Result<DownloadItem, String> {
+        let url = normalize_url(page_url)?;
         let name = self.finalize_filename(
             &filename
                 .filter(|s| sane_filename(s))
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| filename_from_url(&url)),
         );
-        // One readdir per intake.
-        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dir));
         let name = dedupe_filename(&name, |n| {
-            let p = std::path::Path::new(&dir).join(n);
+            let p = std::path::Path::new(dir).join(n);
             p.exists()
-                || crate::video_staging::stem_reserved_in(&existing, name_stem(n))
+                || crate::video_staging::stem_reserved_in(existing, name_stem(n))
                 // Stem-wide reservation (see `is_name_taken`): a discard in flight owns this destination.
                 || self.dest_reserved(&p)
                 || self.items()
@@ -555,7 +594,7 @@ impl DownloadManager {
                             || it.output_dir() == p.to_string_lossy()
                     })
         });
-        let item = DownloadItem::new(self.alloc_id(), &url, &name, &dir);
+        let item = DownloadItem::new(self.alloc_id(), &url, &name, dir);
         item.set_detail(pending_resolve_detail(choices.audio_only));
         self.video_sources.borrow_mut().insert(
             item.id(),
@@ -588,8 +627,10 @@ impl DownloadManager {
             }) => (quality, audio_only),
             _ => return (0, pl.total),
         };
-        let dest_dir = item.dest_dir().to_string();
-        self.begin_batch();
+        let dest_dir = self.resolve_dir(Some(item.dest_dir()));
+        let _batch = self.batch_guard();
+        // One readdir for the whole expansion instead of one per entry.
+        let existing = crate::video_staging::dir_file_names(std::path::Path::new(&dest_dir));
         let mut added = 0;
         for entry in &pl.items {
             let Some(url) =
@@ -599,9 +640,9 @@ impl DownloadManager {
             };
             // Live streams queued from a playlist take the VOD path; each child re-resolves its own page.
             if self
-                .enqueue_video(
+                .enqueue_video_staged(
                     &url,
-                    Some(&dest_dir),
+                    &dest_dir,
                     None,
                     crate::media_types::VideoChoices {
                         quality: quality.clone(),
@@ -610,13 +651,13 @@ impl DownloadManager {
                         is_live: false,
                         playlist_item_id: None,
                     },
+                    &existing,
                 )
                 .is_ok()
             {
                 added += 1;
             }
         }
-        self.end_batch();
         // Reported total, not attempted ("500 of 600").
         (added, pl.total)
     }
@@ -681,7 +722,10 @@ impl DownloadManager {
         self.store.append(&item);
         self.persist_queue();
         self.changed();
-        self.start_next();
+        // Inside a batch the close kicks the scheduler once; a queue scan per insert is pure overhead.
+        if self.batch.get() == 0 {
+            self.start_next();
+        }
         item
     }
 
@@ -1742,7 +1786,9 @@ impl DownloadManager {
                 crate::torrent::forget_download(id);
             }
             // A removed row's status is moot, and a live one must keep Downloading so its Finished still lands.
-            if stop == Stop::Preserve && !live {
+            // A finished row is terminal: no command revives it, so Preserve must not clobber Done —
+            // otherwise retry() would revive it in place with a stopped pulse timer.
+            if stop == Stop::Preserve && !live && item.status() != DownloadStatus::Done {
                 item.set_status(DownloadStatus::Cancelled);
                 item.set_detail(item.status().label());
             }
@@ -2261,48 +2307,49 @@ impl DownloadManager {
                     .chain(done.into_iter().skip(skip))
                     .collect();
             }
-            self.batch.set(self.batch.get() + 1);
-            // Two phases: collect all restore decisions first, then apply — a mid-loop failure can no longer leave half-spawned engines.
-            let mut pending = Vec::with_capacity(items.len());
-            for item in items {
-                if let Some(p) = Self::validate_stored_item(item) {
-                    pending.push(p);
-                }
-            }
-            for p in pending {
-                match p.item.status {
-                    DownloadStatus::Done => {
-                        self.insert_history(
-                            p.item.url,
-                            p.item.dest_dir,
-                            p.item.filename,
-                            p.item.progress,
-                            p.output_dir,
-                        );
+            {
+                let _batch = self.batch_guard();
+                // Two phases: collect all restore decisions first, then apply — a mid-loop failure can no longer leave half-spawned engines.
+                let mut pending = Vec::with_capacity(items.len());
+                for item in items {
+                    if let Some(p) = Self::validate_stored_item(item) {
+                        pending.push(p);
                     }
-                    status => {
-                        // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
-                        if let Some(sel) = p.item.selected_files.clone()
-                            && let Ok(url) = normalize_url(&p.item.url)
-                        {
-                            crate::torrent::stage_selection(&url, sel);
+                }
+                for p in pending {
+                    match p.item.status {
+                        DownloadStatus::Done => {
+                            self.insert_history(
+                                p.item.url,
+                                p.item.dest_dir,
+                                p.item.filename,
+                                p.item.progress,
+                                p.output_dir,
+                            );
                         }
-                        let mut restored_item = p.item.clone();
-                        restored_item.status = status;
-                        restored_item.segments = p.segments;
-                        match self.restore_existing(&restored_item) {
-                            Ok(restored) => {
-                                // Re-attach the recorded engine folder.
-                                if let Some(dir) = p.output_dir.clone() {
-                                    restored.set_output_dir(dir);
-                                }
+                        status => {
+                            // Re-stage the intake file selection BEFORE restore_existing: insert → start_next → spawn_torrent reads it synchronously, so staging after is too late.
+                            if let Some(sel) = p.item.selected_files.clone()
+                                && let Ok(url) = normalize_url(&p.item.url)
+                            {
+                                crate::torrent::stage_selection(&url, sel);
                             }
-                            Err(e) => tracing::warn!("skipping queue entry: {e}"),
+                            let mut restored_item = p.item.clone();
+                            restored_item.status = status;
+                            restored_item.segments = p.segments;
+                            match self.restore_existing(&restored_item) {
+                                Ok(restored) => {
+                                    // Re-attach the recorded engine folder.
+                                    if let Some(dir) = p.output_dir.clone() {
+                                        restored.set_output_dir(dir);
+                                    }
+                                }
+                                Err(e) => tracing::warn!("skipping queue entry: {e}"),
+                            }
                         }
                     }
                 }
-            }
-            self.batch.set(self.batch.get().saturating_sub(1));
+            } // Guard drops: persist once, refresh the UI, kick the scheduler.
             // Drop archives and staged selections no row references anymore; sweep session orphans whose rows vanished in a crash.
             let referenced: std::collections::HashSet<String> = self
                 .items()
@@ -2325,8 +2372,6 @@ impl DownloadManager {
                     crate::torrent::sweep_session_orphans(&keep).await;
                 });
             }
-            self.persist_queue();
-            self.changed();
         }
     }
 
