@@ -19,7 +19,9 @@ thread_local! {
 /// One tool's row: indicator, name, status, pulsing bar, error label shown only on failure.
 struct ToolRow {
     root: gtk4::Box,
-    spinner: adw::Spinner,
+    /// Idle/spinner/status icon: exactly one child visible, so swaps never
+    /// move the text column and no visibility juggling is needed.
+    stack: gtk4::Stack,
     icon: gtk4::Image,
     status: gtk4::Label,
     bar: gtk4::ProgressBar,
@@ -31,23 +33,18 @@ struct ToolRow {
 impl ToolRow {
     /// Build one row; `bar_label` is the accessible name (status label already announces state).
     fn new(name: &str, bar_label: &str, active: &Rc<RefCell<Option<gtk4::ProgressBar>>>) -> Self {
-        // AdwSpinner animates on visibility, so no stale state after hide/reshow.
-        let spinner = adw::Spinner::new();
-        spinner.set_visible(false);
+        // AdwSpinner animates while mapped; the stack unmaps hidden children,
+        // so it runs only while the "spinner" child is visible.
+        let stack = gtk4::Stack::new();
+        stack.set_valign(gtk4::Align::Center);
+        stack.add_named(
+            &gtk4::Box::new(gtk4::Orientation::Horizontal, 0),
+            Some("idle"),
+        );
+        stack.add_named(&adw::Spinner::new(), Some("spinner"));
         let icon = gtk4::Image::from_icon_name("emblem-ok-symbolic");
         icon.set_pixel_size(16);
-        icon.set_visible(false);
-
-        // Fixed centered slot for both indicators so swaps never move the text column.
-        let slot = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        slot.set_size_request(16, 16);
-        slot.set_valign(gtk4::Align::Center);
-        spinner.set_halign(gtk4::Align::Center);
-        spinner.set_valign(gtk4::Align::Center);
-        icon.set_halign(gtk4::Align::Center);
-        icon.set_valign(gtk4::Align::Center);
-        slot.append(&spinner);
-        slot.append(&icon);
+        stack.add_named(&icon, Some("icon"));
 
         let name_label = gtk4::Label::new(Some(name));
         name_label.set_halign(gtk4::Align::Start);
@@ -62,7 +59,7 @@ impl ToolRow {
         titles.append(&status);
 
         let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
-        header.append(&slot);
+        header.append(&stack);
         header.append(&titles);
 
         let bar = gtk4::ProgressBar::new();
@@ -81,7 +78,7 @@ impl ToolRow {
 
         Self {
             root,
-            spinner,
+            stack,
             icon,
             status,
             bar,
@@ -96,7 +93,7 @@ impl ToolRow {
 
     /// Mark the row active: spinner runs and its bar becomes the pulse target.
     fn set_downloading(&self) {
-        self.spinner.set_visible(true);
+        self.stack.set_visible_child_name("spinner");
         self.status.set_text(&gettext("Downloading…"));
         *self.active.borrow_mut() = Some(self.bar.clone());
     }
@@ -104,8 +101,7 @@ impl ToolRow {
     /// Mark the row done: checkmark, full bar, probed version when available.
     fn set_installed(&self, version: Option<String>) {
         *self.active.borrow_mut() = None;
-        self.spinner.set_visible(false);
-        self.icon.set_visible(true);
+        self.stack.set_visible_child_name("icon");
         self.bar.set_fraction(1.0);
         let text = match version {
             Some(v) => gettext("Installed • {version}").replace("{version}", &v),
@@ -117,9 +113,8 @@ impl ToolRow {
     /// Mark failed: error icon + wrapping text (not color alone); popover stays open, caller re-enables Install for retry.
     fn set_failed(&self, message: &str) {
         *self.active.borrow_mut() = None;
-        self.spinner.set_visible(false);
         self.icon.set_icon_name(Some("dialog-error-symbolic"));
-        self.icon.set_visible(true);
+        self.stack.set_visible_child_name("icon");
         self.bar.set_visible(false);
         self.status.set_text(&gettext("Failed"));
         self.error.set_text(message);

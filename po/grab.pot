@@ -635,6 +635,10 @@ msgstr ""
 msgid "Grant browser access"
 msgstr ""
 
+#: src/preferences.rs:691
+msgid "Restart Grab after running the command."
+msgstr ""
+
 #: src/preferences.rs:777
 msgid "Live"
 msgstr ""

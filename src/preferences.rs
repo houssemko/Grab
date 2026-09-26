@@ -59,13 +59,16 @@ fn mark_rate_row(live: &adw::EntryRow) {
 /// browser profile access, so when the picked browser's profile is unreachable
 /// in the sandbox, show the `flatpak override` command as a copyable action
 /// row (the HIG pattern from `install_help::command_row` — no raw command
-/// dump). Re-runs on dialog open and `COOKIES_BROWSER` changes; while the row is
-/// visible a 3s poll re-runs it too, so the row hides itself once the override
-/// is applied in a terminal (which emits no GSettings signal, and AdwDialog
-/// tracks no focus state to hook instead). Takes `&gio::Settings` because
-/// `connect_changed` hands the signal a `&gio::Settings`, and deref coercion
-/// cannot go back up to `AppSettings`.
-fn sync_cookies_override_row(row: &adw::ActionRow, settings: &gio::Settings) {
+/// dump). Re-runs on dialog open and `COOKIES_BROWSER` changes. Overrides only
+/// apply at sandbox startup, so a running app can never observe the grant —
+/// instead of polling, a companion row tells the user to restart. Takes
+/// `&gio::Settings` because `connect_changed` hands the signal a
+/// `&gio::Settings`, and deref coercion cannot go back up to `AppSettings`.
+fn sync_cookies_override_row(
+    row: &adw::ActionRow,
+    restart_row: &adw::ActionRow,
+    settings: &gio::Settings,
+) {
     let value = settings.string(crate::settings::key::COOKIES_BROWSER);
     let command = if crate::video_tools::in_flatpak()
         && value != "none"
@@ -79,8 +82,12 @@ fn sync_cookies_override_row(row: &adw::ActionRow, settings: &gio::Settings) {
         Some(cmd) => {
             row.set_subtitle(&cmd);
             row.set_visible(true);
+            restart_row.set_visible(true);
         }
-        None => row.set_visible(false),
+        None => {
+            row.set_visible(false);
+            restart_row.set_visible(false);
+        }
     }
 }
 
@@ -678,51 +685,21 @@ pub fn show(
     let cookies_override_row =
         crate::install_help::command_row(&video_auth_group, &gettext("Grant browser access"), "");
     cookies_override_row.set_visible(false);
-    // The override is applied in a terminal, which emits no GSettings signal
-    // (and AdwDialog tracks no focus state to hook instead): poll while the row
-    // is visible so it hides itself once the grant lands. Guarded so at most
-    // one timer runs; each tick stops when the row hides or the dialog dies.
-    let kick_recheck: std::rc::Rc<dyn Fn()> = {
-        let row_w = cookies_override_row.downgrade();
-        let polling = std::rc::Rc::new(std::cell::Cell::new(false));
-        let settings_b = settings.clone();
-        std::rc::Rc::new(move || {
-            if polling.get() {
-                return;
-            }
-            let visible = row_w.upgrade().map(|r| r.is_visible()).unwrap_or(false);
-            if !visible {
-                return;
-            }
-            polling.set(true);
-            let row_w = row_w.clone();
-            let settings_b = settings_b.clone();
-            let polling = polling.clone();
-            gtk4::glib::timeout_add_seconds_local(3, move || {
-                let Some(row) = row_w.upgrade() else {
-                    polling.set(false);
-                    return gtk4::glib::ControlFlow::Break;
-                };
-                sync_cookies_override_row(&row, &settings_b);
-                if row.is_visible() {
-                    gtk4::glib::ControlFlow::Continue
-                } else {
-                    polling.set(false);
-                    gtk4::glib::ControlFlow::Break
-                }
-            });
-        })
-    };
-    sync_cookies_override_row(&cookies_override_row, settings);
-    kick_recheck();
+    // Overrides apply at sandbox startup: a running app can never observe the
+    // grant, so no live re-check — the companion row says to restart instead.
+    let cookies_restart_row = adw::ActionRow::builder()
+        .title(gettext("Restart Grab after running the command."))
+        .build();
+    cookies_restart_row.set_visible(false);
+    video_auth_group.add(&cookies_restart_row);
+    sync_cookies_override_row(&cookies_override_row, &cookies_restart_row, settings);
     {
-        let row = cookies_override_row.downgrade();
-        let kick_recheck = kick_recheck.clone();
+        let grant = cookies_override_row.downgrade();
+        let restart = cookies_restart_row.downgrade();
         settings.connect_changed(Some(crate::settings::key::COOKIES_BROWSER), move |s, _| {
-            if let Some(row) = row.upgrade() {
-                sync_cookies_override_row(&row, s);
+            if let (Some(grant), Some(restart)) = (grant.upgrade(), restart.upgrade()) {
+                sync_cookies_override_row(&grant, &restart, s);
             }
-            kick_recheck();
         });
     }
     let video_post_group = adw::PreferencesGroup::builder()

@@ -581,7 +581,9 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
         .or_else(real_home_dir)
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"));
-    browser_profile_dir_in(&config, &home, browser)
+    let found = browser_profile_dir_in(&config, &home, browser);
+    tracing::debug!(browser, config = %config.display(), found = ?found, "browser profile lookup");
+    found
 }
 
 /// Browsers offered for `--cookies-from-browser`, in combo order (yt-dlp names).
