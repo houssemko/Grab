@@ -49,7 +49,6 @@
     <release version="4.4.4-beta.9" date="2026-09-26">
       <description>
         <ul>
-          <li>Subtitles are now fetched in a best-effort pass after the media is delivered, so a subtitle rate-limit can no longer fail the download; embedded into mp4/mov/m4a/mkv/mka, sidecar otherwise.</li>
           <li>The tarball install prompt now installs quickjs-ng with a single distro command line alongside yt-dlp and ffmpeg.</li>
         </ul>
       </description>
