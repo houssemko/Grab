@@ -1,7 +1,7 @@
 use crate::download::DownloadStatus;
 use crate::media_types::PlaylistKind;
 use crate::window_dialogs::{fmt_item_duration, playlist_count_label};
-use crate::window_rows::{StopCopy, should_pulse, stop_copy};
+use crate::window_rows::{PulseTick, StopCopy, pulse_tick, should_pulse, stop_copy};
 
 #[test]
 fn stop_copy_distinguishes_a_live_capture_from_a_discard() {
@@ -51,6 +51,32 @@ fn should_pulse_locks_non_finite_and_negative_edges() {
     // Non-active rows never pulse regardless of fraction.
     assert!(!should_pulse(Queued, true, 0.0));
     assert!(!should_pulse(Done, false, f64::NAN));
+}
+
+/// The row pulse timer used to run until the widget died, so every finished
+/// row kept waking the main loop 8x a second forever. It may only stop on a
+/// state the row can never leave.
+#[test]
+fn the_pulse_timer_stops_only_where_the_row_cannot_come_back() {
+    use DownloadStatus::*;
+    use PulseTick::*;
+    // Done is one-way for a given widget: no command moves a finished row
+    // back to Queued, so the tick has nothing left to drive.
+    assert_eq!(pulse_tick(Done, false, 1.0), Stop);
+    assert_eq!(pulse_tick(Done, true, 0.0), Stop);
+    // Failed and Cancelled are NOT safe to stop on: `retry` revives both by
+    // mutating this very item back to Queued, so a stopped timer would
+    // freeze the retried row's bar — the hang the tick exists to prevent.
+    assert_eq!(pulse_tick(Failed, false, 0.5), Idle);
+    assert_eq!(pulse_tick(Cancelled, false, 0.5), Idle);
+    assert_eq!(pulse_tick(Paused, false, 0.0), Idle);
+    assert_eq!(pulse_tick(Queued, false, 0.0), Idle);
+    // Rows that can still animate keep animating.
+    assert_eq!(pulse_tick(Downloading, false, 0.0), Pulse);
+    assert_eq!(pulse_tick(Downloading, true, 0.9), Pulse);
+    // An active row with a real fraction renders determinate: Pulse or Idle,
+    // never Stop — the only input separating the two on an active row.
+    assert_eq!(pulse_tick(Downloading, false, 0.5), Idle);
 }
 
 #[test]

@@ -144,6 +144,32 @@ pub(crate) fn should_pulse(status: DownloadStatus, is_live: bool, progress: f64)
     status == DownloadStatus::Downloading && (is_live || progress <= 0.0)
 }
 
+/// What the row's wall-clock pulse tick does with this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PulseTick {
+    /// Advance the indeterminate bar.
+    Pulse,
+    /// Nothing to animate, but the row can still reach an active state.
+    Idle,
+    /// The row can never animate again: stop the timer.
+    Stop,
+}
+
+/// One pulse tick's decision. `Stop` is reserved for `Done`, the only status
+/// no command moves back to an active one: `retry` revives Failed and
+/// Cancelled by mutating the same item, so stopping there would freeze a
+/// retried row's bar. Pure for tests.
+pub(crate) fn pulse_tick(status: DownloadStatus, is_live: bool, progress: f64) -> PulseTick {
+    if status == DownloadStatus::Done {
+        return PulseTick::Stop;
+    }
+    if should_pulse(status, is_live, progress) {
+        PulseTick::Pulse
+    } else {
+        PulseTick::Idle
+    }
+}
+
 /// Which of the two meanings the row's stop button currently carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StopCopy {
@@ -656,7 +682,9 @@ pub(crate) fn build_row(
     // Indeterminate activity runs on wall-clock, not progress ticks:
     // resolving ("Resolving media…") emits no property changes, so a pulse
     // driven by refresh_row alone freezes on one frame — the reported hang.
-    // This tick advances only indeterminate bars and dies with the row.
+    // This tick advances only indeterminate bars, and stops once the row is
+    // Done — which nothing revives. A finished row outlives its widget, so
+    // without that arm the tick ran at 8 Hz for every finished row, forever.
     {
         let bar = progress.downgrade();
         let weak_item = item.downgrade();
@@ -665,10 +693,14 @@ pub(crate) fn build_row(
             let (Some(bar), Some(it)) = (bar.upgrade(), weak_item.upgrade()) else {
                 return glib::ControlFlow::Break;
             };
-            if should_pulse(it.status(), m.is_live_video(it.id()), it.progress()) {
-                bar.pulse();
+            match pulse_tick(it.status(), m.is_live_video(it.id()), it.progress()) {
+                PulseTick::Pulse => {
+                    bar.pulse();
+                    glib::ControlFlow::Continue
+                }
+                PulseTick::Idle => glib::ControlFlow::Continue,
+                PulseTick::Stop => glib::ControlFlow::Break,
             }
-            glib::ControlFlow::Continue
         });
     }
 
