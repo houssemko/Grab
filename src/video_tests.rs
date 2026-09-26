@@ -2154,57 +2154,44 @@ fn video_source_page_carries_format_pin() {
 fn distro_packages_known_ids() {
     let fedora = "ID=fedora\nNAME=Fedora\n";
     assert_eq!(
-        distro_packages(fedora).map(|d| (d.distro, d.yt_dlp, d.ffmpeg)),
+        distro_packages(fedora).map(|d| (d.distro, d.install_all)),
         Some((
             "Fedora".to_string(),
-            "sudo dnf install yt-dlp".to_string(),
-            "sudo dnf install ffmpeg".to_string(),
+            "sudo dnf install yt-dlp ffmpeg quickjs-ng".to_string(),
         ))
     );
     let ubuntu = "ID=ubuntu\nID_LIKE=debian\nNAME=Ubuntu\n";
     assert_eq!(
-        distro_packages(ubuntu).map(|d| d.yt_dlp),
-        Some("sudo apt install yt-dlp".to_string())
+        distro_packages(ubuntu).map(|d| d.install_all),
+        Some("sudo apt install yt-dlp ffmpeg quickjs-ng".to_string())
     );
     let arch = "ID=arch\nNAME=Arch\n";
     assert_eq!(
-        distro_packages(arch).map(|d| d.ffmpeg),
-        Some("sudo pacman -S ffmpeg".to_string())
+        distro_packages(arch).map(|d| d.install_all),
+        Some("sudo pacman -S yt-dlp ffmpeg quickjs-ng".to_string())
     );
 }
 
 #[test]
 fn distro_packages_quickjs() {
-    // Distros that package quickjs-ng get a plain install command, like
-    // yt-dlp and ffmpeg.
-    let fedora = "ID=fedora\nNAME=Fedora\n";
-    assert_eq!(
-        distro_packages(fedora).and_then(|d| d.quickjs),
-        Some("sudo dnf install quickjs-ng".to_string())
-    );
-    let ubuntu = "ID=ubuntu\nID_LIKE=debian\nNAME=Ubuntu\n";
-    assert_eq!(
-        distro_packages(ubuntu).and_then(|d| d.quickjs),
-        Some("sudo apt install quickjs-ng".to_string())
-    );
-    let arch = "ID=arch\nNAME=Arch\n";
-    assert_eq!(
-        distro_packages(arch).and_then(|d| d.quickjs),
-        Some("sudo pacman -S quickjs-ng".to_string())
-    );
-    // ID_LIKE derivatives resolve through the same fallback as the package
-    // manager itself.
+    // quickjs-ng joins the one-line command where a distro package is known.
     let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
     assert_eq!(
-        distro_packages(neon).and_then(|d| d.quickjs),
-        Some("sudo apt install quickjs-ng".to_string())
+        distro_packages(neon).map(|d| d.install_all),
+        Some("sudo apt install yt-dlp ffmpeg quickjs-ng".to_string())
     );
-    // No known distro package (openSUSE, Void, Solus): no row, no wrong
-    // command.
+    // No known distro package (openSUSE, Void, Solus): left out rather than
+    // showing a command that would fail.
     let void = "ID=void\nNAME=Void\n";
-    assert_eq!(distro_packages(void).and_then(|d| d.quickjs), None);
+    assert_eq!(
+        distro_packages(void).map(|d| d.install_all),
+        Some("sudo xbps-install -S yt-dlp ffmpeg".to_string())
+    );
     let tumbleweed = "ID=opensuse-tumbleweed\nNAME=openSUSE Tumbleweed\n";
-    assert_eq!(distro_packages(tumbleweed).and_then(|d| d.quickjs), None);
+    assert_eq!(
+        distro_packages(tumbleweed).map(|d| d.install_all),
+        Some("sudo zypper install yt-dlp ffmpeg".to_string())
+    );
 }
 
 #[test]
@@ -2214,7 +2201,10 @@ fn distro_packages_id_like_fallback() {
     let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
     let found = distro_packages(neon).expect("ID_LIKE fallback");
     assert_eq!(found.distro, "KDE neon");
-    assert_eq!(found.yt_dlp, "sudo apt install yt-dlp");
+    assert_eq!(
+        found.install_all,
+        "sudo apt install yt-dlp ffmpeg quickjs-ng"
+    );
 }
 
 #[test]

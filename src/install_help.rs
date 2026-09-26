@@ -57,14 +57,10 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
             let group = adw::PreferencesGroup::builder()
                 .title(pkgs.distro.clone())
                 .description(gettext(
-                    "Run these commands in a terminal, then press Check Again.",
+                    "Run this command in a terminal, then press Check Again.",
                 ))
                 .build();
-            command_row(&group, "yt-dlp", &pkgs.yt_dlp);
-            command_row(&group, "ffmpeg", &pkgs.ffmpeg);
-            if let Some(cmd) = &pkgs.quickjs {
-                command_row(&group, "quickjs", cmd);
-            }
+            command_row(&group, &gettext("Install tools"), &pkgs.install_all);
             page.add(&group);
         }
         None => {

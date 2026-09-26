@@ -141,14 +141,11 @@ pub(crate) fn in_flatpak() -> bool {
 pub(crate) struct DistroPackages {
     /// Pretty distro name for the dialog title, e.g. "Fedora".
     pub distro: String,
-    /// Full install command for yt-dlp, e.g. "sudo dnf install yt-dlp".
-    pub yt_dlp: String,
-    /// Full install command for ffmpeg.
-    pub ffmpeg: String,
-    /// Full install command for quickjs-ng; `None` where no distro package is
-    /// known (openSUSE, Void, Solus) — the row is hidden there rather than
-    /// showing a command that would fail.
-    pub quickjs: Option<String>,
+    /// One-line install command for all three tools, e.g.
+    /// "sudo dnf install yt-dlp ffmpeg quickjs-ng". quickjs-ng is appended
+    /// only where a distro package is known — not on openSUSE, Void or
+    /// Solus, where the command would fail.
+    pub install_all: String,
 }
 
 fn package_manager(id: &str) -> Option<&'static str> {
@@ -207,12 +204,11 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
         package_manager(id).or_else(|| id_like.split_whitespace().find_map(package_manager))?;
     let quickjs = quickjs_package(id)
         .or_else(|| id_like.split_whitespace().find_map(quickjs_package))
-        .map(|pkg| format!("{pm} {pkg}"));
+        .map(|pkg| format!(" {pkg}"))
+        .unwrap_or_default();
     Some(DistroPackages {
         distro: name.unwrap_or(id).to_string(),
-        yt_dlp: format!("{pm} yt-dlp"),
-        ffmpeg: format!("{pm} ffmpeg"),
-        quickjs,
+        install_all: format!("{pm} yt-dlp ffmpeg{quickjs}"),
     })
 }
 
