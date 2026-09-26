@@ -88,14 +88,14 @@ pub fn subtitle_language_labels() -> Vec<String> {
 }
 
 /// Combo index for a stored subtitle language code. Unknown or empty
-/// values fall back to English (the default).
+/// values fall back to Off (the default: no subtitles).
 pub fn subtitle_language_index(value: &str) -> usize {
-    crate::media_types::combo_index(SUBTITLE_LANGUAGE_VALUES, value, 1)
+    crate::media_types::combo_index(SUBTITLE_LANGUAGE_VALUES, value, 0)
 }
 
-/// Stored code for a combo index. Out-of-range indexes fall back to English.
+/// Stored code for a combo index. Out-of-range indexes fall back to Off.
 pub fn subtitle_language_value(index: usize) -> &'static str {
-    crate::media_types::combo_value(SUBTITLE_LANGUAGE_VALUES, index, "en")
+    crate::media_types::combo_value(SUBTITLE_LANGUAGE_VALUES, index, "off")
 }
 
 /// Active raw setting for one job: trimmed and lowercased, then allowlisted
@@ -154,10 +154,12 @@ pub(crate) fn remux_video_active(raw: &str) -> Option<String> {
     allowlisted_active(raw, REMUX_VIDEO_VALUES)
 }
 
-/// Best-effort subtitle sidecars — exact language with automatic-caption
-/// fallback, converted to SRT beside the output. A missing language is only a
-/// warning upstream (yt-dlp exits 0), and conversion points at Grab's resolved
-/// ffmpeg — so subtitles can never sink a download.
+/// Subtitle fetch flags for the media leg: exact language with
+/// automatic-caption fallback, converted to SRT. The language is resolved
+/// beforehand by `resolve_subtitle_lang` (preferred if the video offers it,
+/// else the English fallback), and `--embed-subs` is added by the argv
+/// builders when the embed preference is on. Conversion points at Grab's
+/// resolved ffmpeg.
 pub(crate) fn subtitle_cli_args(lang: &str) -> Vec<String> {
     vec![
         "--write-subs".to_string(),

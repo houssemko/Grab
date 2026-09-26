@@ -154,6 +154,8 @@ pub(crate) fn unified_output_template(staging: &Path) -> PathBuf {
 }
 
 /// Shared argv tail for the VOD builders: subtitles, proxy, identity/cookie args.
+/// `job.subtitles` carries the already-resolved language (preferred if the
+/// video offers it, else the English fallback) — see `resolve_subtitle_lang`.
 fn push_vod_tail_args(args: &mut Vec<String>, job: &VideoJob) {
     if !job.audio_only
         && let Some(lang) = job.subtitles.as_deref()

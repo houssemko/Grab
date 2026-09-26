@@ -5,7 +5,7 @@ use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
 use crate::video_argv::{
     VideoJob, apply_proxy_env, container_truth_name, fallback_to_live_edge, hls_download_argv,
-    live_capture_argv, live_remux_argv, merge_output_ext, unified_download_argv,
+    live_capture_argv, live_remux_argv, merge_output_ext, proxy_cli_args, unified_download_argv,
     unified_format_spec, unified_output_template, write_manifest,
 };
 use crate::video_plan::{StreamPlan, plan_streams};
@@ -25,7 +25,9 @@ use crate::video_staging::{
     reserve_remux_temp, resume_plan, sidecar_path_for, staging_dir, sweep_partial_remuxes,
     sweep_staging_preserving_recordings,
 };
-use crate::video_tools::{VideoError, ensure_tool_versions, resolve_libraries};
+use crate::video_tools::{
+    VideoError, ensure_tool_versions, resolve_libraries, ytdlp_identity_args,
+};
 use crate::video_types::{FetchedVideo, VideoOutcome};
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
@@ -331,7 +333,15 @@ pub(crate) async fn run_unified_ytdlp(
     let merging = video_ext.is_some();
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
     let out_template = unified_output_template(staging);
-    let argv = unified_download_argv(job, spec, merging, &merge_ext, ffmpeg_bin, &out_template);
+    // Resolve the subtitle language against what the video actually offers
+    // (preferred, else English, else none) before the media argv is built.
+    // An abort here stops the download; a probe failure just drops subtitles.
+    let mut job = job.clone();
+    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, abort).await {
+        Ok(lang) => lang,
+        Err(()) => return Ok(None),
+    };
+    let argv = unified_download_argv(&job, spec, merging, &merge_ext, ffmpeg_bin, &out_template);
     // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
@@ -714,6 +724,116 @@ where
     sweep().await;
 }
 
+/// Wall-clock bound for the subtitle language probe: a single info-JSON fetch.
+/// Best-effort — on timeout the download simply gets no subtitles.
+const SUBTITLE_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Pick the subtitle language to request from the video's available subtitle
+/// languages (lowercase info-JSON `subtitles`/`automatic_captions` keys):
+/// the first candidate the video offers, accepting a region variant (`en`
+/// matches `en-us`). Returns the concrete offered key so `--sub-langs`
+/// matches exactly. Pure.
+pub(crate) fn pick_subtitle_lang(
+    available: &std::collections::HashSet<String>,
+    candidates: &[&str],
+) -> Option<String> {
+    for cand in candidates {
+        if available.contains(*cand) {
+            return Some(cand.to_string());
+        }
+        if let Some(hit) = available.iter().find(|a| {
+            a.len() > cand.len()
+                && a.starts_with(*cand)
+                && matches!(a.as_bytes()[cand.len()], b'-' | b'_')
+        }) {
+            return Some(hit.clone());
+        }
+    }
+    None
+}
+
+/// Available subtitle languages for one video: the lowercase keys of the
+/// info-JSON `subtitles` and `automatic_captions` maps. Pure.
+fn available_subtitle_langs(info: &serde_json::Value) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for key in ["subtitles", "automatic_captions"] {
+        if let Some(map) = info.get(key).and_then(|v| v.as_object()) {
+            out.extend(map.keys().map(|k| k.to_ascii_lowercase()));
+        }
+    }
+    out
+}
+
+/// Resolve the subtitle language for the media command: the preferred
+/// language if the video offers it, else English if offered, else no
+/// subtitles. The probe is one best-effort info fetch — any failure
+/// (network, HTTP 429, unparsable output) yields `None`, so a subtitle
+/// outage can never sink the media download. `Err(())` means the user
+/// aborted mid-probe: the caller must stop.
+pub(crate) async fn resolve_subtitle_lang(
+    youtube_bin: &Path,
+    job: &VideoJob,
+    abort: &mut oneshot::Receiver<StopIntent>,
+) -> Result<Option<String>, ()> {
+    let pref = match job.subtitles.as_deref() {
+        Some(p) => p.to_ascii_lowercase(),
+        None => return Ok(None),
+    };
+    let mut argv = vec![
+        "--ignore-config".to_string(),
+        "--no-playlist".to_string(),
+        "--skip-download".to_string(),
+        "--dump-json".to_string(),
+    ];
+    argv.extend(proxy_cli_args(job.proxy.as_ref()));
+    argv.extend(ytdlp_identity_args(
+        &job.cookies_browser,
+        None,
+        &job.page_url,
+    ));
+    let mut cmd = ytdlp_command(youtube_bin);
+    cmd.args(&argv);
+    apply_proxy_env(&mut cmd, job.proxy.as_ref());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(error = %e, "subtitle probe couldn't start; downloading without subtitles");
+            return Ok(None);
+        }
+    };
+    let output = tokio::select! {
+        biased;
+        _ = &mut *abort => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(());
+        }
+        out = tokio::time::timeout(SUBTITLE_PROBE_TIMEOUT, child.wait_with_output()) => out,
+    };
+    let output = match output {
+        Ok(Ok(o)) if o.status.success() => o,
+        _ => {
+            tracing::warn!("subtitle probe failed; downloading without subtitles");
+            return Ok(None);
+        }
+    };
+    let info: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(
+                "subtitle probe returned unparsable info; downloading without subtitles"
+            );
+            return Ok(None);
+        }
+    };
+    let available = available_subtitle_langs(&info);
+    let lang = pick_subtitle_lang(&available, &[&pref, "en"]);
+    if lang.is_none() {
+        tracing::info!("video offers no subtitles in the preferred language or English");
+    }
+    Ok(lang)
+}
+
 /// One live capture through the yt-dlp binary. The MPEG-TS container keeps every kill point playable, so Stop is kill, adopt and remux. Stalled captures yield their partial; an empty capture fails.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_live_ytdlp(
@@ -1075,8 +1195,21 @@ pub(crate) async fn run_hls_ytdlp(
     if job.dest.exists() {
         return Err(VideoError::exists());
     }
+    // Resolve the subtitle language against what the video actually offers
+    // (preferred, else English, else none) before the media argv is built.
+    // An abort here stops the download; a probe failure just drops subtitles.
+    let mut job = job.clone();
+    job.subtitles = match resolve_subtitle_lang(youtube_bin, &job, &mut abort).await {
+        Ok(lang) => lang,
+        Err(()) => return Ok(None),
+    };
     let mut cmd = ytdlp_command(youtube_bin);
-    cmd.args(hls_download_argv(job, hls_format_id, ffmpeg_bin, &job.dest));
+    cmd.args(hls_download_argv(
+        &job,
+        hls_format_id,
+        ffmpeg_bin,
+        &job.dest,
+    ));
     apply_proxy_env(&mut cmd, job.proxy.as_ref());
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
