@@ -2174,6 +2174,40 @@ fn distro_packages_known_ids() {
 }
 
 #[test]
+fn distro_packages_quickjs() {
+    // Distros that package quickjs-ng get a plain install command, like
+    // yt-dlp and ffmpeg.
+    let fedora = "ID=fedora\nNAME=Fedora\n";
+    assert_eq!(
+        distro_packages(fedora).and_then(|d| d.quickjs),
+        Some("sudo dnf install quickjs-ng".to_string())
+    );
+    let ubuntu = "ID=ubuntu\nID_LIKE=debian\nNAME=Ubuntu\n";
+    assert_eq!(
+        distro_packages(ubuntu).and_then(|d| d.quickjs),
+        Some("sudo apt install quickjs-ng".to_string())
+    );
+    let arch = "ID=arch\nNAME=Arch\n";
+    assert_eq!(
+        distro_packages(arch).and_then(|d| d.quickjs),
+        Some("sudo pacman -S quickjs-ng".to_string())
+    );
+    // ID_LIKE derivatives resolve through the same fallback as the package
+    // manager itself.
+    let neon = "ID=neon\nID_LIKE=\"ubuntu debian\"\nNAME=KDE neon\n";
+    assert_eq!(
+        distro_packages(neon).and_then(|d| d.quickjs),
+        Some("sudo apt install quickjs-ng".to_string())
+    );
+    // No known distro package (openSUSE, Void, Solus): no row, no wrong
+    // command.
+    let void = "ID=void\nNAME=Void\n";
+    assert_eq!(distro_packages(void).and_then(|d| d.quickjs), None);
+    let tumbleweed = "ID=opensuse-tumbleweed\nNAME=openSUSE Tumbleweed\n";
+    assert_eq!(distro_packages(tumbleweed).and_then(|d| d.quickjs), None);
+}
+
+#[test]
 fn distro_packages_id_like_fallback() {
     // Unknown derivative riding a known family (e.g. a Ubuntu respin
     // with its own ID) still resolves through ID_LIKE.

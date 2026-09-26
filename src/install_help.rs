@@ -62,14 +62,16 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 .build();
             command_row(&group, "yt-dlp", &pkgs.yt_dlp);
             command_row(&group, "ffmpeg", &pkgs.ffmpeg);
-            quickjs_row(&group);
+            if let Some(cmd) = &pkgs.quickjs {
+                command_row(&group, "quickjs", cmd);
+            }
             page.add(&group);
         }
         None => {
             let group = adw::PreferencesGroup::builder()
                 .title(gettext("Install the tools manually"))
                 .description(gettext(
-                    "Install yt-dlp and ffmpeg yourself and make sure they are on your PATH; quickjs installs from its row below. Then press Check Again.",
+                    "Install yt-dlp, ffmpeg and quickjs yourself and make sure they are on your PATH, then press Check Again.",
                 ))
                 .build();
             link_row(
@@ -78,79 +80,16 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
                 "https://github.com/yt-dlp/yt-dlp#installation",
             );
             link_row(&group, "ffmpeg", "https://ffmpeg.org/download.html");
-            quickjs_row(&group);
+            link_row(
+                &group,
+                "quickjs",
+                "https://github.com/quickjs-ng/quickjs/releases",
+            );
             page.add(&group);
         }
     }
 
     dialog.present(Some(parent));
-}
-
-/// quickjs-ng row: Grab's pinned JS runtime for YouTube. No distro packages
-/// it, so instead of a terminal command the row installs Grab's own pinned
-/// binary with one click (same installer the Flatpak staged prompt uses).
-/// Hidden on architectures quickjs-ng doesn't ship; already-installed shows
-/// a checkmark instead of a button.
-fn quickjs_row(group: &adw::PreferencesGroup) {
-    if crate::video_tools::quickjs_download_url().is_none() {
-        return;
-    }
-    let row = adw::ActionRow::builder()
-        .title("quickjs")
-        .subtitle(gettext("JS runtime for YouTube"))
-        .build();
-    // Install button → spinner → checkmark; swaps never move the text column.
-    let stack = gtk4::Stack::new();
-    stack.set_valign(gtk4::Align::Center);
-    let install_btn = gtk4::Button::builder()
-        .label(gettext("Install"))
-        .valign(gtk4::Align::Center)
-        .build();
-    stack.add_named(&install_btn, Some("install"));
-    stack.add_named(&adw::Spinner::new(), Some("spinner"));
-    let done = gtk4::Image::from_icon_name("emblem-ok-symbolic");
-    done.set_pixel_size(16);
-    stack.add_named(&done, Some("done"));
-    row.add_suffix(&stack);
-    group.add(&row);
-
-    if crate::video_tools::find_quickjs().is_some() {
-        row.set_subtitle(&gettext("Installed"));
-        stack.set_visible_child_name("done");
-        return;
-    }
-    stack.set_visible_child_name("install");
-
-    let (row_w, stack_w, btn_w) = (row.downgrade(), stack.downgrade(), install_btn.downgrade());
-    install_btn.connect_clicked(move |_| {
-        let (Some(row), Some(stack), Some(btn)) =
-            (row_w.upgrade(), stack_w.upgrade(), btn_w.upgrade())
-        else {
-            return;
-        };
-        btn.set_sensitive(false);
-        stack.set_visible_child_name("spinner");
-        row.set_subtitle(&gettext("Downloading…"));
-        glib::spawn_future_local(async move {
-            match crate::video::install_quickjs().await {
-                Ok(path) => {
-                    let version = crate::video_tools::tool_display_version(path, "--version").await;
-                    let text = match version {
-                        Some(v) => gettext("Installed • {version}").replace("{version}", &v),
-                        None => gettext("Installed"),
-                    };
-                    row.set_subtitle(&text);
-                    stack.set_visible_child_name("done");
-                }
-                Err(e) => {
-                    row.set_subtitle(&e.to_string());
-                    btn.set_label(&gettext("Retry"));
-                    btn.set_sensitive(true);
-                    stack.set_visible_child_name("install");
-                }
-            }
-        });
-    });
 }
 
 /// One command row with copy button and brief checkmark confirmation. The copy

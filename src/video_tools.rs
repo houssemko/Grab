@@ -145,6 +145,10 @@ pub(crate) struct DistroPackages {
     pub yt_dlp: String,
     /// Full install command for ffmpeg.
     pub ffmpeg: String,
+    /// Full install command for quickjs-ng; `None` where no distro package is
+    /// known (openSUSE, Void, Solus) — the row is hidden there rather than
+    /// showing a command that would fail.
+    pub quickjs: Option<String>,
 }
 
 fn package_manager(id: &str) -> Option<&'static str> {
@@ -161,6 +165,21 @@ fn package_manager(id: &str) -> Option<&'static str> {
         "gentoo" => Some("sudo emerge --ask"),
         "void" => Some("sudo xbps-install -S"),
         "solus" => Some("sudo eopkg install"),
+        _ => None,
+    }
+}
+
+/// Distro package name for the quickjs-ng JS runtime. Verified against the
+/// distro package trackers: Fedora, Debian/Ubuntu, Arch, Alpine and Gentoo
+/// all ship `quickjs-ng`; openSUSE, Void and Solus do not, so those resolve
+/// to `None` and the install-help row is hidden there.
+fn quickjs_package(id: &str) -> Option<&'static str> {
+    match id {
+        "fedora" | "rhel" | "centos" | "almalinux" | "rocky" => Some("quickjs-ng"),
+        "ubuntu" | "debian" | "pop" | "linuxmint" | "elementary" | "zorin" => Some("quickjs-ng"),
+        "arch" | "manjaro" | "endeavouros" | "cachyos" => Some("quickjs-ng"),
+        "alpine" => Some("quickjs-ng"),
+        "gentoo" => Some("quickjs-ng"),
         _ => None,
     }
 }
@@ -186,10 +205,14 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
     let id = id?;
     let pm =
         package_manager(id).or_else(|| id_like.split_whitespace().find_map(package_manager))?;
+    let quickjs = quickjs_package(id)
+        .or_else(|| id_like.split_whitespace().find_map(quickjs_package))
+        .map(|pkg| format!("{pm} {pkg}"));
     Some(DistroPackages {
         distro: name.unwrap_or(id).to_string(),
         yt_dlp: format!("{pm} yt-dlp"),
         ffmpeg: format!("{pm} ffmpeg"),
+        quickjs,
     })
 }
 
