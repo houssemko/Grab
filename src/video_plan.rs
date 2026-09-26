@@ -280,7 +280,13 @@ impl StreamSel {
 pub(crate) fn select_audio_original_first(formats: &[Format]) -> Option<&Format> {
     formats
         .iter()
-        .filter(|f| f.is_audio() && StreamSel::from_format(f).is_ok())
+        .filter(|f| {
+            // A video height means a video stream: some extractors' direct
+            // MP4s report no video codec (the crate then calls them audio)
+            // while carrying heights, and must never win the audio leg —
+            // otherwise the bogus track suppresses the HLS preset downstream.
+            f.is_audio() && f.video_resolution.height.is_none() && StreamSel::from_format(f).is_ok()
+        })
         .max_by(|a, b| {
             let (al, aq, ab, aa, ac) = audio_rank_key(a);
             let (bl, bq, bb, ba, bc) = audio_rank_key(b);
