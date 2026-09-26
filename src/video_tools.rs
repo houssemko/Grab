@@ -293,6 +293,24 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
 /// Pinned for reproducibility; bump deliberately.
 pub(crate) const QUICKJS_VERSION: &str = "v0.17.0";
 
+/// Hard cap on the quickjs download: the asset is ~2.5MB, so anything larger
+/// is not what was pinned. Enforced while streaming, before the bytes are
+/// trusted.
+const QUICKJS_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Expected SHA-256 of the pinned quickjs-ng asset for this build's arch.
+/// quickjs-ng publishes no checksums, so these were computed from the v0.17.0
+/// assets at pinning time (trust on first use); they catch the asset being
+/// mutated or re-cut under the same URL afterwards. `None` where quickjs-ng
+/// ships no binary (mirrors `quickjs_download_url`).
+pub(crate) fn quickjs_expected_sha256() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("0bfc02511a9f549c28b53880d988fc7cd5d361e90c5e8afdfcd7dc6774ceace5"),
+        "aarch64" => Some("3372133484edf50a69f3c67903af41206d22a061e930e3cfb63269272ef56d2e"),
+        _ => None,
+    }
+}
+
 /// Whether a page URL is YouTube: the only site where Grab pins quickjs-ng as
 /// yt-dlp's JS runtime (its authenticated player clients need a JS runtime to
 /// yield any formats). Everywhere else yt-dlp keeps its own runtime discovery,
@@ -360,11 +378,13 @@ async fn install_quickjs_binary(dir: PathBuf) -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Fetch the `qjs` binary, mark it executable, and move it into place.
+/// Fetch the `qjs` binary, verify it against the pinned checksum, mark it
+/// executable, and move it into place.
 async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoError> {
     download_to_file(url, part)
         .await
         .map_err(VideoError::install)?;
+    verify_quickjs_hash(part).await?;
     use std::os::unix::fs::PermissionsExt as _;
     tokio::fs::set_permissions(part, std::fs::Permissions::from_mode(0o755))
         .await
@@ -376,6 +396,29 @@ async fn fetch_quickjs(url: &str, part: &Path, dest: &Path) -> Result<(), VideoE
         .map_err(|e| VideoError::install(format!("couldn't install {}: {e}", dest.display())))
 }
 
+/// Reject a quickjs download whose bytes don't match the pinned SHA-256.
+/// Runs before the file is marked executable: a mismatched asset never gets
+/// +x and is never renamed into place (the caller deletes the partial).
+async fn verify_quickjs_hash(part: &Path) -> Result<(), VideoError> {
+    let expected = quickjs_expected_sha256().ok_or_else(|| {
+        VideoError::install("quickjs has no pinned checksum for this architecture")
+    })?;
+    let bytes = tokio::fs::read(part)
+        .await
+        .map_err(|e| VideoError::install(format!("couldn't read {}: {e}", part.display())))?;
+    use sha2::Digest as _;
+    let actual: String = sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    if actual != expected {
+        return Err(VideoError::install(
+            "quickjs download failed its integrity check and was discarded",
+        ));
+    }
+    Ok(())
+}
+
 async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
     let response = reqwest::get(url)
         .await
@@ -383,13 +426,28 @@ async fn download_to_file(url: &str, dest: &Path) -> Result<(), String> {
     let response = response
         .error_for_status()
         .map_err(|e| format!("couldn't fetch {url}: {e}"))?;
-    let bytes = response
-        .bytes()
+    // Stream with a hard cap instead of buffering the whole body up front:
+    // a compromised endpoint must not be able to fill memory or disk before
+    // we notice. (Currently only the quickjs download uses this helper.)
+    let mut downloaded: u64 = 0;
+    let mut file = tokio::fs::File::create(dest)
         .await
-        .map_err(|e| format!("couldn't read {url}: {e}"))?;
-    tokio::fs::write(dest, &bytes)
-        .await
-        .map_err(|e| format!("couldn't write {}: {e}", dest.display()))
+        .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt as _;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("couldn't read {url}: {e}"))?;
+        downloaded += chunk.len() as u64;
+        if downloaded > QUICKJS_MAX_DOWNLOAD_BYTES {
+            return Err(format!(
+                "{url} exceeds the download size limit ({QUICKJS_MAX_DOWNLOAD_BYTES} bytes)"
+            ));
+        }
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .map_err(|e| format!("couldn't write {}: {e}", dest.display()))?;
+    }
+    Ok(())
 }
 
 /// Ensure Grab's quickjs is on hand for a YouTube page URL, installing it on
