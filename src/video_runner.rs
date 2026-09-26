@@ -422,7 +422,20 @@ fn stall_elapsed(last_progress: &std::sync::Mutex<std::time::Instant>) -> std::t
     last_progress.lock().unwrap().elapsed()
 }
 
-/// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line. `timeout` is a stall budget, not a wall clock: any stdout line resets it, so only silence kills the attempt.
+/// Wait for the child: bounded by the stall deadline while downloading, unbounded once the merge starts. yt-dlp captures ffmpeg's output instead of forwarding it, so a merge is silent on both streams — a stall deadline there would kill legitimate long merges.
+async fn await_child(
+    child: &mut tokio::process::Child,
+    merging: bool,
+    remaining: Duration,
+) -> Result<Result<std::process::ExitStatus, std::io::Error>, tokio::time::error::Elapsed> {
+    if merging {
+        Ok(child.wait().await)
+    } else {
+        tokio::time::timeout(remaining, child.wait()).await
+    }
+}
+
+/// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line. `timeout` is a stall budget, not a wall clock: any stdout line resets it, so only silence kills the attempt. The deadline is lifted once the merge starts (see `await_child`).
 #[allow(clippy::too_many_arguments)]
 async fn run_ytdlp_attempt(
     youtube_bin: &Path,
@@ -439,9 +452,13 @@ async fn run_ytdlp_attempt(
     apply_proxy_env(&mut cmd, proxy);
     let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
     let mut group = ProcessGroupGuard::new(&child);
-    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does.
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does. The merge phase is exempt (see `await_child`).
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
+    // Shared with the watchdog loop: once the merge starts the stall deadline
+    // no longer applies (see `await_child`).
+    let merging = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let merging_p = merging.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         // `downloaded_bytes` resets per leg, so bank each leg's max on its `finished` line and report the running sum; the caller caps against its metadata total.
@@ -452,6 +469,7 @@ async fn run_ytdlp_attempt(
             *last_progress_p.lock().unwrap() = std::time::Instant::now();
             if !merged && is_ytdlp_merge_line(&line) {
                 merged = true;
+                merging_p.store(true, std::sync::atomic::Ordering::SeqCst);
                 if let Some(cb) = on_merge.as_ref() {
                     cb();
                 }
@@ -501,7 +519,9 @@ async fn run_ytdlp_attempt(
         String::from_utf8_lossy(&tail).into_owned()
     });
     let status = loop {
-        // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed.
+        // Each wait runs only until the stall deadline; a progress line pushes the deadline out, so a progressing download is never killed. Once merging, `await_child` drops the deadline entirely. The snapshot only
+        // sizes this wait; the kill decision re-reads the live flag.
+        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
         let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
@@ -511,7 +531,7 @@ async fn run_ytdlp_attempt(
                 logs.abort();
                 return Ok((None, None));
             }
-            waited = tokio::time::timeout(remaining, child.wait()) => match waited {
+            waited = await_child(&mut child, merging_snapshot, remaining) => match waited {
                 Ok(Ok(status)) => {
                     // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                     group.disarm();
@@ -523,13 +543,20 @@ async fn run_ytdlp_attempt(
                     logs.abort();
                     return Err(VideoError::runtime(&e));
                 }
-                Err(_) if stall_elapsed(&last_progress) >= timeout => {
+                // The merge marker can land while `await_child` is parked on a
+                // pre-merge snapshot: re-read the live flag before killing, or a
+                // silent merge dies exactly one budget after its marker line.
+                Err(_)
+                    if stall_elapsed(&last_progress) >= timeout
+                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
                     reap_child(&mut child, &mut group).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
                 }
-                // Progress landed mid-wait: loop back and re-arm with the fresh deadline.
+                // Progress landed mid-wait, or the merge started while parked:
+                // loop back and re-arm (the next wait is unbounded once merging).
                 Err(_) => {}
             },
         }
@@ -1053,9 +1080,13 @@ pub(crate) async fn run_hls_ytdlp(
     // Progress lines may land on either stream depending on version;
     // parse both, collect the log tail for failure diagnostics.
     let tx_p = tx.clone();
-    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does.
+    // Stall watchdog, not a wall clock: any stdout line proves yt-dlp is alive, so a progressing download never trips the timeout: only silence does. The merge phase is exempt (see `await_child`).
     let last_progress = std::sync::Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let last_progress_p = last_progress.clone();
+    // Shared with the watchdog loop: once the merge starts the stall deadline
+    // no longer applies (see `await_child`).
+    let merging = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let merging_p = merging.clone();
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
@@ -1069,6 +1100,7 @@ pub(crate) async fn run_hls_ytdlp(
             *last_progress_p.lock().unwrap() = std::time::Instant::now();
             if is_ytdlp_merge_line(&line) && !merged {
                 merged = true;
+                merging_p.store(true, std::sync::atomic::Ordering::SeqCst);
                 tx_p.send(EngineMsg::Phase(gettext("Merging…"))).ok();
             } else if let Some(path) = parse_ytdlp_after_move(&line) {
                 after_move = Some(path.to_string());
@@ -1128,8 +1160,11 @@ pub(crate) async fn run_hls_ytdlp(
     let logs = drain_stderr_to_tail(stderr);
     // Stall watchdog, not a wall clock: `timeout` is the silence budget. Each
     // wait runs only until the stall deadline; a progress line pushes the
-    // deadline out, so a progressing download is never killed.
+    // deadline out, so a progressing download is never killed. Once merging,
+    // `await_child` drops the deadline entirely. The snapshot only sizes
+    // each wait; the kill decision re-reads the live flag.
     let status = loop {
+        let merging_snapshot = merging.load(std::sync::atomic::Ordering::SeqCst);
         let remaining = timeout.saturating_sub(stall_elapsed(&last_progress));
         tokio::select! {
             biased;
@@ -1140,7 +1175,7 @@ pub(crate) async fn run_hls_ytdlp(
                 sweep_staging_preserving_recordings(staging);
                 return Ok(None);
             }
-            waited = tokio::time::timeout(remaining, child.wait()) => match waited {
+            waited = await_child(&mut child, merging_snapshot, remaining) => match waited {
                 Ok(Ok(status)) => {
                     // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                     group.disarm();
@@ -1152,13 +1187,20 @@ pub(crate) async fn run_hls_ytdlp(
                     logs.abort();
                     return Err(VideoError::runtime(&e));
                 }
-                Err(_) if stall_elapsed(&last_progress) >= timeout => {
+                // The merge marker can land while `await_child` is parked on a
+                // pre-merge snapshot: re-read the live flag before killing, or a
+                // silent merge dies exactly one budget after its marker line.
+                Err(_)
+                    if stall_elapsed(&last_progress) >= timeout
+                        && !merging.load(std::sync::atomic::Ordering::SeqCst) =>
+                {
                     reap_child(&mut child, &mut group).await;
                     progress.abort();
                     logs.abort();
                     return Err(VideoError::part_failed("stalled"));
                 }
-                // Progress landed mid-wait: loop back and re-arm with the fresh deadline.
+                // Progress landed mid-wait, or the merge started while parked:
+                // loop back and re-arm (the next wait is unbounded once merging).
                 Err(_) => {}
             },
         }
