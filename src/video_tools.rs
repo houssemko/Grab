@@ -589,6 +589,60 @@ pub const COOKIES_BROWSERS: &[&str] = &[
     "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale", "zen",
 ];
 
+/// Profile *roots* (not the profile dir itself) a browser's cookie database can
+/// live under, in `~`-style Flatpak `--filesystem` form. The manifest grants no
+/// browser access, so the preferences UI offers these as a `flatpak override`
+/// command when the profile is unreachable in the sandbox. One entry per
+/// channel subdir the lookup probes — a stable-only command would strand beta
+/// users with a silently failing lookup.
+pub(crate) fn browser_override_dirs(browser: &str) -> Vec<String> {
+    if browser == "firefox" {
+        return [
+            "~/.mozilla/firefox",
+            "~/.config/mozilla/firefox",
+            "~/snap/firefox/common/.mozilla/firefox",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    }
+    if browser == "zen" {
+        return ["~/.zen", "~/.config/zen"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    }
+    chromium_subdirs(browser)
+        .iter()
+        .map(|sub| format!("~/.config/{sub}"))
+        .collect()
+}
+
+/// `flatpak override` command granting the sandbox read access to every root
+/// [`browser_override_dirs`] lists. Pure and testable; `None` for
+/// unknown/off browsers.
+pub(crate) fn browser_override_command_for(browser: &str, app_id: &str) -> Option<String> {
+    let dirs = browser_override_dirs(browser);
+    if dirs.is_empty() {
+        return None;
+    }
+    let mut cmd = String::from("flatpak override --user");
+    for dir in &dirs {
+        cmd.push_str(&format!(" --filesystem={dir}:ro"));
+    }
+    cmd.push(' ');
+    cmd.push_str(app_id);
+    Some(cmd)
+}
+
+/// [`browser_override_command_for`] with our own Flatpak app id. `None`
+/// outside the sandbox (`FLATPAK_ID` is always set inside it) — without the id
+/// the command would be wrong, so show nothing instead.
+pub(crate) fn browser_override_command(browser: &str) -> Option<String> {
+    let app_id = std::env::var("FLATPAK_ID").ok()?;
+    browser_override_command_for(browser, &app_id)
+}
+
 /// Spec for `--cookies-from-browser`: `browser:/absolute/profile/dir` when the
 /// profile resolves, else the bare name so yt-dlp falls back to its own
 /// `$HOME`-relative lookup (correct outside Flatpak). `None`/unknown = off. The

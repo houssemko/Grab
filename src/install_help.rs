@@ -84,10 +84,16 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     dialog.present(Some(parent));
 }
 
-/// One command row with copy button and brief checkmark confirmation.
-fn command_row(group: &adw::PreferencesGroup, tool: &str, command: &str) {
+/// One command row with copy button and brief checkmark confirmation. The copy
+/// button reads the row's current subtitle, so callers can refresh the command
+/// later with `set_subtitle`. Returns the row for visibility control.
+pub(crate) fn command_row(
+    group: &adw::PreferencesGroup,
+    title: &str,
+    command: &str,
+) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
-        .title(tool)
+        .title(title)
         .subtitle(command)
         .build();
     let copy = gtk4::Button::builder()
@@ -98,8 +104,11 @@ fn command_row(group: &adw::PreferencesGroup, tool: &str, command: &str) {
         .build();
     copy.update_property(&[gtk4::accessible::Property::Label(&gettext("Copy command"))]);
     row.add_suffix(&copy);
-    let cmd = command.to_string();
+    let row_b = row.clone();
     copy.connect_clicked(move |b| {
+        // The subtitle is the command; read it back so callers can refresh it
+        // with `set_subtitle` after the row is built.
+        let cmd = row_b.subtitle().unwrap_or_default();
         if let Some(clipboard) = gtk4::gdk::Display::default().map(|d| d.clipboard()) {
             clipboard.set_text(&cmd);
         }
@@ -111,6 +120,7 @@ fn command_row(group: &adw::PreferencesGroup, tool: &str, command: &str) {
         });
     });
     group.add(&row);
+    row
 }
 
 /// One outbound-link row for the manual fallback.

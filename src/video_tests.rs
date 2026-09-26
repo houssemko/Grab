@@ -47,10 +47,10 @@ use crate::video_staging::{
 };
 use crate::video_tools::VideoError;
 use crate::video_tools::{
-    COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_profile_dir_in, chromium_subdirs,
-    cookies_browser_spec, distro_packages, ensure_tool_versions, extract_ffmpeg_toolchain,
-    find_in_dirs, parse_yt_dlp_version, toolchain_dir_in, user_lib_dir, ytdlp_identity_args,
-    ytdlp_update_available,
+    COOKIES_BROWSERS, MIN_YTDLP_VERSION, browser_override_command_for, browser_override_dirs,
+    browser_profile_dir_in, chromium_subdirs, cookies_browser_spec, distro_packages,
+    ensure_tool_versions, extract_ffmpeg_toolchain, find_in_dirs, parse_yt_dlp_version,
+    toolchain_dir_in, user_lib_dir, ytdlp_identity_args, ytdlp_update_available,
 };
 use crate::video_types::FetchedVideo;
 use crate::video_types::codec_preference;
@@ -2295,6 +2295,73 @@ fn chromium_subdirs_cover_browser_channels() {
     assert!(chromium_subdirs("opera").contains(&"opera-developer"));
     assert!(chromium_subdirs("vivaldi").contains(&"vivaldi-snapshot"));
     assert!(chromium_subdirs("mystery").is_empty());
+}
+
+#[test]
+fn browser_override_dirs_match_lookup_roots() {
+    // Every dir the override grants must be a root the cookie lookup probes:
+    // chromium families mirror chromium_subdirs under ~/.config, firefox and
+    // zen mirror browser_profile_dir_in's candidates.
+    assert_eq!(
+        browser_override_dirs("brave"),
+        [
+            "~/.config/BraveSoftware/Brave-Browser",
+            "~/.config/BraveSoftware/Brave-Browser-Beta",
+            "~/.config/BraveSoftware/Brave-Browser-Nightly",
+            "~/.config/BraveSoftware/Brave-Origin-Beta",
+            "~/.config/BraveSoftware/Brave-Origin-Nightly",
+            "~/.config/BraveSoftware/Brave-Browser-Origin-Nightly",
+        ]
+    );
+    assert_eq!(browser_override_dirs("whale"), ["~/.config/naver-whale"]);
+    assert_eq!(
+        browser_override_dirs("firefox"),
+        [
+            "~/.mozilla/firefox",
+            "~/.config/mozilla/firefox",
+            "~/snap/firefox/common/.mozilla/firefox",
+        ]
+    );
+    assert_eq!(browser_override_dirs("zen"), ["~/.zen", "~/.config/zen"]);
+    assert!(browser_override_dirs("none").is_empty());
+    assert!(browser_override_dirs("mystery").is_empty());
+}
+
+#[test]
+fn browser_override_command_covers_all_channels() {
+    assert_eq!(
+        browser_override_command_for("chrome", "io.github.houssemko.Grab").as_deref(),
+        Some(
+            "flatpak override --user --filesystem=~/.config/google-chrome:ro \
+             --filesystem=~/.config/google-chrome-beta:ro \
+             --filesystem=~/.config/google-chrome-unstable:ro \
+             io.github.houssemko.Grab"
+        )
+    );
+    assert_eq!(
+        browser_override_command_for("zen", "io.github.houssemko.Grab").as_deref(),
+        Some(
+            "flatpak override --user --filesystem=~/.zen:ro \
+             --filesystem=~/.config/zen:ro io.github.houssemko.Grab"
+        )
+    );
+    assert_eq!(
+        browser_override_command_for("firefox", "io.github.houssemko.Grab").as_deref(),
+        Some(
+            "flatpak override --user --filesystem=~/.mozilla/firefox:ro \
+             --filesystem=~/.config/mozilla/firefox:ro \
+             --filesystem=~/snap/firefox/common/.mozilla/firefox:ro \
+             io.github.houssemko.Grab"
+        )
+    );
+    assert_eq!(
+        browser_override_command_for("none", "io.github.houssemko.Grab"),
+        None
+    );
+    assert_eq!(
+        browser_override_command_for("mystery", "io.github.houssemko.Grab"),
+        None
+    );
 }
 
 #[test]
