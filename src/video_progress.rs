@@ -85,6 +85,17 @@ pub(crate) fn leg_changed(
     }
 }
 
+/// Whether a refined-up total must rebuild the block grid. A stale smaller
+/// grid saturates early: once downloaded passes the grid's total every cell
+/// reads done while the bar (which tracks the bigger total) still shows
+/// partial. Any growth rebuilds; the grid total only ever grows, so rebuilds
+/// are bounded by new high-water marks and can never oscillate. Downward
+/// wobble never rebuilds: the bar's total is a sticky max, so marks and bar
+/// stay consistent on a stale larger grid.
+pub(crate) fn grid_needs_rebuild(grid_total: Option<u64>, total: u64) -> bool {
+    total > 0 && grid_total.is_none_or(|g| total > g)
+}
+
 /// Newly completed piece indices as byte progress grows against a
 /// known total. Shared by the HLS progress tasks so the byte→cell
 /// math stays unit-tested in one place.

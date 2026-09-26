@@ -11,8 +11,8 @@ use crate::video_argv::{
 use crate::video_plan::{StreamPlan, plan_streams};
 use crate::video_probe::page_host;
 use crate::video_progress::{
-    PROGRESS_GRANULARITY, is_ytdlp_merge_line, last_log_line, leg_changed, parse_ytdlp_after_move,
-    parse_ytdlp_template, piece_marks, trace_format_lines,
+    PROGRESS_GRANULARITY, grid_needs_rebuild, is_ytdlp_merge_line, last_log_line, leg_changed,
+    parse_ytdlp_after_move, parse_ytdlp_template, piece_marks, trace_format_lines,
 };
 use crate::video_quality::default_video_filename;
 use crate::video_spawn::{
@@ -1081,12 +1081,11 @@ pub(crate) async fn run_hls_ytdlp(
                         marked = 0;
                         leg_have = 0;
                         grid_total = Some(t);
-                    } else if t > 0 && grid_total.is_none_or(|g| t > g.saturating_mul(2)) {
+                    } else if grid_needs_rebuild(grid_total, t) {
                         // Same file, refined-up total (first estimates run
                         // tiny): rebuild the grid and re-derive marks from real
                         // bytes, or the map stays flood-lit on its stale small
-                        // grid. Downward wobble never rebuilds (the leg gate owns
-                        // drops); growth past 2x bounds the rebuilds.
+                        // grid while the bar keeps the bigger total.
                         tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
                         grid_total = Some(t);
                         let len = crate::file_names::piece_len(t);
