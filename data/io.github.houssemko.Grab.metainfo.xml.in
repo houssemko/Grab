@@ -46,6 +46,15 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="4.4.4-beta.4" date="2026-09-26">
+      <description>
+        <ul>
+          <li>Stalled video downloads are now detected and stopped instead of hanging until the whole-attempt timeout: a watchdog watches piece throughput and aborts downloads that stop making progress.</li>
+          <li>Importing a large playlist no longer refreshes the queue and persists it once per row — the UI updates once when the import finishes.</li>
+          <li>Every spinner in the app now uses AdwSpinner.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.4.4-beta.3" date="2026-09-26">
       <description>
         <ul>
