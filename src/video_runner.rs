@@ -801,23 +801,35 @@ pub(crate) async fn resolve_subtitle_lang(
             return Ok(None);
         }
     };
-    let output = tokio::select! {
+    // Take the stdout pipe before the select: `wait_with_output` moves the
+    // child, which `tokio::select!` forbids alongside the abort branch's
+    // `kill`. Reading after `wait` is safe: the probe emits one small JSON,
+    // far under the pipe buffer, and the timeout still bounds a hung child.
+    let mut stdout = child.stdout.take();
+    let status = tokio::select! {
         biased;
         _ = &mut *abort => {
             let _ = child.kill().await;
             let _ = child.wait().await;
             return Err(());
         }
-        out = tokio::time::timeout(SUBTITLE_PROBE_TIMEOUT, child.wait_with_output()) => out,
+        res = tokio::time::timeout(SUBTITLE_PROBE_TIMEOUT, child.wait()) => res,
     };
-    let output = match output {
-        Ok(Ok(o)) if o.status.success() => o,
+    let status = match status {
+        Ok(Ok(s)) if s.success() => s,
         _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
             tracing::warn!("subtitle probe failed; downloading without subtitles");
             return Ok(None);
         }
     };
-    let info: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+    let mut out_bytes = Vec::new();
+    if let Some(ref mut pipe) = stdout {
+        use tokio::io::AsyncReadExt as _;
+        let _ = pipe.read_to_end(&mut out_bytes).await;
+    }
+    let info: serde_json::Value = match serde_json::from_slice(&out_bytes) {
         Ok(v) => v,
         Err(_) => {
             tracing::warn!(
