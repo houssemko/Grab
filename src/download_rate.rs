@@ -1,7 +1,4 @@
-//! Rate parsing/pacing + progress text: speed-limit values, the
-//! live throttle cell, chunk pacing and status-line formatting.
-//! Leaf module (engine_msg + settings + file_names size format):
-//! the engine and status rows consume these directly.
+//! Rate parsing/pacing + progress text: limits, throttle cell, chunk pacing, status formatting.
 
 use crate::engine_msg::EngineMsg;
 use crate::file_names::fmt_bytes;
@@ -9,8 +6,7 @@ use gettextrs::ngettext;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-/// Parse a speed limit like `500K`, `2M`, `1.5G` (or plain bytes) into
-/// bytes/sec. `None` means unlimited (empty, `0`) or invalid.
+/// Parse a speed limit like `500K`/`2M`/`1.5G` into bytes/sec; `None` means unlimited or invalid.
 pub(crate) fn parse_rate(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() || s == "0" {
@@ -30,10 +26,7 @@ pub(crate) fn parse_rate(s: &str) -> Option<u64> {
         .map(|v| (v * mult as f64) as u64)
 }
 
-/// Live speed cap in bytes/sec (0 = unlimited), applied per download: every
-/// engine paces to the full value. One atomic serves all engines because the
-/// preference is single: the settings watch publishes, pacing loops read
-/// each tick. `gio::Settings` is main-thread-only (`!Send`), hence the hop.
+/// Live cap in bytes/sec (0 = unlimited), one atomic for all engines; `gio::Settings` is main-thread-only, hence the hop.
 static LIVE_RATE_LIMIT: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn publish_rate_limit(settings: &crate::settings::AppSettings) {
@@ -50,9 +43,7 @@ pub(crate) fn live_rate_limit() -> Option<u64> {
     }
 }
 
-/// Progress message for the direct engine: HTTP rows never carry
-/// upload counters (zeros keep the torrent-only upload suffix in the
-/// pump empty). Callers pass their own byte counts.
+/// Progress message for the direct engine (HTTP rows carry no upload counters).
 pub(crate) fn progress_msg(downloaded: u64, total: Option<u64>) -> EngineMsg {
     EngineMsg::Progress {
         downloaded,
@@ -62,9 +53,7 @@ pub(crate) fn progress_msg(downloaded: u64, total: Option<u64>) -> EngineMsg {
     }
 }
 
-/// Throttle one chunk against the shared speed limit. The limit arrives
-/// per call (never hoisted or cached) so preference edits apply
-/// mid-download; `paced`/`pace_start` carry the running account.
+/// Throttle one chunk; limit passed per call so preference edits apply mid-download.
 pub(crate) async fn pace_chunk(paced: &mut u64, pace_start: Instant, rate: Option<u64>, n: usize) {
     if let Some(r) = rate {
         *paced += n as u64;
@@ -80,8 +69,7 @@ pub(crate) fn format_amounts(downloaded: u64, total: u64) -> String {
     format!("{} of {}", fmt_bytes(downloaded), fmt_bytes(total))
 }
 
-/// Human ETA ("14 minutes"): longest whole unit, for the HIG's
-/// "About {eta} left" estimate phrasing. Pure for tests.
+/// Human ETA (longest whole unit) for the HIG's "About {eta} left" phrasing. Pure for tests.
 pub(crate) fn fmt_eta(secs: u64) -> String {
     let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
     if h > 0 {

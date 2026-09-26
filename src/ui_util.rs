@@ -1,6 +1,4 @@
-//! Small GTK dialog helpers shared by windows that must not depend on
-//! each other: leaf module (gtk/adw only) breaking the
-//! `window ↔ install_help` import cycle.
+//! Small GTK dialog helpers; leaf (gtk/adw only) breaking the `window ↔ install_help` cycle.
 
 use adw::prelude::*;
 use gtk4::prelude::*;

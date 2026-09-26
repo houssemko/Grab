@@ -1,10 +1,4 @@
-//! Guided yt-dlp/ffmpeg installation for tarball/dev builds.
-//!
-//! Inside Flatpak the Install button is the only viable path (host
-//! packages cannot reach the sandbox); outside it users install through
-//! their distro. This dialog shows distro-detected terminal commands (or
-//! manual links when unknown) with copy buttons, plus Check Again which
-//! closes the dialog and re-runs resolution via the caller's callback.
+//! Guided yt-dlp/ffmpeg install for tarball/dev builds (Flatpak Install is the only sandbox path).
 
 use adw::prelude::*;
 use gettextrs::gettext;
@@ -13,8 +7,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-/// Close the dialog, then run a follow-up (Check Again closes and
-/// re-runs resolution via the caller's callback).
+/// Close the dialog, then run a follow-up.
 fn close_then(btn: &gtk4::Button, dialog: &adw::Dialog, on_check: impl Fn() + 'static) {
     let weak = dialog.downgrade();
     btn.connect_clicked(move |_| {
@@ -25,8 +18,7 @@ fn close_then(btn: &gtk4::Button, dialog: &adw::Dialog, on_check: impl Fn() + 's
     });
 }
 
-/// Show the install-help dialog. `on_check` runs after Check Again closes
-/// the dialog (typically: re-resolve tools and refresh the calling row).
+/// Show the install-help dialog; `on_check` re-resolves tools and refreshes the caller.
 pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() + 'static) {
     let dialog = adw::Dialog::builder()
         .title(gettext("Install Support Tools"))
@@ -92,8 +84,7 @@ pub fn show(parent: &impl glib::object::IsA<gtk4::Widget>, on_check: impl Fn() +
     dialog.present(Some(parent));
 }
 
-/// One command row: tool name, selectable-feeling command, copy button
-/// with a brief checkmark confirmation.
+/// One command row with copy button and brief checkmark confirmation.
 fn command_row(group: &adw::PreferencesGroup, tool: &str, command: &str) {
     let row = adw::ActionRow::builder()
         .title(tool)

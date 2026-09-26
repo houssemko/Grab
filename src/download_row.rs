@@ -1,7 +1,4 @@
-//! Row object: the `DownloadItem` GTK list item, from GObject subclass
-//! through wrapper to accessors. Leaf-adjacent module (gtk plus
-//! download_store status): the manager, views and tests consume it
-//! through the `download` facade.
+//! Row object: `DownloadItem` GObject subclass, wrapper and accessors.
 
 use gtk4::glib;
 
@@ -30,9 +27,7 @@ mod imp {
         pub progress: Cell<f64>,
         #[property(get, set)]
         pub detail: RefCell<String>,
-        /// Engine's real output folder for torrents (magnets land in
-        /// `dest/<stub>/`; empty means unknown, use `file_path()`).
-        /// Recorded at enqueue, persisted in the queue, trashed on delete.
+        /// Engine's real output folder for torrents; empty means unknown, use `file_path()`.
         #[property(get, set)]
         pub output_dir: RefCell<String>,
     }
@@ -67,8 +62,7 @@ impl DownloadItem {
         std::path::Path::new(&self.dest_dir()).join(self.filename())
     }
 
-    /// Best on-disk guess for reveal: inside the recorded engine folder
-    /// when one exists, else the plain destination path.
+    /// Best on-disk guess for reveal: engine folder when known, else destination path.
     pub fn display_path(&self) -> std::path::PathBuf {
         let output_dir = self.output_dir();
         if output_dir.is_empty() {

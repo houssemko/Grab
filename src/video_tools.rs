@@ -1,7 +1,6 @@
-//! Tool provisioning: finding, vetting, installing and feeding
-//! yt-dlp/ffmpeg to every spawn. Leaf module (yt_dlp client, tokio,
-//! libc, gettext + file_names/runtime leaves): the dialog, prefs and
-//! engines consume these through the `video` facade.
+//! Tool provisioning: finding, vetting, installing and feeding yt-dlp/ffmpeg to
+//! every spawn. Leaf module: the dialog, prefs and engines consume it through the
+//! `video` facade.
 
 use gettextrs::gettext;
 use std::path::{Path, PathBuf};
@@ -10,13 +9,11 @@ use yt_dlp::client::deps::{Libraries, LibraryInstaller};
 use yt_dlp::model::DrmStatus;
 use yt_dlp::model::format::{Format, FormatType, Protocol};
 
-/// Errors surfaced by the video pipeline. User-facing strings are translated
-/// at construction; match on the variant to branch the UI
-/// (install banner vs retry toast).
+/// Errors surfaced by the video pipeline. User-facing strings are translated at
+/// construction; match on the variant to branch the UI (install banner vs retry).
 #[derive(Debug, Error)]
 pub enum VideoError {
-    /// Neither the Flatpak bundle nor the user library dir nor PATH has the
-    /// yt-dlp/ffmpeg tools. Offer the install flow.
+    /// Neither the Flatpak bundle, the user library dir nor PATH has the tools.
     #[error("{0}")]
     MissingLibraries(String),
     /// The page could not be extracted (wrong URL, offline, …). Retryable.
@@ -56,9 +53,8 @@ impl VideoError {
     pub(crate) fn unavailable() -> Self {
         Self::Message(gettext("No suitable formats found for this media"))
     }
-    /// Same failure with a rejection census, so a page of manifest-only
-    /// variants (live/HLS pages) reads differently from a DRM or
-    /// link-less one instead of guessing.
+    /// Same failure with a rejection census, so a manifest-only page (live/HLS)
+    /// reads differently from a DRM or link-less one instead of guessing.
     pub(crate) fn unavailable_detail(formats: &[Format]) -> Self {
         let total = formats.len();
         if total == 0 {
@@ -127,21 +123,20 @@ impl VideoError {
         Self::Message(gettext("Video tools are too old — update them to continue"))
     }
     /// The exact [`crate::engine_msg::DEST_EXISTS`] sentence, so the pump's
-    /// foreign-file requeue path picks a fresh name and retries the merge.
+    /// foreign-file requeue path retries the merge under a fresh name.
     pub(crate) fn exists() -> Self {
         Self::Message(crate::engine_msg::DEST_EXISTS.to_string())
     }
 }
 
-/// Whether we run inside the Flatpak sandbox. Only there is the Install
-/// button the viable path (users cannot install host packages into the
-/// sandbox); tarball/dev builds get guided self-install instead.
+/// Whether we run inside the Flatpak sandbox. Only there is the Install button
+/// the viable path; tarball/dev builds get guided self-install instead.
 pub(crate) fn in_flatpak() -> bool {
     std::path::Path::new("/.flatpak-info").exists()
 }
 
-/// Package manager commands for the detected distro. `None` means unknown
-/// distro: show manual install links instead of a wrong command.
+/// Package manager commands for the detected distro; `None` = unknown, so show
+/// manual install links instead of a wrong command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DistroPackages {
     /// Pretty distro name for the dialog title, e.g. "Fedora".
@@ -170,9 +165,8 @@ fn package_manager(id: &str) -> Option<&'static str> {
     }
 }
 
-/// Parse `/etc/os-release` content into install commands. Takes the file
-/// content (not the path) so unit tests feed fixtures directly. Falls
-/// back to `ID_LIKE` tokens when `ID` itself is unknown.
+/// Parse `/etc/os-release` content into install commands. Takes the content (not
+/// the path) so tests feed fixtures directly; falls back to `ID_LIKE` tokens.
 pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
     let mut id: Option<&str> = None;
     let mut id_like = "";
@@ -199,10 +193,9 @@ pub(crate) fn distro_packages(os_release: &str) -> Option<DistroPackages> {
     })
 }
 
-/// Directory where on-demand tool installs keep the yt-dlp and ffmpeg
-/// binaries: `$XDG_DATA_HOME/grab/libs`. Both Flatpak and tarball/dev
-/// builds fetch the tools here ([`install_ytdlp`], [`install_ffmpeg`]);
-/// `/app/bin` and PATH remain as fallbacks for system-provided copies.
+/// Where on-demand tool installs keep the yt-dlp/ffmpeg binaries:
+/// `$XDG_DATA_HOME/grab/libs`. Both Flatpak and tarball/dev builds fetch here;
+/// `/app/bin` and PATH remain fallbacks for system-provided copies.
 pub fn user_lib_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -212,17 +205,13 @@ pub fn user_lib_dir() -> PathBuf {
     base.join("grab").join("libs")
 }
 
-/// Bundled-tool directory inside the Flatpak sandbox. This is Flatpak
-/// convention (the app tree is mounted at `/app`), not an XDG standard —
-/// XDG only defines user directories, never bundle layouts. Absent
-/// outside Flatpak, where the lookup simply skips it.
+/// Bundled-tool dir inside the Flatpak sandbox — Flatpak mounts the app tree at
+/// `/app`; this is not an XDG rule. Absent outside Flatpak.
 const FLATPAK_APP_BIN: &str = "/app/bin";
 
-/// Candidate directories for the tools, in priority order: the user's own
-/// installs first (so Update actually takes effect over any bundled copy),
-/// then `/app/bin` (Flatpak), then PATH (which inside Flatpak includes the
-/// runtime's /usr/bin where ffmpeg ships). A stale user copy cannot pin
-/// old tools: the version floor refuses it with an update prompt.
+/// Tool search dirs, in priority order: the user's own installs first (so Update
+/// takes effect over a bundled copy), then `/app/bin` (Flatpak), then PATH. A
+/// stale user copy cannot pin old tools — the version floor refuses it.
 fn tool_search_dirs() -> Vec<PathBuf> {
     let mut dirs = vec![user_lib_dir(), PathBuf::from(FLATPAK_APP_BIN)];
     if let Some(path) = std::env::var_os("PATH") {
@@ -251,10 +240,9 @@ pub fn resolve_libraries() -> Result<Libraries, VideoError> {
     Ok(Libraries::new(youtube, ffmpeg))
 }
 
-/// Install just yt-dlp into the user library dir. Split from ffmpeg so the
-/// UI can report honest per-tool stages; the crate installer exposes no
-/// progress of its own. Await from a spawned task — never block the GTK
-/// thread on it.
+/// Install just yt-dlp into the user library dir. Split from ffmpeg so the UI
+/// can report honest per-tool stages; the crate installer exposes no progress.
+/// Await from a spawned task — never block the GTK thread.
 pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
     let handle = crate::runtime::tokio_rt()
@@ -266,11 +254,9 @@ pub async fn install_ytdlp() -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user
-/// library dir. The yt-dlp crate's installer only extracts the `ffmpeg`
-/// binary, which leaves `--ffmpeg-location` pointing at a dir without
-/// ffprobe — so Grab downloads the static-build archive itself and
-/// extracts both tools in one pass. See [`install_ytdlp`].
+/// Install the ffmpeg toolchain (ffmpeg *and* ffprobe) into the user library dir.
+/// The crate's installer only extracts `ffmpeg`, leaving `--ffmpeg-location`
+/// pointing at a dir without ffprobe — so Grab fetches the static build itself.
 pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     let dir = user_lib_dir();
     let handle =
@@ -281,9 +267,8 @@ pub async fn install_ffmpeg() -> Result<PathBuf, VideoError> {
     }
 }
 
-/// Download one boul2gom/ffmpeg-builds archive and extract the `ffmpeg`
-/// and `ffprobe` binaries into `dir`. Returns the ffmpeg path. Await
-/// from a spawned task — never block the GTK thread on it.
+/// Download one boul2gom/ffmpeg-builds archive and extract `ffmpeg` + `ffprobe`
+/// into `dir`; returns the ffmpeg path. Await off the GTK thread.
 async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
     use yt_dlp::client::deps::ffmpeg::BuildFetcher;
 
@@ -305,13 +290,9 @@ async fn install_ffmpeg_toolchain(dir: PathBuf) -> Result<PathBuf, VideoError> {
         .map_err(VideoError::install)
 }
 
-/// Extract the `ffmpeg` and `ffprobe` binaries from a static-build
-/// archive into `dir`, mark them executable, and delete the archive.
-/// Entries are matched by file name, so both flat zips (`ffmpeg` at the
-/// root, as the crate's own extractor assumes) and `bin/`-style layouts
-/// work. Returns the ffmpeg path; a missing ffmpeg entry is an error,
-/// a missing ffprobe entry is not — callers keep working the way they
-/// did before this toolchain existed.
+/// Extract `ffmpeg` and `ffprobe` from a static-build archive into `dir`, mark
+/// them executable and delete the archive. Entries match by file name, so flat
+/// zips and `bin/`-style layouts both work. A missing ffprobe is not an error.
 pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
     // Always clean up the (large) archive, even when extraction fails.
     let result = extract_ffmpeg_toolchain_inner(archive, dir);
@@ -319,7 +300,6 @@ pub(crate) fn extract_ffmpeg_toolchain(archive: &Path, dir: &Path) -> Result<Pat
     result
 }
 
-/// Inner extraction; see [`extract_ffmpeg_toolchain`].
 fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -354,14 +334,12 @@ fn extract_ffmpeg_toolchain_inner(archive: &Path, dir: &Path) -> Result<PathBuf,
     ffmpeg_path.ok_or_else(|| "ffmpeg binary not found in the downloaded archive".to_string())
 }
 
-/// Minimum accepted yt-dlp version by release date. Older binaries predate
-/// the JS-challenge era and fail extraction in ways that look like broken
-/// pages; refusing them with an actionable message beats a mystery
-/// failure. Newer versions always pass.
+/// Minimum accepted yt-dlp version by release date. Older binaries predate the
+/// JS-challenge era and fail in ways that look like broken pages.
 pub const MIN_YTDLP_VERSION: [u32; 3] = [2026, 1, 1];
 
-/// Parse a `yt-dlp --version` first line (`2026.08.19`) into comparable
-/// parts. Anything else (nightlies, forks, garbage) is unverifiable.
+/// Parse a `yt-dlp --version` first line into comparable parts; anything else
+/// (nightlies, forks) is unverifiable.
 pub(crate) fn parse_yt_dlp_version(first_line: &str) -> Option<[u32; 3]> {
     let mut parts = first_line.trim().split('.');
     let major = parts.next()?.parse().ok()?;
@@ -370,10 +348,9 @@ pub(crate) fn parse_yt_dlp_version(first_line: &str) -> Option<[u32; 3]> {
     Some([major, minor, patch])
 }
 
-/// Whether a release `tag` is newer than the installed version line.
-/// Unparseable tags never trigger an update prompt: an unknown upstream
-/// shape must not nag. Tags carry no `v` prefix (`2026.08.19`), but one
-/// is tolerated.
+/// Whether a release `tag` is newer than the installed version line. Unparseable
+/// tags never prompt: an unknown upstream shape must not nag. A `v` prefix is
+/// tolerated.
 pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
     match (
         parse_yt_dlp_version(installed),
@@ -384,13 +361,11 @@ pub(crate) fn ytdlp_update_available(installed: &str, tag: &str) -> bool {
     }
 }
 
-/// Real home directory from the passwd database, bypassing any sandbox
-/// `$HOME` remapping (inside Flatpak `$HOME` is the app sandbox dir, not
-/// the user's home). `None` on non-Unix or lookup failure.
+/// Real home dir from the passwd database, bypassing sandbox `$HOME` remapping
+/// (inside Flatpak `$HOME` is the app sandbox dir). `None` on lookup failure.
 #[cfg(unix)]
 pub(crate) fn real_home_dir() -> Option<PathBuf> {
-    // SAFETY: getpwuid returns a pointer to static storage (or null); we
-    // only read pw_dir up to its NUL terminator on the calling thread.
+    // SAFETY: getpwuid returns static storage (or null); only pw_dir up to its NUL is read.
     unsafe {
         let pw = libc::getpwuid(libc::getuid());
         if pw.is_null() {
@@ -414,10 +389,8 @@ pub(crate) fn real_home_dir() -> Option<PathBuf> {
     None
 }
 
-/// Real host config directory, even inside a Flatpak sandbox where
-/// `$HOME`/`$XDG_CONFIG_HOME` point at the app's own sandbox dirs.
-/// Priority: `HOST_XDG_CONFIG_HOME` (Flatpak exposes the host value),
-/// then passwd-database home + `.config`, then the normal XDG fallback.
+/// Real host config dir, even inside a Flatpak sandbox whose `$HOME` is the app's
+/// own: `HOST_XDG_CONFIG_HOME`, then passwd home + `.config`, then XDG fallback.
 pub(crate) fn real_config_home() -> PathBuf {
     if let Some(host) = std::env::var_os("HOST_XDG_CONFIG_HOME") {
         let p = PathBuf::from(&host);
@@ -435,8 +408,8 @@ pub(crate) fn real_config_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/etc/xdg"))
 }
 
-/// Profile directories holding a Chromium `Cookies` database, best first:
-/// `Default`, then a top-level `Cookies` file, then `Profile *`.
+/// Profile dirs holding a Chromium `Cookies` database, best first: `Default`, a
+/// top-level `Cookies` file, then `Profile *`.
 fn chromium_profile_dirs(config: &Path, subdir: &str) -> Vec<PathBuf> {
     let base = config.join(subdir);
     let mut out = vec![base.join("Default"), base.clone()];
@@ -458,9 +431,8 @@ fn chromium_profile_dirs(config: &Path, subdir: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Firefox profile directories under one base dir, default first. Parses
-/// every `[Profile*]` section of `profiles.ini` (`Path` + `IsRelative`
-/// + `Default`); falls back to a directory scan when there is no ini.
+/// Firefox profile dirs under one base dir, default first. Parses every
+/// `[Profile*]` section of `profiles.ini`; falls back to a dir scan without it.
 fn firefox_profile_dirs(base: &Path) -> Vec<PathBuf> {
     if let Ok(text) = std::fs::read_to_string(base.join("profiles.ini")) {
         let mut ranked: Vec<(PathBuf, bool)> = Vec::new();
@@ -516,19 +488,16 @@ fn firefox_profile_dirs(base: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// Chromium config subdirs per browser, most common first. One entry covers
-/// the whole family: stable, beta, nightly/canary and dev builds all
-/// resolve under it. Within one channel the first profile wins
-/// ([`chromium_profile_dirs`] order); across channels the freshest `Cookies`
-/// database wins — see [`freshest_chromium_profile`].
+/// Chromium config subdirs per browser, most common first; one entry covers the
+/// whole family (stable, beta, nightly, dev). Across channels the freshest
+/// `Cookies` database wins — see [`freshest_chromium_profile`].
 pub(crate) fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
     match browser {
         "brave" => &[
             "BraveSoftware/Brave-Browser",
             "BraveSoftware/Brave-Browser-Beta",
             "BraveSoftware/Brave-Browser-Nightly",
-            // Rebranded builds seen in the wild; skipped when absent.
-            // Add non-standard forks only with a reported real path.
+            // Rebranded builds seen in the wild; add forks only with a reported real path.
             "BraveSoftware/Brave-Origin-Beta",
             "BraveSoftware/Brave-Origin-Nightly",
             "BraveSoftware/Brave-Browser-Origin-Nightly",
@@ -553,14 +522,10 @@ pub(crate) fn chromium_subdirs(browser: &str) -> &'static [&'static str] {
     }
 }
 
-/// Best profile directory across every channel subdir of one Chromium
-/// browser: each channel contributes its preferred profile (same order as
-/// [`chromium_profile_dirs` — `Default` first), then the channel whose
-/// `Cookies` database was modified most recently wins. That is the browser
-/// the user actually runs; a stale install whose directory merely exists
-/// (e.g. Brave stable shadowing a daily-driven Origin Beta) must not win.
-/// Ties keep channel order via the stable sort; unreadable mtimes sort
-/// after every readable one, so the outcome stays deterministic.
+/// Best profile dir across every channel subdir: each channel contributes its
+/// preferred profile (`Default` first), then the freshest `Cookies` mtime wins —
+/// a stale install that merely exists (e.g. Brave stable shadowing Origin Beta)
+/// must not win. Unreadable mtimes sort last, so the outcome stays deterministic.
 fn freshest_chromium_profile(config_home: &Path, browser: &str) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = chromium_subdirs(browser)
         .iter()
@@ -578,11 +543,9 @@ fn freshest_chromium_profile(config_home: &Path, browser: &str) -> Option<PathBu
     candidates.into_iter().next()
 }
 
-/// Absolute browser profile directory for `--cookies-from-browser`, resolved
-/// against the real host config/home dirs (see [`real_config_home`]) so it
-/// works inside the Flatpak sandbox where `$HOME` is remapped. Testable core:
-/// `config_home` stands in for [`real_config_home`], `home` for the passwd
-/// home (snap Firefox lives under it, not under the config dir).
+/// Absolute browser profile dir for `--cookies-from-browser`, resolved against the
+/// real host dirs (not the sandbox `$HOME`). `config_home` stands in for
+/// [`real_config_home`], `home` for the passwd home (snap Firefox lives there).
 pub(crate) fn browser_profile_dir_in(
     config_home: &Path,
     home: &Path,
@@ -597,8 +560,8 @@ pub(crate) fn browser_profile_dir_in(
         .into_iter()
         .find_map(|base| firefox_profile_dirs(&base).into_iter().next());
     }
-    // Zen is Firefox-based (same profiles.ini + cookies.sqlite layout),
-    // but keeps its profiles under ~/.zen instead of ~/.mozilla/firefox.
+    // Zen is Firefox-based (same profiles.ini layout) but keeps its profiles
+    // under ~/.zen.
     if browser == "zen" {
         return [home.join(".zen"), config_home.join("zen")]
             .into_iter()
@@ -607,10 +570,8 @@ pub(crate) fn browser_profile_dir_in(
     freshest_chromium_profile(config_home, browser)
 }
 
-/// [`browser_profile_dir_in`] against the real host directories. When
-/// `HOST_XDG_CONFIG_HOME` is set (Flatpak, and the unit tests), the home
-/// dir is its parent — `<home>/.config` — so both roots stay consistent
-/// without touching the sandbox `$HOME`.
+/// [`browser_profile_dir_in`] against the real host dirs: when
+/// `HOST_XDG_CONFIG_HOME` is set, home is its parent (`<home>/.config`).
 pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
     let config = real_config_home();
     let home = std::env::var_os("HOST_XDG_CONFIG_HOME")
@@ -623,25 +584,22 @@ pub(crate) fn browser_profile_dir(browser: &str) -> Option<PathBuf> {
     browser_profile_dir_in(&config, &home, browser)
 }
 
-/// Browsers offered for `--cookies-from-browser`, in combo order. Values
-/// are the yt-dlp browser names; labels come from [`cookies_browser_labels`].
+/// Browsers offered for `--cookies-from-browser`, in combo order (yt-dlp names).
 pub const COOKIES_BROWSERS: &[&str] = &[
     "none", "brave", "chrome", "chromium", "edge", "firefox", "opera", "vivaldi", "whale", "zen",
 ];
 
-/// Spec for `--cookies-from-browser`: `browser:/absolute/profile/dir` when
-/// the profile resolves on disk, else the bare browser name so yt-dlp falls
-/// back to its own `$HOME`-relative lookup (correct outside Flatpak).
-/// `None`/unknown means off. The profile path must be the profile
-/// *directory* — yt-dlp opens and decrypts the cookie database itself
-/// (keyring included); a raw `Cookies` file is not a `--cookies` export.
+/// Spec for `--cookies-from-browser`: `browser:/absolute/profile/dir` when the
+/// profile resolves, else the bare name so yt-dlp falls back to its own
+/// `$HOME`-relative lookup (correct outside Flatpak). `None`/unknown = off. The
+/// path must be the profile *directory* — yt-dlp opens and decrypts the cookie
+/// database itself; a raw `Cookies` file is not a `--cookies` export.
 pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     if value.is_empty() || value == "none" || !COOKIES_BROWSERS.contains(&value) {
         return None;
     }
-    // yt-dlp has no "zen" browser; Zen is Firefox-based (same
-    // cookies.sqlite layout), so its resolved profile is handed to the
-    // Firefox extractor.
+    // yt-dlp has no "zen" browser; Zen is Firefox-based, so its resolved
+    // profile goes to the Firefox extractor.
     let ytdlp_browser = if value == "zen" { "firefox" } else { value };
     if let Some(dir) = browser_profile_dir(value) {
         return Some(format!("{ytdlp_browser}:{}", dir.display()));
@@ -649,25 +607,20 @@ pub(crate) fn cookies_browser_spec(value: &str) -> Option<String> {
     Some(ytdlp_browser.to_string())
 }
 
-/// Shared trailing argv for every yt-dlp spawn: YouTube player-client
-/// workaround, browser cookies, user agent, then the page URL behind
-/// `--`. One helper so these flags can never drift between extraction,
-/// parts, HLS and live-resolve spawns (or let a hostile URL parse as a
-/// flag). `None` user agent keeps today's extraction behavior (yt-dlp
-/// default UA there).
+/// Shared trailing argv for every yt-dlp spawn: player-client workaround, cookies,
+/// user agent, then the page URL behind `--`. One helper so these flags cannot
+/// drift between spawns (or let a hostile URL parse as a flag).
 pub(crate) fn ytdlp_identity_args(
     cookies_browser: &str,
     user_agent: Option<&str>,
     page_url: &str,
 ) -> Vec<String> {
     let mut args = Vec::new();
-    // YouTube force-enables SABR-only streaming for the `web` player
-    // client (yt-dlp#12482): its formats come back URL-less and its
-    // playability status fails the whole extraction ("The page needs to
-    // be reloaded"). The `web` client only enters yt-dlp's default
-    // rotation when a JS runtime is available — e.g. the Flatpak's
-    // bundled deno — so exclude it everywhere and stay on the working
-    // clients. Scoped to the youtube extractor: a no-op for other sites.
+    // YouTube force-enables SABR-only streaming for the `web` player client
+    // (yt-dlp#12482): its URL-less formats fail the whole extraction. `web`
+    // only enters yt-dlp's default rotation when a JS runtime is available
+    // (e.g. the Flatpak's deno), so exclude it everywhere. Scoped to the
+    // youtube extractor: a no-op for other sites.
     args.push("--extractor-args".to_string());
     args.push("youtube:player_client=-web".to_string());
     if let Some(spec) = cookies_browser_spec(cookies_browser) {
@@ -677,29 +630,26 @@ pub(crate) fn ytdlp_identity_args(
         args.push("--user-agent".to_string());
         args.push(ua.to_string());
     }
-    // `--` before the page URL: option parsing ends here, so a hostile
-    // or malformed URL can never be read as a flag.
+    // `--` before the page URL: option parsing ends here, so a hostile URL
+    // can never be read as a flag.
     args.push("--".to_string());
     args.push(page_url.to_string());
     args
 }
 
-/// First search dir holding a complete ffmpeg toolchain (`ffmpeg` plus
-/// `ffprobe`). yt-dlp resolves both tools from `--ffmpeg-location` and
-/// never falls back to PATH for a missing sibling, so pointing it at a
-/// dir with only `ffmpeg` (e.g. Grab's own user-lib install, which
-/// shadows a perfectly good system install) breaks post-processing with
-/// "ffprobe not found" even when the system ships both binaries.
+/// First search dir holding a complete ffmpeg toolchain (`ffmpeg` plus `ffprobe`).
+/// yt-dlp resolves both from `--ffmpeg-location` and never falls back to PATH for
+/// a missing sibling, so a dir with only `ffmpeg` breaks post-processing with
+/// "ffprobe not found".
 pub(crate) fn toolchain_dir_in(dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter()
         .find(|d| is_executable(&d.join("ffmpeg")) && is_executable(&d.join("ffprobe")))
         .cloned()
 }
 
-/// Directory form of a resolved tool binary for `--ffmpeg-location`
-/// (yt-dlp wants the directory; Grab resolves the binary). Prefers a
-/// dir with both ffmpeg and ffprobe; falls back to the binary's own dir
-/// (the previous behavior) when no complete toolchain is on hand.
+/// Directory form of a resolved tool binary for `--ffmpeg-location` (yt-dlp wants
+/// the directory). Prefers a dir with both tools, falling back to the binary's
+/// own dir when no complete toolchain is on hand.
 pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
     toolchain_dir_in(&tool_search_dirs())
         .or_else(|| ffmpeg_bin.parent().map(Path::to_path_buf))
@@ -708,10 +658,9 @@ pub(crate) fn ffmpeg_location_dir(ffmpeg_bin: &Path) -> String {
         .into_owned()
 }
 
-/// Latest released yt-dlp tag without downloading anything: one
-/// user-initiated GitHub API call for the update check. `None` on any
-/// network/API failure — the row then reports the check failed instead
-/// of prompting.
+/// Latest released yt-dlp tag without downloading anything: one user-initiated
+/// GitHub API call. `None` on any network/API failure — the row then reports the
+/// check failed instead of prompting.
 pub async fn latest_ytdlp_tag() -> Option<String> {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let fetcher = yt_dlp::client::deps::github::GitHubFetcher::new("yt-dlp", "yt-dlp");
@@ -724,11 +673,10 @@ pub async fn latest_ytdlp_tag() -> Option<String> {
     handle.await.ok().flatten()
 }
 
-/// Run `binary --version` off the caller's thread and return its first
-/// output line. `None` covers missing binaries, spawn failures and empty
-/// output alike — all mean "unusable". Uses the shared runtime's handle
-/// directly (not `tokio::task::spawn_blocking`) so this stays callable
-/// from the GTK thread, which has no tokio context entered.
+/// Run `binary --version` off the caller's thread and return its first output
+/// line. `None` covers missing binaries, spawn failures and empty output alike.
+/// Uses the shared runtime's handle directly so the GTK thread (no tokio
+/// context entered) can call it.
 async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<String> {
     crate::runtime::tokio_rt()
         .spawn_blocking(move || {
@@ -747,11 +695,9 @@ async fn tool_first_line(binary: PathBuf, version_arg: &'static str) -> Option<S
 }
 
 /// Display-ready version line for an installed tool binary: yt-dlp's
-/// `--version` output labeled ("2026.08.19" → "yt-dlp 2026.08.19"),
-/// ffmpeg's first line trimmed to its version
-/// token ("ffmpeg version n9.0.1 …" → "ffmpeg n9.0.1"). `None` when the
-/// binary can't be probed. For the install-progress popover; the
-/// Preferences tools row keeps its own synchronous probe.
+/// `--version` output labeled ("2026.08.19" → "yt-dlp 2026.08.19"), ffmpeg's
+/// first line trimmed to its version token ("ffmpeg version n9.0.1 …" →
+/// "ffmpeg n9.0.1"). `None` when the binary can't be probed.
 pub(crate) async fn tool_display_version(
     binary: PathBuf,
     version_arg: &'static str,
@@ -773,8 +719,8 @@ pub(crate) async fn tool_display_version(
     Some(line)
 }
 
-/// Refuse stale or unverifiable toolchains before any network happens.
-/// Returns the raw version lines for attempt logging.
+/// Refuse stale or unverifiable toolchains before any network happens; returns
+/// the raw version lines for attempt logging.
 pub(crate) async fn ensure_tool_versions(libs: &Libraries) -> Result<(String, String), VideoError> {
     // ffmpeg takes a single-dash -version; --version is an error there.
     let (yt, ff) = tokio::join!(

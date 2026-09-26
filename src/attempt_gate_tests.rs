@@ -15,8 +15,7 @@ fn a_gate_commits_only_once() {
 
 #[test]
 fn a_discard_before_a_commit_blocks_the_commit() {
-    // The window the whole design exists to close: a removal that lands
-    // first must win outright, and the worker must then deliver nothing.
+    // The window the design closes: a first removal wins outright, worker delivers nothing.
     let gate = AttemptGate::new();
     assert!(gate.discard(), "the first discard wins");
     assert!(!gate.discard(), "a second discard must not also win");
@@ -25,9 +24,7 @@ fn a_discard_before_a_commit_blocks_the_commit() {
 
 #[test]
 fn a_commit_before_a_discard_blocks_the_discard() {
-    // The mirror, and the reason the manager needs `was_delivered`: the
-    // commit wins, so the attempt may attempt delivery, and the finalizer
-    // has to know whether it actually placed a file to remove it.
+    // Mirror: commit wins, so the finalizer needs `was_delivered` to know if a file was placed.
     let gate = AttemptGate::new();
     assert!(gate.try_commit());
     assert!(!gate.discard(), "the commit already had it");

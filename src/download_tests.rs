@@ -26,16 +26,11 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static QUEUE_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-/// Serializes every test that iterates the shared glib default
-/// MainContext (MainLoops and drain pumps). glib futures are bound to
-/// their spawning thread: a foreign iteration polling another test's
-/// pending source aborts on the thread-affinity guard. Take AFTER
-/// QUEUE_FILE_LOCK, always that order.
+/// Serializes MainContext iteration: glib futures abort if polled from the
+/// wrong thread. Take AFTER QUEUE_FILE_LOCK, always that order.
 static MAIN_LOOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Both test locks in the one safe order (queue, then loop). Take these
-/// together and never the loop lock before the queue lock: a reversed
-/// order across tests would deadlock the suite into a CI-timeout hang.
+/// Both locks in the safe order (queue, then loop); reversed order deadlocks the suite.
 fn test_locks() -> (
     std::sync::MutexGuard<'static, ()>,
     std::sync::MutexGuard<'static, ()>,
@@ -45,9 +40,7 @@ fn test_locks() -> (
     (q, l)
 }
 
-/// A minimal persisted row for `restore_existing` fixtures: no persisted
-/// id (so restore allocates, which is the pre-v3 path), no resume state,
-/// and no video source.
+/// Minimal persisted row for `restore_existing` fixtures (no id => pre-v3 allocate path).
 fn stored_row(url: &str, dest_dir: &str, filename: &str, status: DownloadStatus) -> StoredItem {
     StoredItem {
         id: None,
@@ -74,11 +67,8 @@ fn test_queue_file(tag: &str) -> std::path::PathBuf {
     p
 }
 
-/// Spin the default MainContext until the row's engine slot frees (or the
-/// deadline passes), then drain to quiescence like [`run_loop`]: the pump
-/// tail runs after the slot frees, and a woken-but-unpolled tail left
-/// behind would abort a later test on the thread guard. The caller must
-/// hold MAIN_LOOP_LOCK (via test_locks).
+/// Drain the engine slot then quiesce so no woken tail trips a later test's
+/// thread guard. Caller must hold MAIN_LOOP_LOCK (via test_locks).
 fn drain_engine(manager: &DownloadManager, id: u64) {
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -89,9 +79,7 @@ fn drain_engine(manager: &DownloadManager, id: u64) {
     quiesce(&ctx);
 }
 
-/// Pump until the context goes quiet (50 idle rounds), so no woken tail is
-/// left for another test's loop to trip over. Shared tail for drains that
-/// don't go through [`run_loop`].
+/// Pump until quiet (50 idle rounds) so no woken tail trips another test's loop.
 fn quiesce(ctx: &glib::MainContext) {
     let mut idle_rounds = 0;
     while idle_rounds < 50 {
@@ -113,11 +101,8 @@ fn test_settings() -> crate::settings::AppSettings {
     crate::settings::AppSettings::new()
 }
 
-/// Fresh loopback port per call. Parallel tests share one process (and
-/// pid), so pid-derived ports collide; a counter never repeats.
-/// Salted per process: crashed runs leak python servers that keep
-/// listening, and without the salt the next run reuses their ports and
-/// talks to stale fixtures.
+/// Fresh loopback port per call: a counter avoids pid collisions, a salt
+/// avoids stale listeners leaked by crashed runs.
 fn test_port(offset: u16) -> u16 {
     static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
     static SALT: OnceLock<u64> = OnceLock::new();
@@ -137,9 +122,7 @@ fn test_port(offset: u16) -> u16 {
             % 40000) as u16
 }
 
-/// One throwaway HTTP fixture: temp dirs, payload file, and a running
-/// throttled_server.py. On success the test kills the server and removes
-/// `dir`; on failure everything stays behind (ranges.log replay).
+/// Throwaway HTTP fixture. On failure everything stays behind for ranges.log replay.
 struct Fixture {
     dir: std::path::PathBuf,
     dl: std::path::PathBuf,
@@ -163,10 +146,8 @@ fn spawn_fixture(
     std::fs::create_dir_all(&dl).unwrap();
     let payload: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
     std::fs::write(srv.join(served_name), &payload).unwrap();
-    // CI runners sometimes fail to bring the fixture server up on the
-    // first port (slow spawn, stale listener). Retry on fresh ports
-    // instead of failing the test: a panic here poisons the shared test
-    // locks and cascades into every later test.
+    // Retry fresh ports: CI fixture bring-up flakes, and a panic here poisons
+    // the shared locks and cascades into later tests.
     let mut last_port = 0;
     for _ in 0..3 {
         let port = test_port(port_offset);
@@ -223,10 +204,8 @@ fn cleanup(server: &Rc<RefCell<std::process::Child>>, dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Watchdog + run + quiescence drain shared by every main-loop test: the
-/// drain pumps until the context goes quiet so no pending future is left
-/// for another test's loop to trip over. Callers must hold
-/// MAIN_LOOP_LOCK: only one test may iterate at a time.
+/// Watchdog + run + quiescence drain shared by main-loop tests. Caller must
+/// hold MAIN_LOOP_LOCK: only one test may iterate at a time.
 fn run_loop(main_loop: &glib::MainLoop, watchdog_secs: u64) {
     let watchdog = main_loop.clone();
     let timed_out = Arc::new(AtomicBool::new(false));
@@ -278,12 +257,10 @@ fn splits_pieces() {
     for w in pieces.windows(2) {
         assert_eq!(w[0].1 + 1, w[1].0);
     }
-    // Uneven tail.
     let pieces = plan_pieces(9_000_000, 4);
     assert_eq!(pieces.len(), 9);
     assert_eq!(pieces.last().unwrap().1, 8_999_999);
-    // Absurd server-claimed sizes never split (FIND-01): no giant
-    // bitmap, no terabyte sparse file, just single-stream.
+    // Absurd server-claimed sizes never split (FIND-01): avoids giant bitmap/sparse file.
     assert!(plan_pieces(u64::MAX, 16).is_empty());
     assert!(plan_pieces(2 * (1 << 40), 16).is_empty());
     // Worker split count follows connections x 4 MB.
@@ -352,8 +329,7 @@ fn rejects_size_mismatched_restarts() {
 
 #[test]
 fn prefix_len_caps_at_total() {
-    // Tail piece is short: two done pieces of a 1.5 MB file cover
-    // 1.5 MB, not 2 MB (an uncapped prefix could extend the file).
+    // Tail piece is short: cap prefix at total so it can't extend the file.
     let mut st = SegmentState::new(1_500_000);
     st.mark(0);
     st.mark(1);
@@ -411,11 +387,7 @@ fn rename_noreplace_never_clobbers() {
 
 #[test]
 fn rename_noreplace_spans_filesystems() {
-    // Staging lives on tmpfs while downloads sit on disk: the move must
-    // survive EXDEV. /dev/shm is a separate tmpfs on Linux, so moving
-    // out of it exercises the copy fallback; elsewhere it exercises the
-    // rename path — the contract (moved, source gone, never clobbers)
-    // holds on both.
+    // Staging may sit on tmpfs while downloads sit on disk: must survive EXDEV.
     let shm = std::path::Path::new("/dev/shm");
     if !shm.is_dir() {
         return;
@@ -539,10 +511,8 @@ fn truncates_to_prefix() {
     st.mark(1);
     truncate_to_prefix(&file, &st);
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_MIN);
-    // Already short: untouched.
     truncate_to_prefix(&file, &st);
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 2 * PIECE_MIN);
-    // Nothing done: emptied.
     let st = SegmentState::new(3 * PIECE_MIN);
     truncate_to_prefix(&file, &st);
     assert_eq!(std::fs::metadata(&file).unwrap().len(), 0);
@@ -620,8 +590,7 @@ fn rate_limit_follows_settings_live() {
     let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let _qf = test_queue_file("rate-live");
     let settings = test_settings();
-    // The manager's watch publishes; the engine cap follows with no
-    // re-queue. Junk reads as unlimited.
+    // Watch publishes; cap follows with no re-queue, junk reads as unlimited.
     let _manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
     settings.set_string("speed-limit", "1M").unwrap();
     assert_eq!(live_rate_limit(), Some(1024 * 1024));
@@ -629,16 +598,14 @@ fn rate_limit_follows_settings_live() {
     assert_eq!(live_rate_limit(), None);
     settings.set_string("speed-limit", "junk").unwrap();
     assert_eq!(live_rate_limit(), None);
-    // Restore: the memory backend is shared across tests; a leaked
-    // value would throttle or fail other tests' spawns.
+    // Restore shared memory backend or a leaked value throttles later tests.
     settings.set_string("speed-limit", "").unwrap();
 }
 
 #[test]
 fn notification_toggles() {
-    // NOTE: no pristine-defaults assert here: the memory GSettings
-    // backend is process-shared, so other tests' set_boolean(false)
-    // calls are visible. This checks live key -> method wiring instead.
+    // No pristine-defaults assert: the memory backend is process-shared, so this
+    // checks live key -> method wiring instead.
     let settings = test_settings();
     settings.set_boolean("show-notifications", true).unwrap();
     settings.set_boolean("notify-background", true).unwrap();
@@ -714,9 +681,7 @@ fn enqueue_video_spawns_and_fails_without_tools() {
 
 #[test]
 fn enqueue_video_restrict_filenames_folds_name() {
-    // The opt-in applies where Grab names the file (enqueue), not via a
-    // yt-dlp flag: yt-dlp only sanitizes its own template fields, while
-    // Grab passes literal output paths.
+    // Opt-in applies where Grab names the file (enqueue): yt-dlp only sanitizes its own template fields.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("enqueue-restrict");
     let _notools = NoVideoTools::apply();
@@ -748,21 +713,8 @@ fn enqueue_video_restrict_filenames_folds_name() {
 
 #[test]
 fn a_restored_row_keeps_its_id_so_its_staging_stays_reachable() {
-    // The id IS the staging key: `staging_dir(item_id)`. Restore used to
-    // call `alloc_id()`, handing every restored row a *fresh* number. A
-    // retry after a restart therefore scanned a different directory than
-    // the attempt that left an unplaceable recording in it -- and a later
-    // row handed the same number could `clean_staging` it away.
-    //
-    // The gap is what makes this observable. Restoring a contiguous queue
-    // re-allocates the same numbers in the same order, so the obvious
-    // version of this test passes against the broken code -- which is why
-    // the single-row restore test beside this one never caught it. Remove
-    // the middle row first and the survivors shift down by one.
-    //
-    // Rows are created through `restore_existing` in a Paused state, which
-    // spawns nothing: no tool scrubbing, no network, and nothing that
-    // needs the process-global environment other tests also depend on.
+    // Id IS the staging key: restore must keep it or retry scans the wrong dir.
+    // The gap makes it observable (contiguous restore passes on broken code).
     let (_q, _l) = test_locks();
     let qf = test_queue_file("restore-id");
     let dest = std::env::temp_dir().join("grab-restore-id");
@@ -828,14 +780,8 @@ fn a_restored_row_keeps_its_id_so_its_staging_stays_reachable() {
 
 #[test]
 fn a_pre_upgrade_row_never_lands_on_a_leftover_staging_dir() {
-    // A queue written before ids were persisted restores its rows with
-    // fresh ids. If the allocator then hands out a number that some other
-    // row's leftover staging directory still occupies, that row's
-    // `clean_staging` deletes a recording it never made -- the exact data
-    // loss #178 exists to prevent, just arriving via the upgrade.
-    //
-    // The leftovers are left alone on disk, deliberately: an unreachable
-    // recording is recoverable by hand, a deleted one is not.
+    // Pre-id queues restore with fresh ids; allocator must skip occupied staging
+    // dirs (#178). Leftovers stay on disk: unreachable beats deleted.
     let (_q, _l) = test_locks();
     let qf = test_queue_file("upgrade-guard");
     let dest = std::env::temp_dir().join("grab-upgrade-guard");
@@ -1062,8 +1008,7 @@ fn queue_file_never_carries_cookies() {
             },
         )
         .expect("video enqueue");
-    // Drain the spawned worker (fails fast without tools) so no woken pump
-    // tail is left for another test's loop to trip over (glib thread guard).
+    // Drain the worker here so no woken pump tail trips another test's thread guard.
     drain_engine(&manager, item.id());
     crate::video::clean_staging(&crate::video::staging_dir(item.id()));
     let text = std::fs::read_to_string(&qf).unwrap();
@@ -1139,8 +1084,7 @@ fn formats_bytes() {
 
 #[test]
 fn path_size_sums_folders() {
-    // Multi-file torrents finish into a folder: the finished detail must
-    // show the content total, not the directory entry's own byte count.
+    // Multi-file torrents finish into a folder: report the content total, not the dir entry size.
     let dir = std::env::temp_dir().join(format!("grab-path-size-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let sub = dir.join("sub");
@@ -1211,15 +1155,13 @@ fn magnet_links() {
         "a".repeat(16384)
     );
     assert!(normalize_url(&huge).is_err());
-    // Tracker params contain `://`: must never reach the http scheme
-    // branch (regression: "Unsupported scheme: magnet").
+    // Tracker params contain `://`: must not reach the http scheme branch.
     let tracked = "magnet:?xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3&tr=http://tracker.example.com:80/announce&tr=udp://tracker.example.com:1337/announce";
     assert_eq!(normalize_url(tracked).as_deref(), Ok(tracked));
     // Pasted BOM must not defeat the magnet classifier.
     let bom = format!("\u{feff}{good}");
     assert_eq!(normalize_url(&bom).as_deref(), Ok(good));
-    // Magnet-shaped but unparseable: rejected by the parser, never by
-    // the scheme branch.
+    // Magnet-shaped but unparseable: rejected by the parser, never the scheme branch.
     let bad_scheme = normalize_url("magnet://xt=urn:btih:a94a8fe5ccb19ba61c4c0873d391e987982fbbd3");
     assert!(bad_scheme.is_err());
     assert!(!bad_scheme.unwrap_err().contains("Unsupported scheme"));
@@ -1238,9 +1180,7 @@ fn single_torrent_bytes() -> Vec<u8> {
     .into_bytes()
 }
 
-/// Minimal multi-file .torrent: bar/{a.txt: 2, sub/b.txt: 3}.
-/// Info-dict keys must be sorted (files < name < piece length <
-/// pieces): the parser enforces canonical order.
+/// Minimal multi-file .torrent. Info-dict keys must be sorted: the parser enforces canonical order.
 fn multi_torrent_bytes() -> Vec<u8> {
     format!(
         "d8:announce12:http://t.co/4:infod5:filesld6:lengthi2e4:pathl5:a.txteed6:lengthi3e4:pathl3:sub5:b.txteee4:name3:bar12:piece lengthi16384e6:pieces20:{}ee",
@@ -1304,9 +1244,7 @@ fn sweep_keeps_only_referenced_archives() {
 
 #[test]
 fn staged_selection_survives_respawn() {
-    // Regression: take-once lost the file filter on every re-spawn
-    // (retry after cancel/fail), silently downloading everything.
-    // Selections now peek until pruned with unreferenced archives.
+    // Regression: take-once lost the file filter on re-spawn; selections now peek until pruned.
     let url = "torrent:/tmp/grab-test-sel.torrent";
     crate::torrent::stage_selection(url, vec![2]);
     assert_eq!(crate::torrent::get_selection(url), Some(vec![2]));
@@ -1344,8 +1282,7 @@ fn torrent_file_enqueue_uses_stem_stub() {
     assert!(crate::torrent::is_torrent_url(&item.url()));
     assert!(sane_filename(&item.filename()));
     assert!(!item.filename().is_empty());
-    // Leave no Queued row behind (a later restore could spawn it) and
-    // no archive behind; restore the shared memory-backend key.
+    // Leave no Queued row/archive behind; restore the shared memory-backend key.
     manager.cancel_all();
     crate::torrent::delete_archive_for_url(&item.url());
     assert!(crate::torrent::archive_path_for_url(&item.url()).is_none());
@@ -1373,14 +1310,12 @@ fn staged_selection_reaches_spawn_take() {
             Some(vec![0]),
         )
         .unwrap();
-    // The exact key spawn_torrent takes with: a staged selection must
-    // survive the archive → normalize → store round-trip identically.
+    // Must survive the archive → normalize → store round-trip identically.
     assert_eq!(
         crate::torrent::get_selection(&item.url().to_string()),
         Some(vec![0])
     );
-    // Leave no Queued row behind (a later restore could spawn it) and
-    // no archive behind; restore the shared memory-backend key.
+    // Leave no Queued row/archive behind; restore the shared memory-backend key.
     manager.cancel_all();
     crate::torrent::delete_archive_for_url(&item.url());
     assert!(crate::torrent::archive_path_for_url(&item.url()).is_none());
@@ -1409,8 +1344,7 @@ fn delete_download_trashes_torrent_files() {
     item.set_status(DownloadStatus::Done);
     store.append(&item);
 
-    // Explicit delete trashes the real files (not kept silently) and
-    // drops the row; the session entry was never created offline.
+    // Explicit delete trashes real files and drops the row; no session entry offline.
     let dbg = manager.delete_download(7);
     eprintln!(
         "DEBUG delete={:?} user_data={:?} exists={}",
@@ -1469,8 +1403,7 @@ fn remove_keeps_torrent_archive_for_undo() {
         .unwrap();
     let id = item.id();
     let url = item.url().to_string();
-    // Remove drops the row but keeps the archive, so Undo can re-add
-    // the same pseudo-URL and the engine resumes from kept partials.
+    // Remove drops the row but keeps the archive so Undo can re-add the same URL.
     manager.remove(id);
     assert_eq!(manager.store().n_items(), 0);
     assert!(
@@ -1510,11 +1443,7 @@ fn rejects_relative_download_dir() {
         .enqueue("https://example.com/g.iso", Some("/tmp"), None)
         .unwrap();
     assert!(item2.dest_dir() == "/tmp");
-    // Teardown BEFORE restoring keys: the max-concurrent watch fires
-    // start_next, and with no Queued row left it is a no-op. Restoring
-    // first would free slots while rows are still queued and spawn real
-    // engines whose pump futures outlive this test and abort later tests
-    // on glib thread-affinity.
+    // Teardown BEFORE restoring keys or the watch spawns real engines for queued rows.
     manager.cancel_all();
     // Restore: the memory backend is shared across tests.
     settings.set_string("download-dir", "").unwrap();
@@ -1622,15 +1551,13 @@ fn magnet_delete_trashes_recorded_subfolder() {
             None,
         )
         .unwrap();
-    // Enqueue records the engine subfolder: no archive exists to
-    // recompute it from at delete time.
+    // Enqueue records the engine subfolder: no archive exists to recompute it at delete time.
     let folder = dir.join("gone");
     assert_eq!(
         std::path::PathBuf::from(item.output_dir().to_string()),
         folder
     );
-    // Simulate engine output: the finished row is renamed while the
-    // real payload sits inside the recorded subfolder.
+    // Simulate engine output: finished row renamed, payload inside the recorded subfolder.
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("real-name.bin"), b"data").unwrap();
     item.set_filename("real-name.bin");
@@ -1678,9 +1605,7 @@ fn delete_download_trashes_torrent_subfolder() {
     let dir = glib::user_data_dir().join(format!("grab-delsub-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let dest = dir.to_string_lossy().into_owned();
-    // Multi-file torrent whose meta name ("bar") differs from the
-    // archive stem: the engine folder is dest/<meta-name>/, never the
-    // row's stub path. Delete must trash the folder, not no-op.
+    // Meta name ("bar") differs from archive stem: folder is dest/<meta-name>/.
     let pseudo =
         crate::torrent::archive_torrent_file("mymeta.torrent", &multi_torrent_bytes()).unwrap();
     let folder = dir.join("bar");
@@ -1734,8 +1659,7 @@ fn shortens_long_filenames() {
 
 #[test]
 fn restrict_filename_ascii_folds_to_ascii() {
-    // Accented Latin folds to its base letter; spaces, "&" and other
-    // punctuation become "_"; the extension survives.
+    // Accented Latin folds to base; spaces/punctuation become "_"; extension survives.
     assert_eq!(
         restrict_filename_ascii("Café & Croissants.mp4"),
         "Cafe_Croissants.mp4"
@@ -1889,9 +1813,7 @@ fn selection_survives_persist_restore() {
     let queue: StoredQueue = serde_json::from_str(&text).unwrap();
     assert_eq!(queue.items.len(), 1);
     assert_eq!(queue.items[0].selected_files, Some(vec![0]));
-    // ...and restore re-stages it. Prune first to simulate the
-    // restart that wipes the in-memory map: without the re-stage,
-    // the spawn would take None and download every file.
+    // ...and restore re-stages it. Prune first to simulate restart wiping the map.
     crate::torrent::prune_selections(&std::collections::HashSet::new());
     let m2 = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
     let holder2 = tokio_rt().spawn(async {
@@ -1901,8 +1823,7 @@ fn selection_survives_persist_restore() {
     m2.restore_queue();
     assert_eq!(m2.store().n_items(), 1);
     assert_eq!(crate::torrent::get_selection(&pseudo), Some(vec![0]));
-    // Teardown: leave no Queued row behind (a later backend restore
-    // would spawn a real engine for it) and restore shared keys.
+    // Teardown: leave no Queued row behind and restore shared keys.
     m1.cancel_all();
     m2.cancel_all();
     crate::torrent::delete_archive_for_url(&pseudo);
@@ -1922,8 +1843,7 @@ fn sane_filenames() {
     assert!(!sane_filename("/etc/passwd"));
     assert!(!sane_filename("a/b"));
     assert!(!sane_filename("a\0b"));
-    // Control and bidi-override characters deceive in listings and
-    // notification text, and arrive via Content-Disposition decoding.
+    // Control/bidi chars deceive in listings; arrive via Content-Disposition decoding.
     assert!(!sane_filename("a\nb.mp4"));
     assert!(!sane_filename("a\tb.mp4"));
     assert!(!sane_filename("evil\u{202e}mp4.txt"));
@@ -2014,10 +1934,7 @@ fn cancel_frees_slot_immediately() {
     assert!(!manager.running.borrow().contains_key(&41));
     assert_eq!(b.status(), DownloadStatus::Downloading);
     assert!(manager.running.borrow().contains_key(&42));
-    // Drain B's UI future on THIS thread: its Failed message is already
-    // queued (dead port fails fast). Leaving it pending would let another
-    // test's MainLoop poll it on the wrong thread and abort on glib's
-    // thread-affinity guard.
+    // Drain B's UI future here: already queued, or another test's loop aborts on thread-affinity.
     let ctx = glib::MainContext::default();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while manager.running.borrow().contains_key(&42) && std::time::Instant::now() < deadline {
@@ -2075,9 +1992,7 @@ fn raising_max_concurrent_starts_queued() {
     let b = DownloadItem::new(64, "http://127.0.0.1:9/b.bin", "b.bin", "/tmp/dl");
     manager.store().append(&b);
     assert_eq!(b.status(), DownloadStatus::Queued);
-    // The preferences SpinRow writes this key; the queued row must start
-    // without any other queue event. Port 9 is closed so the spawned
-    // engine fails fast during the drain below.
+    // The preferences SpinRow writes this key; the queued row must start with no other event.
     settings.set_int("max-concurrent", 2).unwrap();
     assert_eq!(b.status(), DownloadStatus::Downloading);
     assert!(manager.running.borrow().contains_key(&64));
@@ -2099,9 +2014,7 @@ fn defer_yields_slot_and_goes_last() {
     let settings = test_settings();
     settings.set_int("max-concurrent", 1).unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
-    // Both slots busy with stand-in holders: deferring must not spawn
-    // any real engine, keeping this test fully synchronous (no main
-    // loop pumping, which would race other tests' glib sources).
+    // Both slots busy with stand-ins: defer spawns no real engine, stays synchronous.
     for (id, progress) in [(71, 0.5), (72, 0.0)] {
         let it = DownloadItem::new(id, "https://example.com/f.bin", "f.bin", "/tmp/dl");
         it.set_status(DownloadStatus::Downloading);
@@ -2124,10 +2037,7 @@ fn defer_yields_slot_and_goes_last() {
     assert_eq!(order, vec![72, 71]);
     assert!(manager.running.borrow().contains_key(&72));
     assert!(!manager.running.borrow().contains_key(&71));
-    // Teardown through the real API: cancelling everything first means
-    // no row is queued, so the backend restore below can't start_next a
-    // real engine whose UI future would outlive this test. The fake
-    // holders are aborted by the cancel itself.
+    // Cancel first so no queued row remains for the backend restore to spawn.
     manager.cancel_all();
     assert!(!manager.running.borrow().contains_key(&72));
     settings.set_int("max-concurrent", 3).unwrap();
@@ -2151,8 +2061,7 @@ fn lowering_max_concurrent_parks_newest() {
     }
     let c = DownloadItem::new(83, "https://example.com/g.bin", "g.bin", "/tmp/dl");
     manager.store().append(&c);
-    // The preferences SpinRow writes this key; the newest running row
-    // must park itself without any other queue event.
+    // Newest running row parks itself with no other queue event.
     settings.set_int("max-concurrent", 1).unwrap();
     assert_eq!(
         manager.find(81).unwrap().status(),
@@ -2161,8 +2070,7 @@ fn lowering_max_concurrent_parks_newest() {
     assert_eq!(manager.find(82).unwrap().status(), DownloadStatus::Queued);
     assert!(manager.running.borrow().contains_key(&81));
     assert!(!manager.running.borrow().contains_key(&82));
-    // Same teardown constraint as the defer test: leave no queued row
-    // behind, or the backend restore spawns a real engine for it.
+    // Leave no queued row behind or the backend restore spawns a real engine for it.
     manager.cancel_all();
     assert!(manager.running.borrow().is_empty());
     settings.set_int("max-concurrent", 3).unwrap();
@@ -2427,8 +2335,7 @@ fn segmented_multi_connection_download() {
                 &format!("expected size in detail, got {:?}", item.detail()),
             );
         }
-        // Distinct bounded ranges prove parallel segmented fetching
-        // (a single stream would log one open-ended "bytes=0" line).
+        // Distinct bounded ranges prove parallel fetching (one stream would log one open-ended line).
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
         let mut distinct = std::collections::HashSet::new();
         for line in ranges.lines().filter(|l| l.starts_with("bytes=")) {
@@ -2576,10 +2483,7 @@ fn prefers_shorter_content_disposition_filename() {
 
 #[test]
 fn stale_pump_future_ignores_respawned_row() {
-    // Deferring (or a quick pause-resume) aborts the engine and starts a
-    // new one: the old pump future must not drag progress backwards,
-    // fail the row, or steal the new engine's handle. The hanging server
-    // keeps the second engine mid-transfer so any clobbering is visible.
+    // Old pump must not drag progress back or steal the new engine's handle.
     let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("stale-pump");
     let settings = test_settings();
@@ -2637,8 +2541,7 @@ fn stale_pump_future_ignores_respawned_row() {
     if manager.running.borrow().contains_key(&id) {
         abort(&server, "cancelled engine never exited");
     }
-    // Quiesce like run_loop: the cancelled pump's woken tail must finish
-    // here, not on a later test's thread (thread-guard abort).
+    // Quiesce here so the cancelled pump's woken tail finishes on this thread.
     quiesce(&ctx);
     cleanup(&server, &dir);
     settings.set_int("max-concurrent", 3).unwrap();
@@ -2667,13 +2570,11 @@ fn piece_rejects_changed_file_version() {
         tx,
     };
     let total = payload.len() as u64;
-    // Bogus total: the server's Content-Range disagrees, so this must
-    // fail Changed at once instead of burning retries.
+    // Bogus total: server Content-Range disagrees, must fail Changed at once.
     match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, 1)) {
         Err(AttemptFail::Changed(_)) => {}
         _ => abort(&server, "wrong-total piece must fail Changed"),
     }
-    // Correct total: the piece comes back whole.
     match tokio_rt().block_on(fetch_piece(&ctx, 0, 1023, total)) {
         Ok(body) => assert_eq!(body.len(), 1024),
         _ => abort(&server, "correct-total piece must succeed"),
@@ -2729,8 +2630,7 @@ fn falls_back_to_single_stream_when_throttled() {
         if std::fs::read(&path).unwrap() != payload {
             abort(&server, "bytes differ");
         }
-        // A full (unranged) request proves the single-stream fallback ran:
-        // pure multi would only ever log bounded ranges.
+        // A full (unranged) request proves the single-stream fallback ran.
         let ranges = std::fs::read_to_string(dir.join("ranges.log")).unwrap_or_default();
         if !ranges.lines().any(|l| l == "full") {
             abort(
@@ -2751,10 +2651,7 @@ fn segmented_pause_resume_keeps_bytes() {
     let settings = test_settings();
     settings.set_int("connections", 4).unwrap();
 
-    // 20 MB clears the split threshold. Slightly throttled (~3 MB/s,
-    // ~6 s total): the transfer must stay well above the 100 ms progress
-    // granularity or no poll can land mid-transfer (unthrottled loopback
-    // finishes in ~100 ms and polls only ever see 0% then Done).
+    // 20 MB clears the split threshold; throttled so a poll can land mid-transfer.
     let Fixture {
         dir,
         dl,
@@ -2777,9 +2674,8 @@ fn segmented_pause_resume_keeps_bytes() {
             .enqueue(&url, Some(&dest), Some("big.bin"))
             .unwrap_or_else(|e| abort(&server, &e));
         let id = item.id();
-        // Wait until at least one 1 MB piece (5%) landed, then pause.
-        // The status check is part of the loop condition (same thread runs
-        // to pause() with no await in between, so it cannot slip to Done).
+        // Wait for one 1 MB piece (5%), then pause. Status check is in the loop condition
+        // so it cannot slip to Done before pause() with no await in between.
         let mut waited = 0;
         while item.status() == DownloadStatus::Downloading
             && item.progress() < 0.05
@@ -2817,8 +2713,7 @@ fn segmented_pause_resume_keeps_bytes() {
         if item.status() != DownloadStatus::Done {
             abort(&server, &format!("expected Done, got {:?}", item.status()));
         }
-        // The regression: resume used to truncate completed pieces to
-        // zero while the bitmap still claimed them as done.
+        // Regression: resume truncated completed pieces while the bitmap claimed them done.
         if std::fs::read(&path).unwrap() != payload {
             abort(&server, "bytes differ after pause/resume");
         }
@@ -2867,10 +2762,8 @@ fn bitmap_persists_across_managers() {
 
 #[test]
 fn killed_segmented_resume_starts_over() {
-    // Simulates SIGKILL mid-segmented-download: a sparse full-size file
-    // with holes plus a stale Queued entry, no resume bitmap (RAM died
-    // with the process). Restart must discard and re-fetch, never mark
-    // the holey file Done via the 416 shortcut.
+    // SIGKILL mid-download: sparse full-size file, stale Queued entry, no bitmap.
+    // Restart must re-fetch, never mark the holey file Done via the 416 shortcut.
     let (_lock, _loop) = test_locks();
     let qf = test_queue_file("kill");
     let settings = test_settings();
@@ -2948,9 +2841,7 @@ fn killed_segmented_resume_starts_over() {
 
 #[test]
 fn shutdown_restart_resumes_segmented() {
-    // Full kill-restart cycle in-process: manager1 downloads segmented,
-    // shuts down mid-transfer (abort + truncate + persist WITH bitmap),
-    // then a fresh manager2 on the same queue file resumes segmented.
+    // Full kill-restart in-process: shutdown persists the bitmap, manager2 resumes segmented.
     let (_lock, _loop) = test_locks();
     let qf = test_queue_file("segrestart");
     let settings = test_settings();
@@ -3001,8 +2892,7 @@ fn shutdown_restart_resumes_segmented() {
         if !text.contains("\"segments\"") {
             abort(&server, "bitmap was not persisted");
         }
-        // Fresh manager, same queue file: must pick up the bitmap and
-        // resume segmented, not restart.
+        // Fresh manager on the same queue file must resume segmented, not restart.
         let manager2 =
             DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings.clone());
         manager2.restore_queue();
@@ -3042,8 +2932,7 @@ fn shutdown_restart_resumes_segmented() {
 
 #[test]
 fn aborted_engine_marks_failed() {
-    // Simulates an engine task dying without reporting (panic): aborting
-    // its handle must fail the row instead of stranding it Downloading.
+    // Engine died without reporting (panic): abort must fail the row, not strand it.
     let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("abortwatch");
     let settings = test_settings();
@@ -3179,10 +3068,8 @@ fn failed_download_reports_cause() {
 
 #[test]
 fn restart_with_smaller_file_keeps_partial() {
-    // A resume the server answers from zero with a SMALLER object than
-    // we hold is a different file (login wall, throttle page): fail
-    // loudly and keep the partial bytes instead of truncating them.
-    // Plain http.server ignores Range, which is exactly the shape.
+    // Resume answered from zero with a SMALLER object is a different file: fail
+    // loudly and keep partial bytes. Plain http.server ignores Range, matching this shape.
     let (_lock, _loop) = test_locks();
     let _qf = test_queue_file("shrink-guard");
     let settings = test_settings();
@@ -3222,9 +3109,8 @@ fn restart_with_smaller_file_keeps_partial() {
     let manager = DownloadManager::new(store, settings.clone());
     let url = format!("http://127.0.0.1:{port}/t.bin");
     let dest = dl.to_string_lossy().into_owned();
-    // restore_existing, not enqueue: enqueue would dedupe away from the
-    // pre-written partial, and the restore path is synchronous, so no
-    // race with the engine's first metadata read.
+    // restore_existing, not enqueue: enqueue dedupes away from the pre-written
+    // partial, and the restore path is synchronous (no engine race).
     let item = manager
         .restore_existing(&stored_row(
             &url,
@@ -3333,8 +3219,7 @@ fn remove_cleans_video_staging() {
     let dir = crate::video::staging_dir(id);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("manifest.json"), b"{}").unwrap();
-    // Dest-dir parts (yt-dlp defaults) go with the row too; the
-    // finished file and foreign neighbors stay.
+    // Dest-dir parts go with the row too; finished file and foreign neighbors stay.
     let destdir = std::env::temp_dir().join(format!("grab-remove-parts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&destdir);
     std::fs::create_dir_all(&destdir).unwrap();
@@ -3375,12 +3260,8 @@ fn remove_cleans_video_staging() {
 
 #[test]
 fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
-    // Regression guard. An earlier attempt made removal cooperative for
-    // *every* row, so a plain HTTP or torrent row -- which has no
-    // `video_abort` sender and never reaches the video cleanup path -- kept
-    // its engine writing after the row was gone, and the completed handle
-    // then leaked a concurrency slot, because the pump tail early-returns
-    // on the epoch entry `remove` drops and so never clears it.
+    // Regression: removal was cooperative for every row, so plain rows kept writing
+    // and leaked a slot when the pump tail early-returned on the dropped epoch.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-plain-abort");
     let settings = test_settings();
@@ -3390,9 +3271,8 @@ fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
     manager.store().append(&item);
     manager.epoch.borrow_mut().insert(id, 1);
 
-    // A Drop flag inside the task, not an absence checked after a sleep:
-    // asserting a flag was *not* set passes just as well when the task was
-    // detached as when it was aborted.
+    // A Drop flag inside the task, not an absence checked after a sleep: a flag
+    // that was *not* set passes the same when the task was detached, not aborted.
     struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
     impl Drop for DropFlag {
         fn drop(&mut self) {
@@ -3442,18 +3322,8 @@ fn removing_a_plain_row_still_aborts_its_task_and_frees_the_slot() {
 
 #[test]
 fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
-    // Two things the old `remove` could neither do nor prove: say *how* to
-    // stop, and wait for the worker before reclaiming anything.
-    //
-    // The construction matters more than the assertions. The stand-in
-    // worker **recreates** the directories before its late write, because
-    // that is what a dying recorder does -- an earlier version of this
-    // test wrote into staging without recreating it, so an inline sweep
-    // had already removed the parent, the write failed, `.ok()` swallowed
-    // it, and the test passed against the very bug it claimed to catch.
-    // Recreating the parent is what makes the two orderings differ: under
-    // an inline sweep the late files reappear and this fails, and only a
-    // sweep that waits for teardown removes them.
+    // Old `remove` could neither say *how* to stop nor wait. The stand-in recreates
+    // dirs before its late write, so only a sweep that waits for teardown passes.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-discard-live");
     let settings = test_settings();
@@ -3505,9 +3375,8 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let intent = intent_rx.await.ok();
         *seen_task.lock().unwrap() = intent;
-        // A dying recorder is SIGKILLed, not politely shut down: give the
-        // teardown a beat, then recreate scratch the way a late write
-        // would -- recreating the parents, which is the whole point.
+        // A dying recorder is SIGKILLed, not politely shut down: give teardown
+        // a beat, then recreate scratch the way a late write would — parents too.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let staging_ok = std::fs::create_dir_all(&staging_task).is_ok()
             && std::fs::write(staging_task.join("late-remux"), b"late").is_ok();
@@ -3519,10 +3388,7 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
 
     manager.remove(id);
 
-    // Cleanup is deferred to a finalizer that waits for the worker, so it
-    // cannot have finished when `remove` returns. The worker must still
-    // finish writing first -- a fixed sleep here would make the whole test
-    // a coin flip on machine speed, so poll with a deadline instead.
+    // Cleanup is deferred to a finalizer; poll with a deadline instead of a fixed sleep.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !*done.lock().unwrap() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -3531,22 +3397,14 @@ fn remove_tells_a_live_worker_to_discard_and_waits_for_it_to_stop() {
         *done.lock().unwrap(),
         "the stand-in worker never ran to completion"
     );
-    // Both late writes must actually have landed: a fixture that silently
-    // failed to write would pass against the very bug this catches, since
-    // absent files are what the sweep is supposed to leave behind.
+    // Both late writes must land: a silent fixture failure would pass against this bug.
     let (staging_ok, dest_ok) = *wrote.lock().unwrap();
     assert!(
         staging_ok && dest_ok,
         "the stand-in worker failed to write its late files (staging: {staging_ok}, \
          dest: {dest_ok}), so the sweep below proved nothing"
     );
-    // The finalizer handle is the deterministic signal: awaiting it proves
-    // the sweep ran to completion after the worker stopped, with no
-    // polling and no shared deadline to starve on a loaded machine. The
-    // previous version inferred completion by polling `staging.exists()`,
-    // which left the tail assertions racing scheduler delays they could
-    // not observe -- exactly the shape of the one unattributed CI failure
-    // this test ever produced.
+    // Awaiting the finalizer handle proves the sweep ran after the worker stopped.
     let finalizer = manager
         .discards
         .borrow_mut()
@@ -3630,9 +3488,7 @@ fn proxy_direct_and_unknown_modes_go_direct() {
             .expect("valid")
             .is_none()
     );
-    // Unknown values fail open like system (lenient stored-value rule):
-    // the system attempt itself never errors, whatever the desktop
-    // holds, so only well-formedness is asserted here.
+    // Unknown values fail open like system; only well-formedness asserted here.
     assert!(
         proxy_opts("mystery", "socks5", "127.0.0.1", 9050)
             .proxy_config()
@@ -3649,8 +3505,7 @@ fn proxy_manual_builds_remote_dns_socks() {
     // socks5h: names resolve remotely, never beside the tunnel.
     assert_eq!(proxy.cli_url, "socks5h://127.0.0.1:9050");
     assert!(proxy.no_proxy_env.contains("localhost"));
-    // Pooled clients key on the full config: identical configs share
-    // a pool entry, differing ones do not.
+    // Pooled clients key on the full config: identical configs share, differing ones do not.
     let again = proxy_opts("manual", "socks5", "127.0.0.1", 9050)
         .proxy_config()
         .expect("valid")
@@ -3725,8 +3580,7 @@ fn proxy_manual_rejects_garbage_loudly() {
 
 #[test]
 fn proxy_clients_are_pooled_per_config() {
-    // Proxied configs share one pooled client per proxy config, so a
-    // second attempt with the same config reuses the client.
+    // Same config reuses the client; different config adds a pool entry.
     let proxy = proxy_opts("manual", "socks5", "127.0.0.1", 19050)
         .proxy_config()
         .expect("valid")
@@ -3765,8 +3619,7 @@ fn normalize_no_proxy_entries() {
 fn cookies_parse_netscape_matrix() {
     let text = "# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tFALSE\t9999999999\tsid\tabc123\n#HttpOnly_.example.com\tTRUE\t/\tTRUE\t9999999999\ttok\tse cret\n#HttpOnly_.secure.example\tTRUE\t/\tTRUE\t9999999999\ts\t1\nbadline\nshort\ta\tb\nsemi.example\tTRUE\t/\tFALSE\t1\tn\tv;w\n.empty\tTRUE\t/\tFALSE\t1\t\tv\n";
     let (jar, count) = crate::cookies::jar_from_export(text);
-    // sid + tok survive; short lines, empty names and semicolon
-    // values are dropped rather than sent mangled.
+    // sid + tok survive; short lines, empty names, semicolon values are dropped.
     assert_eq!(count, 3);
     let header =
         crate::cookies::cookie_header_for(&jar, "https://example.com/v").expect("in-scope cookies");
@@ -3781,8 +3634,7 @@ fn cookies_parse_netscape_matrix() {
 
 #[test]
 fn cookies_secure_flag_is_scheme_aware() {
-    // Secure cookies ride https only, exactly like the browser and
-    // yt-dlp treat them; plain cookies ride both schemes identically.
+    // Secure cookies ride https only; plain cookies ride both schemes.
     let (jar, _) = crate::cookies::jar_from_export(
         ".secure.example\tTRUE\t/\tTRUE\t9999999999\ts\t1\n.plain.example\tTRUE\t/\tFALSE\t9999999999\tp\t2\n",
     );
@@ -3824,8 +3676,7 @@ fn cookies_stamp_request_headers() {
 
 #[test]
 fn cookies_export_roundtrip() {
-    // Fake yt-dlp honoring `--cookies PATH`: proves the export glue
-    // (spec, temp file, parse) without a browser on the machine.
+    // Fake yt-dlp honoring `--cookies PATH`: proves export glue without a browser.
     let dir = std::env::temp_dir().join(format!("grab-fakecookies-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3871,11 +3722,7 @@ exit 0
 
 #[test]
 fn cookie_export_ignores_ambient_configs() {
-    // --ignore-config must reach the export spawn: an ambient user
-    // config could otherwise reshape it (its own --cookies/--output),
-    // silently degrading export to plain requests. The fake refuses to
-    // write the jar without the flag, so a regression surfaces as a
-    // jar-less `None` and the expect below fails loudly.
+    // --ignore-config must reach the export spawn or an ambient config silently degrades export.
     let dir = std::env::temp_dir().join(format!("grab-ignorecfg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3917,8 +3764,7 @@ exit 0
 
 #[test]
 fn direct_mode_ignores_proxy_env() {
-    // Ambient HTTP_PROXY-style variables must never steer Direct rows:
-    // proxying is explicit settings or nothing.
+    // Ambient proxy vars must never steer Direct rows.
     let (_lock, _loop) = test_locks();
     let Fixture {
         dir,
@@ -3969,9 +3815,7 @@ fn direct_mode_ignores_proxy_env() {
 
 #[test]
 fn proxy_argv_precedes_end_of_options() {
-    // optparse treats everything after `--` positionally: a `--proxy`
-    // placed there would download as a second URL. Proxied argv must
-    // flag before the separator on every builder.
+    // optparse treats everything after `--` positionally: proxied argv must flag before it.
     let proxy = proxy_opts("manual", "socks5", "127.0.0.1", 9050)
         .proxy_config()
         .expect("valid")
@@ -4021,8 +3865,7 @@ fn proxy_argv_precedes_end_of_options() {
 
 #[test]
 fn single_connection_skips_probe() {
-    // Single-use token URLs die on any pre-request: with one
-    // connection the engine must never probe, single GET only.
+    // Single-use token URLs die on any pre-request: no probe, single GET only.
     let (_lock, _loop) = test_locks();
     let Fixture {
         dir,
@@ -4058,8 +3901,7 @@ fn single_connection_skips_probe() {
 
 #[test]
 fn stamp_request_sends_self_origin_referer() {
-    // Hotlink guards commonly accept the file's own origin; the
-    // Referer carries scheme+host only, never path or query.
+    // Hotlink guards accept the file's own origin; Referer carries scheme+host only.
     let built = stamp_request(
         http_client().get("http://127.0.0.1:8080/a/b?token=secret"),
         "",
@@ -4082,9 +3924,7 @@ fn stamp_request_sends_self_origin_referer() {
 
 #[test]
 fn cookies_export_failure_means_plain_requests() {
-    // A failing export (bad profile, locked browser) degrades to None —
-    // plain requests — instead of bricking authed downloads. Distinct
-    // browser name: the roundtrip test's cached jar must not leak in.
+    // Failing export degrades to plain requests instead of bricking authed downloads.
     let dir = std::env::temp_dir().join(format!("grab-fakecookies-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4106,8 +3946,7 @@ fn cookies_export_failure_means_plain_requests() {
 
 #[test]
 fn cookies_empty_export_still_returns_jar() {
-    // Logged-out profile (valid but empty export) is a usable answer:
-    // callers send no Cookie header and move on.
+    // Logged-out profile (valid but empty) is usable: no Cookie header, move on.
     let dir = std::env::temp_dir().join(format!("grab-fakecookies-empty-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4217,8 +4056,7 @@ fn clear_finished_drops_only_done() {
 
 #[test]
 fn restore_dedups_finished_urls() {
-    // Queue files written before dedup may hold several Done rows per
-    // URL; restore collapses them so the newest (last) one wins.
+    // Queue files before dedup may hold several Done rows per URL; newest (last) wins.
     let _lock = QUEUE_FILE_LOCK.lock().unwrap();
     let qf = test_queue_file("history-dedup");
     let settings = test_settings();
@@ -4258,8 +4096,7 @@ fn drop_finished_duplicates_keeps_active_and_newest() {
     add(2, "https://example.com/a.iso", DownloadStatus::Done);
     add(3, "https://example.com/a.iso", DownloadStatus::Queued);
     add(4, "https://example.com/b.iso", DownloadStatus::Done);
-    // Row 2 just finished: row 1 (older Done, same URL) drops; the
-    // queued row and the other URL are untouched.
+    // Row 2 just finished: older Done for the URL drops, queued rows and other URLs stay.
     m.drop_finished_duplicates("https://example.com/a.iso", 2);
     let remaining: Vec<(u64, DownloadStatus)> = (0..m.store().n_items())
         .filter_map(|i| m.store().item(i).and_downcast::<DownloadItem>())
@@ -4280,9 +4117,7 @@ fn drop_finished_duplicates_keeps_active_and_newest() {
 
 #[test]
 fn enqueue_video_reserves_part_namespaced_stems() {
-    // A foreign file under Grab's part namespace reserves the stem: the
-    // intake must dedupe onward so a later clean_dest_parts sweep can
-    // never touch files Grab didn't write.
+    // Foreign file under Grab's part namespace reserves the stem: intake dedupes onward.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("enqueue-video-reserve");
     let _notools = NoVideoTools::apply();
@@ -4392,10 +4227,7 @@ fn delete_download_trashes_video_sidecars() {
 
 #[test]
 fn enqueue_video_reserves_subtitle_sidecar_stems() {
-    // A pre-existing foreign sidecar reserves the stem just like a
-    // part file: intake dedupes onward so a later row delete (which
-    // trashes every offered-language sidecar) can never take a file
-    // Grab didn't write.
+    // Pre-existing foreign sidecar reserves the stem like a part file.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("enqueue-video-reserve-srt");
     let _notools = NoVideoTools::apply();
@@ -4429,9 +4261,7 @@ fn enqueue_video_reserves_subtitle_sidecar_stems() {
 
 #[test]
 fn enqueue_video_accepts_unlisted_url() {
-    // No domain gate: any normalizable URL queues as a video row (the
-    // dialog owns routing; misuse fails loudly at resolve instead of
-    // silently saving HTML). Garbage still rejected by normalization.
+    // No domain gate: any normalizable URL queues as video (misuse fails at resolve).
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("enqueue-video-probed");
     let _notools = NoVideoTools::apply();
@@ -4467,15 +4297,11 @@ fn enqueue_video_accepts_unlisted_url() {
 
 #[test]
 fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
-    // The gate is the only thing that can arbitrate delivery, so a video
-    // attempt must have one and a plain row must not: a plain row is
-    // aborted outright and never arbitrates anything.
+    // Video attempts arbitrate delivery via a gate; plain rows abort outright and need none.
     let (_q, _l) = test_locks();
     let qf = test_queue_file("gate-spawn");
     let settings = test_settings();
-    // Fail validation after gate creation but before the worker/pump starts,
-    // keeping this ownership test synchronous and free of thread-affine
-    // futures.
+    // Fail validation after gate creation but before worker/pump starts: stays synchronous.
     settings
         .set_string(
             crate::settings::key::PROXY_MODE,
@@ -4527,8 +4353,7 @@ fn a_video_attempt_gets_a_gate_and_a_plain_row_does_not() {
 
 #[test]
 fn a_removal_claims_the_gate_before_the_worker_can_commit() {
-    // The decision must be claimed at `remove` time, not discovered later:
-    // a worker that has not reached its rename yet must find the row gone.
+    // Gate must be claimed at `remove` time: a pre-rename worker must find the row gone.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-claims-gate");
     let settings = test_settings();
@@ -4584,9 +4409,7 @@ fn a_removal_claims_the_gate_before_the_worker_can_commit() {
 
 #[test]
 fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
-    // When the commit wins, the file *is* placed, and the row is gone, so
-    // the finalizer has to remove it. This is the only sanctioned exception
-    // to `clean_dest_parts` never touching a finished file.
+    // Commit won and row is gone, so the finalizer must remove the placed orphan.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-orphan");
     let settings = test_settings();
@@ -4648,11 +4471,8 @@ fn a_finalizer_removes_the_orphan_a_lost_commit_left_behind() {
 
 #[test]
 fn removing_a_settled_video_row_keeps_the_users_finished_file() {
-    // A delivered attempt leaves its gate COMMITTING + delivered in the
-    // map (the pump tail clears the worker handle but never the gate),
-    // with no worker in flight. Removing that settled row must keep the
-    // file the user owns: only a worker the finalizer actually awaited
-    // can have left an orphan behind.
+    // Settled row (COMMITTING + delivered, no worker in flight): removal keeps the
+    // user's file; only an awaited worker can leave an orphan behind.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("remove-settled-keeps");
     let settings = test_settings();
@@ -4717,9 +4537,7 @@ fn removing_a_settled_video_row_keeps_the_users_finished_file() {
 
 #[test]
 fn a_pending_discard_reserves_the_destination_against_intake() {
-    // Between remove and its finalizer, the stem must not be claimable:
-    // otherwise the finalizer's stem-wide sweep deletes the *new* row's
-    // part files.
+    // Between remove and its finalizer the stem must not be claimable.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-intake");
     let settings = test_settings();
@@ -4740,8 +4558,7 @@ fn a_pending_discard_reserves_the_destination_against_intake() {
 
 #[test]
 fn an_undo_does_not_reclaim_a_destination_with_a_pending_discard() {
-    // Undo bypasses intake dedupe and starts a row with the same filename
-    // immediately, so it has to consult the reservation too.
+    // Undo bypasses intake dedupe, so it must consult the reservation too.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-undo");
     let settings = test_settings();
@@ -4756,9 +4573,7 @@ fn an_undo_does_not_reclaim_a_destination_with_a_pending_discard() {
 
 #[test]
 fn a_reserved_destination_forces_video_intake_to_dedupe() {
-    // Between remove and its finalizer the destination must count as taken
-    // at intake, or the finalizer's stem-wide sweep deletes the new row's
-    // part files.
+    // Destination counts as taken at intake or the old finalizer sweeps the new row's parts.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-video-intake");
     let _notools = NoVideoTools::apply();
@@ -4796,8 +4611,7 @@ fn a_reserved_destination_forces_video_intake_to_dedupe() {
 
 #[test]
 fn a_pending_discard_reserves_the_stem_against_a_different_extension() {
-    // The finalizer's sweep is stem-wide, so the reservation must be too:
-    // a different extension on the same stem is still the old row's.
+    // Sweep is stem-wide, so the reservation is too: different extension, same stem still counts.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-stem");
     let settings = test_settings();
@@ -4825,9 +4639,7 @@ fn a_pending_discard_reserves_the_stem_against_a_different_extension() {
 
 #[test]
 fn a_reserved_stem_forces_video_intake_to_dedupe() {
-    // Same stem, different extension: without the stem-wide reservation
-    // intake would claim it and the old finalizer's sweep would delete
-    // the new row's part files.
+    // Same stem, different extension: intake must dedupe or the old sweep takes the new parts.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-stem-intake");
     let _notools = NoVideoTools::apply();
@@ -4865,9 +4677,7 @@ fn a_reserved_stem_forces_video_intake_to_dedupe() {
 
 #[test]
 fn a_second_discard_keeps_the_reservation_after_the_first_releases() {
-    // Remove, Undo, remove again before the first finalizer lands: the
-    // same destination is reserved twice, and the first release must not
-    // reopen the window while the second teardown is still in flight.
+    // Remove, Undo, remove again: the first release must not reopen the window.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-refcount");
     let settings = test_settings();
@@ -4893,8 +4703,7 @@ fn a_second_discard_keeps_the_reservation_after_the_first_releases() {
 
 #[test]
 fn a_reserved_destination_forces_plain_intake_to_dedupe() {
-    // The exact-path reservation applies to plain intake too: a plain row
-    // claiming a tearing-down destination meets the finalizer's sweep.
+    // Exact-path reservation applies to plain intake too.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-plain-intake");
     let settings = test_settings();
@@ -4922,8 +4731,7 @@ fn a_reserved_destination_forces_plain_intake_to_dedupe() {
 
 #[test]
 fn a_finished_name_claim_honours_a_pending_discard() {
-    // The Finished claim loop and the DEST_EXISTS requeue share
-    // `is_name_taken`: a reserved destination must read as taken there too.
+    // Finished-name claims and DEST_EXISTS requeues share `is_name_taken`: reserved must read as taken.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-claim");
     let settings = test_settings();
@@ -4946,14 +4754,8 @@ fn a_finished_name_claim_honours_a_pending_discard() {
 
 #[test]
 fn released_reservation_wakes_parked_unremoved_row() {
-    // Undo bypasses intake dedupe: a reserved destination requeues the row
-    // without starting it, and later triggers must not start it while
-    // reserved. When the discard finalizer releases the reservation it
-    // wakes the queue through `wake_tx`: the parked row starts without
-    // waiting for an unrelated `start_next()` trigger. This drives the
-    // async finalizer branch — a discard for a row with a worker in
-    // flight, the real scenario — so the wakeup crosses the tokio/main
-    // thread hop, not the synchronous no-worker path.
+    // Reserved destinations requeue without starting; release wakes via `wake_tx`.
+    // Drives the async finalizer branch (worker in flight) across the tokio/main hop.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-unremove-wake");
     let _notools = NoVideoTools::apply();
@@ -4999,12 +4801,8 @@ fn released_reservation_wakes_parked_unremoved_row() {
         "a later trigger started a row whose destination is still reserved"
     );
     assert!(!manager.running.borrow().contains_key(&id));
-    // The discard finalizer frees the destination. A stand-in worker
-    // stands in for the row's real task so the async finalizer branch
-    // runs: it waits on the worker, sweeps, releases the reservation,
-    // and sends the wakeup from the tokio runtime thread. Awaiting the
-    // tracked finalizer handle is the deterministic signal that all of
-    // that finished — no polling, no deadline to starve.
+    // Stand-in worker for the async finalizer branch: waits, sweeps, releases, wakes.
+    // Awaiting the tracked handle proves all of that finished.
     manager
         .running
         .borrow_mut()
@@ -5022,9 +4820,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
         "the finalizer must release the destination reservation"
     );
     quiesce(&glib::MainContext::default());
-    // The row must have left the parked state: with tools installed it
-    // would sit in Downloading, but under NoVideoTools the woken engine
-    // fails fast to Failed. Either way the wakeup started it.
+    // Under NoVideoTools the woken engine fails fast to Failed; either way the wakeup started it.
     assert_ne!(
         revived.status(),
         DownloadStatus::Queued,
@@ -5037,9 +4833,7 @@ fn released_reservation_wakes_parked_unremoved_row() {
 
 #[test]
 fn an_unremove_of_a_settled_row_stays_settled_while_reserved() {
-    // Only rows that would actually start divert to the requeue path: a
-    // Done snapshot (e.g. clear-finished Undo) over a reserved destination
-    // restores as Done and never starts on its own.
+    // Only rows that would start divert to requeue: Done restores as Done, never starts.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-unremove-done");
     let settings = test_settings();
@@ -5144,8 +4938,7 @@ fn a_finalizer_releases_the_reservation_after_the_worker() {
 
 #[test]
 fn removing_a_never_spawned_video_row_releases_synchronously() {
-    // With no worker in flight the reclaim runs inline, so the reservation
-    // is already gone when remove returns.
+    // No worker in flight: reclaim runs inline, reservation already gone at return.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("reserve-release-sync");
     let settings = test_settings();
@@ -5186,15 +4979,7 @@ fn removing_a_never_spawned_video_row_releases_synchronously() {
 #[cfg(target_os = "linux")]
 #[test]
 fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it() {
-    // The finalizer owns the worker handle. Aborting the finalizer drops
-    // that handle, which *detaches* the worker -- yt-dlp would keep running
-    // with no supervisor, which is the regression #180 fixed.
-    //
-    // Driven through the real path: the long-running worker is inserted as
-    // the row's running handle and `remove` hands it to `finish_discard`,
-    // which retains the abort handle and tracks the finalizer. A
-    // hand-built `PendingDiscard` would pass even if `finish_discard`
-    // regressed, so this test must not construct one.
+    // Finalizer owns the worker handle: aborting it must abort the worker, not detach it (#180).
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("shutdown-discard");
     let settings = test_settings();
@@ -5230,8 +5015,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         .borrow_mut()
         .insert(id, std::sync::Arc::clone(&gate));
 
-    // Scratch the real finalizer must reclaim once the worker stops: a
-    // staging sidecar plus a dest-dir part in yt-dlp's split namespace.
+    // Scratch the real finalizer must reclaim: staging sidecar + dest-dir part.
     let staging = crate::video::staging_dir(id);
     let _ = std::fs::remove_dir_all(&staging);
     std::fs::create_dir_all(&staging).unwrap();
@@ -5248,11 +5032,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
         }
     }
     let flag = std::sync::Arc::clone(&dropped);
-    // Owned by the worker future from construction: aborting the task drops
-    // the future (and this guard) whether the abort lands before or after
-    // the first poll, so the flag fires in both orderings. Constructing the
-    // guard inside the future instead would miss an abort that wins the race
-    // with the first poll.
+    // Owned by the worker from construction: abort drops it whether or not the first poll ran.
     let guard = DropFlag(flag);
     let handle = crate::runtime::tokio_rt().spawn(async move {
         let _guard = guard;
@@ -5260,9 +5040,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
     });
     manager.running.borrow_mut().insert(id, handle);
 
-    // The real path: `remove` claims the gate and hands the running worker
-    // to `finish_discard`, which retains its abort handle beside the
-    // finalizer it spawns.
+    // Real path: `remove` claims the gate and hands the worker to `finish_discard`.
     manager.remove(id);
 
     manager.shutdown();
@@ -5288,9 +5066,7 @@ fn shutdown_during_a_pending_discard_stops_the_worker_rather_than_detaching_it()
 
 #[test]
 fn finalize_filename_applies_ascii_fold_for_late_names() {
-    // The opt-in ASCII fold must cover names adopted after intake
-    // (server/container suggestions via SuggestName), not just the
-    // intake name: finalize_filename is the single policy point.
+    // ASCII fold must cover late-adopted names too: finalize_filename is the single policy point.
     let (_q, _l) = test_locks();
     let _qf = test_queue_file("finalize-restrict");
     let _notools = NoVideoTools::apply();
@@ -5303,10 +5079,7 @@ fn finalize_filename_applies_ascii_fold_for_late_names() {
         folded,
         restrict_filename_ascii(&shorten_filename("Café & Croissants.mp4"))
     );
-    // Pref off: only shortening applies, non-ASCII survives. Set it
-    // explicitly: the GSettings memory backend is process-shared, so an
-    // earlier test's `set_boolean(true)` is still in effect here. This
-    // also leaves the shared backend false for later tests.
+    // Pref off: only shortening applies. Set explicitly: shared backend may still hold true.
     let settings = test_settings();
     settings.set_boolean("restrict-filenames", false).unwrap();
     let manager = DownloadManager::new(gio::ListStore::new::<DownloadItem>(), settings);

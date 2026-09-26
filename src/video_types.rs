@@ -1,18 +1,15 @@
-//! Probe identity: what a URL is and what a probe resolved to.
-//! Leaf module (media types + yt_dlp model + url crate only): the
-//! dialog classifies links, the picker lists formats, the worker
-//! resolves them — all through the `video` facade.
+//! Probe identity: what a URL is and what a probe resolved to. Leaf module
+//! (media types + yt_dlp model + url crate), reached through the `video` facade.
 
 use yt_dlp::model::format::{Format, Protocol};
 use yt_dlp::model::selector::VideoCodecPreference;
 use yt_dlp::model::{DrmStatus, FORMAT_URL_LIFETIME, Video};
 
-/// Hosts routed through the video extractor instead of the plain HTTP
-/// engine. Suffix-matched (`music.youtube.com` counts), lowercase.
-/// DRM-free sites only: DRM-walled services (Netflix and kin) fail cleanly
-/// at selection time, so listing them here would only promise what the
-/// pipeline refuses to fetch. Extend here as verified sites grow — this is
-/// the only place that decides what a "video page" is.
+/// Hosts routed through the video extractor instead of the plain HTTP engine.
+/// Suffix-matched (`music.youtube.com` counts), lowercase. DRM-free sites only:
+/// DRM-walled ones fail at selection time, so listing them would promise what
+/// the pipeline refuses to fetch. This list is the only place that decides
+/// what a "video page" is.
 const VIDEO_DOMAINS: &[&str] = &[
     "youtube.com",
     "youtu.be",
@@ -54,10 +51,9 @@ const VIDEO_DOMAINS: &[&str] = &[
     "bandcamp.com",
 ];
 
-/// Decide whether `url` goes through the video extractor.
-///
-/// Callers pass a fully qualified `http(s)` URL (normalization runs
-/// first); anything else (magnets, bare hosts, unknown schemes) is
+/// Decide whether `url` goes through the video extractor. Callers pass a fully
+/// qualified `http(s)` URL (normalization runs first); anything else
+/// (magnets, bare hosts, unknown schemes) is
 /// [`VideoSource::Direct`](crate::media_types::VideoSource::Direct).
 pub fn classify(url: &str) -> crate::media_types::VideoSource {
     match url::Url::parse(url) {
@@ -87,12 +83,11 @@ pub fn is_video_page(url: &str) -> bool {
     matches!(classify(url), crate::media_types::VideoSource::Page { .. })
 }
 
-/// Whether a resolved preview still matches the dialog's current text.
-/// The dialog kick and the submit gate must agree on this: the extractor
-/// canonicalizes page URLs (youtu.be → youtube.com/watch), so comparing
-/// the stored canonical URL against the typed text would reject every
-/// canonicalized preview and trap Add in a re-resolve loop. The
-/// round-trip key (which exact text was resolved) is the stable one.
+/// Whether a resolved preview still matches the dialog's current text. Both the
+/// dialog kick and the submit gate must agree: the extractor canonicalizes page
+/// URLs (youtu.be → youtube.com/watch), so comparing the stored canonical URL
+/// against the typed text would trap Add in a re-resolve loop. The round-trip
+/// key (which exact text was resolved) is the stable one.
 pub fn preview_fresh(info: &Option<ProbeResult>, last_ok: &str, url: &str) -> bool {
     !url.is_empty() && last_ok == url && info.is_some()
 }
@@ -105,11 +100,8 @@ pub(crate) fn video_domain(host: &str) -> bool {
 }
 
 /// Whether a resolved page carries anything fetchable: at least one
-/// plain-HTTPS or HLS-manifest format with a URL and no DRM — the same
-/// acceptance the worker applies, minus container specifics the planner
-/// refines. The dialog probe uses this to offer the video path for
-/// unlisted pages; an empty extraction falls back to a plain file
-/// download.
+/// plain-HTTPS or HLS-manifest format with a URL and no DRM. The dialog
+/// probe offers the video path for unlisted pages on this.
 pub fn has_fetchable_media(video: &Video) -> bool {
     video.formats.iter().any(|f| {
         matches!(f.protocol, Protocol::Https | Protocol::M3U8Native)
@@ -122,32 +114,29 @@ pub fn has_fetchable_media(video: &Video) -> bool {
 }
 
 /// Extraction result, kept deliberately small: the queue row needs the
-/// title/duration, and the *page URL* for expiry-safe re-resolve.
+/// title/duration and the *page URL* for expiry-safe re-resolve.
 #[derive(Clone, Debug)]
 pub struct VideoInfo {
     pub title: String,
-    /// Duration in seconds. Read only in tests today; kept as probe
-    /// model data alongside `duration_string`.
+    /// Duration in seconds; read only in tests today.
     #[allow(dead_code)]
     pub duration: Option<i64>,
     /// Preformatted duration from the extractor (e.g. "41:21").
     pub duration_string: Option<String>,
     /// Canonical page URL — the identity persisted across restarts.
     pub page_url: String,
-    /// Unix time after which every resolved format URL is stale, derived
-    /// from the youngest `available_at` across formats. Written at probe
-    /// time for expiry-safe re-resolve; no reader yet.
+    /// Unix time after which every resolved format URL is stale; written at
+    /// probe time for expiry-safe re-resolve, no reader yet.
     #[allow(dead_code)]
     pub expires_at: Option<i64>,
-    /// Pinnable video-only formats, tallest first (empty when the page
-    /// carries none). Computed once at resolve; the dialog lists these.
+    /// Pinnable video-only formats, tallest first. Computed once at resolve.
     pub formats: Vec<VideoFormatOption>,
-    /// Whether the page is currently live. Decides stop-and-keep
-    /// behavior for HLS captures; refreshed on every resolve.
+    /// Whether the page is currently live. Decides stop-and-keep behavior
+    /// for HLS captures; refreshed on every resolve.
     pub is_live: bool,
     /// Whether the resolved formats include anything fetchable (see
-    /// [`has_fetchable_media`]): the dialog probe offers the video path
-    /// for unlisted pages on this, instead of the domain list.
+    /// [`has_fetchable_media`]): the dialog offers the video path for
+    /// unlisted pages on this instead of the domain list.
     pub fetchable: bool,
 }
 
@@ -185,8 +174,7 @@ pub enum ProbeResult {
 }
 
 impl ProbeResult {
-    /// Canonical URL of the probed page (the collection URL for
-    /// playlists). Used as the round-trip freshness key.
+    /// Canonical URL of the probed page; the round-trip freshness key.
     pub fn page_url(&self) -> &str {
         match self {
             ProbeResult::Single(v) => &v.page_url,
@@ -212,9 +200,8 @@ impl ProbeResult {
     }
 }
 
-/// What one video worker attempt resolved to. The spawner needs more
-/// than bytes-or-nothing: playlist-shaped pages expand into per-item
-/// rows instead of failing.
+/// What one video worker attempt resolved to. Playlist-shaped pages expand
+/// into per-item rows instead of failing.
 #[derive(Debug)]
 pub enum VideoOutcome {
     /// Bytes finished (or adopted) at dest.
@@ -226,10 +213,8 @@ pub enum VideoOutcome {
     Aborted,
 }
 
-/// What one extractor dump resolved to: a single video, or a
-/// collection whose entries the picker (or worker expansion) consumes.
-/// `parse_playlist_json` decides the shape; single videos never carry
-/// `entries`.
+/// What one extractor dump resolved to: a single video, or a collection.
+/// `parse_playlist_json` decides the shape.
 #[derive(Debug)]
 pub(crate) enum FetchedVideo {
     Single(Box<Video>),
@@ -244,9 +229,9 @@ pub struct VideoFormatOption {
     pub height: u32,
 }
 
-/// Best directly-fetchable video-only stream per height (codec rank,
-/// then filesize). Plain HTTPS without DRM only; muxed and audio-only
-/// streams never qualify. Pure.
+/// Best directly-fetchable video-only stream per height (codec rank, then
+/// filesize). Plain HTTPS without DRM only; muxed and audio-only streams never
+/// qualify. Pure.
 fn best_direct_by_height(
     formats: &[Format],
     newest_first: bool,
@@ -292,9 +277,8 @@ fn best_direct_by_height(
 }
 
 /// Short transport/codec tag for a picker row: HLS variants show their
-/// transport, not a codec that ffmpeg — not the engine — will consume.
-/// Remote extractor strings are allowlisted to label-safe chars so bidi
-/// overrides, newlines or oversized values can't spoof the dropdown.
+/// transport, not a codec ffmpeg will consume. Remote strings are allowlisted
+/// to label-safe chars so bidi overrides or newlines can't spoof the dropdown.
 /// Pure.
 fn format_short_label(f: &Format) -> String {
     if f.protocol == Protocol::M3U8Native {
@@ -316,10 +300,9 @@ fn format_short_label(f: &Format) -> String {
     }
 }
 
-/// Rank a codec string against an ordered table of prefix groups:
-/// first matching group wins, anything else ranks past the table.
-/// Powers both priority modes so the two orders can't drift apart
-/// branch by branch. Pure.
+/// Rank a codec string against an ordered table of prefix groups: first
+/// matching group wins, anything else ranks past the table. Shared by both
+/// priority modes so the two orders can't drift. Pure.
 fn codec_rank_in(vcodec: &str, table: &[&[&str]]) -> u8 {
     let c = vcodec.to_ascii_lowercase();
     table
@@ -329,10 +312,9 @@ fn codec_rank_in(vcodec: &str, table: &[&[&str]]) -> u8 {
         .unwrap_or(table.len() as u8)
 }
 
-/// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort:
-/// AV1 wins ties at the same height, then VP9, HEVC, AVC1, anything
-/// else. Older codecs are only dropped in favor of newer ones — never
-/// at the cost of resolution, and never into an empty list.
+/// Newest-first codec rank, mirroring yt-dlp's `+vcodec:av01` sort: AV1 wins
+/// ties at the same height, then VP9, HEVC, AVC1, anything else — never at the
+/// cost of resolution.
 const NEWEST_ORDER: &[&[&str]] = &[
     &["av01", "av1"],
     &["vp9"],
@@ -344,9 +326,8 @@ fn codec_rank_newest(vcodec: &str) -> u8 {
     codec_rank_in(vcodec, NEWEST_ORDER)
 }
 
-/// Compatibility-first rank for players without HEVC/AV1 decoders
-/// (the common Linux gap): H.264 first, then VP9 (software-decoded
-/// everywhere), HEVC, AV1, anything else.
+/// Compatibility-first rank for players without HEVC/AV1 decoders: H.264
+/// first, then VP9, HEVC, AV1, anything else.
 const COMPATIBLE_ORDER: &[&[&str]] = &[
     &["avc1", "h264"],
     &["vp9"],
@@ -367,9 +348,8 @@ pub(crate) fn codec_rank(vcodec: &str, newest_first: bool) -> u8 {
     }
 }
 
-/// Extractor codec preference matching the priority mode: the crate
-/// falls back to all formats when the preferred codec is absent, so
-/// this never fails a row by itself.
+/// Extractor codec preference matching the priority mode: the crate falls back
+/// to all formats when the preferred codec is absent.
 pub(crate) fn codec_preference(newest_first: bool) -> VideoCodecPreference {
     if newest_first {
         VideoCodecPreference::AV1
@@ -385,15 +365,13 @@ pub(crate) fn filesize_of(f: &Format) -> Option<u64> {
         .filter(|&n| n > 0)
         .map(|n| n as u64)
 }
-/// Listable video-only formats for one video: best per height (codec
-/// rank, then filesize), tallest first. Only directly fetchable streams qualify (plain HTTPS, no DRM);
-/// HLS variants fill heights with no direct stream (the worker pulls
-/// those via ffmpeg); muxed files stay on the automatic path, which
-/// already adopts them. Audio-only formats never appear here.
+/// Listable video-only formats for one video: best per height (codec rank, then
+/// filesize), tallest first. HLS variants fill heights with no direct stream
+/// (the worker pulls those via ffmpeg); muxed files stay on the automatic path.
 pub fn video_format_options(video: &Video, newest_first: bool) -> Vec<VideoFormatOption> {
     let mut best = best_direct_by_height(&video.formats, newest_first);
-    // HLS gap-fill: heights with no direct stream still list, so the
-    // dialog can pin them and the worker routes them to ffmpeg.
+    // HLS gap-fill: heights with no direct stream still list, so the worker
+    // can route them to ffmpeg.
     for f in &video.formats {
         if HlsSel::from_format(f).is_none() {
             continue;
@@ -445,10 +423,9 @@ pub(crate) struct HlsSel {
 }
 
 impl HlsSel {
-    /// Build from an extractor format: manifest protocol, DRM-free,
-    /// with a playlist URL. The URL itself is validated but not
-    /// stored — runners re-resolve by id. `pub(crate)` for the planner
-    /// in `video_plan.rs`.
+    /// Build from an extractor format: manifest protocol, DRM-free, with a
+    /// playlist URL. The URL is validated but not stored — runners re-resolve
+    /// by id. `pub(crate)` for the planner in `video_plan.rs`.
     pub(crate) fn from_format(f: &Format) -> Option<Self> {
         if f.protocol != Protocol::M3U8Native {
             return None;

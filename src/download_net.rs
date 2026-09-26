@@ -1,8 +1,4 @@
-//! Network options + proxy/client plumbing: `DownloadOptions`,
-//! proxy mode/type combos, system/manual proxy resolution, and the
-//! pooled reqwest clients. Mid-level module (settings + net_types):
-//! preferences, the engines and tests consume these through the
-//! `download` facade.
+//! Network options + proxy/client plumbing: `DownloadOptions`, proxy resolution, pooled reqwest clients.
 
 use crate::net_types::ResolvedProxy;
 use crate::runtime::lock_recover;
@@ -20,21 +16,15 @@ pub struct DownloadOptions {
     pub proxy_type: String,
     pub proxy_host: String,
     pub proxy_port: i32,
-    /// Raw browser-auth setting (`none` when off). The direct engine
-    /// exports it to a cookie jar once per attempt (see cookies.rs).
+    /// Raw browser-auth setting (`none` when off); exported to a jar once per attempt.
     pub cookies_browser: String,
 }
 
-/// Default User-Agent for plain (non-yt-dlp) downloads: a common Chrome
-/// string, since some hosts refuse requests with no (or a bot-like) UA.
-/// Previously a preference; now fixed.
+/// Default UA for plain downloads (fixed; some hosts refuse bot-like UAs).
 pub(crate) const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/// Proxy modes for the `proxy-mode` setting.
 pub const PROXY_MODE_SYSTEM: &str = "system";
-
 pub const PROXY_MODE_MANUAL: &str = "manual";
-
 pub const PROXY_MODE_DIRECT: &str = "direct";
 
 pub const PROXY_MODE_VALUES: &[&str] = &[PROXY_MODE_SYSTEM, PROXY_MODE_MANUAL, PROXY_MODE_DIRECT];
@@ -44,13 +34,12 @@ pub fn proxy_mode_labels() -> Vec<String> {
     vec![gettext("System"), gettext("Manual"), gettext("Off")]
 }
 
-/// Combo index for a stored mode value. Unknown values fall back to
-/// system (the default).
+/// Combo index for stored mode; unknown falls back to system.
 pub fn proxy_mode_index(value: &str) -> usize {
     crate::media_types::combo_index(PROXY_MODE_VALUES, value, 0)
 }
 
-/// Stored value for a combo index. Out-of-range indexes fall back to system.
+/// Stored value for combo index; out-of-range falls back to system.
 pub fn proxy_mode_value(index: usize) -> &'static str {
     crate::media_types::combo_value(PROXY_MODE_VALUES, index, PROXY_MODE_SYSTEM)
 }
@@ -66,23 +55,20 @@ pub fn proxy_type_labels() -> Vec<String> {
     ]
 }
 
-/// Combo index for a stored type value. Unknown values fall back to SOCKS5.
+/// Combo index for stored type; unknown falls back to SOCKS5.
 pub fn proxy_type_index(value: &str) -> usize {
     crate::media_types::combo_index(PROXY_TYPE_VALUES, value, 2)
 }
 
-/// Stored value for a combo index. Out-of-range indexes fall back to SOCKS5.
+/// Stored value for combo index; out-of-range falls back to SOCKS5.
 pub fn proxy_type_value(index: usize) -> &'static str {
     crate::media_types::combo_value(PROXY_TYPE_VALUES, index, "socks5")
 }
 
-/// Loopback bypass applied when no ignore list is configured: exits
-/// cannot reach the user's own machine, so proxying localhost only
-/// breaks local services.
+/// Loopback bypass when no ignore list: proxying localhost only breaks local services.
 const LOOPBACK_BYPASS: &str = "localhost,127.0.0.1,::1";
 
-/// Host match for one ignore entry: exact or subdomain suffix, with a
-/// leading `*.`/`.` tolerated. Ports and CIDR ranges are out of scope.
+/// One ignore entry: exact or subdomain suffix; ports and CIDR out of scope.
 fn ignore_entry_normalized(pattern: &str) -> Option<String> {
     let p = pattern.trim().trim_end_matches('.').to_lowercase();
     let p = p.strip_prefix("*.").unwrap_or(&p);
@@ -93,9 +79,7 @@ fn ignore_entry_normalized(pattern: &str) -> Option<String> {
     Some(p.to_string())
 }
 
-/// Normalize a GNOME ignore-hosts list into plain domains for
-/// reqwest's NoProxy (suffix matching): `*.local` and `.local` both
-/// become `local`. Unparseable entries are dropped, never passed on.
+/// Normalize a GNOME ignore-hosts list for reqwest NoProxy; unparseable entries dropped.
 pub(crate) fn normalize_no_proxy(patterns: &[String]) -> String {
     patterns
         .iter()
@@ -106,15 +90,12 @@ pub(crate) fn normalize_no_proxy(patterns: &[String]) -> String {
 
 fn system_proxy_settings() -> Option<gio::Settings> {
     let source = gio::SettingsSchemaSource::default()?;
-    // Settings::new panics on a missing schema (non-GNOME systems, bare
-    // CI images): probe first so system mode degrades to direct there.
+    // Probe first: Settings::new panics on missing schema, so degrade to direct there.
     source.lookup("org.gnome.system.proxy", true)?;
     Some(gio::Settings::new("org.gnome.system.proxy"))
 }
 
-/// http:// + https:// reqwest proxies for one URL, with the bypass
-/// list applied. Used by both system and manual resolution; callers
-/// differ only in how they surface construction failure.
+/// http + https proxies for one URL with bypass applied; callers differ only on failure surface.
 fn http_proxies(url: &str, no_proxy_env: &str) -> Result<Vec<reqwest::Proxy>, reqwest::Error> {
     [reqwest::Proxy::http(url), reqwest::Proxy::https(url)]
         .into_iter()
@@ -127,9 +108,7 @@ fn http_proxies(url: &str, no_proxy_env: &str) -> Result<Vec<reqwest::Proxy>, re
         })
 }
 
-/// Proxy from the desktop settings (`org.gnome.system.proxy`, manual
-/// mode). PAC (`auto`) is unsupported by design — executing remote
-/// proxy scripts is out of scope — as is a missing schema.
+/// Proxy from desktop settings (manual mode); PAC auto unsupported by design, missing schema degrades.
 fn system_proxy() -> Option<ResolvedProxy> {
     use gtk4::gio::prelude::SettingsExt as _;
     let s = system_proxy_settings()?;
@@ -150,9 +129,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
     let no_proxy = reqwest::NoProxy::from_string(&no_proxy_env);
     let host = |key: &str| s.string(key).trim().to_string();
     let port = |key: &str| s.int(key);
-    // Same host-safe rule as manual_proxy: dconf free text feeds URL
-    // construction, so anything outside host chars fails this leg (the
-    // lenient-system rule degrades to direct, never to a mangled URL).
+    // Host-safe rule as in manual_proxy: dconf free text feeds URL construction, so reject outside host chars.
     let valid = |h: &str, p: i32| {
         !h.is_empty()
             && (1..=65535).contains(&p)
@@ -160,8 +137,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
                 c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')
             })
     };
-    // SOCKS first: one remote-resolving tunnel covers every scheme,
-    // which is also the Tor shape (system SOCKS host + port).
+    // SOCKS first: one remote-resolving tunnel covers every scheme (also the Tor shape).
     let socks = host("socks-host");
     if valid(&socks, port("socks-port")) {
         let url = format!("socks5h://{}:{}", socks, port("socks-port"));
@@ -185,9 +161,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
             no_proxy_env,
         });
     }
-    // Split HTTP/HTTPS proxies: cover each scheme present. CLI gets the
-    // secure leg (the sensitive half); plain-HTTP direct fallback there
-    // is documented on the mode row.
+    // Split proxies: cover each scheme present; CLI gets the secure leg.
     let mut proxies = Vec::new();
     if valid(&http, port("http-port")) {
         proxies.push(
@@ -219,11 +193,7 @@ fn system_proxy() -> Option<ResolvedProxy> {
     })
 }
 
-/// Proxy from the manual settings. Unlike system resolution this is an
-/// explicit user demand: invalid values fail loudly instead of
-/// silently leaking direct, because a typo must never look like
-/// privacy. Proxies are unauthenticated: authentication was dropped
-/// because the password had to travel in cleartext process argv.
+/// Manual proxy: explicit demand fails loudly (never leaks direct); unauthenticated (password would travel in cleartext argv).
 fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     let host = o.proxy_host.trim();
     if host.is_empty() {
@@ -232,9 +202,7 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
     if !(1..=65535).contains(&o.proxy_port) {
         return Err(gettext("Proxy port is out of range (1–65535)"));
     }
-    // Free-text host feeds URL construction below (`http://{host}:{port}`):
-    // anything outside host-safe chars (`@`, `/`, `?`, `#`, whitespace…)
-    // would smuggle userinfo, paths or log splits into the proxy URL.
+    // Free-text host feeds URL construction: reject anything outside host-safe chars to block userinfo/path smuggling.
     if !host
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
@@ -249,8 +217,7 @@ fn manual_proxy(o: &DownloadOptions) -> Result<Option<ResolvedProxy>, String> {
             let proxies = http_proxies(&url, &no_proxy_env).map_err(|e| e.to_string())?;
             (proxies, url)
         }
-        // SOCKS5 always remote-resolving: local DNS would leak every
-        // hostname around the tunnel.
+        // SOCKS5 always remote-resolving so local DNS doesn't leak hostnames.
         "socks5" => {
             let url = format!("socks5h://{host}:{}", o.proxy_port);
             let proxy = apply_bypass(reqwest::Proxy::all(url.clone()).map_err(|e| e.to_string())?);
@@ -282,9 +249,7 @@ impl DownloadOptions {
         }
     }
 
-    /// Proxy for this attempt. Manual misconfiguration fails loudly;
-    /// system resolution degrades to direct (missing schema, PAC mode,
-    /// empty hosts) since it is opportunistic, not demanded.
+    /// Proxy for this attempt: manual fails loudly, system degrades to direct.
     pub fn proxy_config(&self) -> Result<Option<ResolvedProxy>, String> {
         match self.proxy_mode.as_str() {
             PROXY_MODE_DIRECT => Ok(None),
@@ -300,9 +265,7 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| client_builder().build().expect("http client"))
 }
 
-/// reqwest client honoring this attempt's proxy. Proxied configs share
-/// one pooled client per proxy config; direct attempts keep the static
-/// client, so enabling a proxy never perturbs existing connection pools.
+/// Client honoring this attempt's proxy; proxied configs share one pooled client per config.
 pub(crate) fn http_client_for(proxy: Option<&ResolvedProxy>) -> reqwest::Client {
     let Some(proxy) = proxy else {
         return http_client().clone();
@@ -331,17 +294,7 @@ pub(crate) fn proxied_pool_len() -> usize {
 
 /// Shared builder: bounded hops, no downgrades (see [`http_client`]).
 fn client_builder() -> reqwest::ClientBuilder {
-    // Bounded hops: a malicious server must not bounce the client
-    // around without limit. Downgrades are refused outright: no
-    // cookie or auth store is enabled, but a https→http bounce would
-    // still let a network attacker substitute the downloaded bytes.
-    // Only the URL + UA cross origins.
-    //
-    // No ambient proxy either: reqwest would otherwise route through
-    // HTTP_PROXY-style env vars behind Direct mode's back. Proxying
-    // is always explicit here (settings or nothing).
-    // Automatic Referer is off for the same reason: cross-origin
-    // redirects must not leak full URLs (tokens included) as Referer.
+    // Bounded hops; refuse https->http downgrades; no ambient proxy (explicit settings or nothing); no automatic Referer (leaks URLs/tokens).
     reqwest::Client::builder()
         .no_proxy()
         .referer(false)

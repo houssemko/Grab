@@ -11,32 +11,28 @@ use std::rc::Rc;
 /// Facade: the dialog flow lives in [`window_dialogs`](crate::window_dialogs)
 /// now; these re-exports keep the in-tree `crate::window::X` paths working.
 pub use crate::window_dialogs::{show_add_dialog, show_torrent_files_dialog};
-/// Facade: row widgets live in [`window_rows`](crate::window_rows) now;
-/// the re-export keeps the in-tree `crate::window::X` path working.
+/// Facade: row widgets live in [`window_rows`](crate::window_rows) now.
 use crate::window_rows::build_row;
 pub use crate::window_rows::launch_path;
 use crate::window_rows::ngettext_count;
 
 pub const BACKGROUND_NOTIF_ID: &str = "grab-background";
 
-/// Suspend block held through the desktop portal. `request` is the portal
-/// request path while held; `sub` watches its Response so a denial clears
-/// the hold instead of pretending to block. Both die with the process,
-/// which also releases the lock server-side.
+/// Suspend block held through the desktop portal. `sub` watches its Response so
+/// a denial clears the hold instead of pretending to block. Both die with the
+/// process, which also releases the lock server-side.
 struct InhibitState {
     request: Option<String>,
     sub: Option<gio::SignalSubscription>,
     seq: u64,
-    /// An Inhibit round trip is in flight. `request` stays None until its
-    /// reply lands, so without this every sync during the round trip would
-    /// fire a duplicate request whose path gets overwritten and never
-    /// closed. Set synchronously when launching, cleared on every exit.
+    /// An Inhibit round trip is in flight. `request` stays None until its reply
+    /// lands, so without this every sync during the round trip would fire a
+    /// duplicate request whose path gets overwritten and never closed.
     pending: bool,
 }
 
 /// Ask the portal to block suspend. Stores the request only if still wanted
-/// when the reply lands; otherwise closes it at once so no block leaks.
-/// Anything failing (no bus, no portal, denied) leaves nothing held.
+/// when the reply lands; anything failing leaves nothing held.
 async fn request_inhibit(
     state: Rc<RefCell<InhibitState>>,
     manager: Rc<DownloadManager>,
@@ -45,8 +41,8 @@ async fn request_inhibit(
     const PORTAL: &str = "org.freedesktop.portal.Desktop";
     const DESKTOP_PATH: &str = "/org/freedesktop/portal/desktop";
     const SUSPEND: u32 = 4;
-    // Every exit below clears `pending`: a stuck true would silence all
-    // future inhibits, leaving the machine unblocked forever.
+    // Every exit below clears `pending`: a stuck true silences all future
+    // inhibits, leaving the machine unblocked forever.
     let clear_pending = |state: &Rc<RefCell<InhibitState>>| {
         state.borrow_mut().pending = false;
     };
@@ -63,8 +59,8 @@ async fn request_inhibit(
     let options = glib::VariantDict::new(None);
     options.insert("handle_token", token);
     options.insert("reason", gettext("Downloading files"));
-    // Flags ride positionally (sua{sv}), not in the options dict: the
-    // portal rejects the call otherwise.
+    // Flags ride positionally (sua{sv}), not in the options dict: the portal
+    // rejects the call otherwise.
     let params = glib::variant::ToVariant::to_variant(&(String::new(), SUSPEND, options.end()));
     let Ok(reply) = conn
         .call_future(
@@ -91,8 +87,7 @@ async fn request_inhibit(
         tracing::warn!("suspend block reply had no request path");
         return;
     };
-    // The queue may have idled during the round trip: close at once instead
-    // of leaking a block nobody will release.
+    // The queue may have idled during the round trip: close at once.
     if !(settings.inhibit_suspend() && manager.has_transferring()) {
         release_inhibit(conn, path).await;
         clear_pending(&state);
@@ -125,8 +120,8 @@ async fn request_inhibit(
     tracing::info!("suspend block held ({path})");
 }
 
-/// Release a held portal block. Fire-and-forget: the lock dies with the
-/// bus connection anyway, so a failed Close loses nothing.
+/// Release a held portal block. Fire-and-forget: the lock dies with the bus
+/// connection anyway.
 async fn release_inhibit(conn: gio::DBusConnection, path: String) {
     let _ = conn
         .call_future(
@@ -142,12 +137,10 @@ async fn release_inhibit(conn: gio::DBusConnection, path: String) {
         .await;
 }
 
-/// Tell the desktop we keep running without windows (Background portal):
-/// the cross-desktop way to survive window close on strict desktops, and
-/// what lists Grab in the system's background-apps settings. Fire-and-forget:
-/// a denial changes nothing about the current transfer, it just means the
-/// host may still reap us. No autostart requested: relaunch stays the user's
-/// choice.
+/// Tell the desktop we keep running without windows (Background portal): the
+/// cross-desktop way to survive window close on strict desktops, and what lists
+/// Grab in the system's background-apps settings. A denial changes nothing;
+/// no autostart is requested, so relaunch stays the user's choice.
 fn request_background() {
     glib::spawn_future_local(async move {
         let Ok(conn) = gio::bus_get_future(gio::BusType::Session).await else {
@@ -309,8 +302,7 @@ pub fn build_window(
     fn is_queued(it: &crate::download::DownloadItem) -> bool {
         it.status() == crate::download::DownloadStatus::Queued
     }
-    /// DropDown position for a status (0 = All). Order must match the
-    /// model built below.
+    /// DropDown position for a status (0 = All); order must match the model.
     fn status_filter_index(s: crate::download::DownloadStatus) -> u32 {
         use crate::download::DownloadStatus::*;
         match s {
@@ -323,8 +315,8 @@ pub fn build_window(
         }
     }
 
-    // Search + status filter above the sections: rows that don't match
-    // are hidden in sync(), and empty sections collapse as usual.
+    // Search + status filter above the sections: non-matching rows are hidden
+    // in sync(), and empty sections collapse as usual.
     let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let status_sel: Rc<Cell<u32>> = Rc::new(Cell::new(0));
     let search = gtk4::SearchEntry::builder()
@@ -351,8 +343,8 @@ pub fn build_window(
     status_drop.update_property(&[gtk4::accessible::Property::Label(&gettext(
         "Filter by status",
     ))]);
-    // HIG search pattern: a header toggle reveals a GtkSearchBar beneath
-    // the header; it may also hold extra widgets like the status filter.
+    // HIG search pattern: a header toggle reveals a GtkSearchBar that may also
+    // hold extra widgets like the status filter.
     let search_bar = gtk4::SearchBar::builder().show_close_button(true).build();
     let filter_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     filter_box.append(&search);
@@ -458,8 +450,7 @@ pub fn build_window(
             add.set_visible(has_items);
             search_btn.set_visible(has_items);
             if !has_items {
-                // List is gone, so nothing to search: hide the toggle and
-                // collapse the bar through the bidirectional binding.
+                // List is gone, so nothing to search.
                 search_btn.set_active(false);
             }
             s.set_visible_child_name(if has_items { "list" } else { "empty" });
@@ -483,14 +474,14 @@ pub fn build_window(
         });
     }
 
-    // ponytail: hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
+    // hidden window keeps its widget tree (~MBs) while headless; destroy+rebuild if that ever matters.
     let ever_shown = Rc::new(Cell::new(false));
     {
         let m = Rc::clone(&manager);
         window.connect_close_request(move |win| {
-            // Only hide to background while bytes are actually moving. Paused
-            // items (or none at all) quit normally: notifying "continues in
-            // the background" would be a lie with nothing transferring.
+            // Only hide to background while bytes are actually moving; paused
+            // items (or none) quit normally, since "continues in the
+            // background" would be a lie with nothing transferring.
             if m.has_transferring() {
                 win.set_visible(false);
                 request_background();
@@ -531,12 +522,10 @@ pub fn build_window(
     }
     banner.set_revealed(false);
 
-    // Sleep inhibition through the desktop portal
-    // (`org.freedesktop.portal.Inhibit`, flag 4 = suspend): the cross-desktop
-    // path, sandbox-safe with no extra permissions. GtkApplication's inhibit
-    // only speaks to GNOME SessionManager, so KDE/Sway/etc would silently
-    // never block. No request held while idle; a failed call simply leaves
-    // nothing held and the next queue sync retries.
+    // Sleep inhibition through the desktop portal (`org.freedesktop.portal.Inhibit`,
+    // flag 4 = suspend): the cross-desktop path, sandbox-safe with no extra
+    // permissions. GtkApplication's inhibit only speaks to GNOME SessionManager,
+    // so KDE/Sway would silently never block.
     let inhibit = Rc::new(RefCell::new(InhibitState {
         request: None,
         sub: None,
@@ -549,10 +538,9 @@ pub fn build_window(
         let st = Rc::clone(&inhibit);
         Rc::new(move || {
             let want = s.boolean("inhibit-suspend") && m.has_transferring();
-            // Claim the in-flight marker synchronously: without it, every
-            // sync during the D-Bus round trip (e.g. each row of a bulk
-            // import) would fire a duplicate request whose path the later
-            // reply overwrites and never closes.
+            // Claim the in-flight marker synchronously: without it, every sync
+            // during the D-Bus round trip would fire a duplicate request whose
+            // path the later reply overwrites and never closes.
             let launch = {
                 let mut st = st.borrow_mut();
                 if want && st.request.is_none() && !st.pending {
@@ -568,8 +556,8 @@ pub fn build_window(
                     request_inhibit(st2, m2, s2).await;
                 });
             } else if !want {
-                // Separate statements: the first borrow must end before the
-                // second begins, or RefCell panics on release.
+                // Separate statements: the first borrow must end first, or
+                // RefCell panics on release.
                 let path = st.borrow_mut().request.take();
                 drop(st.borrow_mut().sub.take());
                 if let Some(path) = path {
@@ -598,8 +586,7 @@ pub fn build_window(
     toasts.set_child(Some(&toolbar));
     window.set_content(Some(toasts.as_ref()));
 
-    // Flip a named app action on/off; silently skips a missing one
-    // (lookup only misses on UI drift, which must not crash the hook).
+    // Flip a named app action on/off; silently skips a missing one.
     let set_action = |app: &adw::Application, name: &str, enabled: bool| {
         if let Some(a) = app.lookup_action(name).and_downcast::<gio::SimpleAction>() {
             a.set_enabled(enabled);
@@ -621,9 +608,9 @@ pub fn build_window(
                 set_action(&app, "clear-finished", m.finished_count() > 0);
             }
             banner.set_revealed(m.has_errored());
-            // Same predicate as close-request: only quit/withdraw when
-            // nothing is transferring. Paused rows persist across launches,
-            // so counting them here would strand a hidden zombie.
+            // Same predicate as close-request: quit only when nothing is
+            // transferring, since paused rows persist across launches and
+            // counting them would strand a hidden zombie.
             let idle_hidden = armed.get()
                 && !m.has_transferring()
                 && w.upgrade().is_some_and(|win| !win.is_visible());

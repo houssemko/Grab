@@ -71,16 +71,13 @@ pub fn setup(app: &adw::Application) {
                 None => return,
             };
             for f in files {
-                // magnet: links arrive here when Grab is the system's
-                // magnet handler (x-scheme-handler/magnet); enqueue
-                // validates them the same way as pasted links.
+                // magnet: links arrive here when Grab is the system's magnet
+                // handler; enqueue validates them like pasted links.
                 if let Ok(uri) = f.uri().parse::<url::Url>()
                     && matches!(uri.scheme(), "http" | "https" | "magnet")
                 {
-                    // Video pages take the dialog path (pre-filled):
-                    // plain enqueue would save the raw HTML page as a
-                    // file. The dialog's lookup flow then resolves
-                    // quality, liveness and choices as usual.
+                    // Video pages take the dialog path (pre-filled): plain
+                    // enqueue would save the raw HTML page as a file.
                     if crate::video::is_video_page(uri.as_str()) {
                         show_add_dialog(s.manager.clone(), Some(uri.as_str()));
                         continue;
@@ -91,8 +88,7 @@ pub fn setup(app: &adw::Application) {
                     continue;
                 }
                 if let Some(path) = f.path() {
-                    // .torrent files go to the torrent intake; anything
-                    // else is rejected with a toast below.
+                    // .torrent files go to the torrent intake.
                     if path
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("torrent"))
@@ -120,8 +116,7 @@ pub fn setup(app: &adw::Application) {
                                 return;
                             };
                             // Same file picker as the add dialog: multi-file
-                            // torrents offer per-file switches, singles go
-                            // straight in.
+                            // torrents offer per-file switches.
                             match crate::torrent::torrent_file_list(&bytes) {
                                 Ok((_, entries)) if entries.len() > 1 => {
                                     let dest =
@@ -144,9 +139,8 @@ pub fn setup(app: &adw::Application) {
                         });
                         continue;
                     }
-                    // Only .torrent files open as files now that the
-                    // URL-list importer is gone; anything else explains
-                    // itself instead of queuing garbage rows.
+                    // Only .torrent files open as files now; anything else
+                    // explains itself instead of queuing garbage rows.
                     s.toasts.add_toast(adw::Toast::new(&gettext(
                         "Only .torrent files can be opened directly",
                     )));
@@ -166,10 +160,9 @@ pub fn setup(app: &adw::Application) {
     }
 }
 
-/// Destructive confirm dialog: Cancel/confirm responses, destructive
-/// confirm styling, Cancel as default and close. The confirm body runs
-/// only on explicit confirmation (dialogs sit open while the queue may
-/// change, so bodies that depend on counts re-read at confirm time).
+/// Destructive confirm dialog: Cancel/confirm responses, destructive styling,
+/// Cancel as default and close. The body runs only on explicit confirmation,
+/// since dialogs sit open while the queue may change.
 fn destructive_confirm(
     parent: &impl gtk4::glib::object::IsA<gtk4::Widget>,
     heading: &str,
@@ -241,8 +234,8 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         &body,
                         &gettext("Cancel All"),
                         move || {
-                            // Count at confirm time, not dialog-open time:
-                            // the queue may have changed while it sat open.
+                            // Count at confirm time: the queue may have
+                            // changed while the dialog sat open.
                             let n = manager.active_count();
                             manager.cancel_all();
                             let toast = adw::Toast::new(&ngettext_count(
@@ -284,10 +277,8 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                     if n == 0 {
                         return;
                     }
-                    // Records only: downloaded files stay on disk, so say
-                    // so in the body — a destructive confirm for a
-                    // non-destructive (to files) action still needs the
-                    // scope spelled out.
+                    // Records only: files stay on disk, so a destructive
+                    // confirm must still spell the scope out.
                     let body = ngettext_count(
                         "This will remove the finished download from the list. The file stays on disk.",
                         "This will remove {n} finished downloads from the list. The files stay on disk.",
@@ -351,15 +342,15 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                 .activate(move |_, _, _| {
                     if let Some(s) = st.borrow().as_ref() {
                         // from_appdata aborts on a missing resource, so only
-                        // use it when the embedded catalog is registered;
-                        // About must never crash the app.
+                        // use it when the catalog is registered: About must
+                        // never crash the app.
                         const METAINFO: &str = "/io/github/houssemko/Grab/metainfo.xml";
                         let registered =
                             gio::resources_lookup_data(METAINFO, gio::ResourceLookupFlags::NONE)
                                 .is_ok();
                         let about = if registered {
-                            // Name/version/notes come from the metainfo catalog;
-                            // the icon and license can't, so they stay literal.
+                            // Name/version/notes come from the metainfo
+                            // catalog; icon and license can't, so literal.
                             let about = adw::AboutDialog::from_appdata(
                                 METAINFO,
                                 Some(env!("GRAB_VERSION")),
@@ -391,8 +382,7 @@ fn register_actions(app: &adw::Application, st: &Rc<RefCell<Option<Rc<State>>>>)
                         ));
                         section.add(adw::ShortcutsItem::new(&gettext("Rename"), "F2"));
                         // Plain items: these actions have no accelerators,
-                        // and from_action would render an empty shortcut cell
-                        // implying a keybinding that doesn't exist.
+                        // and from_action would imply a keybinding.
                         section.add(adw::ShortcutsItem::new(&gettext("Cancel All"), ""));
                         section.add(adw::ShortcutsItem::new(&gettext("Retry Failed"), ""));
                         section.add(adw::ShortcutsItem::from_action(
@@ -444,10 +434,9 @@ mod tests {
     fn version_key(v: &str) -> (u32, u32, u32, bool) {
         let core = v.split(['-', '+']).next().unwrap_or(v);
         let mut parts = core.split('.').map(|p| p.parse().unwrap_or(0));
-        // A stable release outranks its own pre-releases: without the
-        // flag, `4.4.0` and `4.4.0-beta.1` tie and `max_by_key` keeps the
-        // last tie -- the beta -- so keeping beta history alongside a
-        // stable entry would fail the newest-match test below.
+        // A stable release outranks its own pre-releases: without the flag,
+        // `4.4.0` and `4.4.0-beta.1` tie and `max_by_key` keeps the beta,
+        // so beta history alongside a stable entry would fail the test below.
         let stable = !v.contains(['-', '+']);
         (
             parts.next().unwrap_or(0),
@@ -457,9 +446,8 @@ mod tests {
         )
     }
 
-    /// The About dialog (`from_appdata`) displays the newest metainfo
-    /// release as the app version — a Cargo bump without a matching
-    /// metainfo entry ships a stale version string (4.0.5 showed 4.0.3).
+    /// The About dialog (`from_appdata`) shows the newest metainfo release as
+    /// the app version: a Cargo bump without a matching entry ships a stale one.
     #[test]
     fn metainfo_newest_release_matches_package_version() {
         let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");
@@ -471,9 +459,8 @@ mod tests {
         assert_eq!(newest, env!("CARGO_PKG_VERSION"));
     }
 
-    /// The newest entry must also be first: `from_appdata` reads the
-    /// leading `<release>`, so an out-of-order file shows the wrong
-    /// version even when a matching entry exists further down.
+    /// The newest entry must also be first: `from_appdata` reads the leading
+    /// `<release>`, so an out-of-order file shows the wrong version.
     #[test]
     fn metainfo_lists_newest_release_first() {
         let xml = include_str!("../data/io.github.houssemko.Grab.metainfo.xml.in");

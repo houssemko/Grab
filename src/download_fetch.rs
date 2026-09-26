@@ -1,8 +1,5 @@
-//! HTTP fetch engine: attempt loops, range probing, piece fetching,
-//! resume bitmaps and paced single/multi-connection downloads.
-//! Mid-level module (all leaves + settings/cookies, one-way edge into
-//! `torrent` for live-limit re-apply only): the download manager
-//! spawns `run_download`; tests drive the pieces directly.
+//! HTTP fetch engine: attempts, range probing, piece fetching, resume bitmaps.
+//! The download manager spawns `run_download`; tests drive the pieces directly.
 
 use crate::download_net::{DEFAULT_USER_AGENT, DownloadOptions};
 use crate::download_pieces::{SegmentState, plan_pieces};
@@ -17,8 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Forward a parseable Last-Modified response header to the pump. Torrent
-/// engines never call this; HTTP attempts send at most one per response.
+/// Forward a parseable Last-Modified header to the pump (at most one per HTTP response).
 fn send_last_modified(
     tx: &tokio::sync::mpsc::UnboundedSender<EngineMsg>,
     resp: &reqwest::Response,
@@ -31,25 +27,20 @@ fn send_last_modified(
     }
 }
 
-/// First recorded worker error, or a generic interruption message when
-/// no worker recorded one. Callers wrap it in their own `AttemptFail`
-/// variant (changed vs throttled vs retryable drive different recovery),
-/// so the helper returns the message and callers keep their variants.
+/// First recorded worker error, or a generic interruption message (callers keep their own `AttemptFail` variant).
 fn take_first_err(first_err: &Mutex<Option<String>>) -> String {
     lock_recover(first_err)
         .take()
         .unwrap_or_else(|| gettext("Download interrupted"))
 }
 
-/// Shared inputs for one download's engine task. Groups the params every
-/// attempt function needs instead of threading eight loose arguments.
+/// Shared inputs for one download's engine task.
 pub(crate) struct FetchCtx {
     pub(crate) client: reqwest::Client,
     pub(crate) url: String,
     pub(crate) dest: std::path::PathBuf,
     pub(crate) opts: DownloadOptions,
-    /// Attempt-scoped browser cookie jar (`None` = setting off or
-    /// export unavailable). Resolved once per attempt, not per request.
+    /// Attempt-scoped browser cookie jar, resolved once per attempt.
     pub(crate) cookies: Option<std::sync::Arc<reqwest::cookie::Jar>>,
     pub(crate) timeout: Duration,
     pub(crate) tx: tokio::sync::mpsc::UnboundedSender<EngineMsg>,
@@ -58,8 +49,7 @@ pub(crate) struct FetchCtx {
 pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: StartMode) {
     let timeout = Duration::from_secs(30);
     let mut tries = 3;
-    // One export per attempt: the browser profile may have changed
-    // since the last run, and jars are cheap next to downloads.
+    // One export per attempt (jars are cheap next to downloads).
     if !ctx.opts.cookies_browser.is_empty() && ctx.opts.cookies_browser != "none" {
         let youtube_bin = crate::video::resolve_libraries()
             .map(|libs| libs.youtube)
@@ -74,10 +64,7 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
             single_loop(&ctx, &mut tries, None, false).await;
         }
         StartMode::Fresh => {
-            // Single connection skips probing outright: the probe's extra
-            // request consumes single-use token URLs, and one stream
-            // needs no total or range proof up front (completion is EOF,
-            // progress indeterminate).
+            // Single connection skips probing (the probe consumes single-use token URLs; one stream needs no total up front).
             if connections <= 1 {
                 single_loop(&ctx, &mut tries, None, true).await;
                 return;
@@ -109,15 +96,9 @@ pub(crate) async fn run_download(mut ctx: FetchCtx, connections: usize, mode: St
     }
 }
 
-/// Generous single-stream fallback with retries. `expected` is the probed
-/// total when one is known, so a restarted 200 with a disagreeing length
-/// is rejected instead of clobbering good bytes. `claim` marks the initial
-/// fresh attempt (foreign file at dest fails fast); fallback singles pass
-/// false since the prefix is ours.
+/// Single-stream fallback with retries (`expected` rejects a restarted 200 with a disagreeing length; `claim` fails fast on foreign files).
 async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, claim: bool) {
-    // One-shot: only the first attempt may claim a missing file. Past
-    // it, any bytes at dest are ours (or a sanctioned restart), so later
-    // attempts keep truncate semantics.
+    // Only the first attempt may claim a missing file; later bytes are ours.
     let mut claim = claim;
     loop {
         match attempt_once(ctx, expected, claim).await {
@@ -130,8 +111,7 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, cla
                 return;
             }
             Err(e) => {
-                // Retrying a taken path is futile (same dest): fail at
-                // once so the pump can requeue under a fresh name.
+                // A taken path never frees on retry: fail at once so the pump requeues under a fresh name.
                 if e == DEST_EXISTS {
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return;
@@ -147,13 +127,8 @@ async fn single_loop(ctx: &FetchCtx, tries: &mut i32, expected: Option<u64>, cla
     }
 }
 
-/// Retry loop around segmented attempts. The resume bitmap lives in the
-/// manager (fed by PieceDone), so each retry transparently refetches only
-/// the still-missing pieces. On terminal failure the file is first shrunk
-/// to the completed prefix, keeping any later single-stream resume correct.
-/// Returns true when the server throttled parallel connections: the caller
-/// continues single-stream after the UI thread shrinks the file to the
-/// completed prefix and drops the bitmap (see FallbackSingle).
+/// Retry loop around segmented attempts (each retry refetches only still-missing pieces).
+/// Returns true when the server throttled parallel connections (caller continues single-stream).
 async fn multi_loop(
     ctx: &FetchCtx,
     total: u64,
@@ -161,8 +136,6 @@ async fn multi_loop(
     max_workers: usize,
     tries: &mut i32,
 ) -> bool {
-    // Working bitmap: attempts fold completed pieces into it, so each
-    // retry refetches only still-missing ranges instead of everything.
     let mut st = saved.unwrap_or_else(|| SegmentState::new(total));
     loop {
         match attempt_multi(ctx, total, &mut st, max_workers).await {
@@ -177,24 +150,18 @@ async fn multi_loop(
             Err(AttemptFail::Throttled(_)) => {
                 let (ack_tx, mut ack_rx) = tokio::sync::mpsc::channel::<()>(1);
                 ctx.tx.send(EngineMsg::FallbackSingle { ack: ack_tx }).ok();
-                // Wait until the UI thread truncated + dropped the bitmap:
-                // starting single-stream any earlier could append over holes.
-                // If we get aborted here (pause/cancel), there is nothing to do.
+                // Wait for the UI thread to truncate + drop the bitmap before single-stream resumes.
                 let _ = ack_rx.recv().await;
                 return true;
             }
             Err(AttemptFail::Changed(e)) => {
-                // Different object than probed: retrying these ranges can
-                // never succeed, so fail terminally without burning tries.
-                // The pump drops the dead bitmap; the next retry (or Retry
-                // button) starts fresh and re-probes the new file.
+                // The probed object is gone: retries can never succeed, so fail terminally and let a later retry start fresh.
                 ctx.tx.send(EngineMsg::FailedVersion(e)).ok();
                 return false;
             }
             Err(AttemptFail::Retryable(e)) => {
                 *tries -= 1;
                 if *tries <= 0 {
-                    // Same channel, FIFO per sender: truncation lands first.
                     ctx.tx.send(EngineMsg::TruncatePrefix).ok();
                     ctx.tx.send(EngineMsg::Failed(e)).ok();
                     return false;
@@ -204,10 +171,7 @@ async fn multi_loop(
     }
 }
 
-/// One segmented attempt: N workers pull 1 MB pieces off a shared queue
-/// (fast connections steal more work, bounding straggler damage) while one
-/// writer task sequences everything to disk. All futures run inside this
-/// one task, so aborting the supervisor JoinHandle stops the whole attempt.
+/// One segmented attempt: N workers pull pieces off a shared queue while one writer sequences them to disk.
 async fn attempt_multi(
     ctx: &FetchCtx,
     total: u64,
@@ -222,9 +186,7 @@ async fn attempt_multi(
         return Ok(());
     }
     let expect_bytes: u64 = missing.iter().map(|(_, s, e)| e - s + 1).sum();
-    // Ensure the file exists at full size so workers can write at offsets.
-    // Missing pieces stay sparse until fetched; resume always re-runs this.
-    // Never truncate here: completed pieces are already on disk.
+    // Size without truncating: completed pieces are already on disk.
     ensure_sized(&ctx.dest, total).await?;
     let queue: Arc<Mutex<VecDeque<(u64, u64, u64)>>> =
         Arc::new(Mutex::new(missing.into_iter().collect()));
@@ -232,12 +194,10 @@ async fn attempt_multi(
     let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let throttled = Arc::new(AtomicBool::new(false));
     let changed = Arc::new(AtomicBool::new(false));
-    // Bound in-flight BYTES, not pieces: big pieces would otherwise hold
-    // hundreds of MB between fetchers and writer on a slow disk.
+    // Bound in-flight BYTES, not pieces (big pieces would pin hundreds of MB on a slow disk).
     let depth = ((8 * PIECE_MIN) / piece_len(total)).clamp(2, 8) as usize;
     let (wtx, wrx) = tokio::sync::mpsc::channel::<(u64, Vec<u8>, u64)>(depth);
-    // Never exceed the configured connections: extra range requests are
-    // what throttling hosts punish.
+    // Never exceed the configured connections: extra range requests are what throttled hosts punish.
     let n_workers = lock_recover(&queue)
         .len()
         .min(max_workers.max(1))
@@ -291,8 +251,6 @@ async fn attempt_multi(
     let writer = {
         let mut wrx = wrx;
         let dest = ctx.dest.clone();
-        // Fold completed pieces into the caller's bitmap as they land, so
-        // a retry refetches only still-missing ranges instead of everything.
         let st = &mut *st;
         async move {
             let mut file = tokio::fs::OpenOptions::new()
@@ -320,8 +278,7 @@ async fn attempt_multi(
                 ctx.tx.send(EngineMsg::PieceDone(idx)).ok();
                 st.mark(idx);
                 pace_chunk(&mut paced, pace_start, rate, bytes.len()).await;
-                // ~20fps row updates: smooth determinate motion per HIG;
-                // each tick is one label render on a handful of rows.
+                // ~20fps row updates.
                 if last_sent.elapsed() >= Duration::from_millis(50) {
                     rate = live_rate_limit();
                     ctx.tx.send(progress_msg(downloaded, Some(total))).ok();
@@ -352,12 +309,7 @@ async fn attempt_multi(
     Ok(())
 }
 
-/// True when the file has unallocated (sparse) regions. Parallel writes can
-/// leave holes that a later append-at-EOF resume must not inherit: fully
-/// written files always satisfy `blocks * 512 >= len`, so a shortfall proves
-/// holes. Needs no new dependency (std `MetadataExt` only). On exotic
-/// filesystems with unreliable block counts this degrades to "holes", i.e.
-/// a safe full re-download, never silent corruption.
+/// True when the file has unallocated (sparse) regions: a later append-at-EOF resume must not inherit holes.
 pub(crate) fn has_holes(path: &std::path::Path) -> bool {
     std::fs::metadata(path)
         .map(|m| {
@@ -370,10 +322,7 @@ pub(crate) fn has_holes(path: &std::path::Path) -> bool {
 async fn attempt_once(
     ctx: &FetchCtx,
     expected_total: Option<u64>,
-    // True only for the first attempt of an initial fresh single-stream
-    // run: a foreign file at `dest` must fail instead of being
-    // truncated. Retries (our own bytes), 416 restarts (file removed
-    // first), and fallback singles (our own prefix) pass false.
+    // True only for the first attempt of a fresh single-stream run (a foreign file must fail, not truncate).
     claim: bool,
 ) -> Result<(), String> {
     // At most one restart: a 416 may only trigger a single delete-and-retry.
@@ -395,28 +344,19 @@ async fn attempt_once(
         let resp = execute_with_timeout(&ctx.client, req, ctx.timeout).await?;
         let status = resp.status();
         if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
-            // The range is past EOF. That means "already complete" ONLY with
-            // proof: our length matches the server total AND every byte is
-            // really allocated. A SIGKILLed segmented download leaves a sparse
-            // full-size file that must never take this shortcut.
+            // "Already complete" only with proof: matching length AND fully allocated bytes (a sparse full-size file must never take this shortcut).
             let claimed = resp
                 .headers()
                 .get(reqwest::header::CONTENT_RANGE)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.split('/').next_back())
                 .and_then(|t| t.parse::<u64>().ok());
-            // NOTE: no server round trip can rescue this branch. A length
-            // match proves nothing about our bytes when the file has holes:
-            // a sparse full-size file would be marked Done with zeros where
-            // pieces are missing. Only fully allocated files take it.
-            // (On compressed/deduped filesystems the block heuristic can
-            // false-positive; that only costs a re-fetch, never corruption.)
+            // A length match alone proves nothing: the allocation check above rules out holes.
             if start > 0 && claimed == Some(start) && !has_holes(&ctx.dest) {
                 return Ok(());
             }
             if claimed.is_none() && start > 0 && !restarted {
-                // Bare 416 (no usable Content-Range): ask for the length
-                // directly before deleting anything that might be complete.
+                // Bare 416 with no usable Content-Range: confirm the length before deleting anything that might be complete.
                 let hreq = stamp_request(
                     ctx.client.head(&ctx.url),
                     DEFAULT_USER_AGENT,
@@ -432,7 +372,6 @@ async fn attempt_once(
                 }
             }
             if restarted {
-                // Even a plain GET gets 416: pathological server, stop looping.
                 return Err(gettext("Server rejects range requests"));
             }
             let _ = std::fs::remove_file(&ctx.dest);
@@ -448,7 +387,6 @@ async fn attempt_once(
         }
         send_last_modified(&ctx.tx, &resp);
         let partial = start > 0 && status == reqwest::StatusCode::PARTIAL_CONTENT;
-        // Fresh runs must never truncate a file they did not create.
         if claim && start > 0 && !partial {
             return Err(DEST_EXISTS.to_string());
         }
@@ -463,10 +401,7 @@ async fn attempt_once(
         if rejects_unexpected_restart(partial, start, expected_total, resp.content_length()) {
             return Err(gettext("Server returned an unexpected file size"));
         }
-        // Unprobed resume the server answers from zero with a SMALLER object
-        // than what we hold: a different file (login wall, throttle page),
-        // not our download. Fail loudly and keep the partial bytes instead
-        // of truncating them away for it.
+        // A smaller full restart than our bytes is a different file (login wall, throttle page): keep the partial bytes.
         if !partial
             && start > 0
             && let Some(l) = resp.content_length()
@@ -481,11 +416,7 @@ async fn attempt_once(
                 .await
                 .map_err(|e| format!("Cannot write file: {e}"))?
         } else if claim {
-            // One-shot claim, same ownership as the guard above: only the
-            // first attempt of an initial fresh run may fail on a foreign
-            // file. Retries (claim=false) truncate our own empty file.
-            // A file appearing after the metadata check is foreign, so
-            // fail for requeue instead of truncating it.
+            // Retries truncate our own bytes (see the `claim` parameter).
             match tokio::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -519,9 +450,7 @@ async fn attempt_once(
         let mut paced: u64 = 0;
         let mut last_sent = Instant::now();
         let mut rate = live_rate_limit();
-        // Chunked terminators surface as stream end, never as empty chunks:
-        // a run of them is a stalled connection gaming the per-chunk
-        // timeout, not data.
+        // Empty chunks never end a chunked stream: a run of them is a stalled connection, not data.
         let mut empty_streak: u32 = 0;
         use tokio::io::AsyncWriteExt as _;
         loop {
@@ -544,8 +473,7 @@ async fn attempt_once(
                 .map_err(|e| format!("Cannot write file: {e}"))?;
             downloaded += chunk.len() as u64;
             pace_chunk(&mut paced, pace_start, rate, chunk.len()).await;
-            // ~20fps row updates: smooth determinate motion per HIG;
-            // each tick is one label render on a handful of rows.
+            // ~20fps row updates.
             if last_sent.elapsed() >= Duration::from_millis(50) {
                 rate = live_rate_limit();
                 ctx.tx.send(progress_msg(downloaded, total)).ok();
@@ -562,9 +490,7 @@ async fn attempt_once(
     }
 }
 
-/// Re-apply both torrent speed caps from settings. Both the download and
-/// upload watchers call this so editing one key can never silently clear
-/// the other.
+/// Re-apply both torrent speed caps from settings (editing one key must never clear the other).
 pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
     crate::torrent::apply_live_limits(
         parse_rate(s.speed_limit().trim()),
@@ -572,9 +498,7 @@ pub(crate) fn apply_torrent_limits(s: &crate::settings::AppSettings) {
     );
 }
 
-/// Shrink `path` to the longest completed piece prefix. Parallel writes can
-/// leave holes; a later single-stream resume appends at EOF, which is only
-/// correct on a contiguous prefix. Only ever shrinks.
+/// Shrink `path` to the longest completed piece prefix (a single-stream resume appends at EOF, so holes must go). Only shrinks.
 pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
     let prefix = st.prefix_len();
     if let Ok(md) = std::fs::metadata(path)
@@ -585,10 +509,7 @@ pub(crate) fn truncate_to_prefix(path: &std::path::Path, st: &SegmentState) {
     }
 }
 
-/// Open for writing (creating), sizing to `total` only when the size
-/// differs. `File::create` would truncate already-downloaded pieces on
-/// every resume/retry and silently corrupt the file while the bitmap still
-/// claims those pieces as done.
+/// Open for writing without truncating (truncating here would corrupt resumed pieces the bitmap claims as done).
 async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptFail> {
     let file = tokio::fs::OpenOptions::new()
         .write(true)
@@ -601,8 +522,7 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
         && let Err(e) = file.set_len(total).await
     {
         use std::io::ErrorKind::{FileTooLarge, StorageFull};
-        // No room (or no sparse support) for full-size staging: the
-        // single-stream path preallocates nothing, so downgrade to it.
+        // No room for full-size staging: downgrade to single-stream (which preallocates nothing).
         let msg = format!("Cannot write file: {e}");
         let storage = matches!(e.kind(), StorageFull | FileTooLarge);
         return Err(if storage {
@@ -617,21 +537,15 @@ async fn ensure_sized(dest: &std::path::Path, total: u64) -> Result<(), AttemptF
 /// How the engine task should start this download.
 #[derive(Debug)]
 pub(crate) enum StartMode {
-    /// Classic single stream (small/unknown size, no range support, or a
-    /// contiguous partial file from a non-segmented session).
+    /// Classic single stream (small/unknown size, no range support, or contiguous partial).
     Single,
     /// Fresh file: probe range support, then go multi or single.
     Fresh,
-    /// Segmented resume from the in-memory bitmap (holes possible on disk).
+    /// Segmented resume from the in-memory bitmap.
     Resume(SegmentState),
 }
 
-/// One `Range: bytes=0-0` round trip: proves range support AND yields the
-/// total (`Accept-Ranges` headers alone are unreliable). Any error means
-/// "fall back to single-stream", never a user-facing failure.
-/// Stamp one outbound request like the browser would: configured
-/// user agent plus this attempt's exported browser cookies, if any.
-/// Single choke point so a header can never reach some requests only.
+/// Stamp one outbound request like a browser (UA, cookies, self-origin Referer); single choke point for all requests.
 pub(crate) fn stamp_request(
     mut req: reqwest::RequestBuilder,
     user_agent: &str,
@@ -646,10 +560,7 @@ pub(crate) fn stamp_request(
     {
         req = req.header("Cookie", cookie);
     }
-    // Self-origin Referer: hotlink guards commonly accept the file's
-    // own origin (browsers always send *some* referrer context, we have
-    // none for pasted URLs). Reveals nothing the request doesn't
-    // already carry; page-specific allowlists still refuse, honestly.
+    // Self-origin Referer (hotlink guards often accept the file's own origin; reveals nothing new).
     if let Ok(parsed) = url.parse::<url::Url>()
         && let Some(host) = parsed.host_str()
     {
@@ -662,10 +573,7 @@ pub(crate) fn stamp_request(
     req
 }
 
-/// Execute one request under a timeout. Timeouts surface the same
-/// "Connection timed out" message at every call site so rows report one
-/// consistent stall string; build and transport errors keep their own
-/// text for the callers to wrap (`Err(String)` vs `Retryable`).
+/// Execute one request under a timeout (one consistent stall string; build/transport errors keep their own text).
 async fn execute_with_timeout(
     client: &reqwest::Client,
     req: reqwest::RequestBuilder,
@@ -679,6 +587,7 @@ async fn execute_with_timeout(
     }
 }
 
+/// One `Range: bytes=0-0` round trip: proves range support AND yields the total. Any error falls back to single-stream.
 async fn probe_ranges(
     client: &reqwest::Client,
     url: &str,
@@ -707,9 +616,7 @@ async fn probe_ranges(
         .ok_or_else(|| gettext("Bad Content-Range"))
 }
 
-/// Parse `Content-Range: bytes <start>-<end>/<total>`. Callers pin the
-/// fields they require: a wrong start or end means the server answered a
-/// different range than asked (pins all chunks to one file version).
+/// Parse `Content-Range: bytes <start>-<end>/<total>` (a wrong range pins all chunks to one file version).
 pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
     let (start, end) = range.split_once('-')?;
@@ -721,9 +628,7 @@ pub(crate) fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
     (total > 0 && end >= start).then_some((start, end, total))
 }
 
-/// Total size for a response: Content-Length, else the Content-Range total
-/// for partial responses that omit it (chunked 206s). `None` only when
-/// neither header says (fresh chunked 200s), where EOF is the only signal.
+/// Total size for a response (`None` only when neither header says; then EOF is the only signal).
 pub(crate) fn response_total(
     content_length: Option<u64>,
     content_range: Option<&str>,
@@ -743,9 +648,7 @@ pub(crate) fn response_total(
         })
 }
 
-/// A resumed range answered with a full 200 must still be the same object:
-/// a disagreeing declared length means login wall or throttle page, and
-/// `File::create` must not eat the good prefix for it.
+/// A resumed range answered with a full 200 must still be the same object (a disagreeing length means login wall, not our file).
 pub(crate) fn rejects_unexpected_restart(
     partial: bool,
     start: u64,
@@ -755,24 +658,14 @@ pub(crate) fn rejects_unexpected_restart(
     !partial && start > 0 && matches!((expected, content_length), (Some(t), Some(l)) if l != t)
 }
 
-/// Why a piece or segmented attempt failed. Throttled means the server is
-/// rejecting parallel range requests (per-IP connection limits, common on
-/// file hosts) while a single stream still works: downgrade, don't retry.
-/// Changed means the object on the server is no longer the probed file:
-/// retrying the same ranges can never succeed, so fail terminally and let
-/// a later retry start fresh instead of looping forever.
+/// Why a piece or segmented attempt failed (throttled = downgrade to single-stream; changed = fail terminally, never retry).
 pub(crate) enum AttemptFail {
     Retryable(String),
     Throttled(String),
     Changed(String),
 }
 
-/// Fetch one `[start, end]` piece, retrying stalls. Verifies the server
-/// still serves the probed file version via the Content-Range total.
-/// Never offers server-advertised filenames: the engine writes segmented
-/// data through `ctx.dest`, so a mid-download rename would desync the
-/// running attempt (which keeps writing the old path) from the queue
-/// (which records the new name). Only the single-stream path suggests names.
+/// Fetch one `[start, end]` piece, retrying stalls (verifies the Content-Range total; never suggests server filenames).
 pub(crate) async fn fetch_piece(
     ctx: &FetchCtx,
     start: u64,
@@ -801,9 +694,7 @@ pub(crate) async fn fetch_piece(
         send_last_modified(&ctx.tx, &resp);
         if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
             let code = resp.status().as_u16();
-            // Per-IP connection limits speak 403/429/503 (and 509 on some
-            // hosts) while a single stream still works: downgrade at once
-            // instead of burning retries (and goodwill) against the limit.
+            // Per-IP limits speak 403/429/503 (509 on some hosts): downgrade at once instead of burning retries.
             if matches!(code, 403 | 429 | 503) || code == 509 {
                 return Err(Throttled(format!("Range rejected: HTTP {code}")));
             }
@@ -819,21 +710,16 @@ pub(crate) async fn fetch_piece(
         match parse_content_range(&cr) {
             Some((s, e, t)) if s == start && e == end && t == total => {}
             Some((_, _, t)) if t != total => {
-                // Different object than probed: retrying these ranges can
-                // never succeed, so fail terminally right away.
                 return Err(Changed(gettext("File changed on server")));
             }
-            // Unparseable or wrong range: the host ignores ranges, so
-            // downgrade to single-stream instead of retrying to Failed.
+            // Unparseable or wrong range: the host ignores ranges, so downgrade instead of retrying to Failed.
             _ => {
                 return Err(Throttled(gettext("Server ignored range request")));
             }
         }
         let mut body = Vec::with_capacity((end - start + 1).min(2 * piece_len(total)) as usize);
         let mut stream = resp.bytes_stream();
-        // Silence deadline, not a total one: slow-but-progressing pieces
-        // survive, while a stalled connection fails after 10x timeout with
-        // no bytes at all.
+        // Silence deadline, not a total one: slow-but-progressing pieces survive, stalled ones fail after 10x timeout.
         let quiet_limit = timeout.saturating_mul(10);
         let mut last_progress = Instant::now();
         let failed: Option<AttemptFail> = loop {
@@ -852,8 +738,7 @@ pub(crate) async fn fetch_piece(
                             break Some(Retryable(gettext("Server sent too much data")));
                         }
                         body.extend_from_slice(&c);
-                        // Empty chunks carry no bytes: only real data resets
-                        // the silence clock, or keep-alives mask stalls.
+                        // Only real data resets the silence clock (keep-alives must not mask stalls).
                         if !c.is_empty() {
                             last_progress = Instant::now();
                         }
@@ -872,8 +757,7 @@ pub(crate) async fn fetch_piece(
             last_err = e;
             continue;
         }
-        // A truncated stream would otherwise be recorded as a done piece
-        // (zeros on disk) and skipped on every later resume.
+        // A truncated stream must never record as a done piece (zeros on disk would be skipped on every later resume).
         if body.len() as u64 != end - start + 1 {
             last_err = Retryable(gettext("Incomplete piece"));
             continue;
@@ -882,10 +766,7 @@ pub(crate) async fn fetch_piece(
     }
     Err(last_err)
 }
-/// Filename from a `Content-Disposition` header (RFC 6266): prefers
-/// `filename*=UTF-8''...`, falls back to quoted `filename="..."`, strips
-/// any directory components servers sometimes include. `None` when absent
-/// or unusable (caller keeps the URL-derived name).
+/// Filename from a `Content-Disposition` header (RFC 6266): prefers `filename*`, falls back to `filename`, strips directories.
 pub fn filename_from_content_disposition(value: &str) -> Option<String> {
     fn basename(raw: &str) -> &str {
         raw.trim()
@@ -898,12 +779,10 @@ pub fn filename_from_content_disposition(value: &str) -> Option<String> {
     }
     let mut fallback = None;
     for part in value.split(';').map(str::trim) {
-        // Parameter names are case-insensitive (`FILENAME=`, `FileName*=`).
         let Some((pname, pval)) = part.split_once('=') else {
             continue;
         };
         if pname.trim().eq_ignore_ascii_case("filename*") {
-            // Form: filename*=UTF-8''%E2%82%ACrates.mp4 (charset'lang'data).
             let data = pval.split('\'').next_back().unwrap_or("").trim();
             let name = percent_decode(basename(data));
             if sane_filename(&name) {

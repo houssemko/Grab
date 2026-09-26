@@ -1,7 +1,5 @@
-//! Attempt orchestration: resolve, download legs, merge, live
-//! capture and HLS extraction. Top of the video cluster, over every
-//! leaf and mid-level module: the engine drives `run_video_download`
-//! through the `video` facade.
+//! Attempt orchestration: resolve, download legs, merge, live capture and HLS extraction.
+//! Top of the video cluster: the engine drives `run_video_download` through the `video` facade.
 
 use crate::attempt_gate::AttemptGate;
 use crate::file_names::is_url_derived_name;
@@ -37,30 +35,17 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use yt_dlp::model::Video;
 
-/// What a stop means for the attempt it reaches.
-///
-/// This was a bare `oneshot<()>`, which could say "stop" but not *how* to
-/// stop, so the worker had exactly one response: adopt the partial, remux
-/// it, deliver. Row removal inherited that, and a removed row delivered a
-/// file with no row behind it.
-///
-/// The worker applies the intent rather than asking the manager, because
-/// the worker is the only party that knows whether it is capturing live.
+/// What a stop means for the attempt it reaches. The worker applies the intent (only it knows whether it is capturing live); a bare oneshot could not say *how* to stop, so removal once delivered a file with no row behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
-    /// Stop and keep what is recorded: a user pressing Stop, pause or
-    /// cancel. A live capture adopts its partial and delivers it.
+    /// Stop and keep what is recorded (Stop, pause, cancel); a live capture adopts its partial and delivers it.
     Preserve,
-    /// Stop and throw it away: the row is being removed. The worker reaps
-    /// its recorder and returns without adopting, remuxing or delivering.
-    /// It leaves the scratch, because the manager can only reclaim it
-    /// safely once the task has actually returned.
+    /// Stop and throw it away (row removal): reap the recorder and return without adopting, remuxing or delivering; scratch stays for the manager to reclaim after the task returns.
     Discard,
 }
 
 /// Run one attempt: resolve → download parts → merge → rename into place.
-/// Returns the final size, or `None` when aborted (the pauser/canceller
-/// already set the row status; the caller sends nothing).
+/// Returns the final size, or `None` when aborted (the pauser/canceller already set the row status).
 ///
 /// # Errors
 /// Returns a display-ready [`VideoError`]; the caller reports it as Failed.
@@ -73,10 +58,7 @@ pub async fn run_video_download(
     use crate::engine_msg::EngineMsg;
 
     let staging = staging_dir(job.item_id);
-    // Keep the canonical path: `discover_unified_output` compares a
-    // canonicalized `after_move` against it, and on symlinked roots
-    // (`/tmp` → `/private/tmp`, Flatpak) the raw join would fail
-    // closed to scan on every attempt.
+    // Keep the canonical path: `discover_unified_output` compares a canonicalized `after_move` against it (symlinked roots like `/tmp` would otherwise fail closed).
     let staging = ensure_staging_dir(&staging)?;
     let libs = resolve_libraries()?;
     let (yt_version, ff_version) = ensure_tool_versions(&libs).await?;
@@ -88,8 +70,7 @@ pub async fn run_video_download(
         ffmpeg = %ff_version,
         "starting video attempt"
     );
-    // Attempt timeout: a full-length merge on a slow CPU dwarfs any
-    // network timeout, so bound the whole attempt at five minutes.
+    // Attempt timeout: a full-length merge on a slow CPU dwarfs any network timeout, so bound the whole attempt at five minutes.
     let timeout = Duration::from_secs(300);
     let youtube_bin = libs.youtube.clone();
     let ffmpeg_bin = libs.ffmpeg.clone();
@@ -97,11 +78,7 @@ pub async fn run_video_download(
         tx.send(EngineMsg::Phase(text)).ok();
     };
 
-    // Resolve (with retries, always fresh: without a cache backend every
-    // attempt re-extracts, so expired format URLs never survive a retry).
-    // A staging manifest means a previous attempt got far enough to
-    // probe: label the re-resolve as a resume so a parked row doesn't
-    // read as starting over.
+    // Resolve with retries, always fresh: no cache backend, so expired format URLs never survive a retry. A staging manifest labels the re-resolve as a resume.
     let resuming = read_manifest(&staging).is_some();
     phase(if resuming {
         gettext("Resuming download…")
@@ -126,9 +103,7 @@ pub async fn run_video_download(
                 video = Some(*v);
                 break;
             }
-            // No picked entry: the spawner expands the collection into
-            // per-item rows instead of failing it (dialog-less rows
-            // never see the picker).
+            // No picked entry: the spawner expands the collection into per-item rows instead of failing it.
             Ok(FetchedVideo::Playlist(pl)) => return Ok(VideoOutcome::Expand(pl)),
             Err(e) if attempt + 1 < 3 => {
                 tracing::debug!("video resolve failed, retrying: {e}");
@@ -141,29 +116,17 @@ pub async fn run_video_download(
         return Err(VideoError::fetch("empty response"));
     };
 
-    // Dialog-less rows skip the picker, so the row source
-    // never marked them live: refresh from resolve metadata instead.
-    // Without this a live row takes the HLS VOD path on an infinite
-    // manifest (frozen "Resolving media…", wrong stop semantics) and
-    // never reaches live capture. Flipping the job field (not a local)
-    // keeps every downstream use — dispatch, from-start argv, abort
-    // handling, remux gating — consistent; the row source itself is
-    // untouched, so the next attempt re-detects idempotently.
+    // Dialog-less rows skip the picker, so refresh live-ness from resolve metadata: without this a live row takes the HLS VOD path and never reaches capture. Flipping the job field keeps every downstream use consistent.
     if !job.is_live && video.is_live.unwrap_or(false) {
         job.is_live = true;
         tx.send(EngineMsg::LiveDetected).ok();
     }
 
-    // Dialog-less rows skip the picker, so their names are URL
-    // stems ("watch"): rename to the title default now that metadata is
-    // in. Dialog-seeded and typed names are untouched — only URL-derived
-    // names qualify — and the pump dedupes the suggestion at Finished
-    // with collision safety.
+    // Dialog-less rows have URL-stem names ("watch"): rename to the title default now that metadata is in. Only URL-derived names qualify; the pump dedupes at Finished.
     if let Some(current) = job.dest.file_name().and_then(|n| n.to_str())
         && is_url_derived_name(current, &job.page_url)
     {
-        // Live rows capture through the dest name with a hardcoded
-        // mp4/m4a container: never suggest a remux extension there.
+        // Live rows capture through the dest name with a hardcoded mp4/m4a container: never suggest a remux extension there.
         let remux = if job.is_live {
             None
         } else {
@@ -175,16 +138,7 @@ pub async fn run_video_download(
         }
     }
 
-    // Select streams: newest codec first (AV1, then VP9/HEVC/AVC1 —
-    // same ranking as yt-dlp's `+vcodec:av01` sort), best audio. Older
-    // codecs stay as automatic fallback, never a failure. Rejections
-    // (HLS/DRM/missing URL) degrade candidates to absent here; the plan
-    // below decides between split, single-file and HLS from what's
-    // fetchable (see [`plan_streams`] for the priority order:
-    // pinned HLS, direct splits, single-part adoption, HLS preset).
-    // A pinned format id (dialog pick) wins over the preset; when it
-    // vanishes from fresh metadata the preset takes over again instead
-    // of failing the row.
+    // Select streams: newest codec first, best audio; older codecs stay as automatic fallback. Rejections degrade to absent here; the plan below decides between split, single-file and HLS. A pinned format id wins, falling back to the preset when it vanishes.
     let StreamPlan {
         video_sel,
         audio_sel,
@@ -198,10 +152,7 @@ pub async fn run_video_download(
         job.item_id,
     );
     if let Some(hls) = hls_sel {
-        // An abort that fired during resolve means stop-before-start:
-        // for live rows there is deliberately no pauser preset waiting
-        // on a message, so report instead of going quiet (the pump tail
-        // would fail the row either way — this names the cause).
+        // An abort during resolve is stop-before-start: for live rows nobody waits on a message, so report instead of going quiet (the pump tail would fail the row either way).
         if job.is_live && abort.try_recv().is_ok() {
             return Err(VideoError::interrupted());
         }
@@ -211,15 +162,9 @@ pub async fn run_video_download(
             height = ?hls.height,
             "downloading HLS variant",
         );
-        // Live captures go through yt-dlp with a kill-safe MPEG-TS
-        // container (variant choice, keys, retries upstream; Stop is
-        // kill + adopt + remux, no grace-period finalizing); VOD
-        // captures go through yt-dlp's standard HLS path.
+        // Live captures go through yt-dlp with a kill-safe MPEG-TS container (Stop is kill + adopt + remux); VOD captures use yt-dlp's standard HLS path.
         if job.is_live {
-            // The extractor's canonical URL, which is what the other legs
-            // get in `comment` from --embed-metadata. Falls back to the
-            // row's URL exactly as `VideoInfo::from` does, so all three
-            // legs stamp the same provenance for the same video.
+            // The extractor's canonical URL, falling back to the row's URL exactly as `VideoInfo::from` does, so all legs stamp the same provenance.
             let canonical = video
                 .webpage_url
                 .as_deref()
@@ -265,15 +210,9 @@ pub async fn run_video_download(
         "formats selected"
     );
 
-    // Retry discipline from the sidecar. The manifest lives in staging
-    // (scratch); the parts live beside the finished file (yt-dlp
-    // defaults), so every file check builds off the destination.
+    // Retry discipline from the sidecar. Parts live beside the finished file, so every file check builds off the destination.
     let manifest = read_manifest(&staging);
-    // Split rows merge video+audio (both sizes known or neither is
-    // trusted); an adopted single is one muxed file whose extractor
-    // size is the whole file. Anything else leaves the total unknown
-    // rather than understating it — an understated total would both
-    // shrink the bar and trip the over-long Fresh wipe on valid bytes.
+    // Split rows merge video+audio (both sizes known or neither trusted); an adopted single's extractor size is the whole file. Anything else leaves the total unknown rather than understating it.
     let single = video_sel.is_none();
     let query = ResumeQuery {
         manifest: manifest.as_ref(),
@@ -303,34 +242,19 @@ pub async fn run_video_download(
             });
         }
         ResumePlan::Fresh => {
-            // Overwrite pre-flight (Parabolic parity): a finished file
-            // already at `dest` means the atomic claim (rename_noreplace,
-            // which never clobbers) fails at the end no matter what —
-            // refuse before a wasted download so the pump requeues under
-            // a fresh name. This arm's normal cleanup drops our own
-            // shells too, since this row can never adopt them again.
+            // Overwrite pre-flight (Parabolic parity): a finished file at `dest` means the atomic claim fails at the end, so refuse before a wasted download. This arm's cleanup drops our own shells too.
             if job.dest.exists() {
                 clean_dest_parts(&job.dest);
                 return Err(VideoError::exists());
             }
-            // Wipe the staging dir, not just known names: a previous
-            // attempt's detached writers (pause winning the abort race) may
-            // still hold the old inodes, so unlink first — they write
-            // nowhere visible afterwards. Same-selection resume never
-            // reaches this arm (see Resume below); only mismatches,
-            // oversize parts, or unverifiable leftovers land here.
+            // Wipe the staging dir, not just known names: a previous attempt's detached writers may still hold old inodes, so unlink first. Only mismatches/oversize leftovers land here; same-selection resume never does.
             let _ = tokio::fs::remove_dir_all(&staging).await;
             tokio::fs::create_dir_all(&staging)
                 .await
                 .map_err(VideoError::staging)?;
-            // Dest-dir parts are Grab-namespaced (`<stem>.<kind>.<ext>`),
-            // so a mismatch restarts clean instead of letting yt-dlp
-            // resume into a foreign lookalike. The finished file itself
-            // is never touched (rename_noreplace guards the claim).
+            // Dest-dir parts are Grab-namespaced, so a mismatch restarts clean instead of resuming into a foreign lookalike. The finished file itself is never touched.
             clean_dest_parts(&job.dest);
-            // Record this attempt's selection up front: a pause from here
-            // on leaves a matchable sidecar, so the next attempt resumes
-            // instead of wiping.
+            // Record this attempt's selection up front: a pause from here on leaves a matchable sidecar, so the next attempt resumes instead of wiping.
             write_manifest(
                 &staging,
                 &VideoManifest {
@@ -349,10 +273,7 @@ pub async fn run_video_download(
             .await?;
         }
         ResumePlan::Resume => {
-            // Overwrite pre-flight, same as Fresh: the Finished check
-            // above already ruled out an adoptable file, so anything at
-            // `dest` is foreign or stale — refuse before a wasted
-            // download so the pump requeues under a fresh name.
+            // Overwrite pre-flight, same as Fresh: anything at `dest` is foreign or stale, so refuse before a wasted download.
             if job.dest.exists() {
                 clean_dest_parts(&job.dest);
                 return Err(VideoError::exists());
@@ -360,10 +281,7 @@ pub async fn run_video_download(
             phase(gettext("Resuming download…"));
         }
     }
-    // One yt-dlp invocation downloads (and merges) the whole selection:
-    // the `-f` merge spec carries the planner pair plus the preset
-    // fallback pair, so yt-dlp itself retries stale ids. Progress is a
-    // single downloaded/total stream like HTTP rows.
+    // One yt-dlp invocation downloads (and merges) the whole selection; the `-f` spec carries the planner pair plus the preset fallback, so yt-dlp itself retries stale ids.
     let (spec, _merging) = unified_format_spec(
         video_sel.as_ref().map(|s| s.format_id.as_str()),
         audio_sel.format_id.as_str(),
@@ -371,10 +289,7 @@ pub async fn run_video_download(
         job.audio_only,
     );
     let combined_total = query.total;
-    // NOTE: Grab's speed limit applies to VOD legs via `--ratelimit`
-    // (a finite leg can be capped safely). Live capture still runs
-    // unthrottled: capping an endless stream would fall behind the edge.
-    // Retries and timeouts still follow the user's settings.
+    // NOTE: Grab's speed limit applies to VOD legs via `--ratelimit`. Live capture runs unthrottled: capping an endless stream would fall behind the edge.
     run_unified_ytdlp(
         &youtube_bin,
         &ffmpeg_bin,
@@ -392,13 +307,8 @@ pub async fn run_video_download(
     .map(|opt| opt.map_or(VideoOutcome::Aborted, VideoOutcome::Finished))
 }
 
-/// One direct download through a single yt-dlp invocation: yt-dlp picks
-/// the first working merge from the spec, merges with its own ffmpeg,
-/// and cleans its temp parts itself. Grab claims the output into place
-/// (EXDEV-safe, no clobber), collects the subtitle sidecar beside the
-/// finished file, records the finished size, and wipes staging.
-/// Returns the finished size, or `None` on user abort (the caller stays
-/// quiet).
+/// One direct download through a single yt-dlp invocation: Grab claims the output into place (EXDEV-safe, no clobber) and wipes staging.
+/// Returns the finished size, or `None` on user abort (the caller stays quiet).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_unified_ytdlp(
     youtube_bin: &Path,
@@ -414,17 +324,12 @@ pub(crate) async fn run_unified_ytdlp(
     tx: tokio::sync::mpsc::UnboundedSender<crate::engine_msg::EngineMsg>,
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
-    // Split rows merge (video ext mapped onto yt-dlp's supported set);
-    // adopted singles download one file, nothing to merge.
+    // Split rows merge; adopted singles download one file, nothing to merge.
     let merging = video_ext.is_some();
     let merge_ext = video_ext.map(merge_output_ext).unwrap_or_default();
     let out_template = unified_output_template(staging);
     let argv = unified_download_argv(job, spec, merging, &merge_ext, ffmpeg_bin, &out_template);
-    // Single-counter progress with the same granularity gate the split
-    // legs used: the pump renders identical rich detail off these pairs.
-    // `done` is the banked leg sum from the attempt loop; cap it here
-    // against the metadata total (retried ranges can overshoot) so the
-    // bar never passes 100%.
+    // Single-counter progress with the pump's granularity gate; `done` is capped against the metadata total so the bar never passes 100%.
     let sent = Arc::new(AtomicU64::new(0));
     let report = {
         let sent = Arc::clone(&sent);
@@ -471,24 +376,15 @@ pub(crate) async fn run_unified_ytdlp(
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
     };
-    // Measure reality, not the plan: a zero-byte "completed" download
-    // must fail now, or the row would sit Done and empty forever.
+    // Measure reality, not the plan: a zero-byte "completed" download must fail now, or the row sits Done and empty forever.
     if file_len(&final_tmp) == Some(0) {
         return Err(VideoError::part_failed("empty stream"));
     }
-    // Container-truth backstop: the intake name assumes mp4 (or the
-    // remux target); a native webm merge — or a remux pref changed
-    // mid-queue — would otherwise claim under a stale extension. Same
-    // stem, so stem reservations hold; the pump dedupes and renames at
-    // Finished with collision safety, and exotic typed names are never
-    // second-guessed (see `container_truth_name`).
+    // Container-truth backstop: the intake name assumes mp4 (or the remux target), so a native webm merge under a stale extension claims under the truer name. Same stem, so stem reservations hold; the pump dedupes at Finished.
     if let Some(truer) = container_truth_name(&job.dest, &final_tmp) {
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
-    // Atomic claim into place (EXDEV-safe, no clobber).
-    // The linearization point, as on the live leg: either this wins and
-    // the row is still here, or the removal already won and there is
-    // nothing to deliver.
+    // Atomic claim into place (EXDEV-safe, no clobber). The linearization point: either this wins and the row is still here, or the removal already won.
     if !gate.try_commit() {
         let _ = tokio::fs::remove_dir_all(staging).await;
         return Ok(None);
@@ -502,21 +398,14 @@ pub(crate) async fn run_unified_ytdlp(
         }
         Err(e) => return Err(VideoError::combine(&e)),
     }
-    // Best-effort subtitle sidecar beside the discovered output
-    // (video rows only; audio-only rows never request them). Skipped
-    // when embedding: the tracks are muxed into the file itself, so no
-    // .srt is left alongside (uncollected sidecars die with staging).
+    // Best-effort subtitle sidecar beside the discovered output (video rows only; skipped when embedding, since tracks are muxed in).
     if !job.audio_only
         && !job.embed_subs
         && let Some(lang) = job.subtitles.as_deref()
     {
         collect_sidecar(&sidecar_path_for(&final_tmp, lang), &job.dest, lang);
     }
-    // Sweep legacy dest-dir parts: pre-migration rows (or foreign
-    // lookalikes the Fresh arm never saw, e.g. Resume with matching
-    // manifest) would otherwise sit beside the finished file forever.
-    // The just-collected `<stem>.<lang>.srt` never matches the part
-    // namespace, and the finished file itself is exempt.
+    // Sweep legacy dest-dir parts, so pre-migration rows (or foreign lookalikes the Fresh arm never saw) don't sit beside the finished file forever.
     clean_dest_parts(&job.dest);
     // Record the finished size so a later retry adopts the file.
     let final_bytes = file_len(&job.dest);
@@ -528,12 +417,7 @@ pub(crate) async fn run_unified_ytdlp(
     Ok(Some(final_bytes.unwrap_or(0)))
 }
 
-/// One yt-dlp spawn: parse template progress, collect the log tail,
-/// capture `--print after_move:filepath`. `Ok((None, _))` is a user
-/// abort (the caller stays quiet); timeouts and fetch failures are
-/// errors. `on_merge` fires once on the first merge line, if given.
-/// Shared by the unified direct path (renamed from the old per-part
-/// attempt helper it replaces).
+/// One yt-dlp spawn: parse template progress, collect the log tail, capture `--print after_move:filepath`. `Ok((None, _))` is a user abort (the caller stays quiet). `on_merge` fires once on the first merge line.
 #[allow(clippy::too_many_arguments)]
 async fn run_ytdlp_attempt(
     youtube_bin: &Path,
@@ -552,11 +436,7 @@ async fn run_ytdlp_attempt(
     let mut group = ProcessGroupGuard::new(&child);
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        // `downloaded_bytes` resets per format leg, so plain max would
-        // cap merged progress at the largest single leg. Instead bank
-        // each leg's max on its `finished` line and report the running
-        // sum; the reset makes double-banking impossible. The outer
-        // caller caps the sum against its own metadata total.
+        // `downloaded_bytes` resets per leg, so bank each leg's max on its `finished` line and report the running sum; the caller caps against its metadata total.
         let (mut banked, mut leg_max, mut total) = (0u64, 0u64, 0u64);
         let mut after_move = None::<String>;
         let mut merged = false;
@@ -621,9 +501,7 @@ async fn run_ytdlp_attempt(
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
             Ok(Ok(status)) => {
-                // The leader is reaped, so release the PGID: holding it
-                // across the drain joins below would leave a window in
-                // which the OS could recycle it onto another group.
+                // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                 group.disarm();
                 status
             }
@@ -650,16 +528,7 @@ async fn run_ytdlp_attempt(
     Ok((Some(()), after_move))
 }
 
-/// Remux a stopped live capture into place. Failures surface ffmpeg's
-/// own last line.
-///
-/// ffmpeg writes `<dest>.part` and the result is renamed to `dest` only
-/// once ffmpeg has actually succeeded. That is what separates a completed
-/// recording from the debris of a crashed one: a bare `final.<n>.<ext>`
-/// is always worth keeping, while a `final.<n>.<ext>.part` is worthless
-/// and any sweep may reclaim it. Without the distinction, an attempt that
-/// died mid-remux left a file indistinguishable from a finished capture,
-/// and retention could only be bounded by deleting recordings too.
+/// Remux a stopped live capture into place. ffmpeg writes `<dest>.part` and the result is renamed to `dest` only on success: a bare `final.<n>.<ext>` is always worth keeping, a `.part` never is.
 pub(crate) async fn remux_live_capture(
     ffmpeg_bin: &Path,
     ts_path: &Path,
@@ -672,8 +541,7 @@ pub(crate) async fn remux_live_capture(
     partial.push(".part");
     let partial = PathBuf::from(partial);
     for with_bsf in [true, false] {
-        // ffmpeg runs without `-y` and refuses an existing output, so the
-        // bare retry must not inherit the first attempt's partial.
+        // ffmpeg runs without `-y` and refuses an existing output, so the bare retry must not inherit the first attempt's partial.
         let _ = tokio::fs::remove_file(&partial).await;
         let mut cmd = tokio::process::Command::new(ffmpeg_bin);
         cmd.args(live_remux_argv(
@@ -695,9 +563,7 @@ pub(crate) async fn remux_live_capture(
         let logs = drain_stderr_to_tail(stderr);
         let status = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => {
-                // The leader is reaped, so release the PGID: holding it
-                // across the drain joins below would leave a window in
-                // which the OS could recycle it onto another group.
+                // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                 group.disarm();
                 status
             }
@@ -716,8 +582,7 @@ pub(crate) async fn remux_live_capture(
         };
         let log_tail = join_drain(logs).await.unwrap_or_default();
         if status.success() {
-            // Only now is this a recording. A crash before this point
-            // leaves a `.part`, which no sweep has to protect.
+            // Only now is this a recording: a crash before this point leaves a `.part`, which no sweep has to protect.
             return match tokio::fs::rename(&partial, dest).await {
                 Ok(()) => Ok(()),
                 Err(e) => {
@@ -737,82 +602,35 @@ pub(crate) async fn remux_live_capture(
     unreachable!("bsf retry always returns");
 }
 
-/// Why a live capture ended, which decides what scratch is redundant.
-///
-/// Raw media (the dest-side `live.` shell) and the staging dir (which
-/// can hold the *completed* remux) are tracked separately on purpose:
-/// conflating them deletes a finished recording on the one exit where
-/// both are the user's only copy.
+/// Why a live capture ended, which decides what scratch is redundant. Raw media and the staging dir are tracked separately: conflating them deletes a finished recording on the one exit where both are the user's only copy.
 #[derive(Clone, Copy)]
 enum Exit {
-    /// The remuxed file was claimed at dest: the shell and the emptied
-    /// staging dir are both redundant.
+    /// The remuxed file was claimed at dest: shell and emptied staging dir are both redundant.
     Delivered,
-    /// Dest was claimed mid-capture; the row requeues under a fresh
-    /// name and records again, so this attempt's shell and its remux
-    /// temp are both redundant.
+    /// Dest was claimed mid-capture; the row requeues under a fresh name, so shell and remux temp are both redundant.
     Requeued,
-    /// Reaping the recorder failed, so no remux was ever attempted and
-    /// this attempt claimed no temp. The raw shell may hold bytes the
-    /// user wants.
+    /// Reaping the recorder failed, so no remux was attempted: the raw shell may hold bytes the user wants.
     CaptureWaitFailed,
-    /// The remux failed, so this attempt's `final.<n>.<ext>` is at best a
-    /// partial and the raw shell is the only usable copy of the capture.
+    /// The remux failed, so the raw shell is the only usable copy of the capture.
     RemuxFailed,
-    /// The rename failed unexpectedly (permissions, a destination that
-    /// stopped being a directory, I/O). Both the raw shell and this
-    /// attempt's completed `final.<n>.<ext>` are the user's recording:
-    /// keep both.
+    /// The rename failed unexpectedly: keep both the raw shell and this attempt's completed remux.
     RenameFailed,
     /// Nothing was recorded, so there is nothing to salvage.
     NothingRecorded,
-    /// The row was removed while this attempt was finalizing. There is no
-    /// row left for a delivered file to belong to, so the completed remux
-    /// and the raw shell are both discarded.
+    /// The row was removed mid-finalize: discard both the completed remux and the raw shell (no row left to own them).
     Discarded,
 }
 
 /// What a terminal exit does with the row's staging directory.
 #[derive(Clone, Copy)]
 enum Staging {
-    /// Remove this attempt's own remux temp (when one was claimed), then
-    /// drop the directory if that left it empty. Not recursive: a sibling
-    /// `final.<n>.<ext>` is an earlier attempt's completed recording.
+    /// Remove this attempt's own remux temp, then drop the dir only if empty. Never recursive: a sibling temp is an earlier attempt's completed recording.
     Sweep,
-    /// Leave this attempt's temp in place: it is the completed recording
-    /// the final rename could not place.
+    /// Leave this attempt's temp in place: it is the completed recording the final rename could not place.
     Keep,
 }
 
-/// Reclaim one live capture's scratch on any terminal exit.
-///
-/// The `.ytdl` downloader-state file is always *attempted* for removal.
-/// yt-dlp writes it beside its `-o` target for fragment downloads and
-/// deletes it only on a clean exit, but a killed capture (Stop, stall
-/// timeout) never reaches that cleanup. It is pure scratch with a
-/// second, sharper cost: Grab wipes the output and `.part` shell before
-/// every attempt, so a stale state file would make the next attempt
-/// resume fragment N against a shell that no longer exists — a corrupt
-/// recording rather than merely litter.
-///
-/// Staging is **not** swept recursively. Each attempt remuxes into its
-/// own `final.<n>.<ext>` (see [`remux_temp_path`]), so a sibling temp is
-/// an earlier attempt's completed recording — often the only copy of a
-/// capture that could not be placed at its destination. This removes
-/// exactly this attempt's temp, then drops the directory only if that
-/// left it empty. A whole-directory wipe is what made a Retry destroy
-/// the recording it was retrying.
-///
-/// [`Staging::Keep`] is the one exit that leaves a temp in place, and it
-/// passes no `final_tmp` to remove.
-///
-/// Kept dest-side media is reclaimed with the row via
-/// `clean_dest_parts`, and kept staging by `clean_staging` when the row
-/// is dropped. A row removed while its finalizer is still in flight is
-/// also a known follow-up (see `DownloadManager::remove`).
-///
-/// Best-effort throughout: a sweep that races a vanished file (or hits
-/// a read-only dir) is a no-op, never an error worth failing a row over.
+/// Reclaim one live capture's scratch on any terminal exit. The `.ytdl` state file is always removed: a killed capture never cleans it, and a stale one would resume fragment N against a wiped shell (corrupt recording). Staging is never swept recursively: a sibling temp is an earlier attempt's completed recording. Best-effort throughout: a sweep racing a vanished file is a no-op, never worth failing a row over.
 async fn sweep_live_capture(
     out: &Path,
     part: &Path,
@@ -836,24 +654,11 @@ async fn sweep_live_capture(
         let _ = tokio::fs::remove_file(path).await;
         release_remux_lease(path);
     }
-    // Non-recursive: succeeds only when nothing else is in there, so a
-    // sibling attempt's remux is never collateral.
+    // Non-recursive: succeeds only when nothing else is in there, so a sibling attempt's remux is never collateral.
     let _ = tokio::fs::remove_dir(staging).await;
 }
 
-/// Reap the recorder, and *only then* reclaim its scratch.
-///
-/// The order is the contract, not a stylistic choice: sweeping first
-/// could delete a file the recorder is still writing. It is also nearly
-/// invisible from the outside — a real `Child` offers no hook between the
-/// two steps, and both orders leave the same end state whenever the reap
-/// is quick. So the sequence is factored out to be driven by controlled
-/// futures in `video_runner_tests.rs`, which is what pins it; production
-/// calls it with the real ones.
-///
-/// The sweep is a closure rather than a future, so it cannot even be
-/// constructed before the reap has completed, and swapping the two
-/// arguments is a compile error instead of a silent inversion.
+/// Reap the recorder, and *only then* reclaim its scratch. The order is the contract: sweeping first could delete a file the recorder is still writing. Pinned by controlled futures in `video_runner_tests.rs`; the sweep is a closure so it cannot even be constructed before the reap completes.
 async fn reap_then_sweep<F, S, G>(reap: F, sweep: S)
 where
     F: std::future::Future<Output = ()>,
@@ -864,13 +669,7 @@ where
     sweep().await;
 }
 
-/// One live capture through the yt-dlp binary: variant choice, audio
-/// rendition, keys and fragment retries are yt-dlp's; the MPEG-TS
-/// container keeps every kill point playable, so Stop is kill, adopt
-/// and remux instead of grace-period finalizing.
-///
-/// Stalled captures yield their partial like before; an empty capture
-/// fails. Returns the final size.
+/// One live capture through the yt-dlp binary. The MPEG-TS container keeps every kill point playable, so Stop is kill, adopt and remux. Stalled captures yield their partial; an empty capture fails.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_live_ytdlp(
     youtube_bin: &Path,
@@ -886,23 +685,11 @@ pub(crate) async fn run_live_ytdlp(
 ) -> Result<Option<u64>, VideoError> {
     use crate::engine_msg::EngineMsg;
     use tokio::io::AsyncBufReadExt as _;
-    // Fresh capture: a crashed run's dest-dir live file must never be
-    // resumed into (append-only stream — resume corrupts) nor adopted
-    // as a fresh capture that recorded nothing. Staging still hosts the
-    // remux temp below.
+    // Fresh capture: a crashed run's live file must never be resumed into (append-only stream) nor adopted as an empty fresh capture.
     let ext = if job.audio_only { "m4a" } else { "mp4" };
-    // Capture beside the finished file (yt-dlp defaults): the `.part`
-    // shell shows up in the user's folder while recording, and the
-    // file-growth watcher announces "Recording…" off this path.
+    // Capture beside the finished file: the `.part` shell shows in the user's folder while recording, and the file-growth watcher announces "Recording…" off this path.
     let out = dest_part_path(&job.dest, "live", ext);
-    // Overwrite pre-flight (Parabolic parity): a finished file already
-    // at dest means the capture's rename claim fails at the end — refuse
-    // before recording so the pump requeues under a fresh name instead
-    // of wasting an entire stream. The refusal also reclaims this
-    // stem's part-namespace scratch: the requeued row carries a fresh
-    // name, so a crashed run's leftover `live.` shells and state would
-    // otherwise never be swept by `clean_dest_parts` again. Only the
-    // part namespace is touched — the finished file at dest is left be.
+    // Overwrite pre-flight (Parabolic parity): refuse before recording so the pump requeues under a fresh name. Also reclaims this stem's part-namespace scratch; the finished file at dest is left be.
     if job.dest.exists() {
         clean_dest_parts(&job.dest);
         return Err(VideoError::exists());
@@ -910,31 +697,17 @@ pub(crate) async fn run_live_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    // Reclaim partial remuxes from attempts that died mid-ffmpeg. They are
-    // worthless by construction -- a completed one is renamed to
-    // `final.<n>.<ext>` -- so this bounds what a crash leaves behind without
-    // ever putting a real recording at risk.
+    // Reclaim partial remuxes from attempts that died mid-ffmpeg: worthless by construction (a completed one is renamed), so this bounds crash litter without risking a real recording.
     sweep_partial_remuxes(staging);
-    // At most two attempts: the from-start capture the user asked for,
-    // then -- only if it recorded nothing and wasn't stopped -- one retry
-    // from the live edge. The downgrade flips solely `live_from_start`
-    // (the other fields the capture argv reads stay as cloned), so every
-    // other `job` use below stays valid on both attempts.
+    // At most two attempts: the from-start capture, then — only if it recorded nothing and wasn't stopped — one retry from the live edge.
     let part = out.with_extension(format!("{ext}.part"));
     let state = out.with_extension(format!("{ext}.ytdl"));
-    // Covers the await windows a shutdown can cancel, so the state file
-    // does not outlive the app. The recorded media is left for the user.
-    // Held purely for its `Drop`, hence the underscore.
+    // Covers the await windows a shutdown can cancel, so the state file does not outlive the app. Held purely for its `Drop`.
     let _scratch = LiveScratchGuard::new(&state);
     let mut downgraded: Option<VideoJob> = None;
     let src = loop {
         let attempt: &VideoJob = downgraded.as_ref().unwrap_or(job);
-        // Fresh shell per attempt: a failed attempt must never leave a
-        // stale (possibly empty) output for the retry to trip over. The
-        // state file joins them for a sharper reason than litter — it
-        // must not survive into a retry whose media shell was just
-        // deleted, or yt-dlp resumes fragment N against a shell that no
-        // longer exists and writes a corrupt recording.
+        // Fresh shell per attempt: a stale output or state file must never survive into a retry, or yt-dlp resumes fragment N against a deleted shell (corrupt recording).
         let _ = tokio::fs::remove_file(&out).await;
         let _ = tokio::fs::remove_file(&part).await;
         let _ = tokio::fs::remove_file(&state).await;
@@ -942,22 +715,14 @@ pub(crate) async fn run_live_ytdlp(
         cmd.args(live_capture_argv(attempt, hls_format_id, &out));
         apply_proxy_env(&mut cmd, job.proxy.as_ref());
         let (mut child, stdout, stderr) = spawn_piped_ytdlp(cmd)?;
-        // An abort drops this future mid-await and tokio does not kill a
-        // child when its handle drops, so without this guard a shutdown
-        // orphans the recorder — and the ffmpeg it may have started —
-        // still writing to the capture.
+        // Without this guard a shutdown orphans the recorder (and the ffmpeg it may have started) still writing to the capture.
         let mut group = ProcessGroupGuard::new(&child);
         let tx_p = tx.clone();
-        // Recording indicator: live captures often emit no yt-dlp progress
-        // lines for long stretches, leaving the row stuck on "Resolving
-        // media…" while bytes land on disk. The growing output file is the
-        // truth — announce once it has bytes (capped: minutes of silence
-        // means the capture is dead and its own timeouts will fire).
+        // Recording indicator: live captures often emit no progress for long stretches, so announce once the output file has bytes (capped: silence means the capture is dead and its own timeouts fire).
         {
             let tx_rec = tx.clone();
             let out_rec = out.clone();
-            // yt-dlp records into the `.part` shell and only renames to the
-            // `-o` path at the end: the shell is what grows during capture.
+            // yt-dlp records into the `.part` shell and only renames at the end: the shell is what grows during capture.
             // The final path covers a capture that finalized instantly.
             let shell_rec = out.with_extension(format!("{ext}.part"));
             tokio::spawn(async move {
@@ -978,9 +743,7 @@ pub(crate) async fn run_live_ytdlp(
         let progress = tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             let mut have = 0u64;
-            // Announce once recording is confirmed: a parsed progress line
-            // means transfer (same "Recording…" the file watcher sends, so
-            // whichever fires first wins and the second is a no-op).
+            // Announce once recording is confirmed (same "Recording…" the file watcher sends, so whichever fires first wins).
             let mut announced = false;
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Some(p) = parse_ytdlp_template(&line) {
@@ -1003,13 +766,9 @@ pub(crate) async fn run_live_ytdlp(
             have
         });
         let logs = drain_stderr_to_tail(stderr);
-        // The numeric group id for the quiescence wait on the discard
-        // path below: `reap_child` disarms the guard, so it must be read
-        // while the guard is still armed.
+        // Numeric group id for the quiescence wait on the discard path: `reap_child` disarms the guard, so read it while still armed.
         let pgid = group.pgid();
-        // `aborted` gates the live-edge retry below: a stopped attempt must
-        // never come back as a fresh capture. `&mut abort` keeps the receiver
-        // usable for the second attempt when it didn't fire.
+        // `aborted` gates the live-edge retry below; `&mut abort` keeps the receiver usable for the second attempt.
         let (aborted, discarded) = tokio::select! {
             biased;
             intent = &mut abort => {
@@ -1018,10 +777,7 @@ pub(crate) async fn run_live_ytdlp(
                     Ok(StopIntent::Preserve) => (true, false),
                     Ok(StopIntent::Discard) => (true, true),
                     Err(_) => {
-                        // No sender remains to authorise anything: fail
-                        // closed. Claim the gate so the pre-rename commit
-                        // below cannot deliver either, and take the
-                        // discarded path.
+                        // No sender remains to authorise anything: fail closed. Claim the gate so the pre-rename commit below cannot deliver either.
                         let _ = gate.discard();
                         (true, true)
                     }
@@ -1031,9 +787,8 @@ pub(crate) async fn run_live_ytdlp(
                 match waited {
                     Ok(Ok(_)) => group.disarm(),
                     Ok(Err(e)) => {
-                        // Reap, then reclaim — never the other way round.
-                        // The recording may already exist, so the sweep
-                        // keeps it and takes only the scratch around it.
+                        // Reap, then reclaim — never the other way round. The
+                        // sweep keeps a finished recording, taking only scratch.
                         progress.abort();
                         logs.abort();
                         reap_then_sweep(
@@ -1062,28 +817,21 @@ pub(crate) async fn run_live_ytdlp(
             }
         };
         let _ = join_drain(progress).await;
-        // A discard is not a stop. There is no row left to deliver to, so
-        // the finalize path below must not run: adopting the partial and
-        // remuxing it would place a file at a destination with no row
-        // behind it. Only the direct child is reaped here; group
-        // descendants may still be writing (see the quiescence wait below).
-        //
-        // The scratch is deliberately left. The manager reclaims it only
-        // after this task has returned -- sweeping from inside a task that
-        // may still be running is the race this avoids.
+        // A discard is not a stop. With no row left to deliver to, the finalize
+        // path below must not run: adopting and remuxing would place a file at
+        // a destination with no row behind it. Only the direct child is reaped
+        // here; group descendants may still be writing (quiescence wait below).
+        // The scratch is deliberately left too: the manager reclaims it only
+        // after this task returns -- sweeping from inside a running task is the
+        // race this avoids.
         if discarded {
             logs.abort();
-            // `reap_child` waited only the direct child, and the guard only
-            // *signalled* the group: a descendant may still be writing when
-            // this returns and the manager reclaims the scratch, so wait
-            // for the group and report rather than assume.
-            //
-            // Bounded at five seconds, not the attempt timeout: the reap
-            // already killed everything real, so this is grace for stragglers
-            // only. Tying it to the attempt timeout would park the discard
-            // path for minutes on a wedged group -- and, before this helper
-            // was async, park a runtime thread with it, starving unrelated
-            // tasks into their own timeouts.
+            // The guard only *signalled* the group, so a descendant may still be
+            // writing when the manager reclaims the scratch: wait for the group
+            // and report rather than assume. Five seconds, not the attempt
+            // timeout -- the reap already killed everything real, so this is
+            // grace for stragglers only, and the attempt timeout would park
+            // the discard path (and a runtime thread) for minutes.
             if let Some(pgid) = pgid
                 && !crate::video_spawn::await_group_quiescence(
                     pgid,
@@ -1099,20 +847,18 @@ pub(crate) async fn run_live_ytdlp(
             return Ok(None);
         }
         let log_tail = join_drain(logs).await.unwrap_or_default();
-        // Whatever stopped the capture — user stop, stall, stream end, or
-        // crash — adopt what landed: MPEG-TS needs no finalizing. yt-dlp
-        // renames the `.part` shell on clean completion, so prefer the
-        // finished name and fall back to the shell.
+        // Whatever stopped the capture — stop, stall, stream end or crash —
+        // adopt what landed: MPEG-TS needs no finalizing, and yt-dlp renames
+        // the `.part` shell on clean completion, so prefer the finished name.
         let src = [out.clone(), part.clone()]
             .into_iter()
             .find(|p| file_len(p).is_some_and(|n| n > 0));
         let Some(src) = src else {
-            // From-start attempt that never got going: retry once from the
-            // live edge instead of failing the row, and say so on the row.
-            // Only a startup miss qualifies — a mid-capture failure keeps
-            // its error, so partial recordings are never discarded.
-            // Staging is untouched here (nothing was recorded); the
-            // terminal path below sweeps it.
+            // From-start attempt that never got going: retry once from the live
+            // edge instead of failing the row, and say so. Only a startup miss
+            // qualifies — a mid-capture failure keeps its error, so partial
+            // recordings are never discarded. Staging is untouched (nothing was
+            // recorded); the terminal path below sweeps it.
             if fallback_to_live_edge(
                 attempt.is_live,
                 attempt.live_from_start,
@@ -1181,9 +927,8 @@ pub(crate) async fn run_live_ytdlp(
     )
     .await
     {
-        // The remuxed file never materialized, so the recorded shell is
-        // the user's only copy of the capture: keep it for salvage and
-        // drop only the scratch around it.
+        // The remux never materialized, so the recorded shell is the user's only
+        // copy: keep it for salvage, drop only the scratch around it.
         sweep_live_capture(
             &out,
             &part,
@@ -1233,11 +978,9 @@ pub(crate) async fn run_live_ytdlp(
             return Err(VideoError::exists());
         }
         Err(e) => {
-            // An unexpected rename failure (permissions, I/O) leaves both
-            // the recorded shell and the completed remux in staging as the
-            // user's only copies: keep both for salvage. Staging is
-            // deliberately left alone rather than swept — see
-            // `sweep_live_capture` on why that stays a follow-up.
+            // An unexpected rename failure (permissions, I/O) leaves the shell
+            // and the completed remux as the user's only copies: keep both
+            // (see `sweep_live_capture` on why Staging::Keep).
             sweep_live_capture(
                 &out,
                 &part,
@@ -1283,9 +1026,7 @@ pub(crate) async fn run_hls_ytdlp(
     tokio::fs::create_dir_all(staging)
         .await
         .map_err(VideoError::staging)?;
-    // Overwrite pre-flight (Parabolic parity): refuse before transferring
-    // when the claim target is already taken — rename_noreplace never
-    // clobbers, so the run would only fail after a wasted download.
+    // Overwrite pre-flight, same as Fresh: `rename_noreplace` never clobbers, so refuse early.
     if job.dest.exists() {
         return Err(VideoError::exists());
     }
@@ -1300,10 +1041,9 @@ pub(crate) async fn run_hls_ytdlp(
     let progress = tokio::spawn(async move {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         let (mut max_dl, mut max_total, mut marked) = (0u64, None, 0u64);
-        // Total the live block grid was built for, and bytes within the
-        // current leg: `max_dl` stays monotonic across legs for the bar,
-        // while `leg_have` resets so a second leg's map starts empty
-        // instead of instantly filling from the previous leg's bytes.
+        // `grid_total` is what the live block grid was built for, `leg_have` the
+        // bytes within the current leg: `max_dl` stays monotonic across legs for
+        // the bar, while `leg_have` resets so a second leg's map starts empty.
         let (mut grid_total, mut leg_have) = (None::<u64>, 0u64);
         let mut after_move = None::<String>;
         let mut merged = false;
@@ -1324,12 +1064,10 @@ pub(crate) async fn run_hls_ytdlp(
                         grid_total = Some(t);
                     } else if t > 0 && grid_total.is_none_or(|g| t > g.saturating_mul(2)) {
                         // Same file, refined-up total (first estimates run
-                        // tiny): rebuild the grid and re-derive marks from
-                        // real bytes, or the map stays flood-lit on its
-                        // stale small grid while the bar climbs. Downward
-                        // wobble never rebuilds (the leg gate above owns
-                        // drops); growth past 2x bounds the rebuilds to a
-                        // handful per download.
+                        // tiny): rebuild the grid and re-derive marks from real
+                        // bytes, or the map stays flood-lit on its stale small
+                        // grid. Downward wobble never rebuilds (the leg gate owns
+                        // drops); growth past 2x bounds the rebuilds.
                         tx_p.send(EngineMsg::SegmentsInit { total: t }).ok();
                         grid_total = Some(t);
                         let len = crate::file_names::piece_len(t);
@@ -1347,9 +1085,8 @@ pub(crate) async fn run_hls_ytdlp(
                     && let Some(grid) = grid_total
                     && grid > 0
                 {
-                    // Marks align with the displayed grid (not the running
-                    // max): the grid may lag refined-up totals, and marks
-                    // past its end are dropped by the row's bounds check.
+                    // Marks align with the displayed grid, not the running max:
+                    // the grid may lag, and past its end the row drops them.
                     leg_have = leg_have.max(d.min(grid));
                     let have = max_dl.max(d.min(max_total.unwrap_or(grid)));
                     max_dl = have;
@@ -1382,9 +1119,7 @@ pub(crate) async fn run_hls_ytdlp(
         }
         waited = tokio::time::timeout(timeout, child.wait()) => match waited {
             Ok(Ok(status)) => {
-                // The leader is reaped, so release the PGID: holding it
-                // across the drain joins below would leave a window in
-                // which the OS could recycle it onto another group.
+                // The leader is reaped, so release the PGID: holding it across the drain joins would risk the OS recycling it onto another group.
                 group.disarm();
                 status
             }
@@ -1412,18 +1147,14 @@ pub(crate) async fn run_hls_ytdlp(
     let Some(final_tmp) = final_tmp else {
         return Err(VideoError::part_failed("no output file produced"));
     };
-    // Same container-truth backstop as the unified path: the HLS merge
-    // is mp4-only, but `--remux-video` is honored here too, so a remux
-    // pref changed mid-queue would otherwise claim under a stale name.
-    // (Live rows need none of this: ext is fixed to mp4/m4a on both
-    // sides and live never remuxes, so divergence is impossible.)
+    // Same container-truth backstop as the unified path: `--remux-video` is
+    // honored here too, so a remux pref changed mid-queue would claim under a
+    // stale name. (Live rows need none: ext is fixed and live never remuxes.)
     if let Some(truer) = container_truth_name(&job.dest, &final_tmp) {
         tx.send(EngineMsg::SuggestName(truer)).ok();
     }
-    // Atomic claim into place (EXDEV-safe, no clobber).
-    // The linearization point, as on the live leg: either this wins and
-    // the row is still here, or the removal already won and there is
-    // nothing to deliver. The part shells beside the finished file are
+    // Atomic claim into place (EXDEV-safe, no clobber), at the linearization
+    // point as on the live leg. The part shells beside the finished file are
     // ours to sweep: no rename means no delivery happened.
     if !gate.try_commit() {
         clean_dest_parts(&job.dest);
@@ -1439,12 +1170,11 @@ pub(crate) async fn run_hls_ytdlp(
         }
         Err(e) => return Err(VideoError::combine(&e)),
     }
-    // Best-effort subtitle sidecar: `-o` is the `hls` part template, so
-    // collect `<stem>.hls.<lang>.srt` beside the finished file (outside
-    // the part namespace, so retries and row removal keep it). Skipped
-    // when embedding: the tracks are muxed into the file itself — and
-    // the part sidecar is deleted outright, since unlike the unified
-    // path it lives in the dest dir (no staging wipe reaches it).
+    // Best-effort subtitle sidecar: `-o` is the `hls` part template, so collect
+    // `<stem>.hls.<lang>.srt` beside the finished file (outside the part
+    // namespace, so retries and row removal keep it). When embedding, the part
+    // sidecar is deleted outright: it lives in the dest dir, so no staging wipe
+    // reaches it.
     if !job.embed_subs
         && let Some(lang) = job.subtitles.as_deref()
     {

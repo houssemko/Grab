@@ -1,19 +1,11 @@
 //! Video-page downloads (YouTube, Vimeo, …) powered by yt-dlp.
 //!
-//! This module is the facade over the video cluster: probe identity
-//! ([`video_types`](crate::video_types)), quality ladder
-//! ([`video_quality`](crate::video_quality)), page probing + playlist
-//! parsing ([`video_probe`](crate::video_probe)), preference combos
-//! ([`video_prefs`](crate::video_prefs)), stream planning
-//! ([`video_plan`](crate::video_plan)), staging/manifest/resume
-//! ([`video_staging`](crate::video_staging)), attempt inputs + argv
-//! builders ([`video_argv`](crate::video_argv)), progress-line parsing
-//! ([`video_progress`](crate::video_progress)), spawn plumbing + fetch
-//! resolve ([`video_spawn`](crate::video_spawn)) and attempt
-//! orchestration ([`video_runner`](crate::video_runner)).
-//!
-//! Grab only *extracts* with yt-dlp: format URLs are resolved here and the
-//! bytes are pulled by the existing engine as ordinary queue items.
+//! Facade over the video cluster: probe identity, quality ladder, page
+//! probing, preference combos, stream planning, staging/manifest/resume,
+//! attempt inputs + argv builders, progress parsing, spawn plumbing and
+//! attempt orchestration. Grab only *extracts* with yt-dlp: format URLs are
+//! resolved here and the bytes are pulled by the existing engine as ordinary
+//! queue items.
 
 /// Facade: the per-attempt delivery decision lives in
 /// [`attempt_gate`](crate::attempt_gate) now.
@@ -32,9 +24,6 @@ pub use crate::video_prefs::{
 /// Facade: page probing + playlist parsing lives in
 /// [`video_probe`](crate::video_probe) now.
 pub use crate::video_probe::{drive_direct_url, is_direct_file_url, is_http_url};
-/// Facade: progress-line parsing lives in
-/// [`video_progress`](crate::video_progress) now (no re-exports: the
-/// runner consumes it, tests import it directly).
 /// Facade: quality ladder lives in [`video_quality`](crate::video_quality) now.
 pub use crate::video_quality::{
     default_quality_index, default_video_filename, quality_for_height, quality_labels,
@@ -57,9 +46,8 @@ pub use crate::video_types::{ProbeResult, VideoInfo, VideoOutcome, is_video_page
 #[cfg(test)]
 pub(crate) mod test_support {
     /// Scrub tool lookup so video spawns deterministically fail with
-    /// MissingLibraries instead of depending on the dev machine (yt-dlp in
-    /// PATH would hit the network). Serial suite only: the environment is
-    /// process-global (same precedent as GRAB_QUEUE_FILE). Restores on drop.
+    /// MissingLibraries instead of depending on the dev machine. Serial suite
+    /// only: the environment is process-global. Restores on drop.
     pub(crate) struct NoVideoTools {
         path: Option<std::ffi::OsString>,
         xdg: Option<std::ffi::OsString>,

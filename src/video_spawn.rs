@@ -1,7 +1,5 @@
-//! Spawn plumbing + fetch resolve: process-group spawns, pipe
-//! drains, tree kills, output discovery and the probe/fetch entry
-//! points. Mid-level module (leaves + probe/staging/argv): the
-//! dialog and runner consume these through the `video` facade.
+//! Spawn plumbing + fetch resolve: process-group spawns, pipe drains, tree kills, output discovery.
+//! Consumed by the dialog/runner through the `video` facade.
 
 use crate::video_argv::{apply_proxy_env, proxy_cli_args};
 use crate::video_probe::{
@@ -18,29 +16,15 @@ use std::time::Duration;
 use yt_dlp::client::deps::Libraries;
 use yt_dlp::model::Video;
 
-/// How long one metadata extraction may take before it counts as failed.
-/// Without a ceiling a throttled host parks the dialog on its spinner
-/// forever; the error path (with Retry) is strictly more useful.
+/// How long one metadata extraction may take before it counts as failed (never park the dialog on its spinner).
 const FETCH_TIMEOUT_SECS: u64 = 60;
 
-/// Byte ceilings for the drained child pipes. The fetch timeout bounds
-/// *time*, not memory: without a cap a runaway child could grow these
-/// buffers without bound inside the timeout window. Stdout carries the
-/// `--dump-single-json` document (megabytes for big pages); stderr only
-/// ever contributes its last log line.
+/// Byte ceilings for drained child pipes (the timeout bounds time, not memory; stdout carries the JSON document).
 const MAX_STDOUT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES: u64 = 1024 * 1024;
 
-/// Drain one child pipe with a hard byte ceiling. One byte past the
-/// limit is read so an oversize stream is detected and failed instead
-/// of silently truncated; overflow surfaces as
-/// [`std::io::ErrorKind::QuotaExceeded`], not a bigger buffer.
-///
-/// The stream is always drained to EOF, even past the ceiling: the
-/// overflow is discarded into a fixed-size buffer instead of buffered,
-/// so the child can never block on a full pipe. Without that, an
-/// oversize child would stall on its write end and turn the quota
-/// failure into the fetch timeout.
+/// Drain one child pipe with a hard byte ceiling (overflow fails as QuotaExceeded, never a bigger buffer).
+/// Always drains to EOF into a discard buffer so the child can never block on a full pipe.
 async fn read_bounded(
     stream: impl tokio::io::AsyncRead + Unpin,
     limit: u64,
@@ -52,9 +36,6 @@ async fn read_bounded(
     if buf.len() as u64 <= limit {
         return Ok(buf);
     }
-    // Over the ceiling: keep draining into a fixed discard buffer.
-    // Memory stays flat; only time is spent, and the caller already
-    // bounds the child with the fetch timeout.
     let mut discard = [0u8; 8192];
     while reader.read(&mut discard).await? != 0 {}
     Err(std::io::Error::new(
@@ -63,18 +44,7 @@ async fn read_bounded(
     ))
 }
 
-/// Fetch one page's raw `--dump-single-json` through a direct spawn
-/// (same spawn/timeout/output semantics as the crate's extractors),
-/// then parse leniently (see [`crate::video_probe::sanitize_video_json`]). Used instead of
-/// the crate's `fetch_video_infos`, whose strict model breaks whenever
-/// the binary's JSON gains or drops a field.
-///
-/// `flat_playlist` selects the probe mode: `true` lists collection
-/// entries as stubs instead of extracting every one (minutes and
-/// megabytes for big lists; a no-op for single videos) — the dialog's
-/// collection probe. `false` runs full extraction — the download
-/// worker's single-item resolve, where stub listings would come back
-/// with no formats and fail every row.
+/// Fetch one page's raw `--dump-single-json`, then parse leniently. `flat_playlist` lists collection stubs; false runs full extraction.
 pub(crate) async fn fetch_raw_dump_json(
     youtube_bin: &Path,
     url: &str,
@@ -90,10 +60,7 @@ pub(crate) async fn fetch_raw_dump_json(
     args.push("--dump-single-json".to_string());
     args.extend(proxy_cli_args(fetch_proxy));
     args.extend(ytdlp_identity_args(cookies_browser, None, url));
-    // Spawned directly (tokio + timeout) rather than through the
-    // crate's executor: same semantics — concurrent pipe drain,
-    // timeout kill, nonzero exit as error — with the failure detail
-    // taken from stderr instead of a wrapped crate error.
+    // Direct spawn with the same semantics (concurrent drain, timeout kill, stderr detail on failure).
     let mut cmd = ytdlp_command(youtube_bin);
     cmd.args(&args);
     apply_proxy_env(&mut cmd, fetch_proxy);
@@ -107,9 +74,7 @@ pub(crate) async fn fetch_raw_dump_json(
         .stderr
         .take()
         .ok_or_else(|| VideoError::fetch("yt-dlp gave no log pipe"))?;
-    // Drain both pipes concurrently: `--dump-single-json` output is
-    // megabytes, and an unread pipe would stall yt-dlp once full.
-    // Each drain carries a hard byte ceiling (see MAX_*_BYTES above).
+    // Drain both pipes concurrently (an unread full pipe would stall yt-dlp), each with a hard ceiling.
     fn drain(
         stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
         limit: u64,
@@ -132,15 +97,7 @@ pub(crate) async fn fetch_raw_dump_json(
             return Err(VideoError::fetch(gettext("the lookup timed out")));
         }
     };
-    // A drained pipe fails four ways: the task died (JoinError), the
-    // drain grace period ran out (aborted), a genuine pipe IO error, or
-    // the byte ceiling tripped. Only the last gets the size-limit
-    // message; the rest keep the old lenient path (empty stdout fails
-    // downstream at JSON parse, as before) instead of claiming a cause
-    // that was not observed. The drains are joined with a grace period
-    // rather than awaited bare: past the quota ceiling the drain loops
-    // run to EOF, so a pipe-holder that outlives the child would stall
-    // a bare await forever.
+    // Drains join with a grace period (an orphaned grandchild holding the pipe would stall a bare await); only the ceiling gets the size message.
     let stdout = match join_drain(out_task).await {
         Some(Ok(buf)) => buf,
         Some(Err(e)) if e.kind() == std::io::ErrorKind::QuotaExceeded => {
@@ -163,14 +120,7 @@ pub(crate) async fn fetch_raw_dump_json(
     Ok(value)
 }
 
-/// Strict single-video model for the download worker, with one shaped
-/// exception. Full extraction here, not `--flat-playlist`: stub listings
-/// parse as a video with no formats, which is exactly the "the page
-/// listed none" failure a queued story hit. Playlist-shaped output with
-/// a picked entry id selects that entry (highlight rows, and story rows
-/// whose segment page didn't parse at pick time, re-resolve the whole
-/// tray); without one it returns the collection for worker-side
-/// expansion into per-item rows instead of failing.
+/// Strict single-video model for the download worker (full extraction; playlist output selects the picked entry or expands worker-side).
 pub(crate) async fn fetch_video_page(
     youtube_bin: &Path,
     url: &str,
@@ -200,10 +150,7 @@ pub(crate) async fn fetch_video_page(
     parse_single_video(value).map(|v| FetchedVideo::Single(Box::new(v)))
 }
 
-/// Extract metadata for one URL. Singles and collections share the
-/// probe: the returned [`ProbeResult`] tells the dialog which preview
-/// to show. The media URLs inside are only passed on to the download
-/// step; the *page URL* is what survives restarts.
+/// Extract metadata for one URL (the page URL is what survives restarts, not the media URLs).
 pub async fn fetch_video_infos(
     libs: Libraries,
     url: String,
@@ -235,8 +182,7 @@ pub async fn fetch_video_infos(
                 return Err(VideoError::fetch(gettext("the lookup timed out")));
             }
         };
-        // Playlist-shaped output never reaches the video model: its
-        // entries are stubs the crate's strict structs would choke on.
+        // Stub entries would choke the strict video model.
         if let Some(mut playlist) = parse_playlist_json(&value, &url) {
             retarget_story_items(&url, &mut playlist);
             return Ok::<_, VideoError>(ProbeResult::Playlist(playlist));
@@ -255,9 +201,7 @@ pub async fn fetch_video_infos(
     }
 }
 
-/// yt-dlp spawn with the house stdio/process-group setup: null stdin
-/// (never interactive), piped stdout/stderr for capture, and its own
-/// process group so timeouts can kill the whole tree via `kill_tree`.
+/// yt-dlp spawn with null stdin, piped outputs, and its own process group (so timeouts kill the whole tree).
 pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(youtube_bin);
     cmd.stdin(std::process::Stdio::null())
@@ -270,8 +214,7 @@ pub(crate) fn ytdlp_command(youtube_bin: &Path) -> tokio::process::Command {
     cmd
 }
 
-/// Spawn a [`ytdlp_command`]-configured child and take its stdout/stderr
-/// pipes. Fails with a runtime error naming the missing pipe.
+/// Spawn a `ytdlp_command` child and take its pipes.
 pub(crate) fn spawn_piped_ytdlp(
     mut cmd: tokio::process::Command,
 ) -> Result<
@@ -294,10 +237,7 @@ pub(crate) fn spawn_piped_ytdlp(
     Ok((child, stdout, stderr))
 }
 
-/// Spawn a task draining a child process's stderr pipe: complete lines
-/// are traced as they arrive (see [`trace_format_lines`]) and the last
-/// 8 KiB are kept. Awaiting the returned handle yields the
-/// lossy-decoded tail for error detail.
+/// Drain a child's stderr in the background: trace lines live, keep the last 8 KiB for error detail.
 pub(crate) fn drain_stderr_to_tail(
     stderr: tokio::process::ChildStderr,
 ) -> tokio::task::JoinHandle<String> {
@@ -325,76 +265,36 @@ pub(crate) fn drain_stderr_to_tail(
 
 /// Signal a process group, ignoring whether it still exists.
 fn signal_group(pid: libc::pid_t) {
-    // Deliberately unconditional: the group outlives its leader by
-    // design (ffmpeg grandchildren), so an exited child still leaves
-    // a group worth signaling — a try_wait gate here would orphan
-    // ffmpeg on every abort-after-exit. The pid-reuse race (recycled
-    // pid that is also a group leader) needs churn no desktop hits.
+    // Unconditional: the group outlives its leader (ffmpeg grandchildren), and the pid-reuse race needs churn no desktop hits.
     // SAFETY: constant signal number; ESRCH (raced exit) is harmless.
     unsafe {
         libc::killpg(pid, libc::SIGKILL);
     }
 }
 
-/// SIGKILL a spawned downloader and the ffmpeg it may have started:
-/// both run in a dedicated process group (`process_group(0)` at
-/// spawn), so one killpg signals the whole group instead of orphaning
-/// ffmpeg mid-merge. Only the direct child is waitable — see
-/// [`reap_child`], which pairs this with the wait.
+/// SIGKILL a spawned downloader and its ffmpeg group (one killpg, so ffmpeg is never orphaned mid-merge).
 pub(crate) fn kill_tree(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         signal_group(pid as libc::pid_t);
     }
 }
 
-/// Kills a spawned process group when the task owning it is dropped,
-/// and stops guarding once the child has been reaped.
-///
-/// `Command::kill_on_drop` would cover only the direct child, and
-/// yt-dlp's ffmpeg lives in the same process group. `Drop` is the only
-/// hook that fires when a task is aborted mid-await — which is exactly
-/// what `DownloadManager::shutdown` does, so any cleanup written as an
-/// `async` step after an await simply never runs and the recorder would
-/// outlive the app with no supervisor, still writing to the capture.
-///
-/// **Disarm as soon as the child is reaped.** The guard holds a numeric
-/// PGID, and a reaped leader frees that number for reuse. Keeping the
-/// guard armed across the awaits that follow a normal exit would leave a
-/// window — drain joins alone can take seconds — in which the OS could
-/// recycle the PGID onto an unrelated process group and this would
-/// SIGKILL it. That is a much wider window than the one
-/// [`kill_tree`] already accepts, and unlike `kill_tree` it would fire
-/// when nothing is left to kill.
-///
-/// There are two ways a child gets reaped, and each has its own
-/// obligation:
-///
-/// * Killed and waited by [`reap_child`] — disarmed there, for the
-///   caller, so this path cannot be forgotten.
-/// * Exiting on its own, observed in a runner's own wait arm — the arm
-///   must call [`Self::disarm`] itself, before any post-wait work.
-///
-/// That second obligation is manual, and it has already been missed once
-/// (the cookie export). Every spawn site is expected to carry a guard
-/// *and* a completion-arm disarm; the current six are `run_ytdlp_attempt`
-/// (src/video_runner.rs), `remux_live_capture`, `run_live_ytdlp`,
-/// `run_hls_ytdlp`, `fetch_raw_dump_json` (src/video_spawn.rs) and
-/// `export_cookies` (src/cookies.rs).
+/// Kills the process group on drop (covers task-abort mid-await, where async cleanup never runs).
+/// Disarm as soon as the child is reaped: a recycled PGID would otherwise SIGKILL an unrelated group.
+/// Runners must disarm in their own wait arm too; the six spawn sites each carry a guard plus a disarm.
 pub(crate) struct ProcessGroupGuard {
     pid: Option<libc::pid_t>,
 }
 
 impl ProcessGroupGuard {
-    /// `None` when the child was already reaped, so there is no group
-    /// left to signal.
+    /// `None` when the child was already reaped (no group left to signal).
     pub(crate) fn new(child: &tokio::process::Child) -> Self {
         Self {
             pid: child.id().map(|pid| pid as libc::pid_t),
         }
     }
 
-    /// Give up ownership: the child has been reaped, so its group id is
-    /// no longer ours to signal.
+    /// Give up ownership: the child has been reaped, so its group id is no longer ours to signal.
     pub(crate) fn disarm(&mut self) {
         self.pid = None;
     }
@@ -404,9 +304,7 @@ impl ProcessGroupGuard {
         self.pid
     }
 
-    /// Whether the guard would still signal on drop. Test-only: a guard
-    /// that outlives its child's reap is the bug this predicate exists
-    /// to catch.
+    /// Whether the guard would still signal on drop (test-only: catches guards outliving their reap).
     #[cfg(test)]
     pub(crate) fn is_armed(&self) -> bool {
         self.pid.is_some()
@@ -421,39 +319,8 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-/// Removes a live capture's yt-dlp state file if the task owning it is
-/// dropped.
-///
-/// The file-side sibling of [`ProcessGroupGuard`]. `Drop` is the only
-/// hook that runs when a task is aborted mid-await, which is what
-/// `DownloadManager::shutdown` does, so every `async` cleanup step after
-/// an await is skipped on that path.
-///
-/// **State file only — deliberately not staging.** A blanket staging
-/// sweep would delete a sibling `final.<n>.<ext>`: those are earlier
-/// attempts' completed remuxes, and a capture that could not be placed
-/// at its destination is often the user's only copy of it.
-/// `run_live_ytdlp` reclaims precisely its own temp and leaves the rest;
-/// the row's own removal (`clean_staging`) reclaims the directory.
-///
-/// No disarm is needed. Every terminal exit already sweeps the state
-/// file via `sweep_live_capture`, so this is a redundant no-op there; it
-/// only does work when the task was cancelled before reaching one.
-///
-/// **The recorded media is left alone** (`out`, `part`): a user-initiated
-/// Stop adopts a partial recording, so an *involuntary* shutdown must not
-/// destroy hours of captured video. Note the salvage window is the
-/// current session only — the next launch requeues the row, and the
-/// following attempt wipes the shell — so this is "not deleted by the
-/// shutdown", not "preserved for the user indefinitely".
-///
-/// Synchronous `std::fs`: `Drop` cannot await, and a bounded wait here
-/// would be of little use — a killed member can sit at state `Z`
-/// indefinitely under a non-reaping init, so any wait has to give up.
-/// A recorder that is still dying can in principle recreate the state
-/// file after this unlink, but that is self-healing: the next attempt's
-/// per-attempt reset deletes the state path before spawning, so the
-/// residue cannot seed a bad resume.
+/// Removes a live capture's yt-dlp state file on drop (task-abort cleanup; state file only, never staging or media).
+/// No disarm needed (terminal exits already sweep it); sync `std::fs` because `Drop` cannot await.
 pub(crate) struct LiveScratchGuard {
     state: std::path::PathBuf,
 }
@@ -472,63 +339,15 @@ impl Drop for LiveScratchGuard {
     }
 }
 
-/// [`kill_tree`], wait for the child to be reaped, then disarm its
-/// [`ProcessGroupGuard`].
-///
-/// Disarming here is what keeps the guard's PGID from outliving the
-/// process it refers to, for the one path where this helper owns the
-/// wait. A child that exits on its own is reaped by the caller's own
-/// wait arm instead, which must call [`ProcessGroupGuard::disarm`]
-/// itself — see that type's docs for the two obligations and the sites
-/// that carry them.
-///
-/// `kill_tree` only *signals* the group, and says nothing about the
-/// ffmpeg grandchildren in it — only the direct yt-dlp child is reaped
-/// here. A signalled child also stays in the process table as a zombie
-/// until something waits on it, so "the signal was sent" is not the same
-/// as "the recorder is gone". Tokio's orphan queue would reap it
-/// eventually; waiting here settles it while the caller is still in a
-/// position to act on the answer.
-///
-/// The wait is deliberately **unbounded**, and that is a real property to
-/// be aware of: SIGKILL is pending, not a termination deadline, so a
-/// child wedged in uninterruptible I/O (a stuck network write, an fsync
-/// against a dead mount) never exits and this blocks. It is kept that way
-/// because every caller here either adopts, remuxes, or deletes the
-/// scratch this process was writing, and proceeding on a merely
-/// signalled child risks a remux reading a file that is still changing.
-/// Bounding the wait was tried and reverted: it converted these paths
-/// from "wait for the exit" into "proceed after a grace period", which is
-/// a data-integrity regression. Fixing the hang properly means deciding
-/// what an unconfirmed exit should do — quarantining the attempt so a
-/// Retry cannot race the writer — which is a separate design question,
-/// and not something to smuggle in as a timeout.
-///
-/// The wait result is discarded, so a `wait()` that errors leaves the
-/// caller with no verdict: the reap is best-effort, and the guarantee
-/// callers actually get is "the exit has been waited on", not "the exit
-/// was observed to happen". Every caller is on an error or cancel path
-/// either way, and propagating the error without a policy for what to do
-/// next would be a half-applied contract — the same reasoning that
-/// removed an earlier `bool` verdict from this helper.
+/// `kill_tree`, wait for the reap, then disarm the guard.
+/// Deliberately unbounded: proceeding on a merely signalled child risks remuxing a file still being written (do not add a timeout here).
 pub(crate) async fn reap_child(child: &mut tokio::process::Child, group: &mut ProcessGroupGuard) {
     kill_tree(child);
     let _ = child.wait().await;
     group.disarm();
 }
 
-/// Wait until no process remains in `pgid`, bounded.
-///
-/// `reap_child` waits only the direct child, and the group guards *signal*
-/// SIGKILL and return, so task completion is not by itself proof that no
-/// writer remains. `false` means the group did not quiesce in time, and the
-/// caller must treat a writer as possibly still present.
-///
-/// Async for one reason: this runs on the shared runtime, and a blocking
-/// sleep here would park a worker thread for the whole bound. A wedged
-/// group must cost wall-clock time only, never thread time — two parked
-/// threads starve every task scheduled after, which is exactly how a
-/// discard-path wait turns into an unrelated timeout elsewhere.
+/// Wait until no process remains in `pgid`, bounded (`false` = treat a writer as possibly still present).
 #[cfg(target_os = "linux")]
 pub(crate) async fn await_group_quiescence(pgid: i32, timeout: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + timeout;
@@ -548,14 +367,10 @@ pub(crate) async fn await_group_quiescence(pgid: i32, timeout: std::time::Durati
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) async fn await_group_quiescence(_pgid: i32, _timeout: std::time::Duration) -> bool {
-    // No process-group introspection available; the direct-child reap is
-    // the strongest guarantee this platform offers.
     true
 }
 
-/// Join a pipe-drain task with a grace period: a dead child can leave
-/// orphaned grandchildren holding the pipes (ffmpeg spawned by yt-dlp),
-/// and awaiting them bare would hang forever. Falls back to aborting.
+/// Join a pipe-drain with a grace period (orphaned grandchildren can hold pipes open; falls back to abort).
 pub(crate) async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T> {
     let abort = task.abort_handle();
     tokio::select! {
@@ -568,13 +383,7 @@ pub(crate) async fn join_drain<T>(task: tokio::task::JoinHandle<T>) -> Option<T>
     }
 }
 
-/// The finished file of one yt-dlp attempt: the `after_move` path
-/// when it landed under staging, else the largest non-temp file.
-/// Temp suffixes (parts, metadata sidecars) never qualify.
-/// Adopt yt-dlp's finished HLS output: the `--print after_move:filepath`
-/// line when trustworthy, else the largest finished `<stem>.hls.*` file
-/// beside the destination. The fallback is stem-constrained (never the
-/// largest whatever) because the search dir is now the user's folder.
+/// The finished file of one yt-dlp attempt: the `after_move` path when trustworthy, else the largest non-temp file.
 pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Option<PathBuf> {
     let dir = dest.parent().unwrap_or_else(|| Path::new(""));
     let stem = dest
@@ -598,8 +407,7 @@ pub(crate) fn discover_ytdlp_output(dest: &Path, after_move: Option<&str>) -> Op
             p.is_file()
                 && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                     n.starts_with(&prefix)
-                        // Subtitle sidecars (`<stem>.hls.<lang>.srt`) share
-                        // the prefix but are never the media output.
+                        // Subtitle sidecars share the prefix but are never the media output.
                         && !matches!(
                             p.extension().and_then(|e| e.to_str()),
                             Some("part" | "ytdl" | "temp" | "tmp" | "frag" | "srt")
@@ -643,10 +451,6 @@ mod tests {
 
     #[test]
     fn bounded_drain_keeps_draining_after_quota() {
-        // Regression: the drain used to stop reading at the ceiling, so a
-        // child writing past it blocked on a full pipe and the quota
-        // failure degraded into the fetch timeout. The writer below must
-        // finish: the drain keeps consuming into a discard buffer.
         let rt = crate::runtime::tokio_rt();
         rt.block_on(async {
             use tokio::io::AsyncWriteExt as _;

@@ -106,7 +106,6 @@ fn classify_bilibili() {
 
 #[test]
 fn classify_top_up_domains() {
-    // Every allowlisted video domain routes to the extractor.
     for url in [
         "https://www.instagram.com/reel/abc123/",
         "https://www.facebook.com/watch/?v=123",
@@ -141,8 +140,7 @@ fn classify_top_up_domains() {
 
 #[test]
 fn classify_drm_walled_stays_direct() {
-    // DRM services are deliberately NOT listed: routing them would only
-    // promise what the pipeline refuses to fetch.
+    // DRM services stay unlisted: the pipeline refuses to fetch them.
     for url in [
         "https://www.netflix.com/watch/123",
         "https://www.disneyplus.com/video/abc",
@@ -265,8 +263,7 @@ fn test_audio(overrides: serde_json::Value) -> yt_dlp::model::format::Format {
 
 #[test]
 fn audio_prefers_original_over_higher_bitrate_dub() {
-    // Live YouTube shape (auto-dubbed tracks): the Italian 251
-    // outrates the English original, but preference 10 vs -1 wins.
+    // Auto-dub shape: higher-bitrate dub loses to the original's preference.
     let dub = test_audio(serde_json::json!({
         "format_id": "251-20", "abr": 137.475,
         "language": "it", "language_preference": -1,
@@ -310,8 +307,7 @@ fn audio_untagged_beats_explicit_dub() {
 
 #[test]
 fn audio_skips_hls_and_drm_tracks() {
-    // Unfetchable tracks never win, even with top preference: the HLS
-    // preset path below depends on degrading to absent here.
+    // Unfetchable tracks never win; the HLS preset depends on degrading to absent here.
     let hls = test_audio(serde_json::json!({
         "format_id": "h", "protocol": "m3u8_native",
         "language_preference": 10,
@@ -327,8 +323,7 @@ fn audio_skips_hls_and_drm_tracks() {
         select_audio_original_first(&formats).map(|f| f.format_id.as_str()),
         Some("d")
     );
-    // All unfetchable degrades to absent: the HLS preset path depends
-    // on this None, not on skipping to a worse track.
+    // All unfetchable degrades to None for the HLS preset path.
     let formats = vec![
         test_audio(serde_json::json!({"format_id": "h", "protocol": "m3u8_native"})),
         test_audio(serde_json::json!({"format_id": "x", "has_drm": true})),
@@ -385,7 +380,6 @@ fn strip_dedupe_suffix_leaves_titles_alone() {
     // Non-ASCII titles are never split mid-codepoint.
     assert_eq!(strip_dedupe_suffix("Café (2).mp4"), "Café.mp4");
     assert_eq!(strip_dedupe_suffix("watch"), "watch");
-    // Boundary shapes stay untouched.
     assert_eq!(strip_dedupe_suffix("(1)"), "(1)");
     assert_eq!(strip_dedupe_suffix("Clip."), "Clip.");
     assert_eq!(strip_dedupe_suffix(" (1)"), " (1)");
@@ -464,8 +458,7 @@ fn staging_dir_is_under_root() {
 
 #[test]
 fn clean_staging_refuses_outside_root() {
-    // /tmp is NOT under our staging root (/tmp/grab-video), so clean_staging
-    // must not delete anything.
+    // /tmp is outside the staging root, so clean_staging must delete nothing.
     let fake = std::env::temp_dir().join("grab-video-PROMISE-I-WILL-NOT-DELETE");
     std::fs::create_dir_all(&fake).unwrap();
     clean_staging(&fake);
@@ -498,9 +491,7 @@ fn ensure_staging_dir_roundtrip_and_clean() {
 #[cfg(unix)]
 #[test]
 fn ensure_staging_dir_rejects_symlink_escape() {
-    // Pre-planted symlink at the predicted per-item path: creation
-    // follows it, but the canonical check must refuse the escape and
-    // write nothing through the link.
+    // Pre-planted symlink at the item path: creation follows it, but the canonical check must refuse the escape.
     std::fs::create_dir_all(staging_root()).unwrap();
     let outside = std::env::temp_dir().join("grab-video-escape-target");
     let _ = std::fs::remove_dir_all(&outside);
@@ -545,8 +536,7 @@ fn serde_page_round_trip() {
 
 #[test]
 fn serde_page_old_json_gets_defaults() {
-    // Queue files written before quality/format existed must still
-    // parse (quality falls back to 1080p, audio off, no pin).
+    // Pre-quality/format queue files must still parse (fall back to 1080p, audio off, no pin).
     let json = r#"{"Page":{"page_url":"https://vimeo.com/99","media_url":null,"expires_at":null}}"#;
     let back: VideoSource = serde_json::from_str(json).unwrap();
     assert_eq!(
@@ -636,7 +626,6 @@ fn find_in_dirs_none_when_non_executable() {
     std::fs::create_dir_all(&tmp).unwrap();
     let bin = tmp.join("noexec");
     std::fs::write(&bin, b"").unwrap();
-    // mode 0o644 — not executable
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
 
@@ -742,8 +731,7 @@ fn resume_plan_fresh_without_manifest() {
 
 #[test]
 fn resume_plan_resumes_partial_temp() {
-    // A unified temp with bytes under the total resumes in place:
-    // yt-dlp continues its own `.part` shell on the next attempt.
+    // Partial unified temp resumes in place via yt-dlp's own `.part` continuation.
     let dir = test_manifest_dir("partial-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
@@ -756,8 +744,7 @@ fn resume_plan_resumes_partial_temp() {
 
 #[test]
 fn resume_plan_resumes_without_temp() {
-    // Matching manifest but no temp on disk: the same spawn downloads
-    // fresh — no wipe needed, nothing to preserve.
+    // Matching manifest but no temp: same spawn downloads fresh, nothing to wipe.
     let dir = test_manifest_dir("no-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
@@ -769,9 +756,7 @@ fn resume_plan_resumes_without_temp() {
 
 #[test]
 fn unified_temp_limit_math() {
-    // 10% relative plus 8 MiB absolute headroom over the planned total.
-    // (The zero case never occurs on the real path — unknown totals are
-    // `None`, not `Some(0)` — it just pins the floor arithmetic.)
+    // 10% + 8 MiB headroom over total; zero only pins the floor (unknown totals are `None`).
     assert_eq!(unified_temp_limit(0), 8 * 1024 * 1024);
     assert_eq!(unified_temp_limit(150), 150 + 15 + 8 * 1024 * 1024);
     // Saturates instead of overflowing on absurd totals.
@@ -780,10 +765,7 @@ fn unified_temp_limit_math() {
 
 #[test]
 fn resume_plan_resumes_temp_within_merge_margin() {
-    // A temp slightly past the planned total is a plausible merged
-    // output (estimate wobble): resume in place, don't wipe a valid
-    // download. Dense zeros, not set_len: a sparse file would trip
-    // `is_sparse_shell` instead of the branch under test.
+    // Slightly over total is estimate wobble: resume, don't wipe. Dense zeros so `is_sparse_shell` doesn't trigger.
     let dir = test_manifest_dir("merge-margin-temp");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
@@ -796,8 +778,7 @@ fn resume_plan_resumes_temp_within_merge_margin() {
 
 #[test]
 fn resume_plan_resumes_temp_at_limit_boundary() {
-    // Exactly at the bound (`>`, not `>=`) still resumes. Hardcoded
-    // from the 150-byte fixture total: 150 + 15 (10%) + 8 MiB.
+    // Exactly at the bound (`>`, not `>=`) still resumes (150-byte fixture total).
     const AT_LIMIT: usize = 150 + 15 + 8 * 1024 * 1024;
     assert_eq!(AT_LIMIT as u64, unified_temp_limit(150));
     let dir = test_manifest_dir("limit-boundary-temp");
@@ -812,11 +793,7 @@ fn resume_plan_resumes_temp_at_limit_boundary() {
 
 #[test]
 fn resume_plan_fresh_on_overlong_temp() {
-    // A temp far past total + margin is garbage: wipe and start over.
-    // Hardcoded, not derived from the function under test, so a
-    // constants change forces a conscious update here: 150 + 15 (10%)
-    // + 8 MiB + 1 = 8388774. Dense zeros (see above for why not
-    // set_len).
+    // Far past total + margin is garbage: wipe and restart. Hardcoded (8388774) so constant changes force an update here.
     const OVERLONG: usize = 150 + 15 + 8 * 1024 * 1024 + 1;
     assert_eq!(OVERLONG, 8_388_774);
     let dir = test_manifest_dir("overlong-temp");
@@ -846,8 +823,7 @@ fn resume_plan_fresh_on_sparse_temp() {
 
 #[test]
 fn resume_plan_ignores_dest_dir_parts() {
-    // Legacy dest-dir parts (or foreign lookalikes) are invisible to
-    // the unified engine: matching manifest, empty staging, resume.
+    // Legacy dest-dir parts are invisible to the unified engine.
     let dir = test_manifest_dir("legacy-parts");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
@@ -861,8 +837,7 @@ fn resume_plan_ignores_dest_dir_parts() {
 
 #[test]
 fn resume_plan_fresh_without_manifest_despite_temp() {
-    // Bytes without a matching sidecar are unverifiable (pre-sidecar
-    // upgrades, foreign files): wipe and start clean.
+    // Bytes without a matching sidecar are unverifiable: wipe and start clean.
     let dir = test_manifest_dir("unverified");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
@@ -878,13 +853,11 @@ fn resume_plan_fresh_on_selection_change() {
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
     let m = test_manifest();
-    // Same bytes, but the row now wants 1080p: re-download.
     let q = ResumeQuery {
         quality: "1080p",
         ..test_query(Some(&m), &dest, &staging)
     };
     assert_eq!(resume_plan(&q), ResumePlan::Fresh);
-    // Same prefs, but the extractor picked another audio format: re-download.
     let q = ResumeQuery {
         audio: ("250", "webm"),
         ..test_query(Some(&m), &dest, &staging)
@@ -903,8 +876,7 @@ fn resume_plan_finished_when_dest_complete() {
     m.final_bytes = Some(1000);
     let q = test_query(Some(&m), &dest, &staging);
     assert_eq!(resume_plan(&q), ResumePlan::Finished);
-    // Same manifest, foreign file at dest: fall through to the temp
-    // check (absent here) instead of adopting someone else's bytes.
+    // Same manifest but foreign bytes at dest: fall through to the temp check instead.
     std::fs::write(&dest, vec![0u8; 999]).unwrap();
     assert_eq!(resume_plan(&q), ResumePlan::Resume);
     let _ = std::fs::remove_dir_all(&dir);
@@ -912,8 +884,7 @@ fn resume_plan_finished_when_dest_complete() {
 
 #[test]
 fn resume_plan_single_file_identity() {
-    // Adopted single file (muxed direct, no video leg): matching
-    // videoless selection resumes; a stale video expectation restarts.
+    // Adopted videoless single file resumes; a stale video expectation restarts.
     let dir = test_manifest_dir("adopted-single");
     let dest = dir.join("Clip.m4a");
     let staging = test_staging(&dir);
@@ -940,7 +911,7 @@ fn manifest_serde_round_trip() {
     )
     .unwrap();
     assert_eq!(read_manifest(&dir).as_ref(), Some(&m));
-    // Corrupt sidecars read as absent (fresh attempt), never fatal.
+    // Corrupt sidecars read as absent, never fatal.
     std::fs::write(dir.join("manifest.json"), b"{nope").unwrap();
     assert_eq!(read_manifest(&dir), None);
     let _ = std::fs::remove_dir_all(&dir);
@@ -950,11 +921,7 @@ fn manifest_serde_round_trip() {
 
 #[test]
 fn resume_attempt_labels_reresolve_as_resuming() {
-    // A parked row keeps its staging manifest across attempts: the
-    // re-resolve phase must read "Resuming download…" rather than
-    // "Resolving media…", since the bytes are kept and only the probe is
-    // fresh. The probe itself fails here (dumb fakes) — harmless: the
-    // first phase is sent before any probing starts.
+    // Parked row keeps its staging manifest, so re-resolve reads "Resuming download…". Probe fails on dumb fakes; harmless.
     let dir = std::env::temp_dir().join(format!("grab-resume-label-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let libs = dir.join("xdg").join("grab").join("libs");
@@ -971,8 +938,6 @@ fn resume_attempt_labels_reresolve_as_resuming() {
     let _env = ScopedEnv::apply("/nonexistent-grab-test", &dir.join("xdg"));
 
     let item_id = 900_000 + std::process::id() as u64;
-    // Simulate the parked row: the previous attempt's manifest survives
-    // in staging.
     let staging = staging_dir(item_id);
     std::fs::create_dir_all(&staging).unwrap();
     std::fs::write(
@@ -1064,8 +1029,7 @@ fn pipeline_reports_missing_tools() {
         tx,
     ));
     assert!(matches!(res, Err(VideoError::MissingLibraries(_))));
-    // Nothing else was sent: resolving never started without the tools.
-    // The abandoned (empty) staging dir is the caller's to drop.
+    // Resolving never started; the abandoned empty staging dir is the caller's to drop.
     assert!(rx.try_recv().is_err());
     drop(rx);
     clean_staging(&staging_dir(item_id));
@@ -1099,9 +1063,7 @@ fn preview_fresh_matches_round_trip() {
 
 #[test]
 fn preview_fresh_accepts_canonical_drift() {
-    // Extractor canonicalized youtu.be → youtube.com/watch: the stored
-    // page URL differs from the typed text, but the round-trip key
-    // matches, so Add must proceed instead of re-resolving forever.
+    // Canonicalized youtu.be → youtube.com still matches, so Add proceeds instead of re-resolving.
     let info = Some(test_video_info("https://www.youtube.com/watch?v=x"));
     assert!(preview_fresh(
         &info,
@@ -1113,13 +1075,11 @@ fn preview_fresh_accepts_canonical_drift() {
 #[test]
 fn preview_fresh_rejects_stale_and_empty() {
     let info = Some(test_video_info("https://vimeo.com/1"));
-    // User edited the URL after resolving: not fresh.
     assert!(!preview_fresh(
         &info,
         "https://vimeo.com/1",
         "https://vimeo.com/2"
     ));
-    // Nothing resolved yet.
     assert!(!preview_fresh(
         &None,
         "https://vimeo.com/1",
@@ -1166,8 +1126,7 @@ fn parse_playlist_reads_flat_entries() {
     // Float durations truncate like the video path.
     assert_eq!(pl.items[0].duration, Some(61));
     assert_eq!(pl.items[0].index, 1);
-    // Empty title falls back to the id; missing playlist_index falls
-    // back to the position.
+    // Empty title falls back to id; missing index falls back to position.
     assert_eq!(pl.items[1].title, "b2");
     assert_eq!(pl.items[1].page_url, "https://example.com/v/b2");
     assert_eq!(pl.items[1].index, 3);
@@ -1211,13 +1170,11 @@ fn story_tray_url_extracts_owner_tray() {
         story_tray_url("https://www.instagram.com/stories/someuser/12345678901234567/"),
         Some("https://www.instagram.com/stories/someuser/".to_string())
     );
-    // Same without the trailing slash.
     assert_eq!(
         story_tray_url("https://www.instagram.com/stories/someuser/12345678901234567"),
         Some("https://www.instagram.com/stories/someuser/".to_string())
     );
-    // Tray URLs, highlights, non-story Instagram pages, other hosts and
-    // junk have nothing to retarget.
+    // Tray URLs, highlights, non-story pages, other hosts and junk have nothing to retarget.
     assert_eq!(
         story_tray_url("https://www.instagram.com/stories/someuser/"),
         None
@@ -1236,8 +1193,7 @@ fn story_tray_url_extracts_owner_tray() {
 
 #[test]
 fn insta_shortcode_to_pk_matches_ytdlp_vector() {
-    // Known pair from yt-dlp's own instagram tests
-    // (`instagram://media?id=482584233761418119` ↔ `aye83DjauH`).
+    // Known yt-dlp vector: `aye83DjauH` ↔ 482584233761418119.
     assert_eq!(
         insta_shortcode_to_pk("aye83DjauH"),
         Some(482584233761418119)
@@ -1267,8 +1223,7 @@ fn story_segment_url_points_at_the_segment() {
         ),
         Some("https://www.instagram.com/stories/fruits_zipper/482584233761418119/".to_string())
     );
-    // Highlights, non-story links and undecodable ids fall back to the
-    // tray + entry-id selection in the worker.
+    // Highlights, non-story links and undecodable ids fall back to tray + entry-id selection.
     assert_eq!(
         story_segment_url(
             "https://www.instagram.com/stories/highlights/18090946048123978/",
@@ -1291,23 +1246,17 @@ fn story_segment_url_points_at_the_segment() {
 
 #[test]
 fn insta_shortcode_rejects_overflow_and_unicode() {
-    // 14 max-digit chars overflow u64: None (tray fallback), never wrap.
+    // Overflow, non-ASCII, overlong and all-zero codes return None, never wrap/panic/split mid-codepoint.
     assert_eq!(insta_shortcode_to_pk(&"_".repeat(14)), None);
-    // Non-ASCII input: None, never a panic. The long case uses a
-    // 3-byte char so the old byte-index cut would land mid-codepoint.
     assert_eq!(insta_shortcode_to_pk("é"), None);
     assert_eq!(insta_shortcode_to_pk(&"€".repeat(10)), None);
-    // Long ASCII junk with the suffix strip still decodes or rejects
-    // without panicking; overlong codes fail closed to the tray path.
     assert_eq!(insta_shortcode_to_pk(&"A".repeat(64)), None);
-    // All-zero decode is not a real media id.
     assert_eq!(insta_shortcode_to_pk("A"), None);
 }
 
 #[test]
 fn insta_shortcode_pins_dash_underscore_order() {
-    // The known vector has no `-`/`_`; pin their positions explicitly
-    // (yt-dlp table ends `...89-_`).
+    // Known vector lacks `-`/`_`; pin positions explicitly (table ends `...89-_`).
     assert_eq!(insta_shortcode_to_pk("-"), Some(62));
     assert_eq!(insta_shortcode_to_pk("_"), Some(63));
     assert_eq!(insta_shortcode_to_pk("A-"), Some(62));
@@ -1337,8 +1286,7 @@ fn retarget_story_items_points_entries_at_tray() {
 
 #[test]
 fn retarget_story_items_leaves_highlights_alone() {
-    // A highlight *is* the collection: its items are not addressable as
-    // live stories, so the collection URL stands.
+    // A highlight *is* the collection, so the collection URL stands.
     let hl_url = "https://www.instagram.com/stories/highlights/18090946048123978/";
     let mut pl = parse_playlist_json(
         &playlist_json(
@@ -1391,16 +1339,13 @@ fn pick_playlist_entry_finds_picked_story() {
     let value = story_tray_json();
     let entry = pick_playlist_entry(&value, Some("s2")).expect("picked entry");
     assert_eq!(entry.get("id").and_then(|id| id.as_str()), Some("s2"));
-    // No persisted pick: nothing to select.
     assert!(pick_playlist_entry(&value, None).is_none());
-    // Expired stories vanish from the tray.
     assert!(pick_playlist_entry(&value, Some("gone")).is_none());
 }
 
 #[test]
 fn picked_story_entry_parses_as_single_video() {
-    // The entry the worker selects must survive the single-video parse
-    // (sanitization iterates its keys) and land in the Video model.
+    // The worker-selected entry must survive the single-video parse into the Video model.
     let value = story_tray_json();
     let entry = pick_playlist_entry(&value, Some("s1")).expect("picked entry");
     let video = parse_single_video(entry).expect("video");
@@ -1422,8 +1367,7 @@ fn playlist_resolve_error_distinguishes_expired_from_routing_bug() {
 
 #[test]
 fn parse_playlist_ignores_null_entries() {
-    // A private/deleted playlist reports entries: null; the probe must
-    // fall through to the single-video path instead of erroring here.
+    // Null entries (private/deleted) fall through to the single-video path instead of erroring.
     let value = serde_json::json!({
         "_type": "playlist",
         "id": "PL9",
@@ -1436,8 +1380,7 @@ fn parse_playlist_ignores_null_entries() {
 
 #[test]
 fn parse_playlist_prefers_webpage_url() {
-    // YouTube flat entries carry the video id in `url`: only an http(s)
-    // value may serve as the page URL.
+    // Flat entries carry the bare id in `url`: only http(s) values serve as page URL.
     let value = playlist_json(
         serde_json::json!([
             {"id": "a1", "title": "A", "url": "a1", "webpage_url": "https://www.youtube.com/watch?v=a1"},
@@ -1537,9 +1480,7 @@ fn fake_tool(dir: &std::path::Path, name: &str, first_line: &str) -> std::path::
     path
 }
 
-/// Fake ffmpeg that behaves like the real one: only single-dash
-/// `-version` works, `--version` exits 8. Guards the flag plumbing that
-/// once broke every video attempt while the fakes stayed green.
+/// Fake ffmpeg like the real one: only `-version` works. Guards the flag plumbing that once broke every attempt while fakes stayed green.
 fn fake_ffmpeg_strict(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("ffmpeg");
     std::fs::write(
@@ -1598,23 +1539,17 @@ fn ensure_tool_versions_refuses_missing_binary() {
 
 #[test]
 fn default_video_filename_carries_no_video_id() {
-    // The id used to ride along in the name as `Title [abc123].mp4`. It is
-    // metadata, not a name: the source URL lands in the file's `comment`
-    // tag via --embed-metadata, so the id is still recoverable after the
-    // file leaves Grab, and a media manager can read it there.
+    // No id in the name: the source URL in the `comment` tag keeps it recoverable.
     assert_eq!(default_video_filename("Clip", false, None), "Clip.mp4");
     assert_eq!(default_video_filename("Clip", true, None), "Clip.m4a");
-    // Untouched otherwise: sanitizing is the intake's job. Note `a/b`
-    // survives here, so this is still not a safe path -- the intake folds
-    // it before the name reaches disk.
+    // Sanitizing is the intake's job: `a/b` survives here, so this is still not a safe path.
     assert_eq!(default_video_filename("a/b", false, None), "a/b.mp4");
     assert_eq!(default_video_filename("", true, None), ".m4a");
 }
 
 #[test]
 fn default_video_filename_remux_ext() {
-    // Remux target decides the video extension so the worker doesn't
-    // claim matroska bytes under an mp4 name; audio-only ignores it.
+    // Remux target decides the video extension; audio-only ignores it.
     assert_eq!(
         default_video_filename("Clip", false, Some("mkv")),
         "Clip.mkv"
@@ -1659,8 +1594,7 @@ fn container_truth_name_corrects_stale_ext() {
         container_truth_name(Path::new("/dl/.mp4"), Path::new("/st/grab-media.webm")),
         None
     );
-    // Multi-dot stems keep everything but the last extension; the rule
-    // is container-agnostic within the allowlist.
+    // Multi-dot stems keep everything but the last extension.
     assert_eq!(
         container_truth_name(
             Path::new("/dl/my.clip.v2.mp4"),
@@ -1814,9 +1748,7 @@ fn video_format_options_lists_best_per_height() {
         ),
     ]));
     let opts = video_format_options(&video, true);
-    // Newest codec wins each height (AV1 over AVC1 at 720p despite the
-    // smaller file, VP9 over AVC1 at 1080p); audio-only, HLS, DRM and
-    // muxed never list; tallest first.
+    // Newest codec wins each height; audio-only, HLS, DRM and muxed never list; tallest first.
     assert_eq!(
         opts.iter().map(|o| o.id.as_str()).collect::<Vec<_>>(),
         ["v1080-vp9", "v720-av01", "v360-vp9"]
@@ -1877,9 +1809,7 @@ fn hls_selection_prefers_capped_height() {
         test_format_full("https", "avc1", "none", Some(720), None, "https", false),
     ]))
     .unwrap();
-    // Closest at or above the cap; tallest when capped above all.
-    // Selections carry the format id so runners pin the exact variant
-    // instead of re-delegating to yt-dlp's sort.
+    // Closest at or above the cap; tallest when capped above all. Selections carry the id so runners pin the variant.
     let sel = select_hls_format(&formats, Some(720)).expect("hls");
     assert_eq!(sel.format_id, "h1080");
     assert_eq!(
@@ -1920,8 +1850,7 @@ fn explicit_nulls_parse_to_defaults() {
 
 #[test]
 fn hls_format_spec_names_height_and_pin() {
-    // bv* leads so direct muxed files win over lower splits; the
-    // trailing /b still catches audio-only pages.
+    // bv* leads so direct muxed files win; trailing /b catches audio-only pages.
     assert_eq!(hls_format_spec("best", None), "bv*+ba/b");
     assert_eq!(hls_format_spec("1080p", None), "bv*[height<=1080]+ba/b");
     assert_eq!(hls_format_spec("mystery", None), "bv*[height<=1080]+ba/b");
@@ -1950,8 +1879,7 @@ fn ytdlp_template_parses_absolute_counts() {
     let p = parse_ytdlp_template("[Grab];finished;52428800;52428800;52428800;NA;0").expect("done");
     assert_eq!(p.downloaded, Some(52428800));
     assert_eq!(parse_ytdlp_template("[Grab];error;NA;NA;NA;NA;NA"), None);
-    // Foreign lines never parse — including bare paths, so the
-    // after_move sniffer keeps working.
+    // Foreign lines never parse, including bare paths, so the after_move sniffer keeps working.
     assert_eq!(parse_ytdlp_template("[download] 45.2% of 50MiB"), None);
     assert_eq!(parse_ytdlp_template("[Merger] Merging"), None);
     assert_eq!(parse_ytdlp_template("[info] x"), None);
@@ -1966,7 +1894,6 @@ fn ytdlp_template_parses_absolute_counts() {
     );
     assert_eq!(parse_ytdlp_after_move("[download] 10%"), None);
     assert_eq!(parse_ytdlp_after_move(""), None);
-    // Absolute template counts need no unit table: exact bytes in/out.
     let p = parse_ytdlp_template("[Grab];downloading;805306368;1610612736;1610612736;1048576;768")
         .expect("progress");
     assert_eq!(p.downloaded, Some(805306368));
@@ -2000,9 +1927,7 @@ fn leg_changed_ignores_wobble_restarts_legs() {
         9_000_000,
         Some(4_100_000)
     ));
-    // HLS estimate wobble with climbing bytes: growth and partial
-    // drops are the same file, never a restart (this used to clear
-    // the block map every few fragments while the bar stayed put).
+    // HLS estimate wobble with climbing bytes is the same file, never a restart (used to clear the block map).
     assert!(!leg_changed(
         Some(9_000_000),
         1_000_000,
@@ -2015,8 +1940,7 @@ fn leg_changed_ignores_wobble_restarts_legs() {
         14_600_000,
         Some(8_200_000)
     ));
-    // New leg (audio after video): much smaller total AND downloaded
-    // back near zero.
+    // New leg (audio after video): much smaller total AND downloaded back near zero.
     assert!(leg_changed(
         Some(19_000_000),
         19_000_000,
@@ -2036,8 +1960,7 @@ fn leg_changed_ignores_wobble_restarts_legs() {
         2_000_000,
         Some(18_900_000)
     ));
-    // Bigger second leg with reset bytes restarts on a fresh grid
-    // instead of flood-filling the old one.
+    // Bigger second leg with reset bytes restarts on a fresh grid.
     assert!(leg_changed(
         Some(19_000_000),
         19_000_000,
@@ -2051,8 +1974,7 @@ fn leg_changed_ignores_wobble_restarts_legs() {
         40_000_000,
         Some(19_000_000)
     ));
-    // Unknown bytes count as reset: a leg's first lines may carry no
-    // count yet, while a stable total never restarts regardless.
+    // Unknown bytes count as reset; a stable total never restarts regardless.
     assert!(leg_changed(Some(19_000_000), 19_000_000, 2_000_000, None));
     assert!(!leg_changed(Some(19_000_000), 8_000_000, 19_000_000, None));
 }
@@ -2250,10 +2172,8 @@ fn ytdlp_update_available_compares_releases() {
 
 #[test]
 fn sparse_x_com_json_parses_to_video() {
-    // x.com omits top-level scalars (live_status, …) and ships sparse
-    // nested objects; every one of those used to abort the preview with
-    // a missing-field JSON error. Unread arrays are dropped, formats get
-    // neutral defaults, and the full model parse succeeds.
+    // x.com omits top-level scalars and ships sparse nested objects; every
+    // one used to abort the preview with a missing-field JSON error.
     let mut v = serde_json::json!({
         "id": "abc",
         "title": "T",
@@ -2296,10 +2216,8 @@ fn sparse_x_com_json_parses_to_video() {
 
 #[test]
 fn cookies_browser_spec_falls_back_to_bare_name() {
-    // Hermetic: point the host config lookup at an empty dir so no real
-    // browser profile on the dev machine leaks into the assertion. With
-    // nothing on disk the spec stays the bare name and yt-dlp falls back
-    // to its own $HOME-relative lookup (correct outside Flatpak).
+    // Hermetic: an empty config dir, so no real dev-machine profile leaks into
+    // the assertion and the spec stays the bare name yt-dlp resolves itself.
     let dir = std::env::temp_dir().join(format!("grab-nocookies-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join(".config")).unwrap();
@@ -2314,10 +2232,9 @@ fn cookies_browser_spec_falls_back_to_bare_name() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Scoped HOST_XDG_CONFIG_HOME override, restored on drop. Serial suite
-/// only: the environment is process-global (same precedent as ScopedEnv).
-/// Setting it also pins the derived home dir (its parent), so profile
-/// resolution stays hermetic without touching the real home.
+/// Scoped HOST_XDG_CONFIG_HOME override (its derived home dir is pinned
+/// too), restored on drop. Serial suite only: env is process-global, same
+/// precedent as ScopedEnv.
 struct ScopedHostConfig {
     saved: Option<std::ffi::OsString>,
 }
@@ -2553,8 +2470,7 @@ fn cookies_browser_spec_pins_chromium_profile_path() {
 // ── tool search order ────────────────────────────────────────────────
 
 /// Scoped PATH + XDG_DATA_HOME override, restored on drop. Serial suite
-/// only: the environment is process-global (same precedent as the queue
-/// file and NoVideoTools helpers).
+/// only: the environment is process-global (see the queue-file helper).
 struct ScopedEnv {
     path: Option<std::ffi::OsString>,
     xdg: Option<std::ffi::OsString>,
@@ -2601,10 +2517,8 @@ fn fake_executable(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 
 #[test]
 fn user_installed_tools_win_over_bundle() {
-    // User dir holds our own binaries, PATH leads nowhere (in particular
-    // the Flatpak bundle dir is absent on a dev host): resolution must
-    // find the user copies. On a Flatpak system this same order lets a
-    // user Update override the bundle.
+    // User dir holds our own binaries, PATH leads nowhere (no Flatpak bundle
+    // on a dev host); same order lets a user Update override the bundle.
     let dir = std::env::temp_dir().join(format!("grab-userlibs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let libs = dir.join("xdg").join("grab").join("libs");
@@ -2621,9 +2535,8 @@ fn user_installed_tools_win_over_bundle() {
 
 #[test]
 fn toolchain_dir_prefers_complete_toolchain() {
-    // A dir with only ffmpeg (e.g. an older Grab user-lib install) must
-    // not shadow a later dir that ships both ffmpeg and ffprobe:
-    // yt-dlp resolves ffprobe from --ffmpeg-location alone.
+    // A dir with only ffmpeg (an older user-lib install) must not shadow a
+    // later dir shipping both: yt-dlp resolves ffprobe from --ffmpeg-location.
     let base = std::env::temp_dir().join(format!("grab-toolchain-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let lone = base.join("lone");
@@ -2775,9 +2688,8 @@ fn plan_pinned_hls_wins_over_muxed_adoption() {
 
 #[test]
 fn plan_muxed_only_still_adopts_without_pin() {
-    // No pin, no splits: the muxed file adopts as before (precedence
-    // over the HLS preset is unchanged) — but at the requested height,
-    // not first-in-extractor-order.
+    // No pin, no splits: the muxed file adopts as before (HLS precedence
+    // unchanged) — but at the requested height, not first-in-extractor-order.
     let video = x_like_video();
     let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.video_sel.is_none());
@@ -2788,8 +2700,7 @@ fn plan_muxed_only_still_adopts_without_pin() {
 #[test]
 fn plan_muxed_adoption_honors_height_cap() {
     // First-in-order used to win regardless of quality (x.com lists
-    // ascending, so Best match downloaded the lowest). Now the cap
-    // picks smallest-at-or-above, tallest when nothing qualifies.
+    // ascending); the cap now picks smallest-at-or-above, tallest if none.
     let video = test_video(serde_json::json!([
         test_format_full(
             "m320",
@@ -2908,9 +2819,8 @@ fn plan_hls_preset_still_serves_hls_only_pages() {
 
 #[test]
 fn plan_audio_only_request_reaches_hls() {
-    // Audio-only on an HLS-only page (no direct audio anywhere) must
-    // yield the HLS variant for the extract path — never fail the row
-    // as unavailable.
+    // Audio-only on an HLS-only page must yield the HLS variant for the
+    // extract path — never fail the row as unavailable.
     let video = test_video(serde_json::json!([
         test_format_full(
             "h480",
@@ -2946,9 +2856,7 @@ fn quality_for_height_buckets() {
     assert_eq!(quality_for_height(1080), "1080p");
     assert_eq!(quality_for_height(720), "720p");
     assert_eq!(quality_for_height(480), "480p");
-    // Odd extractor heights round to the closest bucket (ties up), and
-    // everything outside clamps — so the result is always a recognized
-    // stored value, never a silent 1080p fallback.
+    // Odd heights round to the closest bucket (ties up); out-of-range clamps, so the result is always recognized.
     assert_eq!(quality_for_height(632), "720p");
     assert_eq!(quality_for_height(900), "1080p");
     assert_eq!(quality_for_height(100), "480p");
@@ -2965,9 +2873,7 @@ fn quality_for_height_buckets() {
 
 #[test]
 fn hls_selection_ignores_extractor_order() {
-    // Tallest first (the order some extractors emit): the cap must still
-    // resolve to the smallest height at or above it, not the first
-    // qualifying entry.
+    // Tallest-first extractor order must still resolve to the smallest height at or above the cap.
     let formats: Vec<yt_dlp::model::format::Format> = serde_json::from_value(serde_json::json!([
         test_format_full(
             "h1080",
@@ -3050,8 +2956,7 @@ fn part_fallback_specs() {
     assert_eq!(part_fallback_spec("720p", true, false), "bv*[height<=720]");
     assert_eq!(part_fallback_spec("best", true, false), "bv*");
     assert_eq!(part_fallback_spec("720p", false, true), "ba/b");
-    // Adopted single files degrade to best-single, never a bare audio
-    // track; genuine audio legs prefer audio.
+    // Adopted singles degrade to best-single, never bare audio; genuine audio legs prefer audio.
     assert_eq!(part_fallback_spec("720p", false, false), "b");
 }
 
@@ -3059,8 +2964,7 @@ fn part_fallback_specs() {
 
 #[test]
 fn fetch_video_page_parses_dump_json() {
-    // Fake yt-dlp emitting --dump-single-json bytes: proves the direct
-    // spawn, concurrent drain and parse path without network.
+    // Fake yt-dlp emitting dump JSON: proves spawn, drain and parse without network.
     let dir = std::env::temp_dir().join(format!("grab-fakeextract-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3108,8 +3012,7 @@ fn fetch_video_page_parses_dump_json() {
 
 #[test]
 fn identity_args_order_and_trim() {
-    // Player-client workaround, cookies, trimmed UA, then `--` + page:
-    // identical for every spawn.
+    // Player-client workaround, cookies, trimmed UA, then `--` + page, identical every spawn.
     let argv = ytdlp_identity_args("none", Some("  Grab/1  "), "https://x.com/u/status/1");
     assert_eq!(
         argv,
@@ -3137,9 +3040,7 @@ fn identity_args_order_and_trim() {
 
 #[test]
 fn identity_args_excludes_web_player_client() {
-    // The SABR workaround must survive on every spawn: the extractor-arg
-    // pair is always present and always precedes `--`, so the page URL
-    // can never swallow it.
+    // SABR workaround survives every spawn: extractor-arg pair always precedes `--`.
     let argv = ytdlp_identity_args("firefox", None, "https://youtu.be/abc");
     let pos = argv
         .iter()
@@ -3151,8 +3052,7 @@ fn identity_args_excludes_web_player_client() {
 
 // ── best-overall muxed vs HLS ────────────────────────────────────────
 
-/// Direct muxed files top out below the tallest HLS variant (the
-/// x.com shape that Best match undershot before the override).
+/// Direct muxed files top out below the tallest HLS variant (the x.com shape Best undershot before the override).
 fn muxed_below_hls_video() -> yt_dlp::model::Video {
     test_video(serde_json::json!([
         test_format_full(
@@ -3205,13 +3105,11 @@ fn plan_best_prefers_taller_hls_over_muxed() {
 
 #[test]
 fn plan_cap_blocks_taller_hls() {
-    // Capped 720p: the 1080p variant exceeds the cap, so the direct
-    // 720p file stands.
+    // Capped 720p leaves the direct 720p file standing; capped 1080p lets the taller variant win.
     let video = muxed_below_hls_video();
     let plan = plan_streams(&video, "720p", false, None, true, 1);
     assert_eq!(plan.audio_sel.expect("adopted").format_id, "m720");
     assert!(plan.hls_sel.is_none());
-    // Capped 1080p: the variant is within cap and taller, so it wins.
     let plan = plan_streams(&video, "1080p", false, None, true, 1);
     assert!(plan.audio_sel.is_none());
     assert_eq!(plan.hls_sel.expect("hls wins").height, Some(1080));
@@ -3242,8 +3140,7 @@ fn test_options() -> Vec<VideoFormatOption> {
 #[test]
 fn default_quality_index_preselects() {
     let opts = test_options();
-    // Best (and empty listings) stay on the first row, which lists
-    // tallest first.
+    // Best and empty listings stay on the first (tallest-first) row.
     assert_eq!(default_quality_index(&opts, "best"), 0);
     assert_eq!(default_quality_index(&[], "720p"), 0);
     // Otherwise the closest listed height wins, 0-based.
@@ -3297,9 +3194,7 @@ fn live_test_job() -> VideoJob {
 fn live_argv_pins_planner_id_in_mpegts() {
     let job = live_test_job();
     let out = std::path::Path::new("/tmp/staging/live.mp4");
-    // The planner-resolved id rides along verbatim: yt-dlp's sort never
-    // gets a second vote (its ie_pref/quality/source tiebreaks can
-    // shadow height).
+    // Planner-resolved id rides along verbatim; yt-dlp's sort never gets a second vote.
     let argv = live_capture_argv(&job, "h1080", out);
     let f = argv.iter().position(|a| a == "-f").expect("has -f");
     assert_eq!(argv[f + 1], "h1080+ba/b");
@@ -3308,15 +3203,13 @@ fn live_argv_pins_planner_id_in_mpegts() {
         argv.windows(2)
             .any(|w| w == ["--fragment-retries", "infinite"])
     );
-    // No live-from-start (record-now means the live edge) and no
-    // unbounded wait loop.
+    // Record-now means the live edge: no live-from-start, no unbounded wait loop.
     assert!(!argv.iter().any(|a| a == "--live-from-start"));
     assert!(!argv.iter().any(|a| a == "--wait-for-video"));
     let o = argv.iter().position(|a| a == "-o").expect("has -o");
     assert_eq!(argv[o + 1], "/tmp/staging/live.mp4");
     assert_eq!(argv[argv.len() - 2], "--");
     assert_eq!(argv[argv.len() - 1], "https://x.com/u/status/1");
-    // Pins ride along in the capture spec.
     let mut pinned = live_test_job();
     pinned.video_format_id = Some("h720".into());
     let argv = live_capture_argv(&pinned, "h720", out);
@@ -3364,12 +3257,7 @@ fn live_remux_argv_copies_with_fixup_and_carries_provenance() {
 
 #[test]
 fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
-    // The live leg is the one path yt-dlp's `--embed-metadata` cannot
-    // cover: it must not post-process a capture that is still growing, so
-    // Grab remuxes the reaped bytes itself. Since the id is no longer in
-    // the filename, this pass is the only place the live recording can
-    // carry its provenance -- and MPEG-TS input has no usable global
-    // metadata to copy, so it has to be set explicitly.
+    // yt-dlp can't post-process a growing capture, so Grab remuxes itself: this is the only provenance pass, set explicitly.
     let argv = live_remux_argv(
         std::path::Path::new("/tmp/st/live.mp4.part"),
         std::path::Path::new("/tmp/st/final.mp4"),
@@ -3409,8 +3297,7 @@ fn live_remux_argv_stamps_the_source_url_so_the_id_survives() {
     );
 }
 
-/// Fake yt-dlp for live: emits one progress line, writes the `.part`
-/// shell (or fails barren for the stale-URL case).
+/// Fake yt-dlp for live: emits one progress line, writes the `.part` shell (or fails barren).
 fn fake_ytdlp_live(dir: &std::path::Path, fail: bool) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live");
     std::fs::write(
@@ -3479,8 +3366,7 @@ fn live_capture_adopts_part_and_remuxes() {
     job.dest = dir.join("v.mp4");
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (_abort_tx, abort_rx) = tokio::sync::oneshot::channel::<crate::video::StopIntent>();
-    // Natural end (fake exits 0) with a `.part` shell: adopted,
-    // remuxed, delivered.
+    // Natural end with a `.part` shell: adopted, remuxed, delivered.
     let res = crate::runtime::tokio_rt().block_on(run_live_ytdlp(
         &fake_yt,
         &fake_ff,
@@ -3496,8 +3382,7 @@ fn live_capture_adopts_part_and_remuxes() {
     assert!(matches!(res, Ok(Some(_))), "got {res:?}");
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"tsbytes");
     assert!(!staging.exists(), "staging cleaned");
-    // The row must leave Resolving the moment capture starts, even
-    // before any bytes flow.
+    // The row must leave Resolving the moment capture starts.
     let phases: Vec<String> = {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
@@ -3545,10 +3430,7 @@ fn live_capture_empty_fails_with_detail() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp for an abortable capture: records a partial immediately,
-/// then sleeps (simulating an ongoing live edge) until killed. Also
-/// writes the `.ytdl` downloader-state file that real yt-dlp keeps
-/// beside its `-o` target for fragment (live) downloads.
+/// Fake yt-dlp for an abortable capture: records a partial, writes the `.ytdl` state file, then sleeps until killed.
 fn fake_ytdlp_slow(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-slow");
     std::fs::write(
@@ -3577,9 +3459,7 @@ sleep 60
 
 #[test]
 fn live_capture_stale_staging_never_adopts() {
-    // A crashed run's leftover must not pose as a fresh capture: the
-    // attempt wipes staging first, so a barren run fails instead of
-    // delivering stale bytes.
+    // Crashed-run leftovers are wiped first, so a barren run fails instead of delivering stale bytes.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-stale-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
@@ -3610,10 +3490,7 @@ fn live_capture_stale_staging_never_adopts() {
 
 #[test]
 fn live_capture_refuses_existing_dest() {
-    // Overwrite pre-flight (Parabolic parity): a finished file already
-    // at dest makes the final rename claim impossible, so the capture
-    // must refuse before recording — no spawn, no part shell, and the
-    // pump's DEST_EXISTS path requeues under a fresh name.
+    // Overwrite pre-flight: a finished file at dest refuses before recording, requeueing under a fresh name.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-ow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3651,11 +3528,7 @@ fn live_capture_refuses_existing_dest() {
 
 #[test]
 fn live_capture_refusal_reclaims_stale_scratch() {
-    // A crashed run can leave this stem's `live.` shell and state file
-    // behind. The requeued row carries a *fresh* name, so nothing would
-    // ever sweep that old stem again: the refusal is the last chance to
-    // reclaim it. The finished file at dest is not part of the part
-    // namespace and must survive untouched.
+    // Crashed stem's shell would never be swept again (requeue uses a fresh name): the refusal is the last chance to reclaim it.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-reclaim-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3703,8 +3576,7 @@ fn live_capture_refusal_reclaims_stale_scratch() {
 
 #[test]
 fn live_capture_abort_adopts_partial() {
-    // User stop mid-capture: the kill lands, the recorded partial is
-    // adopted and remuxed, the row completes Done.
+    // User stop mid-capture: recorded partial is adopted and remuxed, row completes Done.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-abort-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3719,10 +3591,7 @@ fn live_capture_abort_adopts_partial() {
         let state = dir.join("v.live.mp4.ytdl");
         let seen = dir.join("abort-saw-state");
         tokio::spawn(async move {
-            // Wait for the fake to actually write its state file before
-            // stopping the capture: a fixed sleep would race the write on
-            // a loaded machine and pass vacuously. The marker proves the
-            // fixture really produced the file the sweep is asserted on.
+            // Wait for the state file before stopping: a fixed sleep would race and pass vacuously.
             let mut observed = false;
             for _ in 0..200 {
                 if state.exists() {
@@ -3755,15 +3624,12 @@ fn live_capture_abort_adopts_partial() {
         "abort must complete Done, got {res:?}"
     );
     assert_eq!(std::fs::read(&job.dest).unwrap(), b"partial");
-    // The fixture must really have produced the state file, or the
-    // sweep assertion below would pass vacuously.
+    // The fixture must really have produced the state file, or the sweep assertion passes vacuously.
     assert!(
         dir.join("abort-saw-state").exists(),
         "fixture never wrote the .ytdl before the abort: test is vacuous"
     );
-    // A killed yt-dlp never removes its own `.ytdl` downloader-state
-    // file, so the post-capture sweep owns it: a killed capture must
-    // leave nothing beside the finished file.
+    // A killed yt-dlp never removes its `.ytdl` file, so the post-capture sweep owns it.
     assert!(
         !dir.join("v.live.mp4.ytdl").exists(),
         "killed capture left its .ytdl state file behind"
@@ -3775,10 +3641,7 @@ fn live_capture_abort_adopts_partial() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp that records a `.part` shell plus a `.ytdl` state file
-/// and exits cleanly (the state file is what a *killed* real yt-dlp
-/// would strand; the clean exit here just makes the fixture compact —
-/// the sweep must own it either way).
+/// Fake yt-dlp that records `.part` + `.ytdl` and exits cleanly (the sweep must own the stranded state either way).
 fn fake_ytdlp_live_with_state(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-state");
     std::fs::write(
@@ -3805,11 +3668,7 @@ exit 0
     bin
 }
 
-/// Fake ffmpeg that always fails: exercises the live path's remux
-/// error branch.
-/// Fake ffmpeg that fails, optionally after writing a partial output.
-/// The partial is the interesting case: the sweep is no longer recursive,
-/// so this path has to remove its own temp explicitly.
+/// Fake ffmpeg that fails, optionally after writing a partial output (which the non-recursive sweep must remove itself).
 fn fake_ffmpeg_fail(dir: &std::path::Path, partial: bool) -> std::path::PathBuf {
     let bin = dir.join("fake-ffmpeg-fail");
     let body = if partial {
@@ -3834,11 +3693,7 @@ exit 1
 
 #[test]
 fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
-    // A failed remux is the one live-capture exit where the recorded
-    // media is the only copy of what the user captured, so the shell
-    // must survive for salvage. The yt-dlp state file is pure scratch
-    // and always goes: a stale one would make the next attempt resume
-    // fragments against a shell Grab wipes before every attempt.
+    // Failed remux keeps the shell (only copy for salvage) but drops the `.ytdl` scratch.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-remuxfail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3872,11 +3727,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
         "the recording is the only copy: it must survive a failed remux"
     );
     assert!(!job.dest.exists(), "no file is delivered on a failed remux");
-    // A failed ffmpeg can leave a partial `final.<n>.mp4` behind. It is
-    // not a completed recording, so it is worth nothing to the user, and
-    // the sweep is no longer recursive -- so this path has to remove its
-    // own temp explicitly or the partial would linger for the row's
-    // whole lifetime.
+    // A failed ffmpeg can leave a partial `final.<n>.mp4`: worthless, and the non-recursive sweep must remove it.
     assert!(
         !staging.exists(),
         "a failed remux left its partial remux temp in staging"
@@ -3884,8 +3735,7 @@ fn live_capture_remux_failure_sweeps_state_but_keeps_recording() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp that records nothing but still writes a state file: the
-/// barren startup exit must not strand it.
+/// Fake yt-dlp that records nothing but still writes a state file (barren exit must not strand it).
 fn fake_ytdlp_live_barren_with_state(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-barren-state");
     std::fs::write(
@@ -3912,9 +3762,7 @@ exit 0
 
 #[test]
 fn live_capture_barren_start_sweeps_state_file() {
-    // A barren run records nothing, but yt-dlp may still have written
-    // its state file before the stream produced bytes. Nothing is
-    // salvageable here, so the state file must not outlive the row.
+    // Barren run records nothing: the state file must not outlive the row.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-barren-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -3946,9 +3794,7 @@ fn live_capture_barren_start_sweeps_state_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake ffmpeg that remuxes normally but first plants a file at the
-/// final destination, simulating another writer claiming the name
-/// between the capture's overwrite pre-flight and its final rename.
+/// Fake ffmpeg that remuxes normally but first plants a file at dest, simulating a mid-capture name claim.
 fn fake_ffmpeg_racing_dest(
     dir: &std::path::Path,
     dest: &std::path::Path,
@@ -3989,11 +3835,7 @@ exit 0
 
 #[test]
 fn live_capture_lost_rename_race_sweeps_state() {
-    // The pre-flight refuses an occupied dest, but the name can be
-    // claimed mid-capture: the final rename then fails and the row
-    // requeues under a fresh name. The requeued attempt records again,
-    // so the shell is redundant, but yt-dlp's state file is scratch
-    // either way and must not be left to seed a bad resume.
+    // Mid-capture name claim fails the final rename and requeues; shell is redundant, state is scratch.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-race-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4024,9 +3866,7 @@ fn live_capture_lost_rename_race_sweeps_state() {
         !dir.join("v.live.mp4.ytdl").exists(),
         "lost rename race left its .ytdl state file behind"
     );
-    // The row re-records under a fresh name, so this capture's shell
-    // is redundant: both media paths must go, or the requeued attempt
-    // trips over them.
+    // The row re-records under a fresh name, so both media paths must go.
     assert!(
         !dir.join("v.live.mp4").exists(),
         "lost rename race left the finished capture shell behind"
@@ -4047,15 +3887,8 @@ fn live_capture_lost_rename_race_sweeps_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake ffmpeg that remuxes normally, then replaces the destination
-/// *directory* with a regular file so the final rename fails with
-/// ENOTDIR.
-///
-/// The trigger is structural, never a permission bit: CI runs this suite
-/// as root inside `container: fedora:44`, where `CAP_DAC_OVERRIDE` makes
-/// a read-only mode a no-op. A chmod-based fixture passes unprivileged
-/// and silently delivers the file on CI. A type mismatch fails the
-/// rename for every caller, privileged or not.
+/// Fake ffmpeg that remuxes, then replaces the dest directory with a file so the rename fails with ENOTDIR.
+/// Structural trigger, never a permission bit: CI runs as root, where chmod is a no-op.
 fn fake_ffmpeg_breaking_dest_dir(dest_dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dest_dir
         .parent()
@@ -4096,11 +3929,7 @@ exit 0
 #[cfg(target_os = "linux")]
 #[test]
 fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
-    // The real runner, not a stand-in. Two things an earlier version of
-    // this check got wrong: asserting only that the *timeout* returned
-    // (which an inner error also satisfies), and checking only the group
-    // leader (a direct-child kill passes that while leaving a descendant
-    // alive -- and a descendant is exactly what an ffmpeg would be).
+    // Real runner: assert the full nested result and both leader + descendant, not just the timeout or leader.
     let dir = std::env::temp_dir().join(format!("grab-discardreal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4148,8 +3977,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
 
     let leader = read_pid(&pidfile);
     let mut cleanup = GroupCleanup(Some(leader));
-    // Assert the full nested result: an inner Err, or a JoinError, must
-    // fail here rather than read as "the timeout returned".
+    // Assert the full nested result: inner Err/JoinError must fail here, not read as a timeout.
     let outcome = crate::runtime::tokio_rt()
         .block_on(async { tokio::time::timeout(std::time::Duration::from_secs(30), task).await });
     let inner = outcome
@@ -4182,9 +4010,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
         "the fixture never reported its descendant, so this cannot prove the \
          whole group died"
     );
-    // "Can no longer execute", on both: a SIGKILLed process becomes a
-    // zombie and stays visible until something reaps it, which is PID 1's
-    // policy, not the code's. A zombie is dead.
+    // Oracle is "can no longer execute": SIGKILLed processes stay visible as zombies until reaped. A zombie is dead.
     let mut leader_dead = false;
     let mut descendant_dead = false;
     crate::runtime::tokio_rt().block_on(async {
@@ -4211,11 +4037,7 @@ fn a_discard_signal_reaps_the_whole_recorder_group_and_delivers_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake ffmpeg that announces itself, then blocks until the test releases
-/// the remux. A fixed sleep stands in for an ordering guarantee: a delayed
-/// sender can miss the window and the stop lands after the remux is done,
-/// passing without proving anything. A release the test creates only after
-/// the discard was sent cannot be missed.
+/// Fake ffmpeg that blocks until the test releases the remux. The release file is the ordering guarantee a sleep can't give.
 fn fake_ffmpeg_release_signalled(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ffmpeg-release-signalled");
     let marker = dir.join("ffmpeg-started");
@@ -4252,16 +4074,11 @@ exit 0
 
 #[test]
 fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
-    // The window the recorder-wait select cannot cover. A capture that
-    // ends on its own has already passed that select, so a removal arriving
-    // during the remux must claim the gate: the stop prompt alone sits
-    // unread in the oneshot, and only the pre-rename commit arbitrates
-    // delivery now. The gate CAS is the linearization point that closes it.
+    // Removal during remux must claim the gate: the stop prompt sits unread, so only the pre-rename commit arbitrates delivery.
     let dir = std::env::temp_dir().join(format!("grab-discardremux-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    // A recorder that finishes on its own, so the capture ends without any
-    // stop: the discard can then only be observed after the select.
+    // A recorder that finishes on its own, so the discard lands after the select.
     let fake_yt = fake_ytdlp_live(&dir, false);
     let fake_ff = fake_ffmpeg_release_signalled(&dir);
     let staging = dir.join("staging");
@@ -4290,13 +4107,9 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
                     let _ = stop_tx.send(StopIntent::Discard);
-                    // The removal itself: the prompt above is unread this
-                    // late, so only the gate claim stops the delivery.
+                    // The prompt is unread this late, so only the gate claim stops delivery.
                     let _ = gate.discard();
-                    // Unblock the remux only after the discard was sent, so
-                    // the removal provably landed mid-remux. Unconditional:
-                    // without a remux waiting this is a harmless file, and
-                    // without it a missed marker would hang the run.
+                    // Unblock only after the discard, so the removal provably landed mid-remux.
                     let _ = std::fs::write(&release, b"release");
                 }
             });
@@ -4334,11 +4147,7 @@ fn a_discard_that_lands_mid_remux_still_delivers_nothing() {
 
 #[test]
 fn a_non_live_sweep_keeps_a_live_recordings_remux() {
-    // The live path leaves `final.<n>.<ext>` in the row's staging when it
-    // cannot place a recording, and a retry may resolve through VOD or HLS
-    // instead. That leg used to finish with `remove_dir_all(staging)`,
-    // destroying the preserved recording -- #178's whole point, undone by
-    // a route change.
+    // A rerouted retry shares staging with the live path: the finishing leg must step around the unplaceable recording (#178).
     let dir = std::env::temp_dir().join(format!("grab-sweepscope-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
@@ -4365,8 +4174,7 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
         "the finishing leg's own scratch was not reclaimed"
     );
 
-    // With the recordings gone the directory itself is reclaimed, so an
-    // idle row does not leave a directory behind in temp forever.
+    // With the recordings gone the directory itself is reclaimed.
     std::fs::remove_file(staging.join("final.1.mp4")).unwrap();
     std::fs::remove_file(staging.join("final.1.mp4.lease")).unwrap();
     sweep_staging_preserving_recordings(&staging);
@@ -4379,11 +4187,7 @@ fn a_non_live_sweep_keeps_a_live_recordings_remux() {
 
 #[test]
 fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
-    // Retention can only be bounded if a completed recording is
-    // distinguishable from the debris of a crash. A remux therefore
-    // writes `final.<n>.<ext>.part` and is renamed to `final.<n>.<ext>`
-    // only once ffmpeg succeeded -- so a `.part` is worthless by
-    // construction and can be swept, while a real capture never is.
+    // A remux writes `final.<n>.<ext>.part` and renames only on success, so partials are sweepable by construction.
     let dir = std::env::temp_dir().join(format!("grab-partialremux-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
@@ -4423,8 +4227,7 @@ fn a_crashed_remux_leaves_only_a_partial_and_it_is_reclaimable() {
 
 #[test]
 fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
-    // The rename is the whole mechanism: until it happens the file is a
-    // `.part` and any sweep may take it.
+    // The rename is the mechanism: until then the file is a sweepable `.part`.
     let dir = std::env::temp_dir().join(format!("grab-remuxrename-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4456,13 +4259,7 @@ fn a_successful_live_remux_is_only_named_final_once_ffmpeg_succeeds() {
 
 #[test]
 fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
-    // #179's overlap hazard, and the reason the dest-side sweep is
-    // deferred rather than done inline during `remove`. A new row may
-    // claim the same filename the moment the old row's scratch is gone, so
-    // the reservation has to hold for the whole teardown. It does, without
-    // any new mechanism: the recorder's shell sits in the part namespace
-    // for exactly as long as the worker is alive, and intake already
-    // refuses a stem that hosts part files.
+    // #179 overlap: the recorder's shell reserves the stem until teardown, so a new row can't claim the filename.
     let dir = std::env::temp_dir().join(format!("grab-stemreserve-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4495,9 +4292,7 @@ fn a_live_capture_in_flight_keeps_its_destination_stem_reserved() {
 
 #[test]
 fn a_failed_live_remux_leaves_no_partial_behind() {
-    // The mirror: a failure must not leave a file a later sweep has to
-    // reason about, and must not leave a half-written file that looks
-    // like a recording.
+    // A failure must leave no half-written file that looks like a recording.
     let dir = std::env::temp_dir().join(format!("grab-remuxfail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4532,12 +4327,8 @@ fn a_failed_live_remux_leaves_no_partial_behind() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake recorder that writes a caller-chosen payload, so two attempts
-/// on the same row can be told apart in the filesystem.
-/// Write an executable fake at `path`. Kept separate from the fake
-/// constructors so a test can place one outside the destination
-/// directory -- several fixtures replace that directory with a file, so
-/// anything written into it afterwards would fail.
+/// Fake recorder that writes a caller-chosen payload, so two attempts on the same row can be told apart.
+/// Write an executable fake at `path`; kept separate so tests can place one outside the dest dir.
 fn write_fake(path: &std::path::Path, body: &str) -> std::path::PathBuf {
     std::fs::write(path, body).unwrap();
     #[cfg(unix)]
@@ -4548,8 +4339,7 @@ fn write_fake(path: &std::path::Path, body: &str) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
-/// A live recorder that writes `payload` into its `.part` shell and a
-/// state sidecar, then exits cleanly.
+/// A live recorder that writes `payload` into its `.part` shell and a state sidecar, then exits cleanly.
 fn fake_ytdlp_live_payload(
     dir: &std::path::Path,
     bin_name: &str,
@@ -4576,19 +4366,7 @@ exit 0
 
 #[test]
 fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
-    // The bug: every attempt remuxed into the same `staging/final.<ext>`
-    // and its cleanup wiped the whole directory, so a retry destroyed the
-    // previous attempt's completed recording -- the only copy of a
-    // capture that could not be placed.
-    //
-    // Attempt 1 cannot place its recording (the destination stops being a
-    // directory, so the final rename fails with ENOTDIR), the obstruction
-    // clears, and attempt 2 succeeds. Attempt 1's recording must survive.
-    //
-    // The trigger is structural, never a permission bit: CI runs this
-    // suite as root in `container: fedora:44`, where CAP_DAC_OVERRIDE
-    // makes a read-only mode a no-op, so a chmod fixture would silently
-    // deliver instead of failing.
+    // Retry used to remux into the same `staging/final.<ext>` and wipe the dir, destroying the prior recording. Structural ENOTDIR trigger (CI runs as root).
     let base = std::env::temp_dir().join(format!("grab-retryremux-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("dest");
@@ -4673,11 +4451,7 @@ fn a_successful_retry_leaves_the_previous_attempts_remux_alone() {
 
 #[test]
 fn a_remux_slot_is_claimed_exactly_once() {
-    // Picking a "free" name by scanning is check-then-use: two attempts
-    // that overlap could both see slot 1 free, and the loser's cleanup
-    // would then unlink the winner's completed recording. The lease makes
-    // the claim atomic, and must also fail rather than return a slot that
-    // is already occupied.
+    // Scan-then-claim races: the lease makes the slot claim atomic.
     let dir = std::env::temp_dir().join(format!("grab-remuxslot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let staging = dir.join("staging");
@@ -4690,8 +4464,7 @@ fn a_remux_slot_is_claimed_exactly_once() {
         "the slot must be claimed with a lease, not merely observed free"
     );
 
-    // A second claim cannot land on the same slot, even though the temp
-    // file itself does not exist yet.
+    // A second claim cannot land on the same slot, even without a temp file yet.
     let second = reserve_remux_temp(&staging, "mp4").unwrap();
     assert_eq!(second.file_name().unwrap(), "final.2.mp4");
     assert_ne!(second, first, "two claims shared one remux slot");
@@ -4710,10 +4483,7 @@ fn a_remux_slot_is_claimed_exactly_once() {
 
 #[test]
 fn a_sweep_never_removes_another_attempts_remux() {
-    // The cleanup has to stop being recursive. A pre-existing completed
-    // remux from an earlier attempt is the user's only copy of that
-    // capture, so an attempt that fails before it even remuxes must not
-    // take it out along with the directory.
+    // A failing attempt must not sweep an earlier attempt's completed remux (the only copy).
     let base = std::env::temp_dir().join(format!("grab-othersremux-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let dir = base.join("dest");
@@ -4723,7 +4493,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
     let survivor = staging.join("final.1.mp4");
     std::fs::write(&survivor, b"earlier-attempt").unwrap();
 
-    // A barren attempt: records nothing, so it never reaches the remux.
+    // A barren attempt records nothing, so it never reaches the remux.
     let fake_yt = fake_ytdlp_live_barren_with_state(&dir);
     let fake_ff = fake_ffmpeg_copy(&dir);
     let mut job = live_test_job();
@@ -4753,15 +4523,7 @@ fn a_sweep_never_removes_another_attempts_remux() {
 
 #[test]
 fn live_capture_rename_failure_keeps_completed_remux() {
-    // A final rename that fails is not a requeue: the row keeps failing
-    // and nothing re-records, so the *completed* remux in staging is the
-    // user's only copy of a finished file. Sweeping staging here would
-    // silently destroy it, which is the regression this pins.
-    //
-    // The raw shell is not asserted here: the fixture destroys the dest
-    // directory to trigger the failure, taking the shell with it. The
-    // "failure keeps recorded media" policy is covered where the media
-    // survives the trigger, in the remux-failure test.
+    // A failed rename is not a requeue: the completed remux in staging is the only copy, so sweeping would destroy it.
     let base =
         std::env::temp_dir().join(format!("grab-fakelive-renamefail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -4787,9 +4549,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
         std::time::Duration::from_secs(30),
         tx,
     ));
-    // Must be the rename-failure branch specifically. A requeue would
-    // pass the error check above while sweeping the very file this
-    // guards, so distinguish them.
+    // Must be the rename-failure branch: a requeue would sweep the very file this guards.
     match res {
         Err(e) => assert_ne!(
             e.to_string(),
@@ -4808,11 +4568,7 @@ fn live_capture_rename_failure_keeps_completed_remux() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Fake yt-dlp for the live-edge retry: a barren first attempt (state
-/// file only, no media) that forces the downgrade, then a second
-/// attempt which records whether a stale `.ytdl` was still sitting
-/// beside its output — the fragment-resume hazard the per-attempt
-/// reset exists to prevent.
+/// Fake yt-dlp for the live-edge retry: barren first attempt forces the downgrade; second records whether stale `.ytdl` survived.
 fn fake_ytdlp_live_retry(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-retry");
     std::fs::write(
@@ -4854,11 +4610,7 @@ exit 0
 
 #[test]
 fn live_capture_retry_never_inherits_stale_state() {
-    // The from-start attempt records nothing, so the worker downgrades
-    // to the live edge and retries. The retry's per-attempt reset wipes
-    // the output and `.part` shell, so any `.ytdl` left behind would
-    // make yt-dlp resume fragment 3 against a shell that no longer
-    // exists — a corrupt recording, not just litter.
+    // A stale `.ytdl` would resume fragment 3 against a wiped shell: corrupt recording, not litter.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-retry-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -4903,12 +4655,7 @@ fn live_capture_retry_never_inherits_stale_state() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake recorder that reports its own pid, lays down the scratch a real
-/// live capture writes, then blocks. Aborting the task that owns it
-/// simulates `DownloadManager::shutdown`.
-///
-/// Linux-only like its two callers: the pid/group oracles need procfs, so
-/// elsewhere this would be dead code.
+/// Fake recorder that reports its pid, lays scratch, then blocks (aborting the owner simulates shutdown). Linux-only: needs procfs.
 #[cfg(target_os = "linux")]
 fn fake_ytdlp_live_abortable(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-abortable");
@@ -4949,13 +4696,7 @@ exit 0
     bin
 }
 
-/// Test-only: SIGKILLs a process group on drop, so a failing abort test
-/// cannot leave a 600s orphan behind in CI. Separate from the production
-/// guard because that one is created from a live `Child` and this one is
-/// created from a pid read out of a fixture file.
-///
-/// Disarm it once the group is observed gone, so the harness cannot
-/// signal a PGID the kernel has already handed to something else.
+/// Test-only group SIGKILL on drop, so a failing abort test leaves no 600s orphan. Disarm once gone, so no recycled PGID is signalled.
 #[cfg(target_os = "linux")]
 struct GroupCleanup(Option<libc::pid_t>);
 
@@ -4978,24 +4719,12 @@ impl Drop for GroupCleanup {
     }
 }
 
-/// Whether a pid can still execute: present in `/proc` *and* not a
-/// zombie.
-///
-/// A SIGKILLed process is dead the moment the signal lands, but it stays
-/// in the process table as a zombie until it is reaped, and reaping an
-/// orphan is PID 1's policy rather than anything this crate controls. So
-/// "the pid still exists" is the wrong oracle — it fails under a
-/// container whose init never reaps. Reading the scheduler state instead
-/// asks the question that actually matters: can this process run again?
-///
-/// Fails closed: only a `NotFound` read means dead. An unreadable or
-/// unparseable `/proc` returns "still running", so a missing procfs
-/// cannot make every process look killed and pass the assertion.
+/// Whether a pid can still execute: in `/proc` and not a zombie. Zombies stay visible until reaped, so pid-existence is the wrong oracle.
+/// Fails closed: only `NotFound` reads as dead, so missing procfs can't fake a kill.
 #[cfg(target_os = "linux")]
 fn still_running(pid: libc::pid_t) -> bool {
     match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        // `pid (comm) state ...`, and `comm` may contain spaces and
-        // parens, so the state is the first field after the *last* ')'.
+        // `comm` may contain spaces/parens, so state follows the last ')'.
         Ok(stat) => match stat.rsplit_once(')') {
             Some((_, rest)) => !rest.trim_start().starts_with('Z'),
             None => true,
@@ -5005,13 +4734,7 @@ fn still_running(pid: libc::pid_t) -> bool {
     }
 }
 
-/// The oracle itself: an exited-but-unreaped child must read as dead.
-///
-/// This is the condition that broke CI. A child that has exited but not
-/// been waited on is a zombie — it holds its pid until reaped, and is
-/// never scheduled again. `std::process::Child` does not reap on drop, so
-/// simply not calling `wait()` here reproduces a non-reaping-init
-/// environment exactly, without needing one.
+/// Oracle check: an exited-but-unreaped zombie must read as dead (the condition that broke CI).
 #[cfg(target_os = "linux")]
 #[test]
 fn an_unreaped_exited_child_reads_as_dead() {
@@ -5020,9 +4743,7 @@ fn an_unreaped_exited_child_reads_as_dead() {
         .spawn()
         .unwrap();
     let pid = child.id() as libc::pid_t;
-    // Poll for the zombie state rather than sleeping a fixed amount: on a
-    // loaded worker the child may not have exited yet, and "not a zombie
-    // yet" must not be mistaken for "dead".
+    // Poll for zombie state: a fixed sleep could mistake "not exited yet" for "dead".
     let mut state = None;
     for _ in 0..500 {
         state = scheduler_state(pid);
@@ -5052,20 +4773,16 @@ fn an_unreaped_exited_child_reads_as_dead() {
     let _ = child.wait();
 }
 
-/// The scheduler state letter from `/proc/<pid>/stat`, or `None` when the
-/// process is gone. `None` for any unreadable/unparseable procfs too, so
-/// this is only ever used to *confirm* a state, never to infer one.
+/// Scheduler state from `/proc/<pid>/stat`, or `None` when gone/unreadable (only ever confirms a state, never infers one).
 #[cfg(target_os = "linux")]
 fn scheduler_state(pid: libc::pid_t) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // `pid (comm) state ...`; comm may contain spaces and parens, so the
-    // state is the first field after the last ')'.
+    // State follows the last ')' since comm may contain spaces/parens.
     let (_, rest) = stat.rsplit_once(')')?;
     rest.trim_start().chars().next()
 }
 
-/// Read a pid a fixture wrote, panicking if it is missing or malformed.
-/// Keeps the "wait until the fake is really up" polling readable.
+/// Read a fixture-written pid, panicking if missing/malformed.
 #[cfg(target_os = "linux")]
 fn read_pid(path: &std::path::Path) -> libc::pid_t {
     for _ in 0..200 {
@@ -5079,18 +4796,11 @@ fn read_pid(path: &std::path::Path) -> libc::pid_t {
     panic!("{} never appeared or held a pid", path.display());
 }
 
-// Linux-gated: the "dead or just an unreaped zombie" oracle needs /proc.
-// Elsewhere it degrades to a pid-existence probe that cannot tell the two
-// apart, which would be environment-dependent again.
+// Linux-gated: the zombie oracle needs /proc; elsewhere pid-existence can't tell them apart.
 #[cfg(target_os = "linux")]
 #[test]
 fn aborting_a_live_capture_kills_the_recorder() {
-    // `DownloadManager::shutdown` aborts every running task, which drops
-    // the future mid-await. Tokio does *not* kill a child when its handle
-    // drops, so without a Drop guard the recorder — and any ffmpeg it
-    // started in the same process group — outlives the app and keeps
-    // writing to the capture. This asserts the whole call site, so it can
-    // only pass if production actually installs the guard.
+    // Tokio doesn't kill a child on handle drop, so shutdown needs a Drop guard killing the whole group.
     let dir = std::env::temp_dir().join(format!("grab-abortlive-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -5125,12 +4835,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
         }
     });
 
-    // Wait for the fake to actually be up before aborting: aborting a
-    // not-yet-spawned task would pass vacuously. The leader pid is read
-    // first and the cleanup guard installed immediately, so any failure
-    // from here on cannot leave the group running behind in CI. Both pids
-    // are needed: the leader alone cannot tell a group kill from a
-    // direct-child kill.
+    // Wait until the fake is up before aborting: aborting a not-yet-spawned task passes vacuously. Both pids prove a group kill.
     let leader = read_pid(&pidfile);
     let mut cleanup = GroupCleanup(Some(leader));
     let childpid_file = dir.join("recorder-child-pid");
@@ -5157,18 +4862,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
         let _ = recorder.await;
     });
 
-    // `killpg` is signalled synchronously from the drop, but delivery and
-    // termination are asynchronous, so poll. The oracle is "can no longer
-    // execute", checked on *both* the group leader and the descendant: a
-    // direct-child kill (kill_on_drop, start_kill, kill(pid)) satisfies a
-    // leader-only check while leaving the descendant running.
-    //
-    // Deliberately not "the pid is gone": a SIGKILLed process becomes a
-    // zombie and stays in the process table until something reaps it, and
-    // for an orphan that is PID 1's policy, not the code's. A container
-    // whose init does not reap promptly leaves the pid visible forever —
-    // which is exactly how this test passed locally and failed in CI. A
-    // zombie is dead: it will never run another instruction.
+    // Poll both leader and descendant for "can no longer execute"; pid-absence is the wrong oracle (zombies stay visible).
     let mut leader_dead = false;
     let mut descendant_dead = false;
     crate::runtime::tokio_rt().block_on(async {
@@ -5181,8 +4875,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     });
-    // Assert before disarming: if either process is still live the guard
-    // must stay armed so its drop reaps the 600s fixture on the way out.
+    // Assert before disarming, so the guard still reaps the 600s fixture on failure.
     assert!(
         leader_dead,
         "the recorder (pid {leader}) can still run after the abort of its task: an \
@@ -5197,21 +4890,13 @@ fn aborting_a_live_capture_kills_the_recorder() {
     cleanup.disarm();
     drop(cleanup);
 
-    // File half of the same abort. The recorded media is deliberately kept:
-    // a user-initiated Stop adopts a partial, so an involuntary shutdown
-    // must not destroy hours of captured video. The state file is scratch
-    // that actively corrupts a later attempt, so it must not outlive the
-    // row.
+    // File half: partial media is kept, scratch state must go, nothing is delivered.
     assert!(
         !dir.join("v.live.mp4.ytdl").exists(),
         "the abort left yt-dlp's state file behind: a later attempt would resume \
          fragment N against a shell Grab wipes first, producing a corrupt recording"
     );
-    // Staging is deliberately NOT swept on an abort. A `Staging::Keep`
-    // exit parks a completed remux there as the user's only copy, a Retry
-    // reuses the same dir, and a blanket sweep from the retry would
-    // delete it — the parked file occupies the same name this path
-    // writes, so the two cannot be told apart.
+    // Staging is NOT swept on abort: it may park a completed remux another attempt reuses.
     assert!(
         staging.exists(),
         "staging must be left alone on an abort: a blanket sweep would destroy a \
@@ -5229,10 +4914,7 @@ fn aborting_a_live_capture_kills_the_recorder() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake recorder that stays blocked for the whole test, so the only
-/// thing that can end it is the group kill under test. The sleep is far
-/// longer than any plausible test: a recorder that outlived its own
-/// assertion would let a broken kill pass.
+/// Fake recorder that stays blocked, so only the group kill under test can end it.
 fn fake_sleeper(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-sleeper");
     std::fs::write(&bin, "#!/bin/sh\nsleep 600\n").unwrap();
@@ -5247,23 +4929,13 @@ fn fake_sleeper(dir: &std::path::Path) -> std::path::PathBuf {
 #[cfg(unix)]
 #[test]
 fn reap_child_reaps_the_signalled_child() {
-    // `kill_tree` only *signals* the process group. Nothing reaps the
-    // child until something waits on it, and a signalled-but-unreaped
-    // child lingers as a zombie: gone from the scheduler, but still
-    // occupying a pid, so `kill(pid, 0)` still reports success. Only a
-    // completed wait drains it and frees the pid (ESRCH).
-    //
-    // The primary oracle is `child.id()`, checked before anything else
-    // touches the child: tokio clears the cached pid only once a wait has
-    // fused the exit status, and `try_wait` reaps an exited child itself
-    // — so asking it first would make this assertion self-fulfilling.
+    // Signalling isn't reaping: an unreaped child lingers as a zombie holding its pid until waited on (ESRCH).
     let dir = std::env::temp_dir().join(format!("grab-fakesleeper-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let sleeper = fake_sleeper(&dir);
 
-    // Spawn inside the runtime: tokio's process API needs a reactor for
-    // both `spawn` and `wait`.
+    // Spawn inside the runtime: tokio's process API needs a reactor.
     let pid = crate::runtime::tokio_rt().block_on(async {
         let mut child = ytdlp_command(&sleeper).spawn().unwrap();
         let pid = child.id().expect("freshly spawned child has a pid") as libc::pid_t;
@@ -5274,9 +4946,7 @@ fn reap_child_reaps_the_signalled_child() {
             "the child was signalled but never waited on: its pid is still cached. \
              A SIGKILLed `sleep` exits at once, so the reap must have returned"
         );
-        // reap_child disarms for the caller. A guard left armed here would
-        // hold a PGID whose leader no longer exists, and the test's own
-        // teardown drop would signal whatever inherited that number.
+        // reap_child disarms: the reaped PGID is no longer ours to signal.
         assert!(
             !group.is_armed(),
             "reap_child must disarm the group guard: the reaped leader's PGID \
@@ -5285,13 +4955,8 @@ fn reap_child_reaps_the_signalled_child() {
         pid
     });
 
-    // Supplementary, from outside tokio: the pid is genuinely released,
-    // not just forgotten. Unlike `child.id()`, this one is not race-free —
-    // a pid recycled to an unrelated process in the gap would read as
-    // "still present". That window is a few instructions wide, so this is
-    // corroboration for the primary oracle, never a replacement.
-    // SAFETY: signal 0 is the documented existence probe — it performs
-    // error checking and delivers nothing.
+    // Supplementary pid probe: corroboration only, not race-free (pid could recycle in the gap).
+    // SAFETY: signal 0 only probes existence.
     let probe = unsafe { libc::kill(pid, 0) };
     assert_eq!(
         probe, -1,
@@ -5306,10 +4971,7 @@ fn reap_child_reaps_the_signalled_child() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp emitting a scripted progress stream: tiny first total,
-/// growth past it, then a downward estimate wobble with climbing bytes
-/// (the stuck-full shape from a real 104 MB HLS row). Finishes by
-/// writing the `-o` output and printing its path (what discover adopts).
+/// Fake yt-dlp for the stuck-full row: scripted wobble, then writes `-o` output and prints its path.
 fn fake_ytdlp_hls_scripted(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls-scripted");
     std::fs::write(
@@ -5343,11 +5005,7 @@ exit 0
 
 #[test]
 fn hls_map_survives_estimate_wobble() {
-    // Block-map regression test for the stuck-full row: tiny first
-    // total, refined-up growth, then a downward wobble with climbing
-    // bytes must leave the map at the true fraction (~46%), not flood
-    // it to full. Replays the EngineMsg stream onto a bitmap with the
-    // row's own replace-on-init semantics.
+    // Stuck-full regression: downward wobble must leave the map at ~46%, not flood it.
     use crate::engine_msg::EngineMsg;
     let dir = std::env::temp_dir().join(format!("grab-fakehls-wobble-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -5384,10 +5042,9 @@ fn hls_map_survives_estimate_wobble() {
             _ => {}
         }
     }
-    // One init for the first total, one rescale past it — the downward
-    // wobble must not rebuild the grid.
+    // One init per total; the downward wobble must not rebuild the grid.
     assert_eq!(inits, vec![2_000_000u64, 100_000_000u64], "{inits:?}");
-    // 46 MB of 100 MB: marked cells over the live grid size, never ~full.
+    // 46 MB of 100 MB: marked cells over live grid, never ~full.
     let cells = 100_000_000u64.div_ceil(crate::file_names::piece_len(100_000_000)) as f64;
     let frac = marked.len() as f64 / cells;
     assert!(
@@ -5398,8 +5055,7 @@ fn hls_map_survives_estimate_wobble() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp for VOD HLS: logs argv, expands the `-o` template's
-/// `%(ext)s`, writes bytes there (what discover adopts).
+/// Fake yt-dlp for VOD HLS: logs argv, expands `%(ext)s`, writes bytes for discover.
 fn fake_ytdlp_hls(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-hls");
     std::fs::write(
@@ -5428,8 +5084,7 @@ exit 0
 
 #[test]
 fn vod_hls_pins_planner_variant_id() {
-    // Best-match with no dialog pin must still download the planner's
-    // pick verbatim — never yt-dlp's sort order.
+    // Best-match with no pin still downloads the planner's pick verbatim.
     let dir = std::env::temp_dir().join(format!("grab-fakehls-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -5478,9 +5133,7 @@ fn vod_hls_pins_planner_variant_id() {
         "the HLS leg delivered a file without recording it: the orphan \
          finalizer would never know to reclaim it"
     );
-    // argv log lands next to the dest-dir template (`v.hls.%(ext)s`):
-    // parts download beside the finished file, never into staging.
-    // (The fake logs to dirname(-o) + ".argv.log", i.e. beside `dir`.)
+    // Parts download beside the finished file, never into staging.
     let logged = std::fs::read_to_string(dir.with_extension("argv.log")).unwrap();
     assert!(logged.contains("v.hls."), "{logged}");
     let f = logged
@@ -5497,10 +5150,7 @@ fn vod_hls_pins_planner_variant_id() {
 
 #[test]
 fn vod_hls_refuses_existing_dest() {
-    // Overwrite pre-flight for the VOD HLS path: an existing finished
-    // file must be refused before yt-dlp transfers anything, so the
-    // pump requeues under a fresh name instead of downloading the whole
-    // stream into a doomed claim.
+    // Existing finished file refuses before transfer, so the pump requeues under a fresh name.
     let dir = std::env::temp_dir().join(format!("grab-fakehls-ow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -5570,8 +5220,7 @@ fn format_selection_line_detection() {
 
 #[test]
 fn format_lines_survive_split_reads() {
-    // A selection line split across 4 KiB reads still traces (no
-    // panic, no loss): drive the scanner the way the pumps do.
+    // A selection line split across reads still traces without loss.
     let mut pending = String::new();
     trace_format_lines(&mut pending, b"[info] abc: Download");
     assert_eq!(pending, "[info] abc: Download");
@@ -5583,9 +5232,7 @@ fn format_lines_survive_split_reads() {
 
 #[test]
 fn hls_format_spec_rejects_hostile_pins() {
-    // A hostile pinned id must not widen the yt-dlp format set: `,`,
-    // `[]` and `()` all change set semantics. Rejected pins fall
-    // through to the height rule instead of failing the row.
+    // Hostile pins (`,`, `[]`, `()`) fall through to the height rule instead of widening `-f`.
     assert_eq!(
         hls_format_spec("1080p", Some("hls-99,hls-720")),
         "bv*[height<=1080]+ba/b"
@@ -5607,9 +5254,7 @@ fn hls_format_spec_rejects_hostile_pins() {
 
 #[test]
 fn picker_label_sanitizes_remote_codec() {
-    // Extractor-controlled codec strings render as plain text but must
-    // not spoof rows: bidi overrides, newlines and oversized values
-    // are stripped to label-safe chars (max 16).
+    // Remote codec strings strip bidi/newlines to label-safe chars (max 16), so rows can't be spoofed.
     let video = test_video(serde_json::json!([test_format_full(
         "evil",
         "avc1\u{202e}gnp8001\u{000a}FREE",
@@ -5622,7 +5267,7 @@ fn picker_label_sanitizes_remote_codec() {
     let opts = video_format_options(&video, true);
     assert_eq!(opts.len(), 1);
     assert_eq!(opts[0].label, "720p · avc1gnp8001FREE");
-    // Empty-after-filter degrades to the placeholder, never an empty tag.
+    // Empty-after-filter degrades to the placeholder.
     let video = test_video(serde_json::json!([test_format_full(
         "weird",
         "...",
@@ -5638,9 +5283,7 @@ fn picker_label_sanitizes_remote_codec() {
 
 #[test]
 fn plan_unknown_adoption_is_first_match() {
-    // Restored semantics: the Unknown fallback takes the first
-    // fetchable video container in extractor order, not the tallest.
-    // Two sparse candidates pin that ordering down.
+    // Unknown fallback takes the first fetchable container in extractor order, not the tallest.
     let video = test_video(serde_json::json!([
         serde_json::json!({
             "format": "low",
@@ -5667,11 +5310,7 @@ fn plan_unknown_adoption_is_first_match() {
 
 #[test]
 fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
-    // Pins are not restricted to listed ids: a stale persisted pin to
-    // a fetchable-but-unlisted split (here v1080-avc loses the 1080
-    // slot to v1080-vp9 on the codec tie-break, so it never lists)
-    // resolves through find_usable_format as a split paired with
-    // audio — never an adoption, never a failure.
+    // Stale pins to unlisted-but-fetchable splits resolve as splits paired with audio.
     let video = test_video(serde_json::json!([
         test_format_full("v1080-vp9", "vp9", "none", Some(1080), None, "https", false),
         test_format_full(
@@ -5701,8 +5340,7 @@ fn plan_stale_pin_to_unlisted_id_resolves_as_split() {
 
 #[test]
 fn fetch_video_page_surfaces_stderr_tail() {
-    // Nonzero exit: the last non-blank stderr line becomes the detail,
-    // not a generic wrapper.
+    // Nonzero exit: the last non-blank stderr line becomes the detail.
     let dir = std::env::temp_dir().join(format!("grab-fakefail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -5734,7 +5372,7 @@ fn fetch_video_page_surfaces_stderr_tail() {
 
 #[test]
 fn fetch_video_page_rejects_garbage_stdout() {
-    // Zero exit with non-JSON stdout: parse error, not a phantom video.
+    // Zero exit with non-JSON stdout is a parse error, not a phantom video.
     let dir = std::env::temp_dir().join(format!("grab-fakegarbage-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -5757,8 +5395,7 @@ fn fetch_video_page_rejects_garbage_stdout() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp that records its argv (one per line) to `args.txt` and
-/// prints `stdout`. Returns the bin path; the args file sits beside it.
+/// Fake yt-dlp that records argv to `args.txt` and prints `stdout`.
 fn fake_argv_dump_bin(dir_name: &str, stdout: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("{dir_name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -5788,9 +5425,7 @@ fn fake_bin_argv(bin: &std::path::Path) -> String {
 
 #[test]
 fn fetch_video_page_resolves_without_flat_playlist() {
-    // The download worker must fully extract the single item: a story
-    // queued from the picker failed with "the page listed none" because
-    // its resolve ran under --flat-playlist and came back stub-shaped.
+    // Download resolve must fully extract: `--flat-playlist` once returned stub-shaped stories.
     let bin = fake_argv_dump_bin(
         "grab-noflat",
         &serde_json::json!({
@@ -5853,11 +5488,7 @@ fn expand_child_target_routes_entries() {
         ),
         Some("https://www.youtube.com/watch?v=v1".to_string())
     );
-    // …but never the probed collection itself (self-nesting guard:
-    // highlights resolve to their own URL, so they expand to nothing
-    // and keep today's collection error). The undecodable id forces
-    // the page-URL fallback path where the guard lives (any
-    // alphabet-valid id on a stories tray decodes to some segment).
+    // …but never the probed collection itself (self-nesting guard keeps the collection error).
     assert_eq!(expand_child_target(tray, tray, &item("!!!", tray)), None);
     assert_eq!(
         expand_child_target(
@@ -5867,9 +5498,7 @@ fn expand_child_target_routes_entries() {
         ),
         None
     );
-    // Canonical drift: the extractor's URL need not match the probed
-    // one byte-for-byte (trailing slash dropped here) — the guard
-    // checks both, so highlights still expand to nothing.
+    // Canonical drift: the guard checks both probed and extractor URLs.
     assert_eq!(
         expand_child_target(
             "https://www.youtube.com/playlist?list=pl/",
@@ -5878,9 +5507,7 @@ fn expand_child_target_routes_entries() {
         ),
         None
     );
-    // Unusable entries skip (non-story tray so the page-URL fallback
-    // path governs; on a stories tray any alphabet id decodes to some
-    // segment by design — real ids always come from the extractor).
+    // Unusable entries skip via the page-URL fallback path.
     assert_eq!(
         expand_child_target(
             "https://www.youtube.com/playlist?list=pl",
@@ -5893,9 +5520,7 @@ fn expand_child_target_routes_entries() {
 
 #[test]
 fn dump_json_flat_playlist_flag_per_caller() {
-    // Both sides of the split, pinned: the dialog's collection probe
-    // keeps --flat-playlist (stub listings); the single-item resolve
-    // must not.
+    // Dialog probe keeps --flat-playlist; single-item resolve must not.
     for (name, flat, want) in [
         ("grab-flatprobe-on", true, true),
         ("grab-flatprobe-off", false, false),
@@ -5923,9 +5548,7 @@ fn dump_json_flat_playlist_flag_per_caller() {
 
 #[test]
 fn fetch_video_page_returns_playlist_for_expansion() {
-    // A collection URL reaching the download worker returns its entries
-    // for expansion (dialog-less rows never see the picker) — and
-    // never parses as a video with an empty format list.
+    // Collection URLs expand for dialog-less rows, never parse as empty videos.
     let bin = fake_argv_dump_bin(
         "grab-playlistshape",
         &serde_json::json!({
@@ -5964,8 +5587,7 @@ fn fetch_video_page_returns_playlist_for_expansion() {
 
 #[test]
 fn sanitize_missing_codec_fields_still_parse() {
-    // A new sparse extractor omitting codec/container/height keys must
-    // parse like TikTok's: Unknown-typed, adoptable, never a row killer.
+    // Sparse extractors omitting codec keys parse as adoptable Unknown, never a row killer.
     let mut value = serde_json::json!({
         "id": "sparse1",
         "title": "S",
@@ -5983,8 +5605,7 @@ fn sanitize_missing_codec_fields_still_parse() {
 
 #[test]
 fn resume_plan_unknown_total_resumes_bytes_on_disk() {
-    // No total to judge overlong against: temp bytes mean resume, never
-    // a Fresh wipe.
+    // No total means no overlong judgment: temp bytes resume, never wipe.
     let dir = test_manifest_dir("unknown-total");
     let dest = dir.join("Clip.mp4");
     let staging = test_staging(&dir);
@@ -5998,11 +5619,7 @@ fn resume_plan_unknown_total_resumes_bytes_on_disk() {
 
 #[test]
 fn apply_proxy_env_sets_nothing_when_direct() {
-    // A direct spawn must not inherit NO_PROXY from anywhere: only an
-    // explicit proxy sets it.
-    // Deterministic regardless of the ambient environment: a direct
-    // spawn must neither set nor inherit proxy routing. The spawn runs
-    // inside the runtime (tokio process needs a reactor context).
+    // Direct spawns set no proxy routing and inherit none; needs a reactor context.
     let out = crate::runtime::tokio_rt().block_on(async {
         let mut cmd = tokio::process::Command::new("env");
         cmd.env_remove("NO_PROXY").env_remove("no_proxy");
@@ -6062,8 +5679,7 @@ fn proxy_cli_args_passes_plain_url() {
     .proxy_config()
     .expect("well-formed")
     .expect("proxied");
-    // yt-dlp gets one --proxy URL with no userinfo: proxy auth was
-    // dropped, so no credentials ever reach process argv.
+    // yt-dlp gets one --proxy URL with no userinfo, so no credentials reach argv.
     assert_eq!(
         proxy_cli_args(Some(&proxy)),
         vec![
@@ -6077,9 +5693,7 @@ fn proxy_cli_args_passes_plain_url() {
 
 #[test]
 fn dest_part_paths_sit_beside_finished_file() {
-    // yt-dlp defaults: `<stem>.<kind>.<ext>` in the dest dir, so `.part`
-    // shells and fragments show up in the user's folder while moving
-    // nothing else. Deterministic across attempts for crash-resume.
+    // `<stem>.<kind>.<ext>` in the dest dir; deterministic across attempts for crash-resume.
     let dest = std::path::Path::new("/tmp/dl/Clip.mp4");
     assert_eq!(
         dest_part_path(dest, "video", "mp4"),
@@ -6101,10 +5715,7 @@ fn dest_part_paths_sit_beside_finished_file() {
 
 #[test]
 fn ytdlp_output_template_doubles_percent_in_stem() {
-    // yt-dlp parses `-o` as a printf-style template: a literal `%` in
-    // the stem (percent-decoded titles, user-typed names like `100%`)
-    // must be `%%` or the template misparses and the download fails.
-    // Real template fields pass through untouched.
+    // `-o` is printf-style: literal `%` must be `%%` or the template misparses.
     assert_eq!(
         ytdlp_output_template(std::path::Path::new("/tmp/dl/100%.hls.%(ext)s")),
         "/tmp/dl/100%%.hls.%(ext)s"
@@ -6127,9 +5738,8 @@ fn ytdlp_output_template_round_trips_existing_double_percent() {
 
 #[test]
 fn dest_part_path_keeps_literal_percent_for_real_paths() {
-    // The escape lives at the `-o` boundary only: on-disk part names
-    // keep the single `%` so is_grab_part and the discoverers still
-    // match what yt-dlp renders (`%%` -> `%`).
+    // The escape lives at the `-o` boundary only: on-disk part names keep
+    // the single `%` so is_grab_part matches what yt-dlp renders.
     let dest = std::path::Path::new("/tmp/dl/100%.mp4");
     assert_eq!(
         dest_part_path(dest, "hls", "%(ext)s"),
@@ -6238,9 +5848,8 @@ fn download_builders_use_machine_progress_and_ignore_config() {
             .position(|a| a == "--progress-template")
             .expect("template flag");
         assert_eq!(argv[t + 1], YTDLP_PROGRESS_TEMPLATE, "{argv:?}");
-        // The YouTube `web` player-client exclusion rides on every spawn:
-        // SABR URL-less formats would otherwise break the whole run
-        // (yt-dlp#12482), wherever a JS runtime is available.
+        // The `web` player-client exclusion rides on every spawn: SABR
+        // URL-less formats break the whole run otherwise (yt-dlp#12482).
         let e = argv
             .iter()
             .position(|a| a == "--extractor-args")
@@ -6275,14 +5884,9 @@ fn hls_argv_takes_subtitles() {
 
 #[test]
 fn every_download_path_embeds_metadata() {
-    // The id is no longer in the filename, so the file's own tags are the
-    // only place it survives. `--embed-metadata` writes the source
-    // `webpage_url` into `comment`, and that URL carries the id.
-    //
-    // It used to be passed only when merging, which left progressive and
-    // audio-only downloads with no tags at all -- so the id was
-    // recoverable only for some downloads. Coverage must not depend on
-    // which download path the format selection happened to take.
+    // The id is no longer in the filename, so only the file's own tags keep
+    // it (`--embed-metadata` writes `webpage_url` into `comment`). It used
+    // to be passed only when merging, leaving every other path untagged.
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let ff = std::path::Path::new("/usr/bin/ffmpeg");
 
@@ -6328,8 +5932,7 @@ fn every_download_path_embeds_metadata() {
 #[test]
 fn unified_argv_extracts_audio_for_audio_only() {
     // Dialog audio-only choice on a direct row: extract to m4a (native
-    // containers vary by codec) instead of merging, and never pass
-    // subtitle flags.
+    // containers vary by codec) instead of merging; never pass subtitle flags.
     let mut job = direct_test_job();
     job.audio_only = true;
     job.subtitles = Some("en".into());
@@ -6441,9 +6044,8 @@ fn live_capture_argv_never_takes_embed_subs() {
 
 #[test]
 fn unified_argv_leaves_fragments_serial() {
-    // yt-dlp legs stay at the serial fragment default even when the
-    // app's own segmented engine runs hot: fragment floods trip 429s
-    // on strict hosts.
+    // yt-dlp legs stay at the serial fragment default even when the app's
+    // own segmented engine runs hot: fragment floods trip 429s.
     let job = direct_test_job();
     let out = std::path::Path::new("/tmp/staging/grab-media.%(ext)s");
     let argv = unified_download_argv(
@@ -6724,9 +6326,8 @@ fn hls_argv_embeds_chapters_when_enabled() {
 
 #[test]
 fn audio_only_rows_still_get_chapters() {
-    // Chapters are meaningful on audio containers (m4a), so unlike
-    // --embed-subs this flag applies to audio-only rows too. Pinned here
-    // so a future reorder of the flag blocks can't silently drop it.
+    // Unlike --embed-subs, chapters apply to audio-only rows too (m4a carries
+    // them); pinned so a flag-block reorder can't silently drop the flag.
     let mut job = direct_test_job();
     job.audio_only = true;
     job.embed_chapters = true;
@@ -6754,10 +6355,8 @@ fn live_capture_argv_never_embeds_chapters() {
 
 #[test]
 fn vod_and_live_argv_never_emit_removed_tuning_flags() {
-    // The old Advanced tuning knobs are gone: retries, sleeps, socket
-    // timeout, throttled rate, extractor retries and user agent are all
-    // left at the yt-dlp defaults now, so none of their flags may appear
-    // on any leg.
+    // The old Advanced tuning knobs are gone: all left at yt-dlp defaults,
+    // so none of their flags may appear on any leg.
     let gone = [
         "--retries",
         "--retry-sleep",
@@ -6902,9 +6501,8 @@ fn hls_argv_mtime_when_set() {
 
 #[test]
 fn live_capture_argv_never_mtime() {
-    // The live path remuxes through ffmpeg after capture, which would
-    // clobber any mtime yt-dlp set. Excluded like the other VOD-only
-    // opt-ins.
+    // The live path remuxes through ffmpeg after capture, clobbering any
+    // mtime yt-dlp set: excluded like the other VOD-only opt-ins.
     let mut job = live_test_job();
     job.keep_server_date = true;
     let argv = live_capture_argv(&job, "h720", std::path::Path::new("/tmp/dl/v.live.ts"));
@@ -7040,9 +6638,8 @@ fn subtitle_language_index_value_round_trip() {
     );
 }
 
-/// Subtitle tokens that must never leak onto non-video legs. (HLS always
-/// carries `--ffmpeg-location` for its merge step, so it is excluded
-/// here; the part/live builders must not emit it without subs either.)
+/// Subtitle tokens that must never leak onto non-video legs. (`--ffmpeg-location`
+/// is excluded: HLS always carries it; the part/live builders must not.)
 const SUBTITLE_TOKENS: &[&str] = &[
     "--write-subs",
     "--sub-langs",
@@ -7058,9 +6655,8 @@ fn assert_no_subtitle_tokens(argv: &[String]) {
 
 #[test]
 fn subtitle_lang_active_allowlist() {
-    // The configured code resolves verbatim; `off`, empty and unknown
-    // codes (hand-edited dconf) resolve to off — never passed through
-    // to `--sub-langs` or the sidecar filename.
+    // The configured code resolves verbatim; `off`, empty and unknown codes
+    // (hand-edited dconf) resolve to off — never passed to `--sub-langs`.
     assert_eq!(subtitle_lang_active("en"), Some("en".to_string()));
     assert_eq!(subtitle_lang_active("zh"), Some("zh".to_string()));
     assert_eq!(subtitle_lang_active("off"), None);
@@ -7091,9 +6687,8 @@ fn sidecar_path_for_cases() {
 
 #[test]
 fn finished_sidecars_escape_part_namespace() {
-    // Structural: a collected `<stem>.<lang>.srt` (allowlisted lang, no
-    // dots) can never match Grab's part infixes, so `clean_dest_parts`
-    // leaves finished sidecars alone for every offered language.
+    // Structural: a collected `<stem>.<lang>.srt` can never match Grab's part
+    // infixes, so `clean_dest_parts` leaves finished sidecars alone.
     for lang in SUBTITLE_LANGUAGE_VALUES {
         if *lang == "off" {
             continue;
@@ -7152,9 +6747,8 @@ exit 0
 
 #[test]
 fn hls_collects_sidecar_beside_finished_file() {
-    // End to end on the Critical path: the sidecar the binary drops as
-    // `<stem>.hls.en.srt` must be collected as `<stem>.en.srt` next to
-    // the claimed file — never orphaned under the part name.
+    // End to end on the Critical path: the sidecar dropped as `<stem>.hls.en.srt`
+    // must be collected as `<stem>.en.srt` — never orphaned under the part name.
     let dir = std::env::temp_dir().join(format!("grab-fakehls-subs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7207,9 +6801,8 @@ fn hls_collects_sidecar_beside_finished_file() {
 
 #[test]
 fn hls_embed_skips_sidecar_collection() {
-    // Embed mode muxes the tracks into the file itself: no .srt may be
-    // left alongside it (the uncollected staging sidecar dies with the
-    // staging wipe). Same fake as above, embed flag on.
+    // Embed mode muxes the tracks into the file: no .srt may be left
+    // alongside it. Same fake as above, embed flag on.
     let dir = std::env::temp_dir().join(format!("grab-fakehls-embed-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7245,9 +6838,8 @@ fn hls_embed_skips_sidecar_collection() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Fake yt-dlp for the unified path: expands the `%(ext)s` template,
-/// prints template progress + a merge line + the after_move path, and
-/// writes output bytes plus an `en` sidecar beside the template.
+/// Fake yt-dlp for the unified path: expands `%(ext)s`, prints template
+/// progress + a merge line + the after_move path, writes bytes and a sidecar.
 fn fake_ytdlp(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp");
     std::fs::write(
@@ -7294,10 +6886,8 @@ fn fake_ytdlp_fail(dir: &std::path::Path) -> std::path::PathBuf {
     }
     bin
 }
-/// Fake yt-dlp for live that behaves like a killed recorder: bytes land
-/// in the `.part` shell, no progress line is ever printed, then it exits
-/// cleanly after a beat (so the file watcher, not the log parser, must
-/// announce recording).
+/// Fake yt-dlp for live that behaves like a killed recorder: bytes land in
+/// the `.part` shell, no progress line, then a clean exit after a beat.
 fn fake_ytdlp_live_shell_only(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-live-shell");
     std::fs::write(
@@ -7325,10 +6915,8 @@ exit 0
 
 #[test]
 fn live_part_shell_announces_recording_and_is_swept() {
-    // Two real-world live bugs in one: the file watcher polled the `-o`
-    // path (empty until finalize) instead of the growing `.part` shell,
-    // so the row sat on "Resolving media…" while bytes landed; and the
-    // shell survived next to the finished file after stop.
+    // Two live bugs in one: the watcher polled the `-o` path (empty until
+    // finalize) instead of the growing `.part` shell; the shell also survived stop.
     let dir = std::env::temp_dir().join(format!("grab-fakelive-shell-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7404,9 +6992,8 @@ fn stem_reserved_in_matches_namespace_only() {
     // Empty stems never match, even against dotfiles shaped like parts.
     assert!(!stem_reserved_in(&[".video.mp4".to_string()], ""));
     assert!(!stem_reserved_in(&[], "Clip"));
-    // Subtitle sidecars reserve the stem (any offered language — the
-    // pref is global, and delete trashes every offered code); bare or
-    // unknown-code names do not.
+    // Subtitle sidecars reserve the stem (delete trashes every offered code);
+    // bare or unknown-code names do not.
     let subs: Vec<String> = ["Clip.en.srt", "Clip.fr.srt"]
         .iter()
         .map(|s| s.to_string())
@@ -7437,9 +7024,8 @@ fn dir_file_names_snapshots_dir() {
 
 #[test]
 fn collect_sidecar_never_clobbers() {
-    // A foreign sidecar arriving mid-download (after the intake
-    // snapshot) survives collection: ours stays beside the part file
-    // for row removal to sweep, and the download itself is unaffected.
+    // A foreign sidecar arriving mid-download survives collection: ours stays
+    // beside the part file for row removal to sweep.
     let dir = std::env::temp_dir().join(format!("grab-sidecar-noclobber-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7460,9 +7046,8 @@ fn collect_sidecar_never_clobbers() {
 
 #[test]
 fn unified_runner_downloads_claims_and_collects() {
-    // One spawn: merge flags on the wire, after_move discovery, atomic
-    // claim, sidecar collected beside the finished file, Merging phase
-    // announced, progress reported.
+    // One spawn: merge flags on the wire, after_move discovery, atomic claim,
+    // sidecar collected, Merging phase announced, progress reported.
     let dir = std::env::temp_dir().join(format!("grab-fakeunified-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7517,11 +7102,9 @@ fn unified_runner_downloads_claims_and_collects() {
 
 #[test]
 fn a_unified_leg_finishing_over_a_live_recording_leaves_it_alone() {
-    // End-to-end proof for the wiring, not just the sweep helper: a retry
-    // that resolves through the unified/VOD route shares the row's staging
-    // directory with the live path, and used to end in `remove_dir_all`.
-    // The recording a live attempt could not place is often the user's
-    // only copy, so the finishing leg has to step around it.
+    // End-to-end proof for the wiring, not just the sweep helper: a VOD retry
+    // shares the row's staging with the live path and used to end in
+    // `remove_dir_all`, and the unplaceable recording is often the only copy.
     let dir = std::env::temp_dir().join(format!("grab-unified-keep-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7641,9 +7224,8 @@ fn unified_runner_abort_stays_quiet() {
 
 #[test]
 fn unified_runner_refuses_existing_dest() {
-    // Overwrite pre-flight at the claim: a finished file already at
-    // dest fails the row for requeue instead of clobbering it, and the
-    // foreign file is untouched.
+    // Overwrite pre-flight at the claim: a finished file at dest fails the
+    // row for requeue instead of clobbering it.
     let dir = std::env::temp_dir().join(format!("grab-fakeunified-ow-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -7735,9 +7317,8 @@ exit 0
 
 #[test]
 fn unified_format_spec_matrix() {
-    // Split: planner pair, then preset-video with the exact audio (so a
-    // lone stale video id doesn't throw away good audio), then the
-    // full preset pair.
+    // Split: planner pair, then preset-video with the exact audio (so a lone
+    // stale video id doesn't throw away good audio), then the full preset pair.
     assert_eq!(
         unified_format_spec(Some("v123"), "a456", "1080p", false),
         (
@@ -7906,9 +7487,8 @@ fn unified_argv_takes_subtitles() {
     assert_no_subtitle_tokens(&argv);
 }
 
-/// Fake yt-dlp emitting two format legs like a real merged download:
-/// video counts 0→100, a `finished` line, audio counts 0→50, a
-/// `finished` line, then the merge line and the after_move path.
+/// Fake yt-dlp emitting two format legs like a real merged download: video
+/// 0→100 + `finished`, audio 0→50 + `finished`, then merge line and after_move.
 fn fake_ytdlp_two_legs(dir: &std::path::Path) -> std::path::PathBuf {
     let bin = dir.join("fake-ytdlp-two-legs");
     std::fs::write(
@@ -7944,9 +7524,8 @@ exit 0
 
 #[test]
 fn unified_runner_sums_two_leg_progress() {
-    // `downloaded_bytes` resets per format leg; banking each leg on its
-    // `finished` line must report the SUM (100+50) against the combined
-    // total — plain max would stall the bar at ~66% forever.
+    // `downloaded_bytes` resets per leg; banking each on its `finished` line
+    // must report the SUM (100+50) — plain max would stall the bar at ~66%.
     let dir = std::env::temp_dir().join(format!("grab-faketwolegs-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -8024,7 +7603,7 @@ fn has_fetchable_media_matrix() {
         },
     ]));
     assert!(!has_fetchable_media(&dash));
-    // Explicit no-DRM behaves like absent.
+    // Explicit no-DRM: same as absent, per the DRM case above.
     let nodrm = test_video(serde_json::json!([
         {
             "format": "v",
@@ -8083,9 +7662,8 @@ fn is_direct_file_url_matrix() {
     ] {
         assert!(is_direct_file_url(url), "{url}");
     }
-    // Pages, scripts, streams, segments, feeds and odd schemes always
-    // probe (or skip probing). Extensionless terminals are not
-    // extensions: `/md` must probe like any page.
+    // Pages, scripts, streams, feeds and odd schemes always probe. Extensionless
+    // terminals are not extensions: `/md` must probe like any page.
     for url in [
         "https://www.youtube.com/watch?v=x",
         "https://example.com/article",
@@ -8127,9 +7705,8 @@ fn direct_file_exts_stay_sorted() {
 
 #[test]
 fn a_discard_before_the_commit_delivers_nothing() {
-    // The live leg must consult the gate, not just the stop signal: the
-    // signal is only a prompt, and a prompt can arrive after the one
-    // place the worker stops looking.
+    // The live leg must consult the gate, not just the stop signal: the signal
+    // is only a prompt, and a prompt can arrive after the worker stops looking.
     let dir = std::env::temp_dir().join(format!("grab-gate-discard-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -8328,9 +7905,8 @@ fn a_closed_stop_receiver_stops_delivery_rather_than_authorising_it() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
-    // A descendant that ignores its group kill must be *reported*, not
-    // silently treated as gone: the caller sweeps anyway (there is nothing
-    // better to do) but the outcome is observable rather than assumed.
+    // A descendant that ignores its group kill must be *reported*, not treated
+    // as gone: the caller sweeps anyway, but the outcome stays observable.
     use std::os::unix::process::CommandExt as _;
     let dir = std::env::temp_dir().join(format!("grab-quiesce-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -8367,8 +7943,7 @@ fn a_group_that_refuses_to_quiesce_is_reported_rather_than_assumed() {
          under a writer that never stopped"
     );
     // Kill the whole group, not just the direct child: the script's
-    // `sleep 30` grandchild shares the group, and killing only the leader
-    // would leak it.
+    // `sleep 30` grandchild shares the group and would leak.
     // SAFETY: constant signal number; ESRCH (already dead) is harmless.
     unsafe {
         libc::killpg(pgid, libc::SIGKILL);

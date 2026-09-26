@@ -1,11 +1,5 @@
-//! Shared install-progress popover for the yt-dlp + ffmpeg tools install.
-//!
-//! Both the setup dialog (`window.rs`) and Preferences show the same staged
-//! install: yt-dlp first, then the ffmpeg toolchain. The installer exposes
-//! no byte progress, so each tool gets its own row with an indeterminate
-//! pulsing bar; the bars pulse instead of showing fake percentages. A
-//! spinner marks the active row and becomes a checkmark (or an error icon)
-//! when its stage finishes.
+//! Shared install-progress popover for the staged yt-dlp + ffmpeg install.
+//! Indeterminate pulsing bars (no byte progress); spinner becomes check/error per stage.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -16,19 +10,13 @@ use gtk4::glib::{self, ControlFlow};
 use gtk4::prelude::*;
 use libadwaita as adw;
 
-// The one install currently in flight (if any) and its progress popover.
-//
-// All GTK work happens on the main thread, so a `thread_local` is enough —
-// no locking. `SESSION` holds the popover so a later click on the Install
-// button re-opens it instead of starting a second install; it also holds a
-// failed run's popover until the next click retires it with a retry.
+// One install in flight + its popover (main-thread thread_local, no locking); later clicks re-open, failures retry.
 thread_local! {
     static RUNNING: Cell<bool> = const { Cell::new(false) };
     static SESSION: RefCell<Option<gtk4::Popover>> = const { RefCell::new(None) };
 }
 
-/// One tool's row: activity indicator, name, status text, pulsing bar and
-/// a wrapping error label that only appears on failure.
+/// One tool's row: indicator, name, status, pulsing bar, error label shown only on failure.
 struct ToolRow {
     root: gtk4::Box,
     spinner: adw::Spinner,
@@ -36,29 +24,21 @@ struct ToolRow {
     status: gtk4::Label,
     bar: gtk4::ProgressBar,
     error: gtk4::Label,
-    /// Which bar the shared pulse driver ticks; the row sets/clears it as
-    /// its stage starts and finishes.
+    /// Which bar the shared pulse driver ticks; set/cleared as stages start and finish.
     active: Rc<RefCell<Option<gtk4::ProgressBar>>>,
 }
 
 impl ToolRow {
-    /// Build one tool's row. `bar_label` is the accessible name for the
-    /// progress bar; the status label next to it already announces state
-    /// changes, the bar needs its own name too.
+    /// Build one row; `bar_label` is the accessible name (status label already announces state).
     fn new(name: &str, bar_label: &str, active: &Rc<RefCell<Option<gtk4::ProgressBar>>>) -> Self {
-        // AdwSpinner, not GtkSpinner: it has no start/stop state to go
-        // stale (it animates whenever it is visible), which is what left
-        // the old spinner frozen after the window was hidden and reshown.
+        // AdwSpinner animates on visibility, so no stale state after hide/reshow.
         let spinner = adw::Spinner::new();
         spinner.set_visible(false);
         let icon = gtk4::Image::from_icon_name("emblem-ok-symbolic");
         icon.set_pixel_size(16);
         icon.set_visible(false);
 
-        // One fixed, centered slot for both indicators. Toggling two
-        // different widgets' visibility in the header directly would move
-        // the text column and misalign the indicator against the two-line
-        // title, so the swap happens inside a slot whose size never changes.
+        // Fixed centered slot for both indicators so swaps never move the text column.
         let slot = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         slot.set_size_request(16, 16);
         slot.set_valign(gtk4::Align::Center);
@@ -116,8 +96,6 @@ impl ToolRow {
 
     /// Mark the row active: spinner runs and its bar becomes the pulse target.
     fn set_downloading(&self) {
-        // No start() call: AdwSpinner animates whenever it is visible, so
-        // there is no animation state that can go stale.
         self.spinner.set_visible(true);
         self.status.set_text(&gettext("Downloading…"));
         *self.active.borrow_mut() = Some(self.bar.clone());
@@ -136,10 +114,7 @@ impl ToolRow {
         self.status.set_text(&text);
     }
 
-    /// Mark the row failed: error icon plus the message as wrapping text
-    /// (not color alone, so it survives high-contrast and screen readers).
-    /// The popover stays open; the caller re-enables the Install button so
-    /// the user can retry.
+    /// Mark failed: error icon + wrapping text (not color alone); popover stays open, caller re-enables Install for retry.
     fn set_failed(&self, message: &str) {
         *self.active.borrow_mut() = None;
         self.spinner.set_visible(false);
@@ -152,22 +127,9 @@ impl ToolRow {
     }
 }
 
-/// Run the staged yt-dlp + ffmpeg install under a shared progress popover
-/// anchored at `button`.
-///
-/// Each row moves Waiting… → Downloading… → Installed (with the probed
-/// version when available). A failure marks its row Failed with the error
-/// and leaves the popover open; on success both checkmarks linger briefly
-/// before the popover closes.
-///
-/// The button stays sensitive for the whole run: clicking it while the
-/// install is in flight re-opens the progress popover (re-anchored at the
-/// clicked button) instead of starting a second install. Clicking after a
-/// failure retires the failed popover and retries.
-///
-/// `on_error` reports the failure to the caller (e.g. in the tools-row
-/// subtitle); `on_success` refreshes the caller's tools state after the
-/// popover closes.
+/// Staged yt-dlp + ffmpeg install under a shared popover anchored at `button`.
+/// Rows go Waiting → Downloading → Installed; failure marks its row and leaves the popover open, success lingers briefly.
+/// Button stays sensitive: in-flight clicks re-open, post-failure clicks retry; `on_error`/`on_success` report to caller.
 pub fn run(
     button: &gtk4::Button,
     on_error: impl Fn(String) + 'static,
@@ -175,8 +137,7 @@ pub fn run(
 ) {
     let btn = button.clone();
 
-    // An install is already running: don't start another one, just bring
-    // its progress popover back at the button that was clicked.
+    // Already running: re-open its popover at the clicked button.
     if RUNNING.with(|r| r.get()) {
         SESSION.with(|s| {
             if let Some(pop) = s.borrow().as_ref() {
@@ -187,8 +148,7 @@ pub fn run(
         });
         return;
     }
-    // A failed run's popover may still be open; this click is a retry, so
-    // retire it in favor of the fresh progress view below.
+    // Failed popover still open; this click retires it for a fresh retry.
     SESSION.with(|s| {
         if let Some(pop) = s.take() {
             pop.popdown();
@@ -196,8 +156,6 @@ pub fn run(
     });
     RUNNING.with(|r| r.set(true));
 
-    // Which bar the shared pulse driver ticks; each row sets/clears it as
-    // its stage starts and finishes.
     let active: Rc<RefCell<Option<gtk4::ProgressBar>>> = Rc::new(RefCell::new(None));
     let yt = ToolRow::new("yt-dlp", &gettext("yt-dlp install progress"), &active);
     let ff = ToolRow::new("ffmpeg", &gettext("ffmpeg install progress"), &active);
@@ -213,17 +171,12 @@ pub fn run(
     pop.set_child(Some(&rows));
     pop.set_parent(&btn);
     pop.popup();
-    // Kept alive for the whole run so a later click re-opens this exact
-    // popover (with its live row states) instead of starting a new install.
+    // Kept alive so later clicks re-open this popover instead of starting a new install.
     SESSION.with(|s| *s.borrow_mut() = Some(pop.clone()));
 
     glib::spawn_future_local(async move {
-        // Stage 1: yt-dlp.
         yt.set_downloading();
-        // Pulse driver: ticks whichever row is currently downloading, and
-        // stops itself once no row is active. Started after the first row
-        // goes active so the first tick can't observe an empty slot and
-        // stop itself before anything pulses.
+        // Pulse driver ticks the active row; started after first row goes active so the first tick can't stop early.
         {
             let active = active.clone();
             glib::timeout_add_local(Duration::from_millis(100), move || {
@@ -240,8 +193,6 @@ pub fn run(
             Err(e) => {
                 let message = e.to_string();
                 yt.set_failed(&message);
-                // The failed popover stays open (and in the session) until
-                // the next click retires it with a retry.
                 RUNNING.with(|r| r.set(false));
                 on_error(message);
                 return;
@@ -250,15 +201,12 @@ pub fn run(
         let version = crate::video_tools::tool_display_version(yt_path, "--version").await;
         yt.set_installed(version);
 
-        // Stage 2: the ffmpeg toolchain (ffmpeg and ffprobe).
         ff.set_downloading();
         let ff_path = match crate::video::install_ffmpeg().await {
             Ok(path) => path,
             Err(e) => {
                 let message = e.to_string();
                 ff.set_failed(&message);
-                // The failed popover stays open (and in the session) until
-                // the next click retires it with a retry.
                 RUNNING.with(|r| r.set(false));
                 on_error(message);
                 return;
@@ -267,8 +215,7 @@ pub fn run(
         let version = crate::video_tools::tool_display_version(ff_path, "-version").await;
         ff.set_installed(version);
 
-        // Linger on the two checkmarks so the completed state registers,
-        // then close and hand back to the caller.
+        // Linger on checkmarks so completion registers, then close.
         glib::timeout_future(Duration::from_millis(1200)).await;
         pop.popdown();
         SESSION.with(|s| {
